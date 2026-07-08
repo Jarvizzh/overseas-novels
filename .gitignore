@@ -1,0 +1,40 @@
+# OS elements
+.DS_Store
+
+# IDEs and editors
+.idea/
+.vscode/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Environment files
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Dependency directories
+node_modules/
+jspm_packages/
+
+# Build outputs
+dist/
+build/
+.vite/
+out/
+bin/
+
+# Go compiled binaries
+cms-backend/cms-srv
+backend/backend-srv
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
