@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"novel-backend/internal/config"
 	"novel-backend/internal/db"
 )
 
@@ -35,6 +36,13 @@ type FacebookUserData struct {
 	Fbc             string   `json:"fbc,omitempty"`         // Facebook click ID
 	Fbp             string   `json:"fbp,omitempty"`         // Facebook browser ID
 	ExternalID      string   `json:"external_id,omitempty"` // Hashed user ID
+	Country         []string `json:"country,omitempty"`     // Hashed 2-letter ISO country code
+	PhoneNumbers    []string `json:"ph,omitempty"`          // Hashed phone number
+	FirstNames      []string `json:"fn,omitempty"`          // Hashed first name
+	LastNames       []string `json:"ln,omitempty"`          // Hashed last name
+	Cities          []string `json:"ct,omitempty"`          // Hashed city
+	States          []string `json:"st,omitempty"`          // Hashed state
+	ZipCodes        []string `json:"zp,omitempty"`          // Hashed zip code
 }
 
 type FacebookCAPIRequest struct {
@@ -54,7 +62,7 @@ func HashSHA256(input string) string {
 }
 
 // SendFacebookEvent pushes a tracking event server-to-server to Facebook
-func SendFacebookEvent(pixelID string, eventName string, userID string, email string, ip string, ua string, fbc string, fbp string, value float64, currency string, sourceURL string) {
+func SendFacebookEvent(pixelID string, eventName string, userID string, email string, ip string, ua string, fbc string, fbp string, value float64, currency string, sourceURL string, country string) {
 	// Construct the payload structure first so we can log it
 	userData := FacebookUserData{
 		ClientIPAddress: ip,
@@ -66,9 +74,16 @@ func SendFacebookEvent(pixelID string, eventName string, userID string, email st
 	if email != "" {
 		userData.Emails = []string{HashSHA256(email)}
 	}
+	if country != "" {
+		userData.Country = []string{HashSHA256(country)}
+	}
 
 	if sourceURL == "" {
-		sourceURL = "https://h5.star-novel.com"
+		if config.AppConfig != nil && config.AppConfig.DefaultDomain != "" {
+			sourceURL = config.AppConfig.DefaultDomain
+		} else {
+			sourceURL = "https://h5.star-novel.com"
+		}
 	}
 
 	event := FacebookEvent{

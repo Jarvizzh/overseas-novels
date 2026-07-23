@@ -15,6 +15,7 @@ import (
 	"star-novel-cms/internal/billing"
 	"star-novel-cms/internal/config"
 	"star-novel-cms/internal/db"
+	"star-novel-cms/internal/domain"
 	"star-novel-cms/internal/novel"
 	"star-novel-cms/internal/redis"
 	"star-novel-cms/internal/tracking"
@@ -78,6 +79,11 @@ func main() {
 		trackingService := tracking.NewService(trackingRepo)
 		trackingHandler := tracking.NewHandler(trackingService)
 		trackingHandler.RegisterRoutes(api)
+
+		domainRepo := domain.NewRepository()
+		domainService := domain.NewService(domainRepo)
+		domainHandler := domain.NewHandler(domainService)
+		domainHandler.RegisterRoutes(api)
 	}
 
 	// 7. Setup graceful shutdown server

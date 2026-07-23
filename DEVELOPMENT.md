@@ -26,7 +26,7 @@ star-novel/
 ├── backend/                   # Go 读者端后端工程 (端口 8080)
 │   ├── cmd/server/main.go     # 主入口与服务实例化、依赖注入装配
 │   ├── db/
-│   │   ├── migration.sql      # 数据库全量表定义与重置 SQL (包含 12 张核心表)
+│   │   ├── schema.sql         # 数据库全量表定义与重置 SQL (包含核心表)
 │   │   └── seed.sql           # 高保真小说内容与内置配置数据种子
 │   └── internal/              # 读者端业务层 (全部实现规范三层分层)
 │       ├── auth/              # 用户鉴权 (handler.go, service.go, repository.go)
@@ -120,7 +120,7 @@ docker-compose up -d
 ### 2. 数据库迁移与初始种子注入
 如果需要干净的数据库数据重置，运行以下命令（直接通过管道输入 `psql` Stdin 避免 volume 缓存不一致）：
 ```bash
-docker exec -i novel_postgres psql -U postgres -d novel_db < db/migration.sql
+docker exec -i novel_postgres psql -U postgres -d novel_db < db/schema.sql
 docker exec -i novel_postgres psql -U postgres -d novel_db < db/seed.sql
 ```
 

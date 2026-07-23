@@ -127,7 +127,8 @@ export const Recharge: React.FC<RechargeProps> = ({
         setPaymentStep(0);
         setShowStripeModal(true);
       } else {
-        // PayPal Flow: Execute capture simulation
+        // PayPal Flow: Send InitiateCheckout event then execute capture simulation
+        try { await api.initiateCheckout(pack.priceCents, pack.total); } catch (_) {}
         setPaymentStep(2);
         const orderId = "mock_paypal_order_" + Date.now();
         await api.capturePayPalPayment(orderId, pack.total);

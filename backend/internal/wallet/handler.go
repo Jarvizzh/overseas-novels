@@ -27,6 +27,7 @@ func (h *Handler) RegisterRoutes(r *gin.RouterGroup) {
 		walletGroup.GET("/balance", h.GetBalance)
 		walletGroup.GET("/history", h.GetHistory)
 		walletGroup.POST("/unlock", h.UnlockChapter)
+		walletGroup.POST("/recharge/initiate", h.InitiateCheckout)
 		walletGroup.POST("/recharge/stripe", h.CreateStripeIntent)
 		walletGroup.POST("/recharge/paypal/capture", h.CapturePayPalPayment)
 		walletGroup.POST("/rewards/checkin", h.DailyCheckIn)
@@ -107,6 +108,41 @@ func (h *Handler) UnlockChapter(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "Chapter unlocked successfully"})
 }
 
+type InitiateCheckoutRequest struct {
+	AmountCents int64 `json:"amount_cents" binding:"required"`
+	CoinsAmount int   `json:"coins_amount" binding:"required"`
+}
+
+func (h *Handler) InitiateCheckout(c *gin.Context) {
+	userID := c.MustGet("user_id").(int64)
+	var req InitiateCheckoutRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	ctx := c.Request.Context()
+
+	fbp := c.GetHeader("X-FB-FBP")
+	fbc := c.GetHeader("X-FB-FBC")
+	pixelID := c.GetHeader("X-FB-Pixel-ID")
+	ip := c.ClientIP()
+	ua := c.Request.UserAgent()
+	sourceURL := c.GetHeader("X-Event-Source-URL")
+	country := c.GetHeader("X-Country")
+	if country == "" {
+		country = c.GetHeader("CF-IPCountry")
+	}
+
+	err := h.service.InitiateCheckout(ctx, userID, req.AmountCents, req.CoinsAmount, fbp, fbc, pixelID, ip, ua, sourceURL, country)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "InitiateCheckout tracked"})
+}
+
 type StripeRechargeRequest struct {
 	AmountCents int64 `json:"amount_cents" binding:"required"`
 	CoinsAmount int   `json:"coins_amount" binding:"required"`
@@ -121,7 +157,19 @@ func (h *Handler) CreateStripeIntent(c *gin.Context) {
 	}
 
 	ctx := c.Request.Context()
-	clientSecret, err := h.service.CreateStripeIntent(ctx, userID, req.AmountCents, req.CoinsAmount)
+
+	fbp := c.GetHeader("X-FB-FBP")
+	fbc := c.GetHeader("X-FB-FBC")
+	pixelID := c.GetHeader("X-FB-Pixel-ID")
+	ip := c.ClientIP()
+	ua := c.Request.UserAgent()
+	sourceURL := c.GetHeader("X-Event-Source-URL")
+	country := c.GetHeader("X-Country")
+	if country == "" {
+		country = c.GetHeader("CF-IPCountry")
+	}
+
+	clientSecret, err := h.service.CreateStripeIntent(ctx, userID, req.AmountCents, req.CoinsAmount, fbp, fbc, pixelID, ip, ua, sourceURL, country)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create payment intent"})
 		return
@@ -153,8 +201,12 @@ func (h *Handler) CapturePayPalPayment(c *gin.Context) {
 	ip := c.ClientIP()
 	ua := c.Request.UserAgent()
 	sourceURL := c.GetHeader("X-Event-Source-URL")
+	country := c.GetHeader("X-Country")
+	if country == "" {
+		country = c.GetHeader("CF-IPCountry")
+	}
 
-	err := h.service.CapturePayPalPayment(ctx, userID, req.OrderID, req.CoinsAmount, fbp, fbc, pixelID, ip, ua, sourceURL)
+	err := h.service.CapturePayPalPayment(ctx, userID, req.OrderID, req.CoinsAmount, fbp, fbc, pixelID, ip, ua, sourceURL, country)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return

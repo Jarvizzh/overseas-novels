@@ -19,8 +19,8 @@ var (
 )
 
 type AuthService interface {
-	GuestLogin(ctx context.Context, device, ipAddress, utmSource, utmCampaign, fbp, fbc, pixelID, userAgent, sourceURL string) (*model.User, string, error)
-	Register(ctx context.Context, email, password, nickname, device, ipAddress, utmSource, utmCampaign, fbp, fbc, pixelID, userAgent, sourceURL string) (*model.User, string, error)
+	GuestLogin(ctx context.Context, device, ipAddress, utmSource, utmCampaign, fbp, fbc, pixelID, userAgent, sourceURL, country string) (*model.User, string, error)
+	Register(ctx context.Context, email, password, nickname, device, ipAddress, utmSource, utmCampaign, fbp, fbc, pixelID, userAgent, sourceURL, country string) (*model.User, string, error)
 	Login(ctx context.Context, email, password string) (*model.User, string, error)
 	GetProfile(ctx context.Context, userID int64) (*model.User, error)
 }
@@ -35,7 +35,7 @@ func NewAuthService(repo UserRepository) AuthService {
 	}
 }
 
-func (s *authService) GuestLogin(ctx context.Context, device, ipAddress, utmSource, utmCampaign, fbp, fbc, pixelID, userAgent, sourceURL string) (*model.User, string, error) {
+func (s *authService) GuestLogin(ctx context.Context, device, ipAddress, utmSource, utmCampaign, fbp, fbc, pixelID, userAgent, sourceURL, country string) (*model.User, string, error) {
 	tempSuffix := uuid.New().String()[:8]
 	nickname := "Guest_" + tempSuffix
 
@@ -74,12 +74,12 @@ func (s *authService) GuestLogin(ctx context.Context, device, ipAddress, utmSour
 	}
 
 	// Trigger FB CompleteRegistration event asynchronously
-	go tracking.SendFacebookEvent(pixelID, "CompleteRegistration", strconv.FormatInt(user.ID, 10), "", ipAddress, userAgent, fbc, fbp, 0, "", sourceURL)
+	go tracking.SendFacebookEvent(pixelID, "CompleteRegistration", strconv.FormatInt(user.ID, 10), "", ipAddress, userAgent, fbc, fbp, 0, "", sourceURL, country)
 
 	return user, token, nil
 }
 
-func (s *authService) Register(ctx context.Context, email, password, nickname, device, ipAddress, utmSource, utmCampaign, fbp, fbc, pixelID, userAgent, sourceURL string) (*model.User, string, error) {
+func (s *authService) Register(ctx context.Context, email, password, nickname, device, ipAddress, utmSource, utmCampaign, fbp, fbc, pixelID, userAgent, sourceURL, country string) (*model.User, string, error) {
 	exists, err := s.repo.EmailExists(ctx, email)
 	if err != nil {
 		return nil, "", err
@@ -132,7 +132,7 @@ func (s *authService) Register(ctx context.Context, email, password, nickname, d
 	}
 
 	// Trigger FB CompleteRegistration event asynchronously
-	go tracking.SendFacebookEvent(pixelID, "CompleteRegistration", strconv.FormatInt(user.ID, 10), email, ipAddress, userAgent, fbc, fbp, 0, "", sourceURL)
+	go tracking.SendFacebookEvent(pixelID, "CompleteRegistration", strconv.FormatInt(user.ID, 10), email, ipAddress, userAgent, fbc, fbp, 0, "", sourceURL, country)
 
 	return user, token, nil
 }

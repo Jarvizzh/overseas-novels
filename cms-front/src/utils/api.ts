@@ -46,3 +46,25 @@ export async function apiRequest(
 
   return response.json();
 }
+
+export interface SystemDomain {
+  id: number;
+  name: string;
+  domain: string;
+  type: 'main' | 'sub';
+  status: number; // 1-Enabled, 2-Disabled
+  is_default: boolean;
+  created_at: string;
+}
+
+export const domainApi = {
+  getDomains: () => apiRequest('GET', '/domains'),
+  createDomain: (data: { name: string; domain: string; type: 'main' | 'sub'; is_default?: boolean }) =>
+    apiRequest('POST', '/domains', data),
+  updateDomainStatus: (id: number, status: number) =>
+    apiRequest('PUT', `/domains/${id}/status`, { status }),
+  setDefaultDomain: (id: number) =>
+    apiRequest('POST', `/domains/${id}/set-default`),
+  deleteDomain: (id: number) =>
+    apiRequest('DELETE', `/domains/${id}`),
+};

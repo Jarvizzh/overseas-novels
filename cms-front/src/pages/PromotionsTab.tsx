@@ -254,10 +254,9 @@ export default function PromotionsTab() {
   }
 
   return (
-    <div className="animate-fade-in" style={{ padding: '24px' }}>
+    <div className="animate-fade-in" style={{ padding: '16px 24px 24px 24px' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '24px' }}>
         <h1 style={{ fontSize: '1.5rem', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '8px' }}>
-          <Link2 style={{ color: 'hsl(var(--primary))' }} />
           <span className="gradient-text">推广链接管理</span>
         </h1>
       </div>

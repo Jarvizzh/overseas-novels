@@ -24,8 +24,9 @@ type Service interface {
 	GetWallet(ctx context.Context, userID int64) (*model.Wallet, error)
 	GetHistory(ctx context.Context, userID int64, limit, offset int) ([]model.Transaction, error)
 	UnlockChapter(ctx context.Context, userID int64, novelID int64, chapterIndex int) error
-	CreateStripeIntent(ctx context.Context, userID int64, amountCents int64, coinsAmount int) (string, error)
-	CapturePayPalPayment(ctx context.Context, userID int64, orderID string, coinsAmount int, fbp, fbc, pixelID, ip, ua, sourceURL string) error
+	InitiateCheckout(ctx context.Context, userID int64, amountCents int64, coinsAmount int, fbp, fbc, pixelID, ip, ua, sourceURL, country string) error
+	CreateStripeIntent(ctx context.Context, userID int64, amountCents int64, coinsAmount int, fbp, fbc, pixelID, ip, ua, sourceURL, country string) (string, error)
+	CapturePayPalPayment(ctx context.Context, userID int64, orderID string, coinsAmount int, fbp, fbc, pixelID, ip, ua, sourceURL, country string) error
 	ProcessStripeWebhook(ctx context.Context, payload []byte, sigHeader string, webhookSecret string) error
 	AwardDailyCheckIn(ctx context.Context, userID int64, coinsAmount int, day int) error
 	GetRechargeTemplates(ctx context.Context, templateIDHeader string) (*model.RechargeTemplate, error)
@@ -90,7 +91,16 @@ func (s *service) UnlockChapter(ctx context.Context, userID int64, novelID int64
 	return nil
 }
 
-func (s *service) CreateStripeIntent(ctx context.Context, userID int64, amountCents int64, coinsAmount int) (string, error) {
+func (s *service) InitiateCheckout(ctx context.Context, userID int64, amountCents int64, coinsAmount int, fbp, fbc, pixelID, ip, ua, sourceURL, country string) error {
+	email, _ := s.repo.GetUserEmail(ctx, userID)
+
+	// Trigger FB Conversions API InitiateCheckout event asynchronously
+	go tracking.SendFacebookEvent(pixelID, "InitiateCheckout", strconv.FormatInt(userID, 10), email, ip, ua, fbc, fbp, float64(amountCents)/100.0, "USD", sourceURL, country)
+
+	return nil
+}
+
+func (s *service) CreateStripeIntent(ctx context.Context, userID int64, amountCents int64, coinsAmount int, fbp, fbc, pixelID, ip, ua, sourceURL, country string) (string, error) {
 	clientSecret, piID, err := s.stripeClient.CreatePaymentIntent(amountCents, "usd", strconv.FormatInt(userID, 10), coinsAmount)
 	if err != nil {
 		return "", err
@@ -102,10 +112,15 @@ func (s *service) CreateStripeIntent(ctx context.Context, userID int64, amountCe
 		log.Printf("[Warning] Failed to pre-create Pending order: %v", err)
 	}
 
+	email, _ := s.repo.GetUserEmail(ctx, userID)
+
+	// Trigger FB Conversions API InitiateCheckout event asynchronously
+	go tracking.SendFacebookEvent(pixelID, "InitiateCheckout", strconv.FormatInt(userID, 10), email, ip, ua, fbc, fbp, float64(amountCents)/100.0, "USD", sourceURL, country)
+
 	return clientSecret, nil
 }
 
-func (s *service) CapturePayPalPayment(ctx context.Context, userID int64, orderID string, coinsAmount int, fbp, fbc, pixelID, ip, ua, sourceURL string) error {
+func (s *service) CapturePayPalPayment(ctx context.Context, userID int64, orderID string, coinsAmount int, fbp, fbc, pixelID, ip, ua, sourceURL, country string) error {
 	customID, currency, value, err := s.paypalClient.CaptureOrder(ctx, orderID)
 	if err != nil {
 		return err
@@ -169,7 +184,7 @@ func (s *service) CapturePayPalPayment(ctx context.Context, userID int64, orderI
 
 	email, _ := s.repo.GetUserEmail(ctx, userID)
 
-	go tracking.SendFacebookEvent(pixelID, "Purchase", strconv.FormatInt(userID, 10), email, ip, ua, fbc, fbp, float64(priceCents)/100.0, "USD", sourceURL)
+	go tracking.SendFacebookEvent(pixelID, "Purchase", strconv.FormatInt(userID, 10), email, ip, ua, fbc, fbp, float64(priceCents)/100.0, "USD", sourceURL, country)
 
 	return nil
 }

@@ -32,11 +32,11 @@ export default function CustomSelect({ options, value, onChange, placeholder, wi
         onClick={() => setIsOpen(!isOpen)}
         style={{
           height: '38px',
-          backgroundColor: '#ffffff',
-          border: isOpen ? '1px solid #3b82f6' : '1px solid #d1d5db',
-          boxShadow: isOpen ? '0 0 0 3px rgba(59, 130, 246, 0.15)' : 'none',
+          backgroundColor: 'hsl(var(--bg-card))',
+          border: isOpen ? '1px solid hsl(var(--primary))' : '1px solid hsl(var(--border))',
+          boxShadow: isOpen ? '0 0 0 3px hsl(var(--primary) / 0.2)' : 'var(--shadow-sm)',
           borderRadius: '8px',
-          color: '#1f2937',
+          color: 'hsl(var(--text-primary))',
           fontSize: '0.8rem',
           padding: '8px 36px 8px 12px',
           cursor: 'pointer',
@@ -58,7 +58,7 @@ export default function CustomSelect({ options, value, onChange, placeholder, wi
           transform: 'translateY(-50%)',
           display: 'flex',
           alignItems: 'center',
-          color: '#6b7280',
+          color: 'hsl(var(--text-secondary))',
           pointerEvents: 'none'
         }}>
           <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth="2" stroke="currentColor" style={{ width: '1rem', height: '1rem' }}>
@@ -74,46 +74,49 @@ export default function CustomSelect({ options, value, onChange, placeholder, wi
             top: '44px',
             left: 0,
             right: 0,
-            backgroundColor: '#ffffff',
-            border: '1px solid #d1d5db',
+            backgroundColor: 'hsl(var(--bg-surface))',
+            border: '1px solid hsl(var(--border))',
             borderRadius: '8px',
-            boxShadow: '0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05)',
+            boxShadow: 'var(--shadow-lg)',
             zIndex: 1000,
             maxHeight: '250px',
             overflowY: 'auto',
             padding: '4px 0'
           }}
         >
-          {options.map((option) => (
-            <div
-              key={option.value}
-              onClick={() => {
-                onChange(option.value);
-                setIsOpen(false);
-              }}
-              style={{
-                padding: '8px 12px',
-                fontSize: '0.8rem',
-                color: option.value === value ? '#3b82f6' : '#374151',
-                backgroundColor: option.value === value ? '#eff6ff' : 'transparent',
-                cursor: 'pointer',
-                transition: 'background-color 0.15s',
-                fontWeight: option.value === value ? 600 : 400
-              }}
-              onMouseEnter={(e) => {
-                if (option.value !== value) {
-                  e.currentTarget.style.backgroundColor = '#f3f4f6';
-                }
-              }}
-              onMouseLeave={(e) => {
-                if (option.value !== value) {
-                  e.currentTarget.style.backgroundColor = 'transparent';
-                }
-              }}
-            >
-              {option.label}
-            </div>
-          ))}
+          {options.map((option) => {
+            const isSelected = option.value === value;
+            return (
+              <div
+                key={option.value}
+                onClick={() => {
+                  onChange(option.value);
+                  setIsOpen(false);
+                }}
+                style={{
+                  padding: '8px 12px',
+                  fontSize: '0.8rem',
+                  color: isSelected ? 'hsl(var(--primary))' : 'hsl(var(--text-primary))',
+                  backgroundColor: isSelected ? 'hsl(var(--primary) / 0.15)' : 'transparent',
+                  cursor: 'pointer',
+                  transition: 'background-color 0.15s',
+                  fontWeight: isSelected ? 600 : 400
+                }}
+                onMouseEnter={(e) => {
+                  if (!isSelected) {
+                    e.currentTarget.style.backgroundColor = 'hsl(var(--bg-base))';
+                  }
+                }}
+                onMouseLeave={(e) => {
+                  if (!isSelected) {
+                    e.currentTarget.style.backgroundColor = 'transparent';
+                  }
+                }}
+              >
+                {option.label}
+              </div>
+            );
+          })}
         </div>
       )}
     </div>

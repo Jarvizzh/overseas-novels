@@ -109,7 +109,7 @@ export default function AccountsTab() {
   };
 
   return (
-    <div className="animate-fade-in" style={{ padding: '24px' }}>
+    <div className="animate-fade-in" style={{ padding: '16px 24px 24px 24px' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '24px' }}>
         <h1 style={{ fontSize: '1.5rem', fontWeight: 700 }} className="gradient-text">
           账号管理
@@ -183,16 +183,16 @@ export default function AccountsTab() {
           justifyContent: 'center',
           zIndex: 9999
         }} className="animate-fade-in">
-          <div style={{
+          <div className="glass-panel" style={{
             width: '100%',
             maxWidth: '500px',
             padding: '24px',
             position: 'relative',
-            backgroundColor: '#ffffff',
+            backgroundColor: 'hsl(var(--bg-surface))',
             borderRadius: '12px',
-            boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.15), 0 10px 10px -5px rgba(0, 0, 0, 0.04)',
-            border: '1px solid #e2e8f0',
-            color: '#1e293b'
+            boxShadow: 'var(--shadow-lg)',
+            border: '1px solid hsl(var(--border))',
+            color: 'hsl(var(--text-primary))'
           }}>
             <button
               onClick={handleCloseModal}
@@ -203,19 +203,19 @@ export default function AccountsTab() {
                 background: 'none',
                 border: 'none',
                 cursor: 'pointer',
-                color: '#64748b'
+                color: 'hsl(var(--text-muted))'
               }}
             >
               <X size={18} />
             </button>
 
-            <h3 style={{ fontSize: '1.2rem', marginBottom: '18px', display: 'flex', alignItems: 'center', gap: '8px', color: '#0f172a', fontWeight: 600 }}>
+            <h3 style={{ fontSize: '1.2rem', marginBottom: '18px', display: 'flex', alignItems: 'center', gap: '8px', color: 'hsl(var(--text-primary))', fontWeight: 600 }}>
               <Lock size={18} style={{ color: 'hsl(var(--primary))' }} />
               {editingAdmin ? '编辑管理员账号' : '开通后台职员管理账号 (RBAC)'}
             </h3>
 
             {accountError && (
-              <div style={{ backgroundColor: '#fef2f2', border: '1px solid #fecaca', color: '#dc2626', padding: '10px', borderRadius: '8px', fontSize: '0.8rem', marginBottom: '14px' }}>
+              <div style={{ backgroundColor: 'rgba(239, 68, 68, 0.1)', border: '1px solid rgba(239, 68, 68, 0.2)', color: '#f87171', padding: '10px', borderRadius: '8px', fontSize: '0.8rem', marginBottom: '14px' }}>
                 {accountError}
               </div>
             )}
@@ -223,7 +223,7 @@ export default function AccountsTab() {
             <form onSubmit={handleAdminFormSubmit}>
               <div style={{ display: 'flex', flexDirection: 'column', gap: '14px', marginBottom: '20px' }}>
                 <div>
-                  <label style={{ display: 'block', fontSize: '0.8rem', color: '#475569', marginBottom: '6px', fontWeight: 500 }}>员工账号</label>
+                  <label style={{ display: 'block', fontSize: '0.8rem', color: 'hsl(var(--text-secondary))', marginBottom: '6px', fontWeight: 500 }}>员工账号</label>
                   <input
                     type="text"
                     className="input-field"
@@ -233,14 +233,15 @@ export default function AccountsTab() {
                     required
                     disabled={!!editingAdmin}
                     style={{
-                      backgroundColor: '#ffffff',
-                      color: '#0f172a',
-                      borderColor: '#cbd5e1'
+                      width: '100%',
+                      backgroundColor: 'hsl(var(--bg-card))',
+                      color: 'hsl(var(--text-primary))',
+                      borderColor: 'hsl(var(--border))'
                     }}
                   />
                 </div>
                 <div>
-                  <label style={{ display: 'block', fontSize: '0.8rem', color: '#475569', marginBottom: '6px', fontWeight: 500 }}>
+                  <label style={{ display: 'block', fontSize: '0.8rem', color: 'hsl(var(--text-secondary))', marginBottom: '6px', fontWeight: 500 }}>
                     {editingAdmin ? '新登录密码 (留空则不修改)' : '登录密码'}
                   </label>
                   <input
@@ -251,14 +252,15 @@ export default function AccountsTab() {
                     onChange={(e) => setAdminForm({ ...adminForm, password: e.target.value })}
                     required={!editingAdmin}
                     style={{
-                      backgroundColor: '#ffffff',
-                      color: '#0f172a',
-                      borderColor: '#cbd5e1'
+                      width: '100%',
+                      backgroundColor: 'hsl(var(--bg-card))',
+                      color: 'hsl(var(--text-primary))',
+                      borderColor: 'hsl(var(--border))'
                     }}
                   />
                 </div>
                 <div>
-                  <label style={{ display: 'block', fontSize: '0.8rem', color: '#475569', marginBottom: '6px', fontWeight: 500 }}>员工昵称</label>
+                  <label style={{ display: 'block', fontSize: '0.8rem', color: 'hsl(var(--text-secondary))', marginBottom: '6px', fontWeight: 500 }}>员工昵称</label>
                   <input
                     type="text"
                     className="input-field"
@@ -267,14 +269,15 @@ export default function AccountsTab() {
                     onChange={(e) => setAdminForm({ ...adminForm, nickname: e.target.value })}
                     required
                     style={{
-                      backgroundColor: '#ffffff',
-                      color: '#0f172a',
-                      borderColor: '#cbd5e1'
+                      width: '100%',
+                      backgroundColor: 'hsl(var(--bg-card))',
+                      color: 'hsl(var(--text-primary))',
+                      borderColor: 'hsl(var(--border))'
                     }}
                   />
                 </div>
                 <div>
-                  <label style={{ display: 'block', fontSize: '0.8rem', color: '#475569', marginBottom: '6px', fontWeight: 500 }}>职员岗位指派 (RBAC 角色)</label>
+                  <label style={{ display: 'block', fontSize: '0.8rem', color: 'hsl(var(--text-secondary))', marginBottom: '6px', fontWeight: 500 }}>职员岗位指派 (RBAC 角色)</label>
                   <CustomSelect
                     options={[
                       { value: 'Editor', label: '编辑 (Editor)' },
@@ -290,7 +293,7 @@ export default function AccountsTab() {
               </div>
 
               <div style={{ display: 'flex', gap: '12px' }}>
-                <button type="button" className="btn-secondary" style={{ flex: 1, gap: '6px', backgroundColor: '#f1f5f9', color: '#475569', border: '1px solid #cbd5e1' }} onClick={handleCloseModal}>
+                <button type="button" className="btn-secondary" style={{ flex: 1, gap: '6px', backgroundColor: 'hsl(var(--bg-card))', color: 'hsl(var(--text-primary))', border: '1px solid hsl(var(--border))' }} onClick={handleCloseModal}>
                   取消
                 </button>
                 <button type="submit" className="btn-primary" style={{ flex: 1.5, gap: '6px' }}>

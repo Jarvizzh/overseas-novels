@@ -40,7 +40,7 @@ export default function PaymentTab() {
   };
 
   return (
-    <div className="animate-fade-in" style={{ padding: '24px' }}>
+    <div className="animate-fade-in" style={{ padding: '16px 24px 24px 24px' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '24px' }}>
         <h1 style={{ fontSize: '1.5rem', fontWeight: 700 }} className="gradient-text">
           支付管理

@@ -362,8 +362,8 @@ export default function UsersTab() {
 
   // --- Users Table Listing ---
   return (
-    <div className="animate-fade-in" style={{ padding: '24px' }}>
-      <div style={{ marginBottom: '24px' }}>
+    <div className="animate-fade-in" style={{ padding: '16px 24px 24px 24px' }}>
+      <div style={{ marginBottom: '16px' }}>
         <h1 style={{ fontSize: '1.5rem', fontWeight: 700 }} className="gradient-text">用户管理</h1>
       </div>
 

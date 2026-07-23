@@ -250,4 +250,15 @@ CREATE TABLE IF NOT EXISTS facebook_capi_logs (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
+-- System Domains Table
+CREATE TABLE IF NOT EXISTS system_domains (
+    id SERIAL PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    domain VARCHAR(255) NOT NULL UNIQUE,
+    type VARCHAR(20) NOT NULL DEFAULT 'sub', -- 'main' (主域名) / 'sub' (子域名)
+    status SMALLINT DEFAULT 1,             -- 1-启用, 2-禁用
+    is_default BOOLEAN DEFAULT FALSE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
 

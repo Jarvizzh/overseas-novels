@@ -207,6 +207,12 @@ export const api = {
       body: JSON.stringify({ novel_id: novelId, chapter_index: chapterIndex }),
     }),
 
+  initiateCheckout: (amountCents: number, coinsAmount: number) =>
+    request<{ message: string }>('/wallet/recharge/initiate', {
+      method: 'POST',
+      body: JSON.stringify({ amount_cents: amountCents, coins_amount: coinsAmount }),
+    }),
+
   createStripeIntent: (amountCents: number, coinsAmount: number) => 
     request<{ client_secret: string }>('/wallet/recharge/stripe', {
       method: 'POST',

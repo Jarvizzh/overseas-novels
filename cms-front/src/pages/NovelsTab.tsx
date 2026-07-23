@@ -551,7 +551,7 @@ export default function NovelsTab() {
   // --- Novel Detail View ---
   if (selectedNovel) {
     return (
-      <div className="animate-fade-in" style={{ padding: '24px' }}>
+      <div className="animate-fade-in" style={{ padding: '16px 24px 24px 24px' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '24px' }}>
           <button onClick={() => setSelectedNovel(null)} className="btn-secondary" style={{ display: 'inline-flex', gap: '8px' }}>
             <ArrowLeft size={16} /> 返回书籍列表
@@ -969,7 +969,7 @@ export default function NovelsTab() {
 
   // --- Novels List View ---
   return (
-    <div className="animate-fade-in" style={{ padding: '24px' }}>
+    <div className="animate-fade-in" style={{ padding: '16px 24px 24px 24px' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '24px' }}>
         <div>
           <h1 style={{ fontSize: '1.5rem', fontWeight: 700 }} className="gradient-text">书籍管理</h1>

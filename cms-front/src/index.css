@@ -31,6 +31,33 @@
   --shadow-neon: 0 4px 12px rgba(37, 99, 235, 0.15);
 }
 
+[data-theme="dark"] {
+  /* HSL Color System - Sleek Dark Theme */
+  --bg-base: 222 47% 8%;       /* Very dark slate/blue background */
+  --bg-surface: 222 47% 12%;   /* Dark surface */
+  --bg-card: 222 40% 15%;      /* Dark card/input background */
+  
+  --border: 217 33% 22%;       /* Subtle dark border */
+  --border-focus: 221 83% 60%; /* Royal blue focus */
+
+  --text-primary: 210 40% 98%;   /* Bright white/slate text */
+  --text-secondary: 215 20% 75%; /* Soft gray secondary text */
+  --text-muted: 215 16% 55%;     /* Muted gray text */
+
+  --primary: 221 83% 60%;       /* Slightly brighter Royal Blue for dark mode */
+  --primary-glow: rgba(37, 99, 235, 0.25);
+  
+  --accent-pink: 330 85% 65%;
+  --accent-green: 142 70% 45%;  /* Vibrant green */
+  --accent-blue: 200 85% 60%;
+  --accent-orange: 24 85% 60%;
+
+  --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.4), 0 2px 4px -1px rgba(0, 0, 0, 0.3);
+  --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.5), 0 4px 6px -2px rgba(0, 0, 0, 0.4);
+  --shadow-neon: 0 4px 16px rgba(37, 99, 235, 0.3);
+}
+
 * {
   box-sizing: border-box;
   margin: 0;
@@ -85,10 +112,19 @@ a:hover {
 button, input, select, textarea {
   font-family: inherit;
   font-size: inherit;
-  color: inherit;
+  color: hsl(var(--text-primary));
   background: transparent;
   border: none;
   outline: none;
+}
+
+select option {
+  background-color: hsl(var(--bg-surface));
+  color: hsl(var(--text-primary));
+}
+
+input::placeholder, textarea::placeholder {
+  color: hsl(var(--text-muted));
 }
 
 /* Common Classes for the Light Minimalist Look */
@@ -102,7 +138,9 @@ button, input, select, textarea {
 }
 
 .gradient-text {
-  background: linear-gradient(135deg, hsl(var(--text-primary)) 30%, hsl(var(--primary)) 100%);
+  display: inline-block;
+  background: linear-gradient(135deg, hsl(var(--text-primary)) 0%, hsl(var(--primary)) 100%);
+  background-clip: text;
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
 }
@@ -166,12 +204,12 @@ select.input-field option {
 }
 
 /* Custom premium input & select overrides for clean elegant UI */
-.custom-input, .custom-select {
+.custom-input, .custom-select, .input-field {
   height: 38px;
-  background-color: #ffffff !important;
-  border: 1px solid #d1d5db;
+  background-color: hsl(var(--bg-card)) !important;
+  border: 1px solid hsl(var(--border)) !important;
   border-radius: 8px;
-  color: #1f2937;
+  color: hsl(var(--text-primary)) !important;
   font-size: 0.8rem;
   font-family: var(--font-sans);
   padding: 8px 12px;
@@ -190,25 +228,25 @@ select.input-field option {
   cursor: pointer;
 }
 
-.custom-input::placeholder {
-  color: #9ca3af;
+.custom-input::placeholder, .input-field::placeholder {
+  color: hsl(var(--text-muted));
   font-size: 0.75rem;
 }
 
-.custom-select:hover, .custom-input:hover {
-  border-color: #9ca3af;
-  background-color: #ffffff !important;
+.custom-select:hover, .custom-input:hover, .input-field:hover {
+  border-color: hsl(var(--border-focus)) !important;
+  background-color: hsl(var(--bg-card)) !important;
 }
 
-.custom-select:focus, .custom-input:focus {
-  border-color: #3b82f6;
-  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.15);
-  background-color: #ffffff !important;
+.custom-select:focus, .custom-input:focus, .input-field:focus {
+  border-color: hsl(var(--primary)) !important;
+  box-shadow: 0 0 0 3px hsl(var(--primary) / 0.2);
+  background-color: hsl(var(--bg-card)) !important;
 }
 
 .custom-select option {
-  background-color: #ffffff !important;
-  color: #1f2937;
+  background-color: hsl(var(--bg-surface)) !important;
+  color: hsl(var(--text-primary)) !important;
 }
 
 .btn-primary {

@@ -17,6 +17,7 @@ type Config struct {
 	PayPalClientSecret string
 	FbPixelID          string
 	FbAccessToken      string
+	DefaultDomain      string
 }
 
 var AppConfig *Config
@@ -37,6 +38,7 @@ func LoadConfig() {
 		PayPalClientSecret: getEnv("PAYPAL_CLIENT_SECRET", ""),
 		FbPixelID:          getEnv("FB_PIXEL_ID", ""),
 		FbAccessToken:      getEnv("FB_ACCESS_TOKEN", ""),
+		DefaultDomain:      getEnv("DEFAULT_DOMAIN", "https://h5.star-novel.com"),
 	}
 }
 

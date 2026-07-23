@@ -17,6 +17,7 @@ type Config struct {
 	StripeSecretKey    string
 	PayPalClientID     string
 	PayPalClientSecret string
+	DefaultDomain      string
 }
 
 var AppConfig *Config
@@ -36,6 +37,7 @@ func LoadConfig() {
 		StripeSecretKey:    getEnv("STRIPE_SECRET_KEY", ""),
 		PayPalClientID:     getEnv("PAYPAL_CLIENT_ID", ""),
 		PayPalClientSecret: getEnv("PAYPAL_CLIENT_SECRET", ""),
+		DefaultDomain:      getEnv("DEFAULT_DOMAIN", "https://h5.star-novel.com"),
 	}
 }
 

@@ -45,8 +45,12 @@ func (h *AuthHandler) GuestLogin(c *gin.Context) {
 	pixelID := c.GetHeader("X-FB-Pixel-ID")
 	userAgent := c.Request.UserAgent()
 	sourceURL := c.GetHeader("X-Event-Source-URL")
+	country := c.GetHeader("X-Country")
+	if country == "" {
+		country = c.GetHeader("CF-IPCountry")
+	}
 
-	user, token, err := h.service.GuestLogin(ctx, device, ipAddress, utmSource, utmCampaign, fbp, fbc, pixelID, userAgent, sourceURL)
+	user, token, err := h.service.GuestLogin(ctx, device, ipAddress, utmSource, utmCampaign, fbp, fbc, pixelID, userAgent, sourceURL, country)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to login as guest: " + err.Error()})
 		return
@@ -82,8 +86,12 @@ func (h *AuthHandler) Register(c *gin.Context) {
 	pixelID := c.GetHeader("X-FB-Pixel-ID")
 	userAgent := c.Request.UserAgent()
 	sourceURL := c.GetHeader("X-Event-Source-URL")
+	country := c.GetHeader("X-Country")
+	if country == "" {
+		country = c.GetHeader("CF-IPCountry")
+	}
 
-	user, token, err := h.service.Register(ctx, req.Email, req.Password, req.Nickname, device, ipAddress, utmSource, utmCampaign, fbp, fbc, pixelID, userAgent, sourceURL)
+	user, token, err := h.service.Register(ctx, req.Email, req.Password, req.Nickname, device, ipAddress, utmSource, utmCampaign, fbp, fbc, pixelID, userAgent, sourceURL, country)
 	if err != nil {
 		if errors.Is(err, ErrEmailExists) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})

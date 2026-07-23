@@ -13,7 +13,7 @@ services:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./db/migration.sql:/docker-entrypoint-initdb.d/1_migration.sql
+      - ./db/schema.sql:/docker-entrypoint-initdb.d/1_schema.sql
       - ./db/seed.sql:/docker-entrypoint-initdb.d/2_seed.sql
 
   redis:

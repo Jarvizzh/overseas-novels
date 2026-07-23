@@ -92,7 +92,7 @@ export default function PixelsTab() {
   };
 
   return (
-    <div className="animate-fade-in" style={{ padding: '24px' }}>
+    <div className="animate-fade-in" style={{ padding: '16px 24px 24px 24px' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '24px' }}>
         <h1 style={{ fontSize: '1.5rem', fontWeight: 700 }} className="gradient-text">
           像素管理
@@ -107,10 +107,6 @@ export default function PixelsTab() {
       </div>
 
       <div className="glass-panel animate-fade-in" style={{ padding: '24px' }}>
-        <h3 style={{ fontSize: '1.2rem', marginBottom: '18px', display: 'flex', alignItems: 'center', gap: '8px' }}>
-          <Target size={18} style={{ color: 'hsl(var(--primary))' }} />
-          像素管理
-        </h3>
         <div style={{ overflowX: 'auto' }}>
           <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left', fontSize: '0.85rem' }}>
             <thead>

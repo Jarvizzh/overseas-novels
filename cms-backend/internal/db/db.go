@@ -162,6 +162,37 @@ func InitDB() {
 			}
 		}
 	}
+
+	// 6. Create system_domains table
+	createDomainsQuery := `
+	CREATE TABLE IF NOT EXISTS system_domains (
+		id SERIAL PRIMARY KEY,
+		name VARCHAR(255) NOT NULL,
+		domain VARCHAR(255) NOT NULL UNIQUE,
+		type VARCHAR(20) NOT NULL DEFAULT 'sub',
+		status SMALLINT DEFAULT 1,
+		is_default BOOLEAN DEFAULT FALSE,
+		created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+	);`
+	_, err = pool.Exec(ctx, createDomainsQuery)
+	if err != nil {
+		log.Fatalf("Failed to create system_domains table: %v", err)
+	}
+
+	// Seed default domain if table is empty
+	var domainCount int
+	err = pool.QueryRow(ctx, "SELECT COUNT(*) FROM system_domains").Scan(&domainCount)
+	if err == nil && domainCount == 0 {
+		_, err = pool.Exec(ctx, `
+			INSERT INTO system_domains (name, domain, type, status, is_default)
+			VALUES ('主站默认落地页', 'h5.star-novel.com', 'main', 1, TRUE)
+		`)
+		if err != nil {
+			log.Printf("Warning: Failed to seed default domain: %v", err)
+		} else {
+			log.Println("Seeded default domain h5.star-novel.com successfully")
+		}
+	}
 }
 
 func CloseDB() {

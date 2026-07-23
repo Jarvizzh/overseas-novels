@@ -14,6 +14,7 @@ import PixelsTab from './pages/PixelsTab';
 import TemplatesTab from './pages/TemplatesTab';
 import PromotionsTab from './pages/PromotionsTab';
 import TrackingLogsTab from './pages/TrackingLogsTab';
+import DomainsTab from './pages/DomainsTab';
 import {
   LayoutDashboard,
   Book,
@@ -30,7 +31,10 @@ import {
   Link2,
   Target,
   Gift,
-  FileText
+  FileText,
+  Sun,
+  Moon,
+  Globe
 } from 'lucide-react';
 
 
@@ -64,6 +68,7 @@ const navItems = [
     icon: <Settings size={18} />,
     roles: ['SuperAdmin'],
     children: [
+      { id: 'settings-domains', label: '域名管理', path: '/settings/domains', icon: <Globe size={14} /> },
       { id: 'settings-payment', label: '支付管理', path: '/settings/payment', icon: <CreditCard size={14} /> },
       { id: 'settings-accounts', label: '账号管理', path: '/settings/accounts', icon: <ShieldCheck size={14} /> }
     ]
@@ -105,6 +110,30 @@ function AppContent() {
     localStorage.getItem('cms_admin') ? JSON.parse(localStorage.getItem('cms_admin')!) : null
   );
   const [initializing, setInitializing] = useState(true);
+  const [theme, setTheme] = useState<'light' | 'dark'>(() => {
+    const savedTheme = localStorage.getItem('cms_theme');
+    if (savedTheme === 'dark' || savedTheme === 'light') return savedTheme;
+    return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+  });
+
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', theme);
+    localStorage.setItem('cms_theme', theme);
+  }, [theme]);
+
+  const toggleTheme = () => {
+    setTheme(prev => (prev === 'light' ? 'dark' : 'light'));
+  };
+
+  const [userMenuOpen, setUserMenuOpen] = useState(false);
+
+  useEffect(() => {
+    if (!userMenuOpen) return;
+    const handleClickOutside = () => setUserMenuOpen(false);
+    document.addEventListener('click', handleClickOutside);
+    return () => document.removeEventListener('click', handleClickOutside);
+  }, [userMenuOpen]);
+
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [settingsExpanded, setSettingsExpanded] = useState(true);
   const [adConfigExpanded, setAdConfigExpanded] = useState(true);
@@ -209,7 +238,7 @@ function AppContent() {
         borderRadius: 0,
         display: 'flex',
         flexDirection: 'column',
-        padding: sidebarCollapsed ? '24px 8px' : '24px 16px',
+        padding: sidebarCollapsed ? '14px 8px' : '14px 16px',
         backgroundColor: 'hsl(var(--bg-surface) / 0.95)',
         transition: 'width 0.25s cubic-bezier(0.16, 1, 0.3, 1), padding 0.25s ease',
         overflow: 'hidden'
@@ -219,12 +248,16 @@ function AppContent() {
           display: 'flex',
           alignItems: 'center',
           justifyContent: sidebarCollapsed ? 'center' : 'space-between',
-          marginBottom: '32px',
-          paddingLeft: sidebarCollapsed ? '0' : '8px'
+          marginBottom: '20px',
+          paddingLeft: sidebarCollapsed ? '0' : '4px'
         }}>
           {!sidebarCollapsed && (
             <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-              <img src="/assets/logo.png" alt="STAR NOVEL Logo" style={{ width: '36px', height: '36px', objectFit: 'contain', borderRadius: '8px', border: '1px solid hsl(var(--border))' }} />
+              <img
+                src={theme === 'dark' ? '/assets/logo_dark.png?v=twin_exact' : '/assets/logo_light.png?v=twin_exact'}
+                alt="STAR NOVEL Logo"
+                style={{ width: '36px', height: '36px', objectFit: 'contain', borderRadius: '8px', border: '1px solid hsl(var(--border))' }}
+              />
               <div>
                 <h3 style={{ fontSize: '0.9rem', fontWeight: 700 }} className="gradient-text">STAR NOVEL</h3>
                 {/* <span style={{ fontSize: '0.55rem', color: 'hsl(var(--text-muted))', letterSpacing: '0.05em' }}>小说管理系统</span> */}
@@ -232,7 +265,11 @@ function AppContent() {
             </div>
           )}
           {sidebarCollapsed && (
-            <img src="/assets/logo.png" alt="STAR NOVEL Logo" style={{ width: '36px', height: '36px', objectFit: 'contain', borderRadius: '8px', border: '1px solid hsl(var(--border))' }} />
+            <img
+              src={theme === 'dark' ? '/assets/logo_dark.png?v=twin_exact' : '/assets/logo_light.png?v=twin_exact'}
+              alt="STAR NOVEL Logo"
+              style={{ width: '36px', height: '36px', objectFit: 'contain', borderRadius: '8px', border: '1px solid hsl(var(--border))' }}
+            />
           )}
 
           {/* Sidebar Collapse Toggle Button */}
@@ -244,7 +281,7 @@ function AppContent() {
               borderRadius: '6px',
               border: 'none',
               marginLeft: sidebarCollapsed ? '0' : '6px',
-              marginTop: sidebarCollapsed ? '8px' : '0',
+              marginTop: '0',
               display: 'inline-flex',
               alignItems: 'center',
               justifyContent: 'center',
@@ -382,7 +419,7 @@ function AppContent() {
           display: 'flex',
           justifyContent: 'flex-end',
           alignItems: 'center',
-          padding: '12px 24px',
+          padding: '8px 24px',
           borderWidth: '0 0 1px 0',
           borderRadius: 0,
           backgroundColor: 'hsl(var(--bg-surface) / 0.9)',
@@ -390,29 +427,110 @@ function AppContent() {
           position: 'sticky',
           top: 0,
           zIndex: 50,
-          gap: '20px'
+          gap: '16px'
         }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-            <div style={{
-              width: '32px', height: '32px', borderRadius: '16px', backgroundColor: 'hsl(var(--primary) / 0.1)',
-              display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 600, color: 'hsl(var(--primary))',
-              fontSize: '0.85rem'
-            }}>
-              {admin.nickname ? admin.nickname.charAt(0).toUpperCase() : 'A'}
-            </div>
-            <div>
-              <div style={{ fontSize: '0.85rem', fontWeight: 500 }}>
-                {admin.nickname || admin.username}
+          {/* Theme Mode Toggle Button */}
+          <button
+            onClick={toggleTheme}
+            className="btn-secondary"
+            style={{
+              padding: '6px 12px',
+              fontSize: '0.8rem',
+              display: 'flex',
+              gap: '6px',
+              alignItems: 'center',
+              cursor: 'pointer',
+              borderRadius: '8px',
+              color: 'hsl(var(--text-primary))',
+              backgroundColor: 'hsl(var(--bg-card))',
+              border: '1px solid hsl(var(--border))',
+              transition: 'all 0.2s ease'
+            }}
+            title={theme === 'light' ? '切换为深色模式' : '切换为浅色模式'}
+          >
+            {theme === 'light' ? <Moon size={15} style={{ color: 'hsl(var(--primary))' }} /> : <Sun size={15} style={{ color: 'hsl(var(--accent-orange))' }} />}
+            <span>{theme === 'light' ? '深色模式' : '浅色模式'}</span>
+          </button>
+
+          {/* User Profile Dropdown */}
+          <div style={{ position: 'relative' }} onClick={(e) => e.stopPropagation()}>
+            <div
+              onClick={() => setUserMenuOpen(!userMenuOpen)}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '8px',
+                cursor: 'pointer',
+                padding: '4px 8px',
+                borderRadius: '8px',
+                transition: 'all 0.15s ease',
+                backgroundColor: userMenuOpen ? 'hsl(var(--bg-card))' : 'transparent'
+              }}
+              onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = 'hsl(var(--bg-card))'; }}
+              onMouseLeave={(e) => { if (!userMenuOpen) e.currentTarget.style.backgroundColor = 'transparent'; }}
+            >
+              <div style={{
+                width: '32px', height: '32px', borderRadius: '16px', backgroundColor: 'hsl(var(--primary) / 0.15)',
+                display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 600, color: 'hsl(var(--primary))',
+                fontSize: '0.85rem'
+              }}>
+                {admin.nickname ? admin.nickname.charAt(0).toUpperCase() : 'A'}
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                <div style={{ fontSize: '0.85rem', fontWeight: 500, color: 'hsl(var(--text-primary))' }}>
+                  {admin.nickname || admin.username}
+                </div>
+                <ChevronDown size={14} style={{ color: 'hsl(var(--text-secondary))', transform: userMenuOpen ? 'rotate(180deg)' : 'none', transition: 'transform 0.2s ease' }} />
               </div>
             </div>
-          </div>
 
-          <button onClick={handleLogout} className="btn-secondary" style={{
-            padding: '6px 12px', fontSize: '0.8rem', display: 'flex', gap: '6px', alignItems: 'center',
-            color: '#f87171', borderColor: 'rgba(239, 68, 68, 0.15)'
-          }}>
-            <LogOut size={14} /> 退出登录
-          </button>
+            {userMenuOpen && (
+              <div
+                className="glass-panel"
+                style={{
+                  position: 'absolute',
+                  top: '44px',
+                  right: 0,
+                  width: '160px',
+                  backgroundColor: 'hsl(var(--bg-surface))',
+                  border: '1px solid hsl(var(--border))',
+                  borderRadius: '10px',
+                  boxShadow: 'var(--shadow-lg)',
+                  zIndex: 1000,
+                  padding: '4px 0',
+                  display: 'flex',
+                  flexDirection: 'column'
+                }}
+              >
+                <div style={{ padding: '8px 12px', fontSize: '0.75rem', color: 'hsl(var(--text-muted))', borderBottom: '1px solid hsl(var(--border))' }}>
+                  角色: {admin.role === 'SuperAdmin' ? '超级管理员' : '管理员'}
+                </div>
+                <div
+                  onClick={() => {
+                    setUserMenuOpen(false);
+                    handleLogout();
+                  }}
+                  style={{
+                    padding: '8px 12px',
+                    fontSize: '0.8rem',
+                    color: '#f87171',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '8px',
+                    cursor: 'pointer',
+                    borderRadius: '6px',
+                    margin: '2px 4px 0 4px',
+                    transition: 'background-color 0.15s ease'
+                  }}
+                  onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = 'rgba(239, 68, 68, 0.1)'; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = 'transparent'; }}
+                >
+                  <LogOut size={14} />
+                  <span>退出登录</span>
+                </div>
+              </div>
+            )}
+          </div>
         </header>
 
         <Routes>
@@ -426,9 +544,10 @@ function AppContent() {
           <Route path="/ad-config/pixels" element={<PixelsTab />} />
           <Route path="/ad-config/logs" element={<TrackingLogsTab />} />
           <Route path="/ad-config" element={<Navigate to="/ad-config/pixels" replace />} />
+          <Route path="/settings/domains" element={admin.role === 'SuperAdmin' ? <DomainsTab /> : <Navigate to="/" replace />} />
           <Route path="/settings/payment" element={admin.role === 'SuperAdmin' ? <PaymentTab /> : <Navigate to="/" replace />} />
           <Route path="/settings/accounts" element={admin.role === 'SuperAdmin' ? <AccountsTab /> : <Navigate to="/" replace />} />
-          <Route path="/settings" element={admin.role === 'SuperAdmin' ? <Navigate to="/settings/payment" replace /> : <Navigate to="/" replace />} />
+          <Route path="/settings" element={admin.role === 'SuperAdmin' ? <Navigate to="/settings/domains" replace /> : <Navigate to="/" replace />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </main>

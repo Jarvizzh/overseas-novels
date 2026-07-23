@@ -70,9 +70,9 @@ export default function DashboardTab() {
   }
 
   return (
-    <div className="animate-fade-in" style={{ padding: '24px' }}>
+    <div className="animate-fade-in" style={{ padding: '16px 24px 24px 24px' }}>
       {/* Title */}
-      <div style={{ marginBottom: '30px' }}>
+      <div style={{ marginBottom: '16px' }}>
         <h1 style={{ fontSize: '1.5rem', fontWeight: 700, marginBottom: '6px' }} className="gradient-text">
           首页看板
         </h1>

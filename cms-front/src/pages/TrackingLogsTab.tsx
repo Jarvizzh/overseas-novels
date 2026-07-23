@@ -22,6 +22,7 @@ import CustomSelect from '../components/CustomSelect';
 const eventOptions = [
   { value: '', label: '全部事件' },
   { value: 'CompleteRegistration', label: 'CompleteRegistration' },
+  { value: 'InitiateCheckout', label: 'InitiateCheckout' },
   { value: 'Purchase', label: 'Purchase' }
 ];
 
@@ -91,7 +92,7 @@ export default function TrackingLogsTab() {
   const totalPages = Math.ceil(total / pageSize) || 1;
 
   return (
-    <div className="animate-fade-in" style={{ padding: '24px' }}>
+    <div className="animate-fade-in" style={{ padding: '16px 24px 24px 24px' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '24px' }}>
         <h1 style={{ fontSize: '1.5rem', fontWeight: 700 }} className="gradient-text">
           回传日志

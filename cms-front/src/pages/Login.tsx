@@ -1,7 +1,7 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { apiRequest } from '../utils/api';
 import type { AdminUser } from '../utils/api';
-import { Shield, Key, User, Activity } from 'lucide-react';
+import { Shield, Key, User, Activity, Sun, Moon } from 'lucide-react';
 
 interface LoginProps {
   onLoginSuccess: (token: string, admin: AdminUser) => void;
@@ -13,6 +13,21 @@ export default function Login({ onLoginSuccess }: LoginProps) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [seedSuccess, setSeedSuccess] = useState('');
+
+  const [theme, setTheme] = useState<'light' | 'dark'>(() => {
+    return (localStorage.getItem('cms_theme') as 'light' | 'dark') || 'dark';
+  });
+
+  const toggleTheme = () => {
+    const nextTheme = theme === 'light' ? 'dark' : 'light';
+    setTheme(nextTheme);
+    localStorage.setItem('cms_theme', nextTheme);
+    document.documentElement.setAttribute('data-theme', nextTheme);
+  };
+
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', theme);
+  }, [theme]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -35,7 +50,7 @@ export default function Login({ onLoginSuccess }: LoginProps) {
     setError('');
     setSeedSuccess('');
     try {
-      await apiRequest('POST', '/auth/register', {
+      await apiRequest('POST', '/auth/seed', {
         username: 'admin',
         password: 'admin123',
         nickname: '超级管理员',
@@ -58,26 +73,60 @@ export default function Login({ onLoginSuccess }: LoginProps) {
       alignItems: 'center',
       justifyContent: 'center',
       padding: '24px',
-      background: 'radial-gradient(circle at center, #f4f7fb 0%, #e1e7f0 100%)'
+      position: 'relative',
+      background: theme === 'dark'
+        ? 'radial-gradient(circle at 50% 30%, #0f172a 0%, #020617 100%)'
+        : 'radial-gradient(circle at 50% 30%, #f8fafc 0%, #e2e8f0 100%)'
     }}>
+      {/* Theme Switcher Button */}
+      <div style={{ position: 'absolute', top: '24px', right: '24px', zIndex: 10 }}>
+        <button
+          onClick={toggleTheme}
+          className="btn-secondary"
+          style={{
+            padding: '6px 12px',
+            fontSize: '0.8rem',
+            display: 'flex',
+            gap: '6px',
+            alignItems: 'center',
+            cursor: 'pointer',
+            borderRadius: '8px',
+            color: 'hsl(var(--text-primary))',
+            backgroundColor: 'hsl(var(--bg-card))',
+            border: '1px solid hsl(var(--border))',
+            transition: 'all 0.2s ease'
+          }}
+          title={theme === 'light' ? '切换为深色模式' : '切换为浅色模式'}
+        >
+          {theme === 'light' ? <Moon size={15} style={{ color: 'hsl(var(--primary))' }} /> : <Sun size={15} style={{ color: 'hsl(var(--accent-orange))' }} />}
+          <span>{theme === 'light' ? '深色模式' : '浅色模式'}</span>
+        </button>
+      </div>
+
       <div className="glass-panel animate-fade-in" style={{
         width: '100%',
         maxWidth: '420px',
         padding: '36px',
         border: '1px solid hsl(var(--border) / 0.8)',
-        boxShadow: '0 20px 40px -15px rgba(37, 99, 235, 0.08)'
+        boxShadow: theme === 'dark'
+          ? '0 20px 50px -10px rgba(0, 0, 0, 0.5), 0 0 20px 0 rgba(37, 99, 235, 0.15)'
+          : '0 20px 40px -15px rgba(37, 99, 235, 0.08)'
       }}>
         {/* Logo */}
-        <div style={{ textAlign: 'center', marginBottom: '32px' }}>
-          <div className="gradient-cyber" style={{
-            display: 'inline-flex',
-            padding: '12px',
-            borderRadius: '16px',
-            marginBottom: '16px',
-            boxShadow: 'var(--shadow-neon)'
-          }}>
-            <Shield size={32} color="#fff" />
-          </div>
+        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', textAlign: 'center', marginBottom: '32px' }}>
+          <img
+            src={theme === 'dark' ? '/assets/logo_dark.png?v=twin_exact' : '/assets/logo_light.png?v=twin_exact'}
+            alt="STAR NOVEL Logo"
+            style={{
+              width: '64px',
+              height: '64px',
+              objectFit: 'contain',
+              borderRadius: '16px',
+              marginBottom: '16px',
+              boxShadow: 'var(--shadow-neon)',
+              border: '1px solid hsl(var(--border))'
+            }}
+          />
           <h2 style={{ fontSize: '1.8rem', fontWeight: 700, marginBottom: '6px' }} className="gradient-text">
             STAR NOVEL
           </h2>

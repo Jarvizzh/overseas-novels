@@ -120,6 +120,24 @@ export default function App() {
       document.cookie = `_fbc=${fbcValue}; expires=${date.toUTCString()}; path=/`;
     }
 
+    // Ensure standard Facebook _fbp cookie is generated if missing
+    const getCookie = (name: string): string => {
+      const value = `; ${document.cookie}`;
+      const parts = value.split(`; ${name}=`);
+      if (parts.length === 2) return parts.pop()?.split(';').shift() || '';
+      return '';
+    };
+
+    if (!getCookie('_fbp')) {
+      const creationTime = Date.now();
+      const randomNumber = Math.floor(1000000000 + Math.random() * 9000000000);
+      const fbpValue = `fb.1.${creationTime}.${randomNumber}`;
+      
+      const date = new Date();
+      date.setTime(date.getTime() + 90 * 24 * 60 * 60 * 1000);
+      document.cookie = `_fbp=${fbpValue}; expires=${date.toUTCString()}; path=/`;
+    }
+
     // Auto-routing to specific novel/chapter if provided in URL parameters
     const novelIdStr = params.get('novel_id');
     const chapterIndex = params.get('chapter_index');

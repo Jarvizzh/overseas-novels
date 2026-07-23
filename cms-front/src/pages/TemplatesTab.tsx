@@ -300,7 +300,7 @@ export default function TemplatesTab() {
   const paginatedTemplates = filteredTemplates.slice(startIndex, startIndex + pageSize);
 
   return (
-    <div className="animate-fade-in" style={{ padding: '24px' }}>
+    <div className="animate-fade-in" style={{ padding: '16px 24px 24px 24px' }}>
 
       {/* Page Header */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '24px' }}>
