@@ -114,6 +114,17 @@ CREATE INDEX idx_bookshelves_user ON bookshelves(user_id);
 CREATE INDEX idx_unlock_records_user_novel ON unlock_records(user_id, novel_id);
 CREATE INDEX idx_transactions_user ON transactions(user_id);
 
+-- Partial unique index for daily check-in (prevents race conditions)
+CREATE UNIQUE INDEX IF NOT EXISTS idx_unique_user_daily_checkin 
+ON transactions(user_id, (created_at::date)) 
+WHERE biz_type = 'checkin';
+
+-- Extension and GIN Indexes for fast trigram fuzzy search
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+CREATE INDEX IF NOT EXISTS idx_novels_title_trgm ON novels USING gin (title gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS idx_novels_author_trgm ON novels USING gin (author gin_trgm_ops);
+
+
 -- =========================================================================
 -- CMS & Operational Schema Enhancements
 -- =========================================================================

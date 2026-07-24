@@ -2,8 +2,10 @@ package novel
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
+	"golang.org/x/sync/singleflight"
 	"novel-backend/internal/model"
 )
 
@@ -24,6 +26,7 @@ type Service interface {
 type service struct {
 	repo  Repository
 	cache Cache
+	sf    singleflight.Group
 }
 
 func NewService(repo Repository, cache Cache) Service {
@@ -47,16 +50,26 @@ func (s *service) GetNovelDetail(ctx context.Context, id int64) (*model.Novel, e
 		return n, nil
 	}
 
-	n, err = s.repo.GetByID(ctx, id)
+	sfKey := fmt.Sprintf("sf:novel:detail:%d", id)
+	val, err, _ := s.sf.Do(sfKey, func() (interface{}, error) {
+		if cached, _ := s.cache.GetNovel(ctx, id); cached != nil {
+			return cached, nil
+		}
+		nDB, errDB := s.repo.GetByID(ctx, id)
+		if errDB != nil || nDB == nil {
+			return nDB, errDB
+		}
+		_ = s.cache.SetNovel(ctx, id, nDB)
+		return nDB, nil
+	})
+
 	if err != nil {
 		return nil, err
 	}
-	if n == nil {
+	if val == nil {
 		return nil, nil
 	}
-
-	_ = s.cache.SetNovel(ctx, id, n)
-	return n, nil
+	return val.(*model.Novel), nil
 }
 
 func (s *service) GetChaptersList(ctx context.Context, novelID int64) ([]model.Chapter, error) {
@@ -65,15 +78,28 @@ func (s *service) GetChaptersList(ctx context.Context, novelID int64) ([]model.C
 		return list, nil
 	}
 
-	list, err = s.repo.GetChaptersList(ctx, novelID)
+	sfKey := fmt.Sprintf("sf:novel:chapters:%d", novelID)
+	val, err, _ := s.sf.Do(sfKey, func() (interface{}, error) {
+		if cached, _ := s.cache.GetChaptersList(ctx, novelID); len(cached) > 0 {
+			return cached, nil
+		}
+		listDB, errDB := s.repo.GetChaptersList(ctx, novelID)
+		if errDB != nil {
+			return nil, errDB
+		}
+		if len(listDB) > 0 {
+			_ = s.cache.SetChaptersList(ctx, novelID, listDB)
+		}
+		return listDB, nil
+	})
+
 	if err != nil {
 		return nil, err
 	}
-
-	if len(list) > 0 {
-		_ = s.cache.SetChaptersList(ctx, novelID, list)
+	if val == nil {
+		return nil, nil
 	}
-	return list, nil
+	return val.([]model.Chapter), nil
 }
 
 func (s *service) GetChapterContent(ctx context.Context, userID int64, novelID int64, chapterIndex int) (*ChapterReadResult, error) {

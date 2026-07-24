@@ -39,6 +39,14 @@ func LoadConfig() {
 		PayPalClientSecret: getEnv("PAYPAL_CLIENT_SECRET", ""),
 		DefaultDomain:      getEnv("DEFAULT_DOMAIN", "https://h5.star-novel.com"),
 	}
+	App = AppConfig
+}
+
+var App *Config
+
+// Get returns the global application configuration in an idiomatic Go way.
+func Get() *Config {
+	return AppConfig
 }
 
 func getEnv(key, fallback string) string {

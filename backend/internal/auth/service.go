@@ -9,6 +9,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 	"novel-backend/internal/model"
 	"novel-backend/internal/tracking"
+	"novel-backend/internal/workerpool"
 )
 
 var (
@@ -73,8 +74,10 @@ func (s *authService) GuestLogin(ctx context.Context, device, ipAddress, utmSour
 		return nil, "", err
 	}
 
-	// Trigger FB CompleteRegistration event asynchronously
-	go tracking.SendFacebookEvent(pixelID, "CompleteRegistration", strconv.FormatInt(user.ID, 10), "", ipAddress, userAgent, fbc, fbp, 0, "", sourceURL, country)
+	// Trigger FB CompleteRegistration event asynchronously via WorkerPool
+	workerpool.Submit(func() {
+		tracking.SendFacebookEvent(pixelID, "CompleteRegistration", strconv.FormatInt(user.ID, 10), "", ipAddress, userAgent, fbc, fbp, 0, "", sourceURL, country)
+	})
 
 	return user, token, nil
 }
@@ -131,8 +134,10 @@ func (s *authService) Register(ctx context.Context, email, password, nickname, d
 		return nil, "", err
 	}
 
-	// Trigger FB CompleteRegistration event asynchronously
-	go tracking.SendFacebookEvent(pixelID, "CompleteRegistration", strconv.FormatInt(user.ID, 10), email, ipAddress, userAgent, fbc, fbp, 0, "", sourceURL, country)
+	// Trigger FB CompleteRegistration event asynchronously via WorkerPool
+	workerpool.Submit(func() {
+		tracking.SendFacebookEvent(pixelID, "CompleteRegistration", strconv.FormatInt(user.ID, 10), email, ipAddress, userAgent, fbc, fbp, 0, "", sourceURL, country)
+	})
 
 	return user, token, nil
 }

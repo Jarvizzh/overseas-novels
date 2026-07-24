@@ -487,11 +487,11 @@ func (s *novelService) UpdateSettings(ctx context.Context, configs map[string]st
 		return err
 	}
 
-	// Invalidate Redis Cache
+	// Invalidate Redis Cache safely using SCAN iterator instead of blocking KEYS command
 	if redisclient.RDB != nil {
-		keys, err := redisclient.RDB.Keys(ctx, "novel:*").Result()
-		if err == nil && len(keys) > 0 {
-			redisclient.RDB.Del(ctx, keys...)
+		iter := redisclient.RDB.Scan(ctx, 0, "novel:*", 100).Iterator()
+		for iter.Next(ctx) {
+			redisclient.RDB.Del(ctx, iter.Val())
 		}
 	}
 

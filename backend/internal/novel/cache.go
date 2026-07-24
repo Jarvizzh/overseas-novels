@@ -4,12 +4,22 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math/rand"
 	"time"
 
 	"github.com/redis/go-redis/v9"
 	"novel-backend/internal/model"
 	redisclient "novel-backend/internal/redis"
 )
+
+func getJitterTTL(baseDuration time.Duration) time.Duration {
+	if baseDuration <= 0 {
+		return baseDuration
+	}
+	// Add 0 ~ 20% random jitter to TTL to prevent cache avalanche
+	jitter := time.Duration(rand.Int63n(int64(baseDuration / 5)))
+	return baseDuration + jitter
+}
 
 type Cache interface {
 	GetNovel(ctx context.Context, id int64) (*model.Novel, error)
@@ -53,8 +63,8 @@ func (c *redisCache) SetNovel(ctx context.Context, id int64, novel *model.Novel)
 	if err != nil {
 		return err
 	}
-	// Expire novel detail in Redis after 6 hours
-	return redisclient.RDB.Set(ctx, key, data, 6*time.Hour).Err()
+	// Expire novel detail in Redis after 6 hours + random jitter
+	return redisclient.RDB.Set(ctx, key, data, getJitterTTL(6*time.Hour)).Err()
 }
 
 func (c *redisCache) GetChaptersList(ctx context.Context, novelID int64) ([]model.Chapter, error) {
@@ -80,8 +90,8 @@ func (c *redisCache) SetChaptersList(ctx context.Context, novelID int64, chapter
 	if err != nil {
 		return err
 	}
-	// Expire chapters list in Redis after 6 hours
-	return redisclient.RDB.Set(ctx, key, data, 6*time.Hour).Err()
+	// Expire chapters list in Redis after 6 hours + random jitter
+	return redisclient.RDB.Set(ctx, key, data, getJitterTTL(6*time.Hour)).Err()
 }
 
 func (c *redisCache) GetChapter(ctx context.Context, novelID int64, chapterIndex int) (*model.Chapter, error) {
@@ -107,8 +117,8 @@ func (c *redisCache) SetChapter(ctx context.Context, novelID int64, chapterIndex
 	if err != nil {
 		return err
 	}
-	// Expire full chapter text in Redis after 2 hours
-	return redisclient.RDB.Set(ctx, key, data, 2*time.Hour).Err()
+	// Expire full chapter text in Redis after 2 hours + random jitter
+	return redisclient.RDB.Set(ctx, key, data, getJitterTTL(2*time.Hour)).Err()
 }
 
 func (c *redisCache) IsChapterUnlocked(ctx context.Context, userID, novelID int64, chapterIndex int) (bool, error) {

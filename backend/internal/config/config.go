@@ -28,11 +28,16 @@ func LoadConfig() {
 		log.Println("No .env file found, using environment variables")
 	}
 
+	jwtSecret := getEnv("JWT_SECRET", "super-secret-key-star-novel-2026")
+	if os.Getenv("GIN_MODE") == "release" && (jwtSecret == "" || jwtSecret == "super-secret-key-star-novel-2026") {
+		log.Fatal("[CRITICAL SECURITY ERROR] JWT_SECRET must be explicitly configured with a secure secret in release mode!")
+	}
+
 	AppConfig = &Config{
 		Port:               getEnv("PORT", "8080"),
 		DatabaseURL:        getEnv("DATABASE_URL", "postgres://postgres:password@localhost:5432/novel_db?sslmode=disable"),
 		RedisURL:           getEnv("REDIS_URL", "localhost:6379"),
-		JWTSecret:          getEnv("JWT_SECRET", "super-secret-key-star-novel-2026"),
+		JWTSecret:          jwtSecret,
 		StripeSecretKey:    getEnv("STRIPE_SECRET_KEY", ""),
 		PayPalClientID:     getEnv("PAYPAL_CLIENT_ID", ""),
 		PayPalClientSecret: getEnv("PAYPAL_CLIENT_SECRET", ""),
@@ -40,6 +45,14 @@ func LoadConfig() {
 		FbAccessToken:      getEnv("FB_ACCESS_TOKEN", ""),
 		DefaultDomain:      getEnv("DEFAULT_DOMAIN", "https://h5.star-novel.com"),
 	}
+	App = AppConfig
+}
+
+var App *Config
+
+// Get returns the global application configuration in an idiomatic Go way.
+func Get() *Config {
+	return AppConfig
 }
 
 func getEnv(key, fallback string) string {

@@ -174,10 +174,49 @@ func SendFacebookEvent(pixelID string, eventName string, userID string, email st
 	saveCAPILog(pixelID, eventName, userID, value, currency, testCode, resp.StatusCode, payloadStr, respStr)
 }
 
-func saveCAPILog(pixelID string, eventName string, userID string, value float64, currency string, testEventCode string, statusCode int, payload string, response string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+type CAPILogItem struct {
+	PixelID       string
+	EventName     string
+	UserID        *int64
+	Value         float64
+	Currency      string
+	TestEventCode string
+	StatusCode    int
+	Payload       string
+	Response      string
+}
 
+var logChan = make(chan CAPILogItem, 5000)
+
+func init() {
+	go func() {
+		batch := make([]CAPILogItem, 0, 50)
+		ticker := time.NewTicker(2 * time.Second)
+		for {
+			select {
+			case item, ok := <-logChan:
+				if !ok {
+					if len(batch) > 0 {
+						flushCAPILogs(batch)
+					}
+					return
+				}
+				batch = append(batch, item)
+				if len(batch) >= 50 {
+					flushCAPILogs(batch)
+					batch = make([]CAPILogItem, 0, 50)
+				}
+			case <-ticker.C:
+				if len(batch) > 0 {
+					flushCAPILogs(batch)
+					batch = make([]CAPILogItem, 0, 50)
+				}
+			}
+		}
+	}()
+}
+
+func saveCAPILog(pixelID string, eventName string, userID string, value float64, currency string, testEventCode string, statusCode int, payload string, response string) {
 	var uID *int64
 	if userID != "" {
 		if id, err := strconv.ParseInt(userID, 10, 64); err == nil {
@@ -185,14 +224,49 @@ func saveCAPILog(pixelID string, eventName string, userID string, value float64,
 		}
 	}
 
+	item := CAPILogItem{
+		PixelID:       pixelID,
+		EventName:     eventName,
+		UserID:        uID,
+		Value:         value,
+		Currency:      currency,
+		TestEventCode: testEventCode,
+		StatusCode:    statusCode,
+		Payload:       payload,
+		Response:      response,
+	}
+
+	select {
+	case logChan <- item:
+	default:
+		log.Println("[FB CAPI Log Warning] Channel full, dropping CAPI log record")
+	}
+}
+
+func flushCAPILogs(batch []CAPILogItem) {
+	if db.DB == nil || len(batch) == 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	tx, err := db.DB.Begin(ctx)
+	if err != nil {
+		log.Printf("[FB CAPI Log Error] Failed to begin transaction for log batch: %v", err)
+		return
+	}
+	defer tx.Rollback(ctx)
+
 	query := `
 		INSERT INTO facebook_capi_logs (pixel_id, event_name, user_id, value, currency, test_event_code, status_code, payload, response)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 	`
-	if db.DB != nil {
-		_, err := db.DB.Exec(ctx, query, pixelID, eventName, uID, value, currency, testEventCode, statusCode, payload, response)
+	for _, item := range batch {
+		_, err := tx.Exec(ctx, query, item.PixelID, item.EventName, item.UserID, item.Value, item.Currency, item.TestEventCode, item.StatusCode, item.Payload, item.Response)
 		if err != nil {
-			log.Printf("[FB CAPI Log Error] Failed to insert log to database: %v", err)
+			log.Printf("[FB CAPI Log Error] Failed to insert log batch item: %v", err)
 		}
 	}
+	_ = tx.Commit(ctx)
 }
+

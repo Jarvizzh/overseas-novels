@@ -3,10 +3,29 @@ package auth
 import (
 	"errors"
 	"net/http"
+	"sync"
 
 	"github.com/gin-gonic/gin"
+	"golang.org/x/time/rate"
 	"novel-backend/internal/model"
 )
+
+var guestLimiters = sync.Map{}
+
+func GuestRateLimitMiddleware(rps float64, burst int) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		ip := c.ClientIP()
+		limiterRaw, _ := guestLimiters.LoadOrStore(ip, rate.NewLimiter(rate.Limit(rps), burst))
+		limiter := limiterRaw.(*rate.Limiter)
+
+		if !limiter.Allow() {
+			c.JSON(http.StatusTooManyRequests, gin.H{"error": "Too many guest registration attempts. Please try again later."})
+			c.Abort()
+			return
+		}
+		c.Next()
+	}
+}
 
 type AuthHandler struct {
 	service AuthService
@@ -26,7 +45,7 @@ func NewAuthHandler(service AuthService) *AuthHandler {
 func (h *AuthHandler) RegisterRoutes(r *gin.RouterGroup) {
 	authGroup := r.Group("/auth")
 	{
-		authGroup.POST("/guest", h.GuestLogin)
+		authGroup.POST("/guest", GuestRateLimitMiddleware(0.1, 5), h.GuestLogin)
 		authGroup.POST("/register", h.Register)
 		authGroup.POST("/login", h.Login)
 		authGroup.GET("/profile", AuthMiddleware(), h.GetProfile)

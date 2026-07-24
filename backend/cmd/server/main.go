@@ -19,6 +19,7 @@ import (
 	"novel-backend/internal/redis"
 	"novel-backend/internal/shelf"
 	"novel-backend/internal/wallet"
+	"novel-backend/internal/workerpool"
 )
 
 func main() {
@@ -30,13 +31,15 @@ func main() {
 		gin.SetMode(gin.ReleaseMode)
 	}
 
-	// 3. Connect to DB and Redis
-	// Note: During local build/testing, make sure Docker containers are running
+	// 3. Connect to DB and Redis, Initialize WorkerPool
 	db.InitDB()
 	defer db.CloseDB()
 
 	redis.InitRedis()
 	defer redis.CloseRedis()
+
+	workerpool.InitPool(10, 1000)
+	defer workerpool.Shutdown()
 
 	// 4. Setup Gin engine
 	r := gin.New()
@@ -110,7 +113,12 @@ func main() {
 
 func corsMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
+		origin := c.Request.Header.Get("Origin")
+		if origin != "" {
+			c.Writer.Header().Set("Access-Control-Allow-Origin", origin)
+		} else {
+			c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
+		}
 		c.Writer.Header().Set("Access-Control-Allow-Credentials", "true")
 		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization, accept, origin, Cache-Control, X-Requested-With, X-FB-FBP, X-FB-FBC, X-UTM-Source, X-UTM-Campaign, X-Event-Source-URL, X-FB-Pixel-ID, X-Recharge-Template-ID, X-Country, CF-IPCountry")
 		c.Writer.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS, GET, PUT, DELETE")

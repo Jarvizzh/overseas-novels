@@ -87,7 +87,15 @@ func (r *dbRepository) UnlockChapterTx(ctx context.Context, userID int64, novelI
 	}
 	defer tx.Rollback(ctx)
 
-	// 1. Check if already unlocked
+	// 1. Fetch wallet balance WITH ROW LOCK (FOR UPDATE) FIRST to serialize concurrent unlocks for the user
+	walletQuery := `SELECT charged_coins, bonus_coins FROM wallets WHERE user_id = $1 FOR UPDATE`
+	var chargedCoins, bonusCoins int
+	err = tx.QueryRow(ctx, walletQuery, userID).Scan(&chargedCoins, &bonusCoins)
+	if err != nil {
+		return err
+	}
+
+	// 2. Check if already unlocked inside the locked transaction
 	var exists bool
 	checkQuery := `SELECT EXISTS(SELECT 1 FROM unlock_records WHERE user_id = $1 AND novel_id = $2 AND chapter_index = $3)`
 	err = tx.QueryRow(ctx, checkQuery, userID, novelID, chapterIndex).Scan(&exists)
@@ -96,14 +104,6 @@ func (r *dbRepository) UnlockChapterTx(ctx context.Context, userID int64, novelI
 	}
 	if exists {
 		return ErrAlreadyUnlocked
-	}
-
-	// 2. Fetch wallet balance WITH ROW LOCK (FOR UPDATE)
-	walletQuery := `SELECT charged_coins, bonus_coins FROM wallets WHERE user_id = $1 FOR UPDATE`
-	var chargedCoins, bonusCoins int
-	err = tx.QueryRow(ctx, walletQuery, userID).Scan(&chargedCoins, &bonusCoins)
-	if err != nil {
-		return err
 	}
 
 	if chargedCoins+bonusCoins < price {

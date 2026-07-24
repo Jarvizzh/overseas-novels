@@ -4,16 +4,20 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"math"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/stripe/stripe-go/v80"
 	"novel-backend/internal/model"
 	"novel-backend/internal/novel"
 	"novel-backend/internal/payment"
+	redisclient "novel-backend/internal/redis"
 	"novel-backend/internal/tracking"
+	"novel-backend/internal/workerpool"
 )
 
 var (
@@ -94,8 +98,10 @@ func (s *service) UnlockChapter(ctx context.Context, userID int64, novelID int64
 func (s *service) InitiateCheckout(ctx context.Context, userID int64, amountCents int64, coinsAmount int, fbp, fbc, pixelID, ip, ua, sourceURL, country string) error {
 	email, _ := s.repo.GetUserEmail(ctx, userID)
 
-	// Trigger FB Conversions API InitiateCheckout event asynchronously
-	go tracking.SendFacebookEvent(pixelID, "InitiateCheckout", strconv.FormatInt(userID, 10), email, ip, ua, fbc, fbp, float64(amountCents)/100.0, "USD", sourceURL, country)
+	// Trigger FB Conversions API InitiateCheckout event asynchronously via WorkerPool
+	workerpool.Submit(func() {
+		tracking.SendFacebookEvent(pixelID, "InitiateCheckout", strconv.FormatInt(userID, 10), email, ip, ua, fbc, fbp, float64(amountCents)/100.0, "USD", sourceURL, country)
+	})
 
 	return nil
 }
@@ -114,8 +120,10 @@ func (s *service) CreateStripeIntent(ctx context.Context, userID int64, amountCe
 
 	email, _ := s.repo.GetUserEmail(ctx, userID)
 
-	// Trigger FB Conversions API InitiateCheckout event asynchronously
-	go tracking.SendFacebookEvent(pixelID, "InitiateCheckout", strconv.FormatInt(userID, 10), email, ip, ua, fbc, fbp, float64(amountCents)/100.0, "USD", sourceURL, country)
+	// Trigger FB Conversions API InitiateCheckout event asynchronously via WorkerPool
+	workerpool.Submit(func() {
+		tracking.SendFacebookEvent(pixelID, "InitiateCheckout", strconv.FormatInt(userID, 10), email, ip, ua, fbc, fbp, float64(amountCents)/100.0, "USD", sourceURL, country)
+	})
 
 	return clientSecret, nil
 }
@@ -154,6 +162,13 @@ func (s *service) CapturePayPalPayment(ctx context.Context, userID int64, orderI
 	}
 	amountCents := int64(math.Round(valFloat * 100))
 
+	// Security Check: Verify actual captured amount against expected price in recharge_slots
+	expectedPriceCents, err := s.repo.GetPriceCentsByCoins(ctx, parsedCoinsAmount)
+	if err == nil && expectedPriceCents > 0 && amountCents < int64(expectedPriceCents) {
+		log.Printf("[Security Risk] User %d attempted PayPal amount tampering! Paid Cents: %d, Expected Cents: %d", userID, amountCents, expectedPriceCents)
+		return errors.New("payment amount does not match the configured price for requested coins")
+	}
+
 	var fbLeadJSON string
 	if pixelID != "" {
 		fbLeadData := map[string]string{
@@ -173,7 +188,7 @@ func (s *service) CapturePayPalPayment(ctx context.Context, userID int64, orderI
 		return err
 	}
 
-	// Trigger FB Conversions API purchase event
+	// Trigger FB Conversions API purchase event via WorkerPool
 	priceCents, err := s.repo.GetPriceCentsByCoins(ctx, coinsAmount)
 	if err != nil || priceCents == 0 {
 		priceCents = int(amountCents)
@@ -184,7 +199,9 @@ func (s *service) CapturePayPalPayment(ctx context.Context, userID int64, orderI
 
 	email, _ := s.repo.GetUserEmail(ctx, userID)
 
-	go tracking.SendFacebookEvent(pixelID, "Purchase", strconv.FormatInt(userID, 10), email, ip, ua, fbc, fbp, float64(priceCents)/100.0, "USD", sourceURL, country)
+	workerpool.Submit(func() {
+		tracking.SendFacebookEvent(pixelID, "Purchase", strconv.FormatInt(userID, 10), email, ip, ua, fbc, fbp, float64(priceCents)/100.0, "USD", sourceURL, country)
+	})
 
 	return nil
 }
@@ -226,6 +243,15 @@ func (s *service) ProcessStripeWebhook(ctx context.Context, payload []byte, sigH
 }
 
 func (s *service) AwardDailyCheckIn(ctx context.Context, userID int64, coinsAmount int, day int) error {
+	lockKey := fmt.Sprintf("lock:checkin:%d", userID)
+	if redisclient.RDB != nil {
+		locked, err := redisclient.RDB.SetNX(ctx, lockKey, "1", 5*time.Second).Result()
+		if err != nil || !locked {
+			return errors.New("frequent check-in request, please try again later")
+		}
+		defer redisclient.RDB.Del(ctx, lockKey)
+	}
+
 	checked, err := s.repo.HasCheckedInToday(ctx, userID)
 	if err != nil {
 		return err
@@ -235,7 +261,14 @@ func (s *service) AwardDailyCheckIn(ctx context.Context, userID int64, coinsAmou
 	}
 
 	desc := "Daily Check-in (Day " + strconv.Itoa(day) + ")"
-	return s.repo.AddCoins(ctx, userID, coinsAmount, true, "checkin", desc)
+	err = s.repo.AddCoins(ctx, userID, coinsAmount, true, "checkin", desc)
+	if err != nil {
+		if strings.Contains(err.Error(), "idx_unique_user_daily_checkin") {
+			return ErrAlreadyCheckedIn
+		}
+		return err
+	}
+	return nil
 }
 
 func (s *service) GetRechargeTemplates(ctx context.Context, templateIDHeader string) (*model.RechargeTemplate, error) {
