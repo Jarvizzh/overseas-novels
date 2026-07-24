@@ -62,29 +62,29 @@
 
 ```mermaid
 graph TD
-    UserClient[H5 Reader Frontend (Port 5173)] --> Gateway[Nginx / Gateway (Rate Limit & CORS)]
-    AdminClient[CMS SPA Frontend (Port 5174)] --> Gateway
+    UserClient["H5 Reader Frontend (Port 5173)"] --> Gateway["Nginx / Gateway (Rate Limit & CORS)"]
+    AdminClient["CMS SPA Frontend (Port 5174)"] --> Gateway
     
-    Gateway -->|/api/v1/*| ReaderBackend[Reader Go Service (Port 8080)]
-    Gateway -->|/api/v1/admin/*| CMSBackend[CMS Go Service (Port 8081)]
+    Gateway -->|"/api/v1/*"| ReaderBackend["Reader Go Service (Port 8080)"]
+    Gateway -->|"/api/v1/admin/*"| CMSBackend["CMS Go Service (Port 8081)"]
 
-    subgraph Backend Core Architecture Layer
-        ReaderBackend --> AuthModule[Auth & Guest Module]
-        ReaderBackend --> NovelModule[Novel & Chapter Module]
-        ReaderBackend --> WalletModule[Wallet & Tx Lock Module]
+    subgraph "Backend Core Architecture Layer"
+        ReaderBackend --> AuthModule["Auth & Guest Module"]
+        ReaderBackend --> NovelModule["Novel & Chapter Module"]
+        ReaderBackend --> WalletModule["Wallet & Tx Lock Module"]
         
-        NovelModule --> SingleFlight[SingleFlight Group (Anti-Stampede)]
-        WalletModule --> RowLock[PostgreSQL FOR UPDATE Row Lock]
+        NovelModule --> SingleFlight["SingleFlight Group (Anti-Stampede)"]
+        WalletModule --> RowLock["PostgreSQL FOR UPDATE Row Lock"]
         
-        WalletModule --> WorkerPool[Async WorkerPool (ants / channel)]
+        WalletModule --> WorkerPool["Async WorkerPool (ants / channel)"]
         AuthModule --> WorkerPool
     end
 
-    SingleFlight -->|Read/Write Cache + Jitter| Redis[(Redis 7 Cluster)]
-    WorkerPool -->|Async Facebook Event| FBCAPI[Facebook Conversions API]
-    WorkerPool -->|Async Batch Log| LogChan[Batch CAPI Log Flusher]
+    SingleFlight -->|"Read/Write Cache + Jitter"| Redis[("Redis 7 Cluster")]
+    WorkerPool -->|"Async Facebook Event"| FBCAPI["Facebook Conversions API"]
+    WorkerPool -->|"Async Batch Log"| LogChan["Batch CAPI Log Flusher"]
     
-    RowLock -->|Atomic Transaction| Postgres[(PostgreSQL 15)]
+    RowLock -->|"Atomic Transaction"| Postgres[("PostgreSQL 15")]
     LogChan --> Postgres
     CMSBackend --> Postgres
     CMSBackend --> Redis
