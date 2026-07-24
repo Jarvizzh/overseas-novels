@@ -1,4 +1,4 @@
-const BASE_URL = 'http://localhost:8080/api/v1';
+const BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8080/api/v1';
 
 async function request<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
   const token = localStorage.getItem('auth-token');
@@ -80,7 +80,7 @@ export interface Novel {
   genres: string[];
   words: number;
   views: number;
-  created_at: string;
+  created_at?: string;
 }
 
 export interface Chapter {

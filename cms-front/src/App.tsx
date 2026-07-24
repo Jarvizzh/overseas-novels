@@ -1,5 +1,7 @@
 import { useState, useEffect } from 'react';
 import { BrowserRouter, Routes, Route, Navigate, useNavigate, useLocation, Link } from 'react-router-dom';
+import { ToastProvider } from './context/ToastContext';
+import { ConfirmProvider } from './context/ConfirmContext';
 import { apiRequest } from './utils/api';
 import type { AdminUser } from './utils/api';
 import Login from './pages/Login';
@@ -106,9 +108,14 @@ function AppContent() {
     }
   }, [toast]);
   const [token, setToken] = useState<string | null>(localStorage.getItem('cms_token'));
-  const [admin, setAdmin] = useState<AdminUser | null>(
-    localStorage.getItem('cms_admin') ? JSON.parse(localStorage.getItem('cms_admin')!) : null
-  );
+  const [admin, setAdmin] = useState<AdminUser | null>(() => {
+    try {
+      const saved = localStorage.getItem('cms_admin');
+      return saved ? JSON.parse(saved) : null;
+    } catch {
+      return null;
+    }
+  });
   const [initializing, setInitializing] = useState(true);
   const [theme, setTheme] = useState<'light' | 'dark'>(() => {
     const savedTheme = localStorage.getItem('cms_theme');
@@ -636,7 +643,11 @@ function AppContent() {
 export default function App() {
   return (
     <BrowserRouter>
-      <AppContent />
+      <ToastProvider>
+        <ConfirmProvider>
+          <AppContent />
+        </ConfirmProvider>
+      </ToastProvider>
     </BrowserRouter>
   );
 }

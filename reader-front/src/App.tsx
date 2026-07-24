@@ -28,7 +28,7 @@ export default function App() {
   const [user, setUser] = useState<User | null>(null);
 
   // Dynamic Novels State (using local mocks as fallback)
-  const [novels, setNovels] = useState<Novel[]>(MOCK_NOVELS as any);
+  const [novels, setNovels] = useState<Novel[]>(MOCK_NOVELS as unknown as Novel[]);
 
   // Personal Shelf Saved Books
   const [shelfBookIds, setShelfBookIds] = useState<number[]>([]);
@@ -50,8 +50,12 @@ export default function App() {
 
   // Unlocked Chapters List across books
   const [unlockedBookChapters, setUnlockedBookChapters] = useState<string[]>(() => {
-    const saved = localStorage.getItem('unlocked-chapters');
-    return saved ? JSON.parse(saved) : [];
+    try {
+      const saved = localStorage.getItem('unlocked-chapters');
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
   });
 
   // Wallet Transaction billing history
@@ -333,7 +337,7 @@ export default function App() {
       case 'search':
         return (
           <Search 
-            novels={novels as any} 
+            novels={novels} 
             onNavigate={navigateTo} 
             initialGenre={pageParams?.genre}
           />
@@ -342,7 +346,7 @@ export default function App() {
         return (
           <Detail
             novelId={pageParams?.id}
-            novels={novels as any}
+            novels={novels}
             onNavigate={navigateTo}
             shelfBookIds={shelfBookIds}
             onToggleShelf={handleToggleShelf}
@@ -354,7 +358,7 @@ export default function App() {
           <Reader
             novelId={pageParams?.id}
             chapterIndex={pageParams?.chapterIndex}
-            novels={novels as any}
+            novels={novels}
             onNavigate={navigateTo}
             shelfBookIds={shelfBookIds}
             onToggleShelf={handleToggleShelf}
@@ -376,7 +380,7 @@ export default function App() {
       case 'shelf':
         return (
           <Shelf
-            novels={novels as any}
+            novels={novels}
             onNavigate={navigateTo}
             shelfBookIds={shelfBookIds}
             onRemoveFromShelf={handleRemoveMultipleFromShelf}
@@ -421,7 +425,7 @@ export default function App() {
       default:
         return (
           <Home 
-            novels={novels as any} 
+            novels={novels} 
             onNavigate={navigateTo} 
             userCoins={userCoins}
           />

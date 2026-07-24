@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { apiRequest } from '../utils/api';
-import { Link2, Trash, Clipboard, Search, Edit2, X } from 'lucide-react';
+import { Trash, Clipboard, Search, Edit2, X } from 'lucide-react';
 import CustomSelect from '../components/CustomSelect';
 
 interface PromotionLink {

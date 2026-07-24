@@ -27,4 +27,6 @@ services:
 
 volumes:
   postgres_data:
+    name: backend_postgres_data
   redis_data:
+    name: backend_redis_data

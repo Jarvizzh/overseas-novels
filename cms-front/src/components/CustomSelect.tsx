@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 
 interface Option {
   value: string;
@@ -14,22 +14,62 @@ interface CustomSelectProps {
   style?: React.CSSProperties;
 }
 
-export default function CustomSelect({ options, value, onChange, placeholder, width = '180px', style }: CustomSelectProps) {
+export default function CustomSelect({
+  options,
+  value,
+  onChange,
+  placeholder,
+  width = '180px',
+  style,
+}: CustomSelectProps) {
   const [isOpen, setIsOpen] = useState(false);
-  const selectedOption = options.find(o => o.value === value);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const selectedOption = options.find((o) => o.value === value);
 
   useEffect(() => {
     if (!isOpen) return;
-    const handleOutsideClick = () => setIsOpen(false);
-    document.addEventListener('click', handleOutsideClick);
-    return () => document.removeEventListener('click', handleOutsideClick);
+    const handleOutsideClick = (e: MouseEvent) => {
+      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
+        setIsOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleOutsideClick);
+    return () => document.removeEventListener('mousedown', handleOutsideClick);
   }, [isOpen]);
 
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Escape') {
+      setIsOpen(false);
+    } else if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      setIsOpen((prev) => !prev);
+    } else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      if (!isOpen) {
+        setIsOpen(true);
+        return;
+      }
+      const currentIndex = options.findIndex((o) => o.value === value);
+      if (e.key === 'ArrowDown') {
+        const nextIndex = (currentIndex + 1) % options.length;
+        onChange(options[nextIndex].value);
+      } else {
+        const prevIndex = (currentIndex - 1 + options.length) % options.length;
+        onChange(options[prevIndex].value);
+      }
+    }
+  };
+
   return (
-    <div style={{ position: 'relative', width, ...style }} onClick={(e) => e.stopPropagation()}>
-      <div 
+    <div ref={containerRef} style={{ position: 'relative', width, ...style }}>
+      <div
         className="custom-select-trigger"
         onClick={() => setIsOpen(!isOpen)}
+        onKeyDown={handleKeyDown}
+        tabIndex={0}
+        role="combobox"
+        aria-expanded={isOpen}
+        aria-haspopup="listbox"
         style={{
           height: '38px',
           backgroundColor: 'hsl(var(--bg-card))',
@@ -46,29 +86,40 @@ export default function CustomSelect({ options, value, onChange, placeholder, wi
           userSelect: 'none',
           position: 'relative',
           transition: 'all 0.15s ease-in-out',
+          outline: 'none',
         }}
       >
         <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
           {selectedOption ? selectedOption.label : placeholder}
         </span>
-        <span style={{
-          position: 'absolute',
-          right: '12px',
-          top: '50%',
-          transform: 'translateY(-50%)',
-          display: 'flex',
-          alignItems: 'center',
-          color: 'hsl(var(--text-secondary))',
-          pointerEvents: 'none'
-        }}>
-          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth="2" stroke="currentColor" style={{ width: '1rem', height: '1rem' }}>
+        <span
+          style={{
+            position: 'absolute',
+            right: '12px',
+            top: '50%',
+            transform: 'translateY(-50%)',
+            display: 'flex',
+            alignItems: 'center',
+            color: 'hsl(var(--text-secondary))',
+            pointerEvents: 'none',
+          }}
+        >
+          <svg
+            xmlns="http://www.w3.org/2000/svg"
+            fill="none"
+            viewBox="0 0 24 24"
+            strokeWidth="2"
+            stroke="currentColor"
+            style={{ width: '1rem', height: '1rem' }}
+          >
             <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5" />
           </svg>
         </span>
       </div>
 
       {isOpen && (
-        <div 
+        <div
+          role="listbox"
           style={{
             position: 'absolute',
             top: '44px',
@@ -81,7 +132,7 @@ export default function CustomSelect({ options, value, onChange, placeholder, wi
             zIndex: 1000,
             maxHeight: '250px',
             overflowY: 'auto',
-            padding: '4px 0'
+            padding: '4px 0',
           }}
         >
           {options.map((option) => {
@@ -89,6 +140,8 @@ export default function CustomSelect({ options, value, onChange, placeholder, wi
             return (
               <div
                 key={option.value}
+                role="option"
+                aria-selected={isSelected}
                 onClick={() => {
                   onChange(option.value);
                   setIsOpen(false);
@@ -100,7 +153,7 @@ export default function CustomSelect({ options, value, onChange, placeholder, wi
                   backgroundColor: isSelected ? 'hsl(var(--primary) / 0.15)' : 'transparent',
                   cursor: 'pointer',
                   transition: 'background-color 0.15s',
-                  fontWeight: isSelected ? 600 : 400
+                  fontWeight: isSelected ? 600 : 400,
                 }}
                 onMouseEnter={(e) => {
                   if (!isSelected) {

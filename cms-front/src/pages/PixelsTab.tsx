@@ -2,7 +2,6 @@ import { useState, useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { apiRequest } from '../utils/api';
 import {
-  Target,
   Plus,
   Edit2,
   Trash2,

@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { apiRequest } from '../utils/api';
 import type { AdminUser } from '../utils/api';
-import { Shield, Key, User, Activity, Sun, Moon } from 'lucide-react';
+import { Key, User, Activity, Sun, Moon } from 'lucide-react';
 
 interface LoginProps {
   onLoginSuccess: (token: string, admin: AdminUser) => void;

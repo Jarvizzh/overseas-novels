@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
 import { apiRequest } from '../utils/api';
 import { Book, Plus, ArrowLeft, Upload, Edit, Trash, CheckCircle, HelpCircle, Search, Settings, Link2 } from 'lucide-react';
-import CustomSelect from '../components/CustomSelect';
+import { NovelFormModal, type NovelFormData } from '../components/novels/NovelFormModal';
+import { PromotionLinkModal } from '../components/novels/PromotionLinkModal';
 
 interface Novel {
   id: number;
@@ -49,14 +50,14 @@ export default function NovelsTab() {
 
   // Form states
   const [isCreating, setIsCreating] = useState(false);
-  const [newNovel, setNewNovel] = useState({
+  const [newNovel, setNewNovel] = useState<NovelFormData>({
     title: '', author: '', cover_url: 'https://images.unsplash.com/photo-1543002588-bfa74002ed7e?w=300',
     status: 'Ongoing', rating: 4.5, synopsis: '', genres: 'Romance, Werewolf',
     coin_cost_per_thousand: 5, start_pay_chapter_index: 10
   });
 
   const [isEditing, setIsEditing] = useState(false);
-  const [editNovelForm, setEditNovelForm] = useState({
+  const [editNovelForm, setEditNovelForm] = useState<NovelFormData>({
     title: '', author: '', cover_url: '', status: 'Ongoing', rating: 4.5, synopsis: '', genres: '',
     coin_cost_per_thousand: 5, start_pay_chapter_index: 10
   });
@@ -355,192 +356,70 @@ export default function NovelsTab() {
     }
   };
 
+  const handleGeneratePromotionLink = async () => {
+    const baseUrl = window.location.origin;
+    const params = new URLSearchParams();
+    params.set('novel_id', String(promotionForm.novelId));
+    if (promotionForm.chapterIndex) {
+      params.set('chapter_index', promotionForm.chapterIndex);
+    }
+    if (promotionForm.utmSource) {
+      params.set('utm_source', promotionForm.utmSource);
+    }
+    if (promotionForm.utmCampaign) {
+      params.set('utm_campaign', promotionForm.utmCampaign);
+    }
+
+    const targetPixel = pixels.find((p) => p.id === parseInt(promotionForm.fbPixelId, 10));
+    if (targetPixel) {
+      params.set('pixel_id', targetPixel.pixel_id);
+    }
+
+    if (promotionForm.rechargeTemplateId) {
+      params.set('template_id', promotionForm.rechargeTemplateId);
+    }
+
+    const finalUrl = `${baseUrl}/?${params.toString()}`;
+
+    try {
+      await apiRequest('POST', '/promotion-links', {
+        name: promotionForm.name,
+        novel_id: promotionForm.novelId,
+        novel_title: promotionForm.title,
+        chapter_index: promotionForm.chapterIndex ? parseInt(promotionForm.chapterIndex, 10) : 0,
+        utm_source: promotionForm.utmSource,
+        utm_campaign: promotionForm.utmCampaign,
+        generated_url: finalUrl,
+        fb_pixel_id: promotionForm.fbPixelId ? parseInt(promotionForm.fbPixelId, 10) : null,
+        recharge_template_id: promotionForm.rechargeTemplateId ? parseInt(promotionForm.rechargeTemplateId, 10) : null,
+      });
+      setGeneratedLink(finalUrl);
+      window.showToast?.('推广链接已成功生成并记录！', 'success');
+    } catch (err: any) {
+      window.showToast?.('保存推广链接失败：' + err.message, 'error');
+    }
+  };
+
+  const handleCopyLink = () => {
+    if (generatedLink) {
+      navigator.clipboard.writeText(generatedLink);
+      window.showToast?.('链接已复制到剪贴板！', 'success');
+    }
+  };
+
   const renderPromotionModal = () => {
-    if (!isPromoModalOpen) return null;
     return (
-      <div style={{
-        position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
-        backgroundColor: 'rgba(15, 23, 42, 0.4)',
-        display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000,
-        padding: '20px'
-      }} onClick={() => setIsPromoModalOpen(false)}>
-        <div className="glass-panel animate-fade-in" style={{
-          width: '100%', maxWidth: '520px',
-          backgroundColor: 'hsl(var(--bg-surface))', border: '1px solid hsl(var(--border))',
-          borderRadius: '16px', display: 'flex', flexDirection: 'column',
-          boxShadow: 'var(--shadow-lg)', overflow: 'hidden'
-        }} onClick={(e) => e.stopPropagation()}>
-
-          {/* Modal Header */}
-          <div style={{
-            padding: '20px 24px', borderBottom: '1px solid hsl(var(--border))',
-            display: 'flex', justifyContent: 'space-between', alignItems: 'center'
-          }}>
-            <h3 style={{ fontSize: '1.25rem', fontWeight: 600 }}>生成书籍推广链接</h3>
-            <button
-              className="btn-secondary"
-              style={{ padding: '6px 12px', fontSize: '0.8rem' }}
-              onClick={() => setIsPromoModalOpen(false)}
-            >
-              关闭
-            </button>
-          </div>
-
-          {/* Modal Body */}
-          <div style={{ padding: '24px', display: 'flex', flexDirection: 'column', gap: '16px' }}>
-            <div>
-              <label style={{ display: 'block', fontSize: '0.75rem', color: 'hsl(var(--text-secondary))', marginBottom: '4px' }}>推广名称</label>
-              <input
-                type="text"
-                className="input-field"
-                placeholder="e.g. 脸书夏季投放-广告组A"
-                value={promotionForm.name}
-                onChange={(e) => setPromotionForm({ ...promotionForm, name: e.target.value })}
-              />
-            </div>
-
-            <div>
-              <label style={{ display: 'block', fontSize: '0.75rem', color: 'hsl(var(--text-secondary))', marginBottom: '4px' }}>推广书籍</label>
-              <input type="text" className="input-field" disabled value={promotionForm.title} />
-            </div>
-
-            <div>
-              <label style={{ display: 'block', fontSize: '0.75rem', color: 'hsl(var(--text-secondary))', marginBottom: '4px' }}>落地章节索引 (可选)</label>
-              <input
-                type="number"
-                className="input-field"
-                placeholder="e.g. 1 (第一章)"
-                value={promotionForm.chapterIndex}
-                onChange={(e) => setPromotionForm({ ...promotionForm, chapterIndex: e.target.value })}
-              />
-              <span style={{ fontSize: '0.7rem', color: 'hsl(var(--text-muted))', marginTop: '4px', display: 'block' }}>
-                设置读者点击广告后直接跳转阅读的章节。留空则直接跳转至书籍详情页。
-              </span>
-            </div>
-
-            <div>
-              <label style={{ display: 'block', fontSize: '0.75rem', color: 'hsl(var(--text-secondary))', marginBottom: '4px' }}>广告渠道 (utm_source)</label>
-              <CustomSelect
-                options={[{ value: 'facebook', label: 'Facebook' }]}
-                value={promotionForm.utmSource}
-                onChange={(val) => setPromotionForm({ ...promotionForm, utmSource: val })}
-                width="100%"
-              />
-            </div>
-
-            <div>
-              <label style={{ display: 'block', fontSize: '0.75rem', color: 'hsl(var(--text-secondary))', marginBottom: '4px' }}>选择 Facebook 像素</label>
-              <CustomSelect
-                options={[
-                  { value: '', label: '-- 选择绑定的像素 (可选) --' },
-                  ...pixels.map(p => ({ value: String(p.id), label: `${p.name} (${p.pixel_id})` }))
-                ]}
-                value={promotionForm.fbPixelId}
-                onChange={(val) => setPromotionForm({ ...promotionForm, fbPixelId: val })}
-                width="100%"
-              />
-            </div>
-
-            <div>
-              <label style={{ display: 'block', fontSize: '0.75rem', color: 'hsl(var(--text-secondary))', marginBottom: '4px' }}>广告活动名称 (utm_campaign)</label>
-              <input
-                type="text"
-                className="input-field"
-                placeholder="e.g. blackfriday_adset1"
-                value={promotionForm.utmCampaign}
-                onChange={(e) => setPromotionForm({ ...promotionForm, utmCampaign: e.target.value })}
-              />
-            </div>
-
-            <div>
-              <label style={{ display: 'block', fontSize: '0.75rem', color: 'hsl(var(--text-secondary))', marginBottom: '4px' }}>绑定充值模板 (可选)</label>
-              <CustomSelect
-                options={[
-                  { value: '', label: '-- 使用默认激活模板 --' },
-                  ...templates.map(t => ({ value: String(t.id), label: `${t.name} ${t.is_default ? '(默认)' : ''}` }))
-                ]}
-                value={promotionForm.rechargeTemplateId}
-                onChange={(val) => setPromotionForm({ ...promotionForm, rechargeTemplateId: val })}
-                width="100%"
-              />
-            </div>
-
-            <button
-              type="button"
-              className="btn-primary"
-              style={{ width: '100%' }}
-              onClick={async () => {
-                const baseUrl = 'http://localhost:5174';
-                const params = new URLSearchParams();
-                params.set('novel_id', String(promotionForm.novelId));
-                if (promotionForm.chapterIndex) {
-                  params.set('chapter_index', promotionForm.chapterIndex);
-                }
-                if (promotionForm.utmSource) {
-                  params.set('utm_source', promotionForm.utmSource);
-                }
-                if (promotionForm.utmCampaign) {
-                  params.set('utm_campaign', promotionForm.utmCampaign);
-                }
-
-                const targetPixel = pixels.find(p => p.id === parseInt(promotionForm.fbPixelId, 10));
-                if (targetPixel) {
-                  params.set('pixel_id', targetPixel.pixel_id);
-                }
-
-                if (promotionForm.rechargeTemplateId) {
-                  params.set('template_id', promotionForm.rechargeTemplateId);
-                }
-
-                const finalUrl = `${baseUrl}/?${params.toString()}`;
-
-                try {
-                  await apiRequest('POST', '/promotion-links', {
-                    name: promotionForm.name,
-                    novel_id: promotionForm.novelId,
-                    novel_title: promotionForm.title,
-                    chapter_index: promotionForm.chapterIndex ? parseInt(promotionForm.chapterIndex, 10) : 0,
-                    utm_source: promotionForm.utmSource,
-                    utm_campaign: promotionForm.utmCampaign,
-                    generated_url: finalUrl,
-                    fb_pixel_id: promotionForm.fbPixelId ? parseInt(promotionForm.fbPixelId, 10) : null,
-                    recharge_template_id: promotionForm.rechargeTemplateId ? parseInt(promotionForm.rechargeTemplateId, 10) : null
-                  });
-                  setGeneratedLink(finalUrl);
-                  window.showToast?.("推广链接已成功生成并记录！", "success");
-                } catch (err: any) {
-                  window.showToast?.("保存推广链接失败：" + err.message, "error");
-                }
-              }}
-            >
-              🛠️ 生成推广链接
-            </button>
-
-            {generatedLink && (
-              <div style={{ marginTop: '12px', borderTop: '1px solid hsl(var(--border))', paddingTop: '16px' }}>
-                <label style={{ display: 'block', fontSize: '0.75rem', color: 'hsl(var(--accent-green))', fontWeight: 600, marginBottom: '6px' }}>
-                  🎉 推广链接已生成
-                </label>
-                <textarea
-                  readOnly
-                  className="input-field"
-                  style={{ height: '70px', fontSize: '0.8rem', resize: 'none', fontFamily: 'monospace' }}
-                  value={generatedLink}
-                  onClick={(e) => {
-                    const el = e.target as HTMLTextAreaElement;
-                    el.select();
-                    navigator.clipboard.writeText(generatedLink);
-                    window.showToast?.("链接已复制到剪贴板！", "success");
-                  }}
-                />
-                <span style={{ fontSize: '0.7rem', color: 'hsl(var(--text-muted))', marginTop: '4px', display: 'block' }}>
-                  点击文本框可自动选中并复制链接。
-                </span>
-              </div>
-            )}
-          </div>
-        </div>
-      </div>
+      <PromotionLinkModal
+        isOpen={isPromoModalOpen}
+        onClose={() => setIsPromoModalOpen(false)}
+        promotionForm={promotionForm}
+        setPromotionForm={setPromotionForm}
+        pixels={pixels}
+        templates={templates}
+        onGenerateLink={handleGeneratePromotionLink}
+        generatedLink={generatedLink}
+        onCopyLink={handleCopyLink}
+      />
     );
   };
 
@@ -798,7 +677,7 @@ export default function NovelsTab() {
         {(previewChapter || previewLoading) && (
           <div style={{
             position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
-            backgroundColor: 'rgba(15, 23, 42, 0.4)', backdropFilter: 'blur(4px)',
+            backgroundColor: 'rgba(15, 23, 42, 0.4)',
             display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000,
             padding: '20px'
           }} onClick={() => setPreviewChapter(null)}>
@@ -867,102 +746,14 @@ export default function NovelsTab() {
 
         {renderPromotionModal()}
         {/* Edit Novel Modal */}
-        {isEditing && (
-          <div style={{
-            position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
-            backgroundColor: 'rgba(15, 23, 42, 0.4)', backdropFilter: 'blur(4px)',
-            display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000,
-            padding: '20px'
-          }} onClick={() => setIsEditing(false)}>
-            <div className="glass-panel animate-fade-in" style={{
-              width: '100%', maxWidth: '640px', maxHeight: '90vh',
-              backgroundColor: 'hsl(var(--bg-surface))', border: '1px solid hsl(var(--border))',
-              borderRadius: '16px', display: 'flex', flexDirection: 'column',
-              boxShadow: 'var(--shadow-lg)', overflow: 'hidden'
-            }} onClick={(e) => e.stopPropagation()}>
-
-              {/* Modal Header */}
-              <div style={{
-                padding: '20px 24px', borderBottom: '1px solid hsl(var(--border))',
-                display: 'flex', justifyContent: 'space-between', alignItems: 'center'
-              }}>
-                <h3 style={{ fontSize: '1.25rem', fontWeight: 600 }}>编辑书籍及计费设置</h3>
-                <button
-                  className="btn-secondary"
-                  style={{ padding: '6px 12px', fontSize: '0.8rem' }}
-                  onClick={() => setIsEditing(false)}
-                >
-                  关闭
-                </button>
-              </div>
-
-              {/* Modal Body */}
-              <form onSubmit={handleUpdateNovel} style={{ display: 'flex', flexDirection: 'column', flex: 1, overflow: 'hidden', margin: 0 }}>
-                <div style={{ padding: '24px', overflowY: 'auto', flex: 1, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
-                  <div style={{ gridColumn: 'span 2' }}>
-                    <label style={{ display: 'block', fontSize: '0.8rem', color: 'hsl(var(--text-secondary))', marginBottom: '6px' }}>书名</label>
-                    <input type="text" className="input-field" value={editNovelForm.title} onChange={(e) => setEditNovelForm({ ...editNovelForm, title: e.target.value })} required />
-                  </div>
-                  <div>
-                    <label style={{ display: 'block', fontSize: '0.8rem', color: 'hsl(var(--text-secondary))', marginBottom: '6px' }}>作者</label>
-                    <input type="text" className="input-field" value={editNovelForm.author} onChange={(e) => setEditNovelForm({ ...editNovelForm, author: e.target.value })} required />
-                  </div>
-                  <div>
-                    <label style={{ display: 'block', fontSize: '0.8rem', color: 'hsl(var(--text-secondary))', marginBottom: '6px' }}>评分 (1-5)</label>
-                    <input type="number" className="input-field" min={0} max={5} step={0.1} value={editNovelForm.rating} onChange={(e) => setEditNovelForm({ ...editNovelForm, rating: Number(e.target.value) })} required />
-                  </div>
-                  <div style={{ gridColumn: 'span 2' }}>
-                    <label style={{ display: 'block', fontSize: '0.8rem', color: 'hsl(var(--text-secondary))', marginBottom: '6px' }}>封面图片 URL 地址</label>
-                    <input type="text" className="input-field" value={editNovelForm.cover_url} onChange={(e) => setEditNovelForm({ ...editNovelForm, cover_url: e.target.value })} required />
-                  </div>
-                  <div style={{ gridColumn: 'span 2' }}>
-                    <label style={{ display: 'block', fontSize: '0.8rem', color: 'hsl(var(--text-secondary))', marginBottom: '6px' }}>分类标签 (逗号分隔)</label>
-                    <input type="text" className="input-field" value={editNovelForm.genres} onChange={(e) => setEditNovelForm({ ...editNovelForm, genres: e.target.value })} required />
-                  </div>
-                  <div>
-                    <label style={{ display: 'block', fontSize: '0.8rem', color: 'hsl(var(--text-secondary))', marginBottom: '6px' }}>完结状态</label>
-                    <CustomSelect
-                      options={[
-                        { value: 'Ongoing', label: '连载中 (Ongoing)' },
-                        { value: 'Completed', label: '已完结 (Completed)' }
-                      ]}
-                      value={editNovelForm.status}
-                      onChange={(val) => setEditNovelForm({ ...editNovelForm, status: val })}
-                      width="100%"
-                    />
-                  </div>
-                  <div>
-                    <label style={{ display: 'block', fontSize: '0.8rem', color: 'hsl(var(--text-secondary))', marginBottom: '6px' }}>千字付费金币数 (为0或空则使用全局配置)</label>
-                    <input type="number" className="input-field" min={0} value={editNovelForm.coin_cost_per_thousand} onChange={(e) => setEditNovelForm({ ...editNovelForm, coin_cost_per_thousand: e.target.value === '' ? '' as any : Number(e.target.value) })} />
-                  </div>
-                  <div style={{ gridColumn: 'span 2' }}>
-                    <label style={{ display: 'block', fontSize: '0.8rem', color: 'hsl(var(--text-secondary))', marginBottom: '6px' }}>起始收费章节序号 (含本章)</label>
-                    <input type="number" className="input-field" min={0} value={editNovelForm.start_pay_chapter_index} onChange={(e) => setEditNovelForm({ ...editNovelForm, start_pay_chapter_index: e.target.value === '' ? '' as any : Number(e.target.value) })} required />
-                  </div>
-                  <div style={{ gridColumn: 'span 2' }}>
-                    <label style={{ display: 'block', fontSize: '0.8rem', color: 'hsl(var(--text-secondary))', marginBottom: '6px' }}>书籍简介</label>
-                    <textarea className="input-field" rows={3} value={editNovelForm.synopsis} onChange={(e) => setEditNovelForm({ ...editNovelForm, synopsis: e.target.value })} />
-                  </div>
-                </div>
-
-                {/* Modal Footer */}
-                <div style={{
-                  padding: '16px 24px', borderTop: '1px solid hsl(var(--border))',
-                  display: 'flex', justifyContent: 'flex-end', gap: '12px',
-                  backgroundColor: 'hsl(var(--bg-surface))'
-                }}>
-                  <button type="button" className="btn-secondary" onClick={() => setIsEditing(false)}>
-                    取消
-                  </button>
-                  <button type="submit" className="btn-primary">
-                    保存修改
-                  </button>
-                </div>
-              </form>
-
-            </div>
-          </div>
-        )}
+        <NovelFormModal
+          isOpen={isEditing}
+          isEditing={true}
+          formData={editNovelForm}
+          setFormData={(data) => setEditNovelForm(data)}
+          onSubmit={handleUpdateNovel}
+          onCancel={() => setIsEditing(false)}
+        />
       </div>
     );
   }
@@ -1013,66 +804,14 @@ export default function NovelsTab() {
         </form>
       )}
 
-      {isCreating && (
-        <form onSubmit={handleCreateNovel} className="glass-panel" style={{ padding: '24px', marginBottom: '30px' }}>
-          <h3 style={{ marginBottom: '18px' }}>新建书籍档案</h3>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '18px', marginBottom: '18px' }}>
-            {/* Novel ID is now autoincrement from the database */}
-            <div>
-              <label style={{ display: 'block', fontSize: '0.8rem', color: 'hsl(var(--text-secondary))', marginBottom: '6px' }}>书名</label>
-              <input type="text" className="input-field" placeholder="e.g. Alpha King Bound" value={newNovel.title} onChange={(e) => setNewNovel({ ...newNovel, title: e.target.value })} required />
-            </div>
-            <div>
-              <label style={{ display: 'block', fontSize: '0.8rem', color: 'hsl(var(--text-secondary))', marginBottom: '6px' }}>作者</label>
-              <input type="text" className="input-field" placeholder="e.g. Catherine A." value={newNovel.author} onChange={(e) => setNewNovel({ ...newNovel, author: e.target.value })} required />
-            </div>
-            <div>
-              <label style={{ display: 'block', fontSize: '0.8rem', color: 'hsl(var(--text-secondary))', marginBottom: '6px' }}>封面图片 URL 地址</label>
-              <input type="text" className="input-field" value={newNovel.cover_url} onChange={(e) => setNewNovel({ ...newNovel, cover_url: e.target.value })} required />
-            </div>
-            <div>
-              <label style={{ display: 'block', fontSize: '0.8rem', color: 'hsl(var(--text-secondary))', marginBottom: '6px' }}>分类标签 (用逗号分隔，如 Romance, Werewolf)</label>
-              <input type="text" className="input-field" placeholder="e.g. Romance, Werewolf, CEO" value={newNovel.genres} onChange={(e) => setNewNovel({ ...newNovel, genres: e.target.value })} required />
-            </div>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
-              <div>
-                <label style={{ display: 'block', fontSize: '0.8rem', color: 'hsl(var(--text-secondary))', marginBottom: '6px' }}>完结状态</label>
-                <CustomSelect
-                  options={[
-                    { value: 'Ongoing', label: '连载中 (Ongoing)' },
-                    { value: 'Completed', label: '已完结 (Completed)' }
-                  ]}
-                  value={newNovel.status}
-                  onChange={(val) => setNewNovel({ ...newNovel, status: val })}
-                  width="100%"
-                />
-              </div>
-              <div>
-                <label style={{ display: 'block', fontSize: '0.8rem', color: 'hsl(var(--text-secondary))', marginBottom: '6px' }}>评分覆盖度 (1-5)</label>
-                <input type="number" className="input-field" min={0} max={5} step={0.1} value={newNovel.rating} onChange={(e) => setNewNovel({ ...newNovel, rating: Number(e.target.value) })} required />
-              </div>
-            </div>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
-              <div>
-                <label style={{ display: 'block', fontSize: '0.8rem', color: 'hsl(var(--text-secondary))', marginBottom: '6px' }}>千字付费金币数 (为0或空则使用全局配置)</label>
-                <input type="number" className="input-field" min={0} value={newNovel.coin_cost_per_thousand} onChange={(e) => setNewNovel({ ...newNovel, coin_cost_per_thousand: e.target.value === '' ? '' as any : Number(e.target.value) })} />
-              </div>
-              <div>
-                <label style={{ display: 'block', fontSize: '0.8rem', color: 'hsl(var(--text-secondary))', marginBottom: '6px' }}>起始收费章节 (默认从第 10 章起)</label>
-                <input type="number" className="input-field" min={0} value={newNovel.start_pay_chapter_index} onChange={(e) => setNewNovel({ ...newNovel, start_pay_chapter_index: e.target.value === '' ? '' as any : Number(e.target.value) })} required />
-              </div>
-            </div>
-          </div>
-          <div style={{ marginBottom: '20px' }}>
-            <label style={{ display: 'block', fontSize: '0.8rem', color: 'hsl(var(--text-secondary))', marginBottom: '6px' }}>书籍简介</label>
-            <textarea className="input-field" rows={4} placeholder="描述一下小说的主要情节吸引读者..." value={newNovel.synopsis} onChange={(e) => setNewNovel({ ...newNovel, synopsis: e.target.value })} />
-          </div>
-          <div style={{ display: 'flex', gap: '12px', justifyContent: 'flex-end' }}>
-            <button type="button" className="btn-secondary" onClick={() => setIsCreating(false)}>取消</button>
-            <button type="submit" className="btn-primary">保存书籍档案</button>
-          </div>
-        </form>
-      )}
+      <NovelFormModal
+        isOpen={isCreating}
+        isEditing={false}
+        formData={newNovel}
+        setFormData={(data) => setNewNovel(data)}
+        onSubmit={handleCreateNovel}
+        onCancel={() => setIsCreating(false)}
+      />
 
       {/* Search Input Bar */}
       <div style={{ display: 'flex', gap: '16px', marginBottom: '20px' }}>

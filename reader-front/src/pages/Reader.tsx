@@ -138,24 +138,24 @@ export const Reader: React.FC<ReaderProps> = ({
       isTransitioning.current = true; // Lock scroll checking during positioning
       
       const finishPositioning = () => {
-        setTimeout(() => {
+        requestAnimationFrame(() => {
           isTransitioning.current = false;
-        }, 150);
+        });
       };
 
       if (scrollTargetPosition.current === 'restore' && progress && progress.chapterIndex === currentChIndex) {
-        setTimeout(() => {
+        requestAnimationFrame(() => {
           const maxScroll = container.scrollHeight - container.clientHeight;
           container.scrollTop = progress.scrollOffsetPercentage * maxScroll;
           finishPositioning();
-        }, 80);
+        });
       } else {
         container.scrollTop = 0;
         finishPositioning();
       }
       scrollTargetPosition.current = 'restore';
     }
-  }, [currentChIndex, novelId, isLocked, loading]);
+  }, [currentChIndex, novelId, isLocked, loading, readingProgress]);
 
   // Swipe touch gestures
   const handleTouchStart = (e: React.TouchEvent) => {
@@ -277,21 +277,29 @@ export const Reader: React.FC<ReaderProps> = ({
     setShowSettings(false);
   };
 
+  const [isUnlocking, setIsUnlocking] = useState(false);
+
   const handleUnlockNow = async () => {
-    if (userCoins >= chapterPrice) {
-      const success = await onUnlockChapter(novelId, currentChIndex, chapterPrice);
-      if (success) {
-        triggerToast("Unlocked successfully!");
-        try {
-          const res = await api.getChapterContent(novelId, currentChIndex);
-          setChapterDetail(res.chapter);
-          setIsLocked(res.locked);
-        } catch (err) {
-          console.error("Failed to reload unlocked chapter content:", err);
+    if (isUnlocking) return;
+    setIsUnlocking(true);
+    try {
+      if (userCoins >= chapterPrice) {
+        const success = await onUnlockChapter(novelId, currentChIndex, chapterPrice);
+        if (success) {
+          triggerToast("Unlocked successfully!");
+          try {
+            const res = await api.getChapterContent(novelId, currentChIndex);
+            setChapterDetail(res.chapter);
+            setIsLocked(res.locked);
+          } catch (err) {
+            console.error("Failed to reload unlocked chapter content:", err);
+          }
         }
+      } else {
+        onNavigate('recharge');
       }
-    } else {
-      onNavigate('recharge');
+    } finally {
+      setIsUnlocking(false);
     }
   };
 
@@ -571,6 +579,7 @@ export const Reader: React.FC<ReaderProps> = ({
             <button 
               className={userCoins >= chapterPrice ? "btn-unlock-now" : "btn-top-up-now"}
               onClick={handleUnlockNow}
+              disabled={isUnlocking}
               style={{
                 width: '100%',
                 height: '48px',
