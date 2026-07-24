@@ -15,6 +15,7 @@ type Repository interface {
 	GetChaptersList(ctx context.Context, novelID int64) ([]model.Chapter, error)
 	GetChapter(ctx context.Context, novelID int64, chapterIndex int) (*model.Chapter, error)
 	CheckChapterUnlocked(ctx context.Context, userID, novelID int64, chapterIndex int) (bool, error)
+	GetUnlockedChapterIndices(ctx context.Context, userID, novelID int64) ([]int, error)
 }
 
 type dbRepository struct{}
@@ -31,7 +32,7 @@ func (r *dbRepository) GetNovels(ctx context.Context, genre string, limit, offse
 		query := `
 			SELECT id, title, author, cover_url, rating, status, synopsis, genres, word_count, view_count, COALESCE(coin_cost_per_thousand, 5) AS coin_cost_per_thousand, start_pay_chapter_index, created_at
 			FROM novels
-			WHERE genres @> ARRAY[$1]::VARCHAR[]
+			WHERE genres @> ARRAY[$1]::VARCHAR[] AND status != 'archived'
 			ORDER BY view_count DESC
 			LIMIT $2 OFFSET $3`
 		rows, err = db.DB.Query(ctx, query, genre, limit, offset)
@@ -39,6 +40,7 @@ func (r *dbRepository) GetNovels(ctx context.Context, genre string, limit, offse
 		query := `
 			SELECT id, title, author, cover_url, rating, status, synopsis, genres, word_count, view_count, COALESCE(coin_cost_per_thousand, 5) AS coin_cost_per_thousand, start_pay_chapter_index, created_at
 			FROM novels
+			WHERE status != 'archived'
 			ORDER BY view_count DESC
 			LIMIT $1 OFFSET $2`
 		rows, err = db.DB.Query(ctx, query, limit, offset)
@@ -71,7 +73,7 @@ func (r *dbRepository) SearchNovels(ctx context.Context, search string, limit, o
 	query := `
 		SELECT id, title, author, cover_url, rating, status, synopsis, genres, word_count, view_count, COALESCE(coin_cost_per_thousand, 5) AS coin_cost_per_thousand, start_pay_chapter_index, created_at
 		FROM novels
-		WHERE title ILIKE $1 OR author ILIKE $1 OR synopsis ILIKE $1
+		WHERE (title ILIKE $1 OR author ILIKE $1 OR synopsis ILIKE $1) AND status != 'archived'
 		ORDER BY view_count DESC
 		LIMIT $2 OFFSET $3`
 
@@ -179,4 +181,26 @@ func (r *dbRepository) CheckChapterUnlocked(ctx context.Context, userID, novelID
 	var exists bool
 	err := db.DB.QueryRow(ctx, query, userID, novelID, chapterIndex).Scan(&exists)
 	return exists, err
+}
+
+func (r *dbRepository) GetUnlockedChapterIndices(ctx context.Context, userID, novelID int64) ([]int, error) {
+	query := `
+		SELECT chapter_index 
+		FROM unlock_records 
+		WHERE user_id = $1 AND novel_id = $2
+		ORDER BY chapter_index ASC`
+	rows, err := db.DB.Query(ctx, query, userID, novelID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var indices []int
+	for rows.Next() {
+		var idx int
+		if err := rows.Scan(&idx); err == nil {
+			indices = append(indices, idx)
+		}
+	}
+	return indices, nil
 }

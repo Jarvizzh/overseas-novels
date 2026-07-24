@@ -132,7 +132,7 @@ func (r *dbNovelRepository) UpdateNovel(ctx context.Context, n *Novel) error {
 }
 
 func (r *dbNovelRepository) DeleteNovel(ctx context.Context, id int64) (int64, error) {
-	tag, err := db.DB.Exec(ctx, "DELETE FROM novels WHERE id = $1", id)
+	tag, err := db.DB.Exec(ctx, "UPDATE novels SET status = 'archived' WHERE id = $1 AND status != 'archived'", id)
 	if err != nil {
 		return 0, err
 	}

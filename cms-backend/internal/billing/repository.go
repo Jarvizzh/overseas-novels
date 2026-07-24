@@ -226,6 +226,7 @@ func (r *dbBillingRepository) GetTemplateIsDefault(ctx context.Context, template
 }
 
 func (r *dbBillingRepository) ClearDefaultTemplatesTx(ctx context.Context, tx pgx.Tx) error {
+	_, _ = tx.Exec(ctx, "SELECT id FROM recharge_templates FOR UPDATE")
 	_, err := tx.Exec(ctx, "UPDATE recharge_templates SET is_default = FALSE")
 	return err
 }

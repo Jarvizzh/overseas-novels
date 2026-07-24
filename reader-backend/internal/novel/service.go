@@ -149,12 +149,24 @@ func (s *service) GetChapterContent(ctx context.Context, userID int64, novelID i
 		return result, nil
 	}
 
-	sfUnlockKey := fmt.Sprintf("sf:unlock:%d:%d:%d", userID, novelID, chapterIndex)
+	sfUnlockKey := fmt.Sprintf("sf:unlock:%d:%d", userID, novelID)
 	valUnlock, errUnlock, _ := s.sf.Do(sfUnlockKey, func() (interface{}, error) {
 		if cachedUnlocked, errCache := s.cache.IsChapterUnlocked(ctx, userID, novelID, chapterIndex); errCache == nil && cachedUnlocked {
 			return true, nil
 		}
-		return s.repo.CheckChapterUnlocked(ctx, userID, novelID, chapterIndex)
+		indices, errDB := s.repo.GetUnlockedChapterIndices(ctx, userID, novelID)
+		if errDB != nil {
+			return false, errDB
+		}
+		if len(indices) > 0 {
+			_ = s.cache.SetUnlockedChaptersBatch(ctx, userID, novelID, indices)
+		}
+		for _, idx := range indices {
+			if idx == chapterIndex {
+				return true, nil
+			}
+		}
+		return false, nil
 	})
 
 	if errUnlock != nil {
@@ -163,7 +175,6 @@ func (s *service) GetChapterContent(ctx context.Context, userID int64, novelID i
 
 	dbUnlocked := valUnlock.(bool)
 	if dbUnlocked {
-		_ = s.cache.SetChapterUnlocked(ctx, userID, novelID, chapterIndex)
 		result.Chapter = ch
 		result.Locked = false
 	} else {
