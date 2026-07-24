@@ -1,12 +1,12 @@
-# STAR NOVEL (星芒小说) - 海外小说平台与运营管理系统
-
 <p align="center">
   <img src="cms-front/public/assets/logo_light.png" alt="STAR NOVEL Logo" width="120" />
 </p>
 
+# STAR NOVEL - 海外小说平台与运营管理系统
+
 ## 📝 1. 系统描述 (System Description)
 
-**STAR NOVEL (星芒小说)** 是一套面向海外网络文学市场的现代化、高并发、全功能网络文学阅读平台与运营管理系统 (CMS)。
+**STAR NOVEL** 是一套面向海外网络文学市场的现代化、高并发、全功能网络文学阅读平台与运营管理系统 (CMS)。
 
 系统整体采用前后端分离拓扑架构，由**移动端 H5 读者前端 (`reader-front`)**、**运营管理后台前端 (`cms-front`)**、**读者端 Go 后端 API (`reader-backend`)** 以及 **CMS 运营 Go 后端 API (`cms-backend`)** 四大子系统构成。系统深度针对海外网文买量引流、付费墙划扣、广告归因及高并发阅读场景进行定制化架构设计：
 - 基于 **Go 1.25 (Gin + pgxpool + go-redis)** 提供微秒级响应的高性能 RESTful API；
