@@ -8,7 +8,7 @@
 
 **STAR NOVEL (星芒小说)** 是一套面向海外网络文学市场的现代化、高并发、全功能网络文学阅读平台与运营管理系统 (CMS)。
 
-系统整体采用前后端分离拓扑架构，由**移动端 H5 读者前端 (`front`)**、**运营管理后台前端 (`cms-front`)**、**读者端 Go 后端 API (`backend`)** 以及 **CMS 运营 Go 后端 API (`cms-backend`)** 四大子系统构成。系统深度针对海外网文买量引流、付费墙划扣、广告归因及高并发阅读场景进行定制化架构设计：
+系统整体采用前后端分离拓扑架构，由**移动端 H5 读者前端 (`reader-front`)**、**运营管理后台前端 (`cms-front`)**、**读者端 Go 后端 API (`reader-backend`)** 以及 **CMS 运营 Go 后端 API (`cms-backend`)** 四大子系统构成。系统深度针对海外网文买量引流、付费墙划扣、广告归因及高并发阅读场景进行定制化架构设计：
 - 基于 **Go 1.25 (Gin + pgxpool + go-redis)** 提供微秒级响应的高性能 RESTful API；
 - 集成 **Stripe & PayPal** 海外合规支付网关与 6 卡位灵活充值/VIP订阅模版；
 - 集成 **Facebook Conversions API (CAPI)** 动态广告事件归因与多 Pixel 追踪；
@@ -18,7 +18,7 @@
 
 ## 🌟 2. 功能特性 (Features)
 
-### 📖 2.1 H5 读者端与云同步阅读器 (`front` & `backend`)
+### 📖 2.1 H5 读者端与云同步阅读器 (`reader-front` & `reader-backend`)
 - **即开即读与游客鉴权**：基于设备指纹与 IP 的游客免密自动注册，自动发放迎新赠送金币，无缝过渡至正式账户。
 - **高安全防爬收费墙**：支持设定免费阅读章节区间（如 1~2 章免费），付费章节接口执行严格鉴权与正文切片裁剪（Preview Slice）。
 - **云端阅读进度同步**：基于防冲突时间戳对账算法与客户端 2 秒防抖队列，确保多设备间同步阅读历史与滚动位置不被覆盖。
@@ -49,9 +49,9 @@
 
 | 领域 | 核心技术选型 | 说明 |
 | :--- | :--- | :--- |
-| **读者端前端 (`front`)** | React 19, Vite 8, React Router v6, Lucide React | 移动端 H5 响应式适配，微秒级阅读动效 |
+| **读者端前端 (`reader-front`)** | React 19, Vite 8, React Router v6, Lucide React | 移动端 H5 响应式适配，微秒级阅读动效 |
 | **CMS 前端 (`cms-front`)** | React 19, Vite 8, Lucide React, Custom Select | 运营可视化数据仪表盘 |
-| **读者端后端 (`backend`)** | Go 1.25, Gin Framework, pgxpool, go-redis/v9, SingleFlight | 高并发 REST API (默认端口 `8080`) |
+| **读者端后端 (`reader-backend`)** | Go 1.25, Gin Framework, pgxpool, go-redis/v9, SingleFlight | 高并发 REST API (默认端口 `8080`) |
 | **CMS 后端 (`cms-backend`)** | Go 1.25, Gin Framework, pgxpool, go-redis/v9 | 运营管理 API (默认端口 `8081`) |
 | **存储基础设施** | PostgreSQL 15, Redis 7, pg_trgm (Gin Index) | Docker 容器化部署，全文模糊搜索索引 |
 | **支付与广告追踪** | Stripe SDK, PayPal REST API, Facebook CAPI | 海外合规支付网关与 CAPI 异步追踪 |
@@ -96,7 +96,7 @@ graph TD
 
 ```text
 star-novel/
-├── backend/                             # 读者端 Go 后端服务 (Port 8080)
+├── reader-backend/                      # 读者端 Go 后端服务 (Port 8080)
 │   ├── cmd/server/                      # 读者端入口与依赖注入
 │   ├── db/                              # 数据库 Schema 初始化脚本与种子数据
 │   └── internal/                        # 读者端核心业务包
@@ -123,7 +123,7 @@ star-novel/
 │       ├── redis/                       # Redis 缓存客户端
 │       ├── tracking/                    # FB CAPI 日志大盘审计与失败事件补发
 │       └── user/                        # 读者用户风控、封号与人工充扣币
-├── front/                               # 读者端 H5 移动前端 (Port 5173)
+├── reader-front/                        # 读者端 H5 移动前端 (Port 5173)
 ├── cms-front/                           # 运营后台 SPA 前端 (Port 5174)
 │   └── public/assets/                   # 双星 LOGO 等静态资源
 ├── development_guidelines.md            # 后端开发分层与并发控制规范
@@ -140,9 +140,9 @@ star-novel/
 - **Docker & Docker Compose**
 
 ### 6.2 启动基础设施 (PostgreSQL & Redis)
-进入 `backend/` 目录并使用 Docker 启动容器服务：
+进入 `reader-backend/` 目录并使用 Docker 启动容器服务：
 ```bash
-cd backend
+cd reader-backend
 docker-compose up -d
 ```
 * **PostgreSQL**：运行于 `localhost:5432`（数据库: `star_novel`，用户: `postgres`，密码: `postgres123`）
@@ -152,7 +152,7 @@ docker-compose up -d
 
 #### 启动读者端后端服务 (Port 8080)：
 ```bash
-cd backend
+cd reader-backend
 go run cmd/server/main.go
 ```
 
@@ -166,7 +166,7 @@ go run cmd/server/main.go
 
 #### 启动读者端 H5 (Port 5173)：
 ```bash
-cd front
+cd reader-front
 npm install
 npm run dev -- --port 5173
 ```

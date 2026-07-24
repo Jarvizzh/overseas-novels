@@ -330,7 +330,7 @@ func (s *novelService) BulkImportChapters(ctx context.Context, novelID int64, zi
 			if err != nil {
 				return err
 			}
-			contentBytes, err := io.ReadAll(rc)
+			contentBytes, err := io.ReadAll(io.LimitReader(rc, 10<<20)) // 10MB limit per chapter TXT
 			rc.Close()
 			if err != nil {
 				return err

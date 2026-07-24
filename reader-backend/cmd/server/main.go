@@ -12,15 +12,16 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
-	"star-novel-cms/internal/auth"
-	"star-novel-cms/internal/billing"
-	"star-novel-cms/internal/config"
-	"star-novel-cms/internal/db"
-	"star-novel-cms/internal/domain"
-	"star-novel-cms/internal/novel"
-	"star-novel-cms/internal/redis"
-	"star-novel-cms/internal/tracking"
-	"star-novel-cms/internal/user"
+	"reader-backend/internal/auth"
+	"reader-backend/internal/config"
+	"reader-backend/internal/db"
+	"reader-backend/internal/novel"
+	"reader-backend/internal/payment"
+	"reader-backend/internal/redis"
+	"reader-backend/internal/shelf"
+	"reader-backend/internal/tracking"
+	"reader-backend/internal/wallet"
+	"reader-backend/internal/workerpool"
 )
 
 func main() {
@@ -32,16 +33,18 @@ func main() {
 		gin.SetMode(gin.ReleaseMode)
 	}
 
-	// 3. Connect to DB and Redis
+	// 3. Connect to DB and Redis, Initialize WorkerPool
 	db.InitDB()
 	defer db.CloseDB()
 
 	redis.InitRedis()
 	defer redis.CloseRedis()
 
+	workerpool.InitPool(10, 1000)
+	defer workerpool.Shutdown()
+
 	// 4. Setup Gin engine
 	r := gin.New()
-	r.MaxMultipartMemory = 50 << 20 // 50MB max upload memory limit
 	r.Use(gin.Logger(), gin.Recovery())
 
 	// 5. Middleware
@@ -71,45 +74,40 @@ func main() {
 		})
 	})
 
+	// 6. Basic Health check and routes
+	api := r.Group("/api/v1")
+	{
+		authRepo := auth.NewUserRepository()
+		authService := auth.NewAuthService(authRepo)
+		authHandler := auth.NewAuthHandler(authService)
+		authHandler.RegisterRoutes(api)
+
+		novelRepo := novel.NewDBRepository()
+		novelCache := novel.NewRedisCache()
+		novelService := novel.NewService(novelRepo, novelCache)
+		novelHandler := novel.NewHandler(novelService)
+		novelHandler.RegisterRoutes(api)
+
+		shelfRepo := shelf.NewDBRepository()
+		shelfService := shelf.NewService(shelfRepo)
+		shelfHandler := shelf.NewHandler(shelfService)
+		shelfHandler.RegisterRoutes(api)
+
+		stripeClient := payment.NewStripeClient()
+		paypalClient := payment.NewPayPalClient()
+
+		walletRepo := wallet.NewDBRepository()
+		walletService := wallet.NewService(walletRepo, novelRepo, novelCache, stripeClient, paypalClient)
+		walletHandler := wallet.NewHandler(walletService)
+		walletHandler.RegisterRoutes(api)
+	}
+
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
 			"status": "UP",
 			"time":   time.Now().Format(time.RFC3339),
 		})
 	})
-
-	api := r.Group("/api/v1/admin")
-	{
-		authRepo := auth.NewAdminRepository()
-		authService := auth.NewAdminService(authRepo)
-		authHandler := auth.NewAuthHandler(authService)
-		authHandler.RegisterRoutes(api)
-
-		novelRepo := novel.NewNovelRepository()
-		novelService := novel.NewNovelService(novelRepo)
-		novelHandler := novel.NewHandler(novelService)
-		novelHandler.RegisterRoutes(api)
-
-		billingRepo := billing.NewBillingRepository()
-		billingService := billing.NewBillingService(billingRepo)
-		billingHandler := billing.NewHandler(billingService)
-		billingHandler.RegisterRoutes(api)
-
-		userRepo := user.NewUserRepository()
-		userService := user.NewUserService(userRepo)
-		userHandler := user.NewHandler(userService)
-		userHandler.RegisterRoutes(api)
-
-		trackingRepo := tracking.NewRepository()
-		trackingService := tracking.NewService(trackingRepo)
-		trackingHandler := tracking.NewHandler(trackingService)
-		trackingHandler.RegisterRoutes(api)
-
-		domainRepo := domain.NewRepository()
-		domainService := domain.NewService(domainRepo)
-		domainHandler := domain.NewHandler(domainService)
-		domainHandler.RegisterRoutes(api)
-	}
 
 	// 7. Setup graceful shutdown server
 	srv := &http.Server{
@@ -118,25 +116,26 @@ func main() {
 	}
 
 	go func() {
-		log.Printf("Star Novel CMS Backend starting on port %s", config.AppConfig.Port)
+		log.Printf("Star Novel backend starting on port %s", config.AppConfig.Port)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Fatalf("listen: %s\n", err)
 		}
 	}()
 
-	// Wait for interrupt signal
+	// Wait for interrupt signal to gracefully shutdown the server with a timeout of 5 seconds.
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
-	log.Println("Shutting down CMS server...")
+	log.Println("Shutting down server...")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(ctx); err != nil {
-		log.Fatal("CMS Server forced to shutdown:", err)
+		log.Fatal("Server forced to shutdown:", err)
 	}
 
-	log.Println("CMS Server exiting")
+	tracking.Shutdown(ctx)
+	log.Println("Server exiting")
 }
 
 func corsMiddleware() gin.HandlerFunc {
@@ -148,8 +147,8 @@ func corsMiddleware() gin.HandlerFunc {
 			c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
 		}
 		c.Writer.Header().Set("Access-Control-Allow-Credentials", "true")
-		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization, accept, origin, Cache-Control, X-Requested-With, X-FB-FBP, X-FB-FBC, X-UTM-Source, X-UTM-Campaign, X-Event-Source-URL, X-FB-Pixel-ID, X-Recharge-Template-ID")
-		c.Writer.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS, GET, PUT, DELETE, PATCH")
+		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization, accept, origin, Cache-Control, X-Requested-With, X-FB-FBP, X-FB-FBC, X-UTM-Source, X-UTM-Campaign, X-Event-Source-URL, X-FB-Pixel-ID, X-Recharge-Template-ID, X-Country, CF-IPCountry")
+		c.Writer.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS, GET, PUT, DELETE")
 
 		if c.Request.Method == "OPTIONS" {
 			c.AbortWithStatus(http.StatusNoContent)
