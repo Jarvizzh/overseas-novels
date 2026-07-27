@@ -199,7 +199,8 @@ export default function PromotionsTab() {
       params.set('template_id', editForm.rechargeTemplateId);
     }
 
-    const finalUrl = `${baseUrl}/?${params.toString()}`;
+    const path = editForm.chapterIndex ? '/content' : '/detail';
+    const finalUrl = `${baseUrl}${path}?${params.toString()}`;
 
     try {
       await apiRequest('PUT', `/promotion-links/${editingLink.id}`, {

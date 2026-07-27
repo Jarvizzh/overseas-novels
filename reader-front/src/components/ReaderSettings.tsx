@@ -6,6 +6,10 @@ interface ReaderSettingsProps {
   onFontSizeChange: (size: number) => void;
   theme: string;
   onThemeChange: (theme: string) => void;
+  fontFamily: 'serif' | 'sans';
+  onFontFamilyChange: (font: 'serif' | 'sans') => void;
+  lineHeight: 'narrow' | 'medium' | 'wide';
+  onLineHeightChange: (lh: 'narrow' | 'medium' | 'wide') => void;
   onOpenDrawer: () => void;
   novelTitle: string;
   onBack: () => void;
@@ -19,6 +23,10 @@ export const ReaderSettings: React.FC<ReaderSettingsProps> = ({
   onFontSizeChange,
   theme,
   onThemeChange,
+  fontFamily,
+  onFontFamilyChange,
+  lineHeight,
+  onLineHeightChange,
   onOpenDrawer,
   novelTitle,
   onBack,
@@ -26,11 +34,11 @@ export const ReaderSettings: React.FC<ReaderSettingsProps> = ({
   onAddToShelf,
 }) => {
   const themes = [
-    { id: 'day', name: 'Day', color: '#fdfdfd', bg: '#fdfdfd' },
-    { id: 'night', name: 'Night', color: '#121214', bg: '#121214' },
-    { id: 'sepia', name: 'Sepia', color: '#f4edd8', bg: '#f4edd8' },
-    { id: 'forest', name: 'Forest', color: '#e2edd5', bg: '#e2edd5' },
-    { id: 'mint', name: 'Mint', color: '#e6f3f0', bg: '#e6f3f0' },
+    { id: 'day', name: 'Day', bg: '#fdfdfd' },
+    { id: 'night', name: 'Night', bg: '#121214' },
+    { id: 'sepia', name: 'Sepia', bg: '#f4edd8' },
+    { id: 'forest', name: 'Forest', bg: '#e2edd5' },
+    { id: 'mint', name: 'Mint', bg: '#e6f3f0' },
   ];
 
   return (
@@ -93,25 +101,66 @@ export const ReaderSettings: React.FC<ReaderSettingsProps> = ({
           </div>
         </div>
 
-        {/* Font Size Selector */}
-        <div className="hud-section">
-          <span className="hud-label">Font Size</span>
-          <div className="hud-font-size-row">
-            <button 
-              className="hud-font-size-btn" 
-              onClick={() => onFontSizeChange(Math.max(12, fontSize - 2))}
-              aria-label="Decrease font size"
-            >
-              A-
-            </button>
-            <span className="hud-font-size-val">{fontSize}px</span>
-            <button 
-              className="hud-font-size-btn" 
-              onClick={() => onFontSizeChange(Math.min(28, fontSize + 2))}
-              aria-label="Increase font size"
-            >
-              A+
-            </button>
+        {/* Font & Spacing Settings */}
+        <div className="hud-section" style={{ gridColumn: 'span 2' }}>
+          <span className="hud-label">Typography</span>
+          <div style={{ display: 'flex', gap: '12px', width: '100%', alignItems: 'center' }}>
+            {/* Font Size Row */}
+            <div className="hud-font-size-row" style={{ flex: 1 }}>
+              <button 
+                className="hud-font-size-btn" 
+                onClick={() => onFontSizeChange(Math.max(12, fontSize - 2))}
+                aria-label="Decrease font size"
+              >
+                A-
+              </button>
+              <span className="hud-font-size-val">{fontSize}px</span>
+              <button 
+                className="hud-font-size-btn" 
+                onClick={() => onFontSizeChange(Math.min(28, fontSize + 2))}
+                aria-label="Increase font size"
+              >
+                A+
+              </button>
+            </div>
+
+            {/* Font Family Toggle */}
+            <div className="hud-font-family-toggle">
+              <button
+                className={`hud-sub-btn ${fontFamily === 'serif' ? 'active' : ''}`}
+                onClick={() => onFontFamilyChange('serif')}
+              >
+                Serif
+              </button>
+              <button
+                className={`hud-sub-btn ${fontFamily === 'sans' ? 'active' : ''}`}
+                onClick={() => onFontFamilyChange('sans')}
+              >
+                Sans
+              </button>
+            </div>
+
+            {/* Line Height Toggle */}
+            <div className="hud-line-height-toggle">
+              <button
+                className={`hud-sub-btn ${lineHeight === 'narrow' ? 'active' : ''}`}
+                onClick={() => onLineHeightChange('narrow')}
+              >
+                Compact
+              </button>
+              <button
+                className={`hud-sub-btn ${lineHeight === 'medium' ? 'active' : ''}`}
+                onClick={() => onLineHeightChange('medium')}
+              >
+                Norm
+              </button>
+              <button
+                className={`hud-sub-btn ${lineHeight === 'wide' ? 'active' : ''}`}
+                onClick={() => onLineHeightChange('wide')}
+              >
+                Wide
+              </button>
+            </div>
           </div>
         </div>
       </div>

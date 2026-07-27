@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { useToast } from '../context/ToastContext';
 import { GoldCoin } from '../components/GoldCoin';
 import { api } from '../utils/api';
 
@@ -13,6 +14,7 @@ export const Recharge: React.FC<RechargeProps> = ({
   onAddCoins,
   onBack,
 }) => {
+  const { showToast } = useToast();
   const [selectedPack, setSelectedPack] = useState<number | null>(null);
   const [paymentMethod, setPaymentMethod] = useState<'stripe' | 'paypal'>('stripe');
   const [isProcessing, setIsProcessing] = useState(false);
@@ -151,7 +153,7 @@ export const Recharge: React.FC<RechargeProps> = ({
     } catch (err: any) {
       setIsProcessing(false);
       setPaymentStep(0);
-      alert(err.message || "Payment intent creation failed. Please try again.");
+      showToast(err.message || "Payment intent creation failed. Please try again.", "error");
     }
   };
 
@@ -198,7 +200,7 @@ export const Recharge: React.FC<RechargeProps> = ({
     } catch (err: any) {
       setIsProcessing(false);
       setPaymentStep(0);
-      alert(err.message || "Stripe mock payment processing failed.");
+      showToast(err.message || "Stripe mock payment processing failed.", "error");
     }
   };
 

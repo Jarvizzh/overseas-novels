@@ -1143,6 +1143,92 @@
   border-right: 1px solid rgba(255,255,255,0.1);
 }
 
+/* Mode toggle & typography sub-buttons */
+.hud-mode-toggle, .hud-font-family-toggle, .hud-line-height-toggle {
+  display: flex;
+  background-color: rgba(255,255,255,0.08);
+  border-radius: 6px;
+  border: 1px solid rgba(255,255,255,0.1);
+  overflow: hidden;
+}
+
+.hud-mode-btn, .hud-sub-btn {
+  padding: 6px 10px;
+  background: transparent;
+  border: none;
+  color: #94a3b8;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: var(--transition-fast);
+}
+
+.hud-mode-btn.active, .hud-sub-btn.active {
+  background-color: var(--accent-color);
+  color: white;
+}
+
+/* Paged Mode Layout Engine CSS Multi-Column */
+.reader-paged-viewport {
+  width: 100%;
+  height: 100vh;
+  position: relative;
+  overflow: hidden;
+  user-select: none;
+}
+
+.reader-paged-columns {
+  column-width: 100vw;
+  column-gap: 0px;
+  height: calc(100vh - 100px);
+  width: 100%;
+  padding-top: 64px;
+  padding-left: 20px;
+  padding-right: 20px;
+  box-sizing: border-box;
+  transition: transform 0.28s cubic-bezier(0.25, 0.8, 0.25, 1);
+}
+
+.reader-page-touch-area {
+  position: absolute;
+  top: 60px;
+  bottom: 40px;
+  width: 33%;
+  z-index: 80;
+  cursor: pointer;
+}
+
+.reader-page-touch-area.left {
+  left: 0;
+}
+
+.reader-page-touch-area.right {
+  right: 0;
+}
+
+.reader-page-touch-area.center {
+  left: 33%;
+  width: 34%;
+}
+
+.reader-page-footer {
+  position: absolute;
+  bottom: 12px;
+  left: 20px;
+  right: 20px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 11px;
+  color: var(--text-tertiary);
+  opacity: 0.7;
+  z-index: 85;
+}
+
+.reader-scroll-area {
+  overflow-anchor: auto;
+}
+
 /* Slider progress bar */
 .hud-progress-row {
   display: flex;

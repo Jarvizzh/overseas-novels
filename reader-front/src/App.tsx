@@ -1,4 +1,5 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
+import { Routes, Route, useNavigate, useLocation, useSearchParams } from 'react-router-dom';
 import { MOCK_NOVELS } from './data/novels';
 import { Header } from './components/Header';
 import { BottomNav } from './components/BottomNav';
@@ -13,29 +14,27 @@ import { Recharge } from './pages/Recharge';
 import { GoldCoin } from './components/GoldCoin';
 import { api } from './utils/api';
 import type { Novel, User, Transaction } from './utils/api';
+import { ToastProvider } from './context/ToastContext';
+import { ConfirmProvider } from './context/ConfirmContext';
 import './App.css';
 
-type PageType = 'home' | 'shelf' | 'rewards' | 'profile' | 'detail' | 'reader' | 'search' | 'recharge';
-
-export default function App() {
-  // Navigation Routing States
-  const [currentPage, setCurrentPage] = useState<PageType>('home');
-  const [pageParams, setPageParams] = useState<any>(null);
-  const [activeTab, setActiveTab] = useState<'home' | 'shelf' | 'rewards' | 'profile'>('home');
-  const [prevPageStack, setPrevPageStack] = useState<PageType[]>([]);
+function AppContent() {
+  const navigate = useNavigate();
+  const location = useLocation();
+  const [searchParams] = useSearchParams();
 
   // User auth state
   const [user, setUser] = useState<User | null>(null);
 
-  // Dynamic Novels State (using local mocks as fallback)
+  // Dynamic Novels State
   const [novels, setNovels] = useState<Novel[]>(MOCK_NOVELS as unknown as Novel[]);
 
   // Personal Shelf Saved Books
   const [shelfBookIds, setShelfBookIds] = useState<number[]>([]);
 
-  // Reading Progress: { [bookId]: { chapterIndex, scrollOffsetPercentage } }
+  // Reading Progress: { [bookId]: { chapterIndex, scrollOffsetPercentage, paragraphIndex } }
   const [readingProgress, setReadingProgress] = useState<{
-    [bookId: number]: { chapterIndex: number; scrollOffsetPercentage: number };
+    [bookId: number]: { chapterIndex: number; scrollOffsetPercentage: number; paragraphIndex?: number };
   }>({});
 
   // Global theme settings
@@ -65,7 +64,7 @@ export default function App() {
   const syncTimeouts = useRef<{ [bookId: string]: any }>({});
 
   // Auth & API Initializer
-  const reloadWalletAndShelf = async () => {
+  const reloadWalletAndShelf = useCallback(async () => {
     try {
       const balance = await api.getWalletBalance();
       setUserCoins(balance.charged_coins + balance.bonus_coins);
@@ -87,9 +86,9 @@ export default function App() {
     } catch (err) {
       console.error("Failed to load shelf or wallet info:", err);
     }
-  };
+  }, []);
 
-  const triggerGuestLogin = async () => {
+  const triggerGuestLogin = useCallback(async () => {
     try {
       const res = await api.guestLogin();
       localStorage.setItem('auth-token', res.token);
@@ -98,7 +97,7 @@ export default function App() {
     } catch (err) {
       console.error("Guest login failed:", err);
     }
-  };
+  }, [reloadWalletAndShelf]);
 
   // Capture Facebook Ads / UTM tracking parameters on initial load
   useEffect(() => {
@@ -115,7 +114,6 @@ export default function App() {
     if (templateId) localStorage.setItem('recharge_template_id', templateId);
     if (fbclid) {
       localStorage.setItem('fbclid', fbclid);
-      // Hand-craft the standard Facebook _fbc cookie
       const creationTime = Date.now();
       const fbcValue = `fb.1.${creationTime}.${fbclid}`;
       
@@ -124,7 +122,6 @@ export default function App() {
       document.cookie = `_fbc=${fbcValue}; expires=${date.toUTCString()}; path=/`;
     }
 
-    // Ensure standard Facebook _fbp cookie is generated if missing
     const getCookie = (name: string): string => {
       const value = `; ${document.cookie}`;
       const parts = value.split(`; ${name}=`);
@@ -140,22 +137,6 @@ export default function App() {
       const date = new Date();
       date.setTime(date.getTime() + 90 * 24 * 60 * 60 * 1000);
       document.cookie = `_fbp=${fbpValue}; expires=${date.toUTCString()}; path=/`;
-    }
-
-    // Auto-routing to specific novel/chapter if provided in URL parameters
-    const novelIdStr = params.get('novel_id');
-    const chapterIndex = params.get('chapter_index');
-    if (novelIdStr) {
-      const novelId = parseInt(novelIdStr, 10);
-      if (!isNaN(novelId)) {
-        if (chapterIndex) {
-          setCurrentPage('reader');
-          setPageParams({ id: novelId, chapterIndex: parseInt(chapterIndex, 10) - 1 });
-        } else {
-          setCurrentPage('detail');
-          setPageParams({ id: novelId });
-        }
-      }
     }
   }, []);
 
@@ -197,10 +178,9 @@ export default function App() {
     window.addEventListener('auth-unauthorized', handleUnauthorized);
     return () => {
       window.removeEventListener('auth-unauthorized', handleUnauthorized);
-      // Clear all pending progress syncs on unmount
       Object.values(syncTimeouts.current).forEach(clearTimeout);
     };
-  }, []);
+  }, [triggerGuestLogin, reloadWalletAndShelf]);
 
   // Sync state changes to local storage for unlocked chapters cache
   useEffect(() => {
@@ -214,85 +194,104 @@ export default function App() {
     localStorage.setItem('color-scheme', globalTheme);
   }, [globalTheme]);
 
-  // View Transitions Router Navigate function
-  const navigateTo = (page: string, params: any = null) => {
-    const updateState = () => {
-      // Save page navigation history stack for recharge back-triggers
-      setPrevPageStack((prev) => [...prev, currentPage]);
-      
-      setCurrentPage(page as PageType);
-      setPageParams(params);
-      
-      // Keep bottom navigation tab synchronized
-      if (['home', 'shelf', 'rewards', 'profile'].includes(page)) {
-        setActiveTab(page as any);
+  // Centralized SPA Router Navigation helper preserving CMS tracking params
+  const navigateTo = useCallback((pageOrPath: string, params: any = null) => {
+    const trackingKeys = ['utm_source', 'utm_campaign', 'fbclid', 'pixel_id', 'template_id'];
+    const newSearchParams = new URLSearchParams();
+    
+    trackingKeys.forEach((key) => {
+      const val = searchParams.get(key);
+      if (val) newSearchParams.set(key, val);
+    });
+
+    let targetPath = '/';
+    if (pageOrPath === 'detail' && params?.id) {
+      targetPath = '/detail';
+      newSearchParams.set('novel_id', String(params.id));
+    } else if (pageOrPath === 'reader' && params?.id) {
+      targetPath = '/content';
+      newSearchParams.set('novel_id', String(params.id));
+      if (params.chapterIndex !== undefined) {
+        newSearchParams.set('chapter_index', String(params.chapterIndex + 1));
       }
+    } else if (pageOrPath === 'search') {
+      targetPath = '/search';
+      if (params?.genre) {
+        newSearchParams.set('genre', params.genre);
+      }
+    } else if (pageOrPath === 'shelf') {
+      targetPath = '/shelf';
+    } else if (pageOrPath === 'rewards') {
+      targetPath = '/rewards';
+    } else if (pageOrPath === 'profile') {
+      targetPath = '/profile';
+    } else if (pageOrPath === 'recharge') {
+      targetPath = '/recharge';
+    } else if (pageOrPath === 'home') {
+      targetPath = '/';
+    } else if (pageOrPath.startsWith('/')) {
+      targetPath = pageOrPath;
+    }
+
+    const finalUrl = `${targetPath}${newSearchParams.toString() ? `?${newSearchParams.toString()}` : ''}`;
+
+    const doNavigate = () => {
+      navigate(finalUrl);
     };
 
     if (!(document as any).startViewTransition) {
-      updateState();
+      doNavigate();
     } else {
       (document as any).startViewTransition(() => {
-        updateState();
+        doNavigate();
       });
     }
-  };
+  }, [navigate, searchParams]);
 
-  const navigateBack = () => {
-    const updateState = () => {
-      const nextStack = [...prevPageStack];
-      const prevPage = nextStack.pop() || 'home';
-      setPrevPageStack(nextStack);
-      
-      setCurrentPage(prevPage);
-      if (['home', 'shelf', 'rewards', 'profile'].includes(prevPage)) {
-        setActiveTab(prevPage as any);
-      }
+  const navigateBack = useCallback(() => {
+    const doNavigate = () => {
+      navigate(-1);
     };
 
     if (!(document as any).startViewTransition) {
-      updateState();
+      doNavigate();
     } else {
       (document as any).startViewTransition(() => {
-        updateState();
+        doNavigate();
       });
     }
-  };
+  }, [navigate]);
 
   // Manage adding/removing from shelf via API
-  const handleToggleShelf = async (bookId: number) => {
-    const inShelf = shelfBookIds.includes(bookId);
-    try {
+  const handleToggleShelf = useCallback(async (bookId: number) => {
+    setShelfBookIds((prev) => {
+      const inShelf = prev.includes(bookId);
       if (inShelf) {
-        await api.removeFromShelf([bookId]);
-        setShelfBookIds((prev) => prev.filter((id) => id !== bookId));
+        api.removeFromShelf([bookId]).catch(err => console.error("Failed to remove from shelf:", err));
+        return prev.filter((id) => id !== bookId);
       } else {
-        await api.addToShelf(bookId);
-        setShelfBookIds((prev) => [...prev, bookId]);
+        api.addToShelf(bookId).catch(err => console.error("Failed to add to shelf:", err));
+        return [...prev, bookId];
       }
-    } catch (err) {
-      console.error("Failed to toggle bookshelf:", err);
-    }
-  };
+    });
+  }, []);
 
-  const handleRemoveMultipleFromShelf = async (bookIds: number[]) => {
+  const handleRemoveMultipleFromShelf = useCallback(async (bookIds: number[]) => {
     try {
       await api.removeFromShelf(bookIds);
       setShelfBookIds((prev) => prev.filter((id) => !bookIds.includes(id)));
     } catch (err) {
       console.error("Failed to remove multiple books:", err);
     }
-  };
+  }, []);
 
   // Save progress from reading viewport with 2s debounce
-  const handleSaveProgress = (bookId: number, chapterIndex: number, scrollOffsetPercentage: number) => {
-    // 1. Local update for instant feedback
+  const handleSaveProgress = useCallback((bookId: number, chapterIndex: number, scrollOffsetPercentage: number, paragraphIndex?: number) => {
     setReadingProgress((prev) => ({
       ...prev,
-      [bookId]: { chapterIndex, scrollOffsetPercentage },
+      [bookId]: { chapterIndex, scrollOffsetPercentage, paragraphIndex },
     }));
 
-    // 2. Debounce cloud sync
     if (syncTimeouts.current[bookId]) {
       clearTimeout(syncTimeouts.current[bookId]);
     }
@@ -310,16 +309,15 @@ export default function App() {
         console.error("Reading progress sync failed:", err);
       }
     }, 2000);
-  };
+  }, []);
 
-  // Wallet Add Coins Trigger (Daily Checkin, Recharge)
-  const handleAddCoins = async (_amount: number, _reason: string) => {
-    // Reload state from database to ensure balance parity
+  // Wallet Add Coins Trigger
+  const handleAddCoins = useCallback(async (_amount: number, _reason: string) => {
     await reloadWalletAndShelf();
-  };
+  }, [reloadWalletAndShelf]);
 
-  // Wallet Deduct Coins to Unlock Chapter (delegates to API)
-  const handleUnlockChapter = async (bookId: number, chapterIndex: number, _price: number): Promise<boolean> => {
+  // Wallet Deduct Coins to Unlock Chapter
+  const handleUnlockChapter = useCallback(async (bookId: number, chapterIndex: number, _price: number): Promise<boolean> => {
     try {
       await api.unlockChapter(bookId, chapterIndex);
       setUnlockedBookChapters((prev) => [...prev, `${bookId}-${chapterIndex}`]);
@@ -329,142 +327,49 @@ export default function App() {
       console.error("Failed to unlock chapter:", err);
       return false;
     }
+  }, [reloadWalletAndShelf]);
+
+  // Active Bottom Navigation Tab based on pathname
+  const getActiveTab = (): 'home' | 'shelf' | 'rewards' | 'profile' => {
+    if (location.pathname === '/shelf') return 'shelf';
+    if (location.pathname === '/rewards') return 'rewards';
+    if (location.pathname === '/profile') return 'profile';
+    return 'home';
   };
 
-  // Renders page based on active route state
-  const renderPage = () => {
-    switch (currentPage) {
-      case 'search':
-        return (
-          <Search 
-            novels={novels} 
-            onNavigate={navigateTo} 
-            initialGenre={pageParams?.genre}
-          />
-        );
-      case 'detail':
-        return (
-          <Detail
-            novelId={pageParams?.id}
-            novels={novels}
-            onNavigate={navigateTo}
-            shelfBookIds={shelfBookIds}
-            onToggleShelf={handleToggleShelf}
-            readingProgress={readingProgress}
-          />
-        );
-      case 'reader':
-        return (
-          <Reader
-            novelId={pageParams?.id}
-            chapterIndex={pageParams?.chapterIndex}
-            novels={novels}
-            onNavigate={navigateTo}
-            shelfBookIds={shelfBookIds}
-            onToggleShelf={handleToggleShelf}
-            readingProgress={readingProgress}
-            onSaveProgress={handleSaveProgress}
-            unlockedBookChapters={unlockedBookChapters}
-            onUnlockChapter={handleUnlockChapter}
-            userCoins={userCoins}
-          />
-        );
-      case 'recharge':
-        return (
-          <Recharge
-            userCoins={userCoins}
-            onAddCoins={handleAddCoins}
-            onBack={navigateBack}
-          />
-        );
-      case 'shelf':
-        return (
-          <Shelf
-            novels={novels}
-            onNavigate={navigateTo}
-            shelfBookIds={shelfBookIds}
-            onRemoveFromShelf={handleRemoveMultipleFromShelf}
-            readingProgress={readingProgress}
-          />
-        );
-      case 'rewards':
-        return (
-          <Rewards 
-            onAddCoins={handleAddCoins}
-          />
-        );
-      case 'profile':
-        return (
-          <Profile
-            shelfBookIds={shelfBookIds}
-            readingProgress={readingProgress}
-            onNavigate={navigateTo}
-            globalTheme={globalTheme}
-            onChangeGlobalTheme={setGlobalTheme}
-            userCoins={userCoins}
-            transactionHistory={transactionHistory}
-            currentUser={user}
-            onLoginSuccess={async (token, u) => {
-              localStorage.setItem('auth-token', token);
-              setUser(u);
-              await reloadWalletAndShelf();
-              navigateTo('profile');
-            }}
-            onLogout={() => {
-              localStorage.removeItem('auth-token');
-              setUser(null);
-              setShelfBookIds([]);
-              setReadingProgress({});
-              setUserCoins(0);
-              setTransactionHistory([]);
-              triggerGuestLogin();
-            }}
-          />
-        );
-      case 'home':
-      default:
-        return (
-          <Home 
-            novels={novels} 
-            onNavigate={navigateTo} 
-            userCoins={userCoins}
-          />
-        );
-    }
-  };
+  const activeTab = getActiveTab();
 
-  // Configure Header details based on current view
+  // Configure Header details based on current pathname
   const getHeaderDetails = () => {
-    switch (currentPage) {
-      case 'search':
+    switch (location.pathname) {
+      case '/search':
         return {
           title: 'Search Books',
           showBack: true,
           onBack: navigateBack,
         };
-      case 'shelf':
+      case '/shelf':
         return {
           title: 'My Library',
           showBack: false,
         };
-      case 'rewards':
+      case '/rewards':
         return {
           title: 'Reward Center',
           showBack: false,
         };
-      case 'profile':
+      case '/profile':
         return {
           title: 'Profile Settings',
           showBack: false,
         };
-      case 'home':
+      case '/':
       default:
         return {
           title: 'StarNovel',
           showBack: false,
           rightElement: (
             <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-              {/* Clicking coin bubble redirects to Top Up */}
               <div 
                 onClick={() => navigateTo('recharge')}
                 style={{
@@ -501,11 +406,16 @@ export default function App() {
     }
   };
 
-  // Full-screen pages (without global header & bottom navigation bar)
-  const isFullScreenPage = ['reader', 'detail', 'recharge'].includes(currentPage);
+  const isFullScreenPage = ['/content', '/detail', '/recharge'].includes(location.pathname);
   const headerInfo = getHeaderDetails();
+  const isHomePage = location.pathname === '/';
 
-  const isHomePage = currentPage === 'home';
+  // Extract query parameters for direct Route element rendering
+  const detailNovelId = parseInt(searchParams.get('novel_id') || '0', 10);
+  const readerNovelId = parseInt(searchParams.get('novel_id') || '0', 10);
+  const readerChapterIdxStr = searchParams.get('chapter_index');
+  const readerChapterIndex = readerChapterIdxStr ? parseInt(readerChapterIdxStr, 10) - 1 : 0;
+  const searchGenre = searchParams.get('genre') || undefined;
 
   return (
     <>
@@ -519,7 +429,45 @@ export default function App() {
       )}
       
       <main className={isFullScreenPage ? 'page-container-full' : (isHomePage ? 'page-container-home' : 'page-container')}>
-        {renderPage()}
+        <Routes>
+          <Route path="/" element={<Home novels={novels} onNavigate={navigateTo} userCoins={userCoins} />} />
+          <Route path="/shelf" element={<Shelf novels={novels} onNavigate={navigateTo} shelfBookIds={shelfBookIds} onRemoveFromShelf={handleRemoveMultipleFromShelf} readingProgress={readingProgress} />} />
+          <Route path="/rewards" element={<Rewards onAddCoins={handleAddCoins} globalTheme={globalTheme} />} />
+          <Route 
+            path="/profile" 
+            element={
+              <Profile
+                shelfBookIds={shelfBookIds}
+                readingProgress={readingProgress}
+                onNavigate={navigateTo}
+                globalTheme={globalTheme}
+                onChangeGlobalTheme={setGlobalTheme}
+                userCoins={userCoins}
+                transactionHistory={transactionHistory}
+                currentUser={user}
+                onLoginSuccess={async (token, u) => {
+                  localStorage.setItem('auth-token', token);
+                  setUser(u);
+                  await reloadWalletAndShelf();
+                  navigateTo('profile');
+                }}
+                onLogout={() => {
+                  localStorage.removeItem('auth-token');
+                  setUser(null);
+                  setShelfBookIds([]);
+                  setReadingProgress({});
+                  setUserCoins(0);
+                  setTransactionHistory([]);
+                  triggerGuestLogin();
+                }}
+              />
+            } 
+          />
+          <Route path="/search" element={<Search novels={novels} onNavigate={navigateTo} initialGenre={searchGenre} />} />
+          <Route path="/detail" element={<Detail novelId={detailNovelId} novels={novels} onNavigate={navigateTo} shelfBookIds={shelfBookIds} onToggleShelf={handleToggleShelf} readingProgress={readingProgress} />} />
+          <Route path="/content" element={<Reader novelId={readerNovelId} chapterIndex={readerChapterIndex} novels={novels} onNavigate={navigateTo} shelfBookIds={shelfBookIds} onToggleShelf={handleToggleShelf} readingProgress={readingProgress} onSaveProgress={handleSaveProgress} unlockedBookChapters={unlockedBookChapters} onUnlockChapter={handleUnlockChapter} userCoins={userCoins} />} />
+          <Route path="/recharge" element={<Recharge userCoins={userCoins} onAddCoins={handleAddCoins} onBack={navigateBack} />} />
+        </Routes>
       </main>
 
       {!isFullScreenPage && (
@@ -529,5 +477,15 @@ export default function App() {
         />
       )}
     </>
+  );
+}
+
+export default function App() {
+  return (
+    <ToastProvider>
+      <ConfirmProvider>
+        <AppContent />
+      </ConfirmProvider>
+    </ToastProvider>
   );
 }

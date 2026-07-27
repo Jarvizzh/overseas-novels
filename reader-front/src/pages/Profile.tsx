@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { useToast } from '../context/ToastContext';
 import { GoldCoin } from '../components/GoldCoin';
 import { api } from '../utils/api';
 import type { User, Transaction } from '../utils/api';
@@ -49,6 +50,8 @@ export const Profile: React.FC<ProfileProps> = ({
   const [authError, setAuthError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
+  const { showToast } = useToast();
+
   useEffect(() => {
     const interval = setInterval(() => {
       setReadingTime((prev) => {
@@ -62,13 +65,6 @@ export const Profile: React.FC<ProfileProps> = ({
   }, []);
 
   const totalBooksRead = Object.keys(readingProgress).length;
-
-  const handleClearCache = () => {
-    if (window.confirm("Are you sure you want to clear all reading progress and book shelf data?")) {
-      localStorage.clear();
-      window.location.reload();
-    }
-  };
 
   const getThemeValueLabel = () => {
     if (globalTheme === 'dark') return 'Dark Mode 🌙';
@@ -176,23 +172,32 @@ export const Profile: React.FC<ProfileProps> = ({
 
       {/* Wallet Card Section */}
       <div style={{
-        background: 'linear-gradient(135deg, #020617 0%, #1e293b 100%)',
-        color: 'white',
+        background: globalTheme === 'dark' 
+          ? 'linear-gradient(135deg, #0f172a 0%, #1e293b 100%)' 
+          : 'linear-gradient(135deg, #eef2ff 0%, #f8fafc 100%)',
+        color: globalTheme === 'dark' ? '#ffffff' : '#1e1b4b',
         borderRadius: '16px',
         padding: '20px',
         marginBottom: '20px',
-        border: '1px solid var(--border-color)',
-        boxShadow: 'var(--card-shadow)',
+        border: globalTheme === 'dark' ? '1px solid rgba(255,255,255,0.1)' : '1px solid #c7d2fe',
+        boxShadow: globalTheme === 'dark' ? '0 8px 20px rgba(0,0,0,0.3)' : '0 8px 20px rgba(99,102,241,0.12)',
         display: 'flex',
         justifyContent: 'space-between',
-        alignItems: 'center'
+        alignItems: 'center',
+        transition: 'all 0.3s ease'
       }}>
         <div>
-          <span style={{ fontSize: '11px', color: '#94a3b8' }}>My Wallet</span>
+          <span style={{ fontSize: '11px', color: globalTheme === 'dark' ? '#94a3b8' : '#6366f1', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+            My Wallet
+          </span>
           <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginTop: '4px' }}>
-            <GoldCoin size={20} />
-            <span style={{ fontSize: '24px', fontWeight: 800, fontFamily: 'monospace' }}>{userCoins}</span>
-            <span style={{ fontSize: '12px', color: '#94a3b8' }}>Coins</span>
+            <GoldCoin size={22} />
+            <span style={{ fontSize: '26px', fontWeight: 800, fontFamily: 'monospace', color: globalTheme === 'dark' ? '#ffffff' : '#0f172a' }}>
+              {userCoins}
+            </span>
+            <span style={{ fontSize: '13px', color: globalTheme === 'dark' ? '#94a3b8' : '#64748b', fontWeight: 500 }}>
+              Coins
+            </span>
           </div>
         </div>
         <button 
@@ -200,10 +205,12 @@ export const Profile: React.FC<ProfileProps> = ({
           onClick={() => onNavigate('recharge')}
           style={{ 
             flex: 'none', 
-            padding: '8px 16px', 
-            fontSize: '12px', 
+            padding: '10px 18px', 
+            fontSize: '13px', 
+            fontWeight: 700,
             width: 'auto',
-            boxShadow: '0 4px 10px rgba(79,70,229,0.3)'
+            borderRadius: '99px',
+            boxShadow: '0 4px 12px rgba(79,70,229,0.35)'
           }}
         >
           Top Up +
@@ -252,22 +259,9 @@ export const Profile: React.FC<ProfileProps> = ({
               <span className="settings-item-value">View ({totalBooksRead}) ›</span>
             </div>
 
-            <div className="settings-item" onClick={() => alert("Multi-language: English is currently the default language.")}>
+            <div className="settings-item" onClick={() => showToast("Multi-language: English is currently default.", "info")}>
               <span>Interface Language</span>
               <span className="settings-item-value">English (US) ›</span>
-            </div>
-          </div>
-
-          <h3 className="hot-tags-title" style={{ fontSize: '13px', margin: '24px 0 10px' }}>Maintenance</h3>
-          <div className="settings-list">
-            <div className="settings-item" onClick={handleClearCache} style={{ color: '#ef4444' }}>
-              <span>Reset Reading Progress & Shelf</span>
-              <span className="settings-item-value" style={{ color: '#ef4444' }}>Wipe Storage ›</span>
-            </div>
-
-            <div className="settings-item" onClick={() => alert("StarNovel H5 Demo v1.0.0. Powered by Go backend.")}>
-              <span>About App Version</span>
-              <span className="settings-item-value">v1.0.0 ›</span>
             </div>
           </div>
         </div>

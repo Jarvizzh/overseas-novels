@@ -379,7 +379,8 @@ export default function NovelsTab() {
       params.set('template_id', promotionForm.rechargeTemplateId);
     }
 
-    const finalUrl = `${baseUrl}/?${params.toString()}`;
+    const path = promotionForm.chapterIndex ? '/content' : '/detail';
+    const finalUrl = `${baseUrl}${path}?${params.toString()}`;
 
     try {
       await apiRequest('POST', '/promotion-links', {

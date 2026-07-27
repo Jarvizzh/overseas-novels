@@ -1,9 +1,18 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { useToast } from '../context/ToastContext';
 import { api } from '../utils/api';
-import type { Novel, Chapter } from '../utils/api';
+import type { Novel, Chapter, ChapterContentResponse } from '../utils/api';
 import { ReaderSettings } from '../components/ReaderSettings';
 import { Drawer } from '../components/Drawer';
 import { GoldCoin } from '../components/GoldCoin';
+import { readerCache } from '../utils/readerCache';
+
+interface ChapterFeedItem {
+  index: number;
+  chapter: Chapter;
+  locked: boolean;
+  price: number;
+}
 
 interface ReaderProps {
   novelId: number;
@@ -16,9 +25,10 @@ interface ReaderProps {
     [bookId: number]: {
       chapterIndex: number;
       scrollOffsetPercentage: number;
+      paragraphIndex?: number;
     };
   };
-  onSaveProgress: (bookId: number, chapterIndex: number, scrollOffsetPercentage: number) => void;
+  onSaveProgress: (bookId: number, chapterIndex: number, scrollOffsetPercentage: number, paragraphIndex?: number) => void;
   unlockedBookChapters: string[];
   onUnlockChapter: (bookId: number, chapterIndex: number, price: number) => Promise<boolean>;
   userCoins: number;
@@ -36,46 +46,87 @@ export const Reader: React.FC<ReaderProps> = ({
   onUnlockChapter,
   userCoins,
 }) => {
+  const { showToast } = useToast();
   const [novel, setNovel] = useState<Novel | null>(null);
   const [chapters, setChapters] = useState<Chapter[]>([]);
-  const [chapterDetail, setChapterDetail] = useState<Chapter | null>(null);
-  const [isLocked, setIsLocked] = useState(true);
-  const [chapterPrice, setChapterPrice] = useState(50);
+  const [feedItems, setFeedItems] = useState<ChapterFeedItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [currentChIndex, setCurrentChIndex] = useState(initialChapterIndex);
 
   const scrollRef = useRef<HTMLDivElement>(null);
-  const touchStartX = useRef(0);
-  const touchStartY = useRef(0);
-  const touchStartScrollTop = useRef(0);
-  const scrollTargetPosition = useRef<'top' | 'bottom' | 'restore'>('restore');
-  const hasScrolledDown = useRef(false);
-  const isTransitioning = useRef(false);
+  const isFetchingPrev = useRef(false);
+  const isFetchingNext = useRef(false);
+  const isPositioning = useRef(false);
 
-  // Settings states with localStorage defaults
+  // Typography settings with localStorage defaults
   const [fontSize, setFontSize] = useState<number>(() => {
-    return parseInt(localStorage.getItem('reader-font-size') || '18');
+    return parseInt(localStorage.getItem('reader-font-size') || '16', 10);
   });
   const [theme, setTheme] = useState<string>(() => {
     return localStorage.getItem('reader-theme') || 'sepia';
   });
-  const [fontFamily] = useState<'serif' | 'sans'>(() => {
+  const [fontFamily, setFontFamily] = useState<'serif' | 'sans'>(() => {
     return (localStorage.getItem('reader-font-family') as 'serif' | 'sans') || 'serif';
   });
-  const [lineHeight] = useState<'narrow' | 'medium' | 'wide'>(() => {
+  const [lineHeight, setLineHeight] = useState<'narrow' | 'medium' | 'wide'>(() => {
     return (localStorage.getItem('reader-line-height') as 'narrow' | 'medium' | 'wide') || 'medium';
   });
 
   const [showSettings, setShowSettings] = useState(false);
   const [showTOC, setShowTOC] = useState(false);
-  const [toastMessage, setToastMessage] = useState<string | null>(null);
 
   // Auto-unlock chapters preference
   const [autoUnlock, setAutoUnlock] = useState<boolean>(() => {
     return localStorage.getItem('reader-auto-unlock') === 'true';
   });
 
-  // 1. Fetch novel meta and chapters list
+  const autoUnlockRef = useRef(autoUnlock);
+  useEffect(() => {
+    autoUnlockRef.current = autoUnlock;
+  }, [autoUnlock]);
+
+  const userCoinsRef = useRef(userCoins);
+  useEffect(() => {
+    userCoinsRef.current = userCoins;
+  }, [userCoins]);
+
+  // Screen Wake Lock API: Keep screen awake while reading
+  useEffect(() => {
+    let wakeLock: any = null;
+    const requestWakeLock = async () => {
+      try {
+        if ('wakeLock' in navigator) {
+          wakeLock = await (navigator as any).wakeLock.request('screen');
+        }
+      } catch {
+        // Fallback gracefully
+      }
+    };
+    requestWakeLock();
+    return () => {
+      if (wakeLock && wakeLock.release) {
+        wakeLock.release().catch(() => {});
+      }
+    };
+  }, []);
+
+  // Fetch Chapter with IndexedDB cache fallback
+  const fetchChapterData = useCallback(
+    async (nId: number, cIdx: number): Promise<ChapterContentResponse> => {
+      const cached = await readerCache.getCachedChapter(nId, cIdx);
+      if (cached) {
+        return cached;
+      }
+      const res = await api.getChapterContent(nId, cIdx);
+      if (res) {
+        await readerCache.setCachedChapter(nId, cIdx, res);
+      }
+      return res;
+    },
+    []
+  );
+
+  // 1. Fetch novel metadata & chapters list
   useEffect(() => {
     const loadNovelMeta = async () => {
       try {
@@ -90,24 +141,68 @@ export const Reader: React.FC<ReaderProps> = ({
     loadNovelMeta();
   }, [novelId]);
 
-  // 2. Fetch specific chapter content when index changes
+  // 2. Initial load of target chapter into Feed + background prefetching
   useEffect(() => {
-    const fetchChapter = async () => {
+    const initFeed = async () => {
       setLoading(true);
       try {
-        const res = await api.getChapterContent(novelId, currentChIndex);
-        setChapterDetail(res.chapter);
-        setIsLocked(res.locked);
-        setChapterPrice(res.price);
+        let res = await fetchChapterData(novelId, initialChapterIndex);
+
+        // Auto-unlock initial chapter if locked and autoUnlock preference is enabled
+        if (res.locked && autoUnlockRef.current && userCoinsRef.current >= res.price) {
+          const success = await onUnlockChapter(novelId, initialChapterIndex, res.price);
+          if (success) {
+            showToast(`Auto-unlocked ${res.chapter.title || `Chapter ${initialChapterIndex + 1}`}!`, "success");
+            res = await api.getChapterContent(novelId, initialChapterIndex);
+            await readerCache.setCachedChapter(novelId, initialChapterIndex, res);
+          }
+        }
+
+        setFeedItems([
+          {
+            index: initialChapterIndex,
+            chapter: res.chapter,
+            locked: res.locked,
+            price: res.price,
+          },
+        ]);
+        setCurrentChIndex(initialChapterIndex);
+
+        // Background prefetch next 2 chapters into IndexedDB
+        readerCache.prefetchChapters(novelId, initialChapterIndex, chapters.length || 100, (nId, idx) =>
+          api.getChapterContent(nId, idx)
+        );
+
+        // Restore paragraph anchor progress after DOM renders
+        requestAnimationFrame(() => {
+          const container = scrollRef.current;
+          const savedProgress = readingProgress[novelId];
+          if (savedProgress && savedProgress.chapterIndex === initialChapterIndex) {
+            if (savedProgress.paragraphIndex !== undefined) {
+              const pEl = container?.querySelector(`[data-paragraph-index="${savedProgress.paragraphIndex}"]`);
+              if (pEl) {
+                pEl.scrollIntoView({ block: 'center' });
+                return;
+              }
+            }
+            if (container) {
+              const maxScroll = container.scrollHeight - container.clientHeight;
+              container.scrollTop = savedProgress.scrollOffsetPercentage * maxScroll;
+            }
+          } else if (container) {
+            container.scrollTop = 0;
+          }
+        });
       } catch (err) {
-        console.error("Failed to load chapter content:", err);
-        triggerToast("Failed to load chapter content.");
+        console.error("Failed to load initial chapter:", err);
+        showToast("Failed to load chapter content.", "error");
       } finally {
         setLoading(false);
       }
     };
-    fetchChapter();
-  }, [novelId, currentChIndex]);
+
+    initFeed();
+  }, [novelId, initialChapterIndex, fetchChapterData, showToast, onUnlockChapter, chapters.length]);
 
   // Sync settings changes to localStorage
   useEffect(() => {
@@ -119,188 +214,281 @@ export const Reader: React.FC<ReaderProps> = ({
   }, [theme]);
 
   useEffect(() => {
+    localStorage.setItem('reader-font-family', fontFamily);
+  }, [fontFamily]);
+
+  useEffect(() => {
+    localStorage.setItem('reader-line-height', lineHeight);
+  }, [lineHeight]);
+
+  useEffect(() => {
     localStorage.setItem('reader-auto-unlock', autoUnlock.toString());
   }, [autoUnlock]);
 
-  // 3. Handle Auto-Unlock logic
-  useEffect(() => {
-    if (isLocked && autoUnlock && userCoins >= chapterPrice) {
-      handleUnlockNow();
-    }
-  }, [currentChIndex, isLocked, autoUnlock, userCoins, novelId, chapterPrice]);
+  // Load Previous Chapter (Prepend to feed without scroll jump)
+  const loadPreviousChapter = useCallback(async () => {
+    if (feedItems.length === 0 || isFetchingPrev.current) return;
+    const firstItem = feedItems[0];
+    if (firstItem.index <= 0) return;
 
-  // When chapter index changes, restore scroll position if saved, or scroll to top
-  useEffect(() => {
-    const progress = readingProgress[novelId];
-    const container = scrollRef.current;
-    
-    if (container && !isLocked && !loading) {
-      isTransitioning.current = true; // Lock scroll checking during positioning
-      
-      const finishPositioning = () => {
-        requestAnimationFrame(() => {
-          isTransitioning.current = false;
-        });
+    const prevIndex = firstItem.index - 1;
+    isFetchingPrev.current = true;
+
+    try {
+      const container = scrollRef.current;
+      const prevScrollHeight = container ? container.scrollHeight : 0;
+      const prevScrollTop = container ? container.scrollTop : 0;
+
+      const res = await fetchChapterData(novelId, prevIndex);
+      const newItem: ChapterFeedItem = {
+        index: prevIndex,
+        chapter: res.chapter,
+        locked: res.locked,
+        price: res.price,
       };
 
-      if (scrollTargetPosition.current === 'restore' && progress && progress.chapterIndex === currentChIndex) {
-        requestAnimationFrame(() => {
-          const maxScroll = container.scrollHeight - container.clientHeight;
-          container.scrollTop = progress.scrollOffsetPercentage * maxScroll;
-          finishPositioning();
-        });
-      } else {
-        container.scrollTop = 0;
-        finishPositioning();
-      }
-      scrollTargetPosition.current = 'restore';
+      setFeedItems((prev) => [newItem, ...prev]);
+
+      requestAnimationFrame(() => {
+        if (container) {
+          const newScrollHeight = container.scrollHeight;
+          const heightDiff = newScrollHeight - prevScrollHeight;
+          container.scrollTop = prevScrollTop + heightDiff;
+        }
+        isFetchingPrev.current = false;
+      });
+    } catch (err) {
+      console.error("Failed to load previous chapter:", err);
+      isFetchingPrev.current = false;
     }
-  }, [currentChIndex, novelId, isLocked, loading, readingProgress]);
+  }, [feedItems, novelId, fetchChapterData]);
 
-  // Swipe touch gestures
-  const handleTouchStart = (e: React.TouchEvent) => {
-    touchStartX.current = e.changedTouches[0].clientX;
-    touchStartY.current = e.changedTouches[0].clientY;
-    const container = scrollRef.current;
-    touchStartScrollTop.current = container ? container.scrollTop : 0;
-  };
+  // Load Next Chapter (Append to feed with auto-unlock support)
+  const loadNextChapter = useCallback(async () => {
+    if (feedItems.length === 0 || isFetchingNext.current) return;
+    const lastItem = feedItems[feedItems.length - 1];
+    if (chapters.length > 0 && lastItem.index >= chapters.length - 1) return;
 
-  const handleTouchEnd = (e: React.TouchEvent) => {
-    if (isTransitioning.current) return;
-    const diffX = e.changedTouches[0].clientX - touchStartX.current;
-    const diffY = e.changedTouches[0].clientY - touchStartY.current;
+    const nextIndex = lastItem.index + 1;
+    isFetchingNext.current = true;
 
-    // Detect vertical swipe down at the top: load previous chapter
-    if (diffY > 80 && Math.abs(diffX) < 50 && touchStartScrollTop.current <= 5) {
-      if (currentChIndex > 0) {
-        isTransitioning.current = true;
-        triggerToast("Loading previous chapter...");
-        setTimeout(() => {
-          handleChapterSelect(currentChIndex - 1, 'top');
-        }, 800);
-      } else {
-        triggerToast("You've reached the first chapter.");
-      }
-    }
-    // Detect vertical swipe up at the bottom: load next chapter
-    else if (diffY < -80 && Math.abs(diffX) < 50) {
-      const container = scrollRef.current;
-      if (container) {
-        const maxScroll = container.scrollHeight - container.clientHeight;
-        if (touchStartScrollTop.current >= maxScroll - 15 || maxScroll <= 0) {
-          if (isLocked) {
-            triggerToast("Please unlock this chapter first.");
-            return;
-          }
-          if (currentChIndex < chapters.length - 1) {
-            isTransitioning.current = true;
-            triggerToast("Loading next chapter...");
-            setTimeout(() => {
-              handleChapterSelect(currentChIndex + 1, 'top');
-            }, 800);
-          } else {
-            triggerToast("You've reached the last chapter.");
-          }
+    try {
+      let res = await fetchChapterData(novelId, nextIndex);
+
+      // Check auto-unlock condition
+      if (res.locked && autoUnlockRef.current && userCoinsRef.current >= res.price) {
+        const success = await onUnlockChapter(novelId, nextIndex, res.price);
+        if (success) {
+          showToast(`Auto-unlocked ${res.chapter.title || `Chapter ${nextIndex + 1}`}!`, "success");
+          res = await api.getChapterContent(novelId, nextIndex);
+          await readerCache.setCachedChapter(novelId, nextIndex, res);
         }
       }
-    }
-  };
 
-  // Track scrolling to save progress
-  const handleScroll = () => {
-    if (isLocked || isTransitioning.current) return;
+      const newItem: ChapterFeedItem = {
+        index: nextIndex,
+        chapter: res.chapter,
+        locked: res.locked,
+        price: res.price,
+      };
+
+      setFeedItems((prev) => [...prev, newItem]);
+
+      // Background prefetch further ahead
+      readerCache.prefetchChapters(novelId, nextIndex, chapters.length || 100, (nId, idx) =>
+        api.getChapterContent(nId, idx)
+      );
+    } catch (err) {
+      console.error("Failed to load next chapter:", err);
+    } finally {
+      isFetchingNext.current = false;
+    }
+  }, [feedItems, chapters.length, novelId, fetchChapterData, onUnlockChapter, showToast]);
+
+  const lastSavedParagraphRef = useRef<number | null>(null);
+
+  // IntersectionObserver for active chapter & paragraph tracking without Layout Thrashing
+  useEffect(() => {
     const container = scrollRef.current;
     if (!container) return;
 
-    const maxScroll = container.scrollHeight - container.clientHeight;
-    if (maxScroll <= 0) return;
+    // Observe active chapter
+    const chapterObserver = new IntersectionObserver(
+      (entries) => {
+        entries.forEach((entry) => {
+          if (entry.isIntersecting && entry.intersectionRatio >= 0.3) {
+            const chIdx = parseInt(entry.target.getAttribute('data-chapter-index') || '0', 10);
+            if (chIdx !== currentChIndex) {
+              setCurrentChIndex(chIdx);
+              const search = new URLSearchParams(window.location.search);
+              search.set('chapter_index', String(chIdx + 1));
+              window.history.replaceState(null, '', `${window.location.pathname}?${search.toString()}`);
+            }
+          }
+        });
+      },
+      { root: container, threshold: [0.3] }
+    );
 
-    const scrollTop = container.scrollTop;
-    const percentage = scrollTop / maxScroll;
-    onSaveProgress(novelId, currentChIndex, percentage);
+    // Observe active paragraph for anchor progress
+    const paragraphObserver = new IntersectionObserver(
+      (entries) => {
+        entries.forEach((entry) => {
+          if (entry.isIntersecting && entry.intersectionRatio >= 0.5) {
+            const pIdx = parseInt(entry.target.getAttribute('data-paragraph-index') || '0', 10);
+            if (lastSavedParagraphRef.current !== pIdx) {
+              lastSavedParagraphRef.current = pIdx;
+              if (container.scrollHeight > container.clientHeight) {
+                const percentage = container.scrollTop / (container.scrollHeight - container.clientHeight);
+                onSaveProgress(novelId, currentChIndex, percentage, pIdx);
+              }
+            }
+          }
+        });
+      },
+      { root: container, threshold: [0.5] }
+    );
 
-    if (scrollTop > 20) {
-      hasScrolledDown.current = true;
+    const chapterEls = container.querySelectorAll('[data-chapter-index]');
+    chapterEls.forEach((el) => chapterObserver.observe(el));
+
+    const paragraphEls = container.querySelectorAll('[data-paragraph-index]');
+    paragraphEls.forEach((el) => paragraphObserver.observe(el));
+
+    return () => {
+      chapterObserver.disconnect();
+      paragraphObserver.disconnect();
+    };
+  }, [feedItems, currentChIndex, novelId, onSaveProgress]);
+
+  // Scroll Listener for Infinite Feed Prepend/Append triggers
+  const handleScroll = () => {
+    const container = scrollRef.current;
+    if (!container || isPositioning.current) return;
+
+    const { scrollTop, scrollHeight, clientHeight } = container;
+
+    // Trigger Prepend Top
+    if (scrollTop < 120 && !isFetchingPrev.current) {
+      loadPreviousChapter();
     }
 
-    // Scroll to bottom page turn:
-    if (scrollTop >= maxScroll - 10) {
-      if (currentChIndex < chapters.length - 1) {
-        isTransitioning.current = true;
-        triggerToast("Loading next chapter...");
-        setTimeout(() => {
-          handleChapterSelect(currentChIndex + 1, 'top');
-          hasScrolledDown.current = false;
-        }, 800);
-      } else {
-        triggerToast("You've reached the last chapter.");
+    // Trigger Append Bottom (Allow loading next chapter if lastItem is unlocked OR autoUnlock is enabled)
+    if (scrollTop + clientHeight >= scrollHeight - 350 && !isFetchingNext.current) {
+      const lastItem = feedItems[feedItems.length - 1];
+      if (lastItem && (!lastItem.locked || autoUnlockRef.current)) {
+        loadNextChapter();
       }
     }
-    // Scroll to top page turn:
-    else if (scrollTop <= 2 && hasScrolledDown.current) {
-      if (currentChIndex > 0) {
-        isTransitioning.current = true;
-        triggerToast("Loading previous chapter...");
-        setTimeout(() => {
-          handleChapterSelect(currentChIndex - 1, 'top');
-          hasScrolledDown.current = false;
-        }, 800);
-      } else {
-        triggerToast("You've reached the first chapter.");
-      }
-    }
   };
 
-  // Clicking in content area toggles settings HUD
-  const handleScreenClick = () => {
-    if (isLocked) return;
-    setShowSettings(!showSettings);
-  };
-
-  const triggerToast = (msg: string) => {
-    setToastMessage(msg);
-    setTimeout(() => {
-      setToastMessage(null);
-    }, 2000);
-  };
-
-  const handleToggleShelf = () => {
-    onToggleShelf(novelId);
-    triggerToast(isInShelf ? "Removed from shelf" : "Added to shelf!");
-  };
-
-  const handleChapterSelect = (idx: number, targetPos: 'top' | 'bottom' | 'restore' = 'top') => {
-    scrollTargetPosition.current = targetPos;
-    hasScrolledDown.current = false;
-    setCurrentChIndex(idx);
-    setShowTOC(false);
-    setShowSettings(false);
-  };
-
+  // Chapter Unlock handling
   const [isUnlocking, setIsUnlocking] = useState(false);
 
-  const handleUnlockNow = async () => {
+  const handleUnlockChapterFeed = async (item: ChapterFeedItem) => {
     if (isUnlocking) return;
     setIsUnlocking(true);
     try {
-      if (userCoins >= chapterPrice) {
-        const success = await onUnlockChapter(novelId, currentChIndex, chapterPrice);
+      if (userCoins >= item.price) {
+        const success = await onUnlockChapter(novelId, item.index, item.price);
         if (success) {
-          triggerToast("Unlocked successfully!");
-          try {
-            const res = await api.getChapterContent(novelId, currentChIndex);
-            setChapterDetail(res.chapter);
-            setIsLocked(res.locked);
-          } catch (err) {
-            console.error("Failed to reload unlocked chapter content:", err);
-          }
+          showToast("Unlocked successfully!", "success");
+          const res = await api.getChapterContent(novelId, item.index);
+          await readerCache.setCachedChapter(novelId, item.index, res);
+          setFeedItems((prev) =>
+            prev.map((f) =>
+              f.index === item.index
+                ? { ...f, chapter: res.chapter, locked: res.locked }
+                : f
+            )
+          );
         }
       } else {
         onNavigate('recharge');
       }
+    } catch (err) {
+      console.error("Failed to unlock chapter:", err);
     } finally {
       setIsUnlocking(false);
     }
+  };
+
+  // Auto-unlock active locked items in feed if autoUnlock is checked and user has coins
+  useEffect(() => {
+    if (!autoUnlock || feedItems.length === 0) return;
+    const unlockPending = async () => {
+      for (const item of feedItems) {
+        if (item.locked && userCoins >= item.price && !isUnlocking) {
+          const success = await onUnlockChapter(novelId, item.index, item.price);
+          if (success) {
+            showToast(`Auto-unlocked ${item.chapter.title || `Chapter ${item.index + 1}`}!`, "success");
+            const res = await api.getChapterContent(novelId, item.index);
+            await readerCache.setCachedChapter(novelId, item.index, res);
+            setFeedItems((prev) =>
+              prev.map((f) =>
+                f.index === item.index
+                  ? { ...f, chapter: res.chapter, locked: res.locked }
+                  : f
+              )
+            );
+          }
+        }
+      }
+    };
+    unlockPending();
+  }, [autoUnlock, userCoins, novelId, onUnlockChapter, showToast]);
+
+  // TOC Navigation: Jump directly to chapter
+  const handleJumpToChapter = async (targetIdx: number) => {
+    setShowTOC(false);
+    setShowSettings(false);
+    isPositioning.current = true;
+
+    const existing = feedItems.find((f) => f.index === targetIdx);
+    if (existing) {
+      const container = scrollRef.current;
+      const targetEl = container?.querySelector<HTMLElement>(`[data-chapter-index="${targetIdx}"]`);
+      if (targetEl && container) {
+        container.scrollTop = targetEl.offsetTop - 60;
+      }
+      setCurrentChIndex(targetIdx);
+      setTimeout(() => {
+        isPositioning.current = false;
+      }, 300);
+    } else {
+      setLoading(true);
+      try {
+        const res = await fetchChapterData(novelId, targetIdx);
+        setFeedItems([
+          {
+            index: targetIdx,
+            chapter: res.chapter,
+            locked: res.locked,
+            price: res.price,
+          },
+        ]);
+        setCurrentChIndex(targetIdx);
+        const container = scrollRef.current;
+        if (container) container.scrollTop = 0;
+      } catch (err) {
+        console.error("Failed to jump to chapter:", err);
+      } finally {
+        setLoading(false);
+        setTimeout(() => {
+          isPositioning.current = false;
+        }, 300);
+      }
+    }
+  };
+
+  const handleScreenClick = () => {
+    setShowSettings((prev) => !prev);
+  };
+
+  const isInShelf = shelfBookIds.includes(novelId);
+  const handleToggleShelf = () => {
+    onToggleShelf(novelId);
+    showToast(isInShelf ? "Removed from shelf" : "Added to shelf!", "success");
   };
 
   const getLineHeightVal = () => {
@@ -309,7 +497,7 @@ export const Reader: React.FC<ReaderProps> = ({
     return '1.75';
   };
 
-  if (!novel || !chapterDetail) {
+  if (!novel) {
     return (
       <div className="scroll-container animate-fade-in" style={{ textAlign: 'center', paddingTop: '100px', color: 'var(--text-secondary)' }}>
         <p>Loading reader content...</p>
@@ -317,76 +505,53 @@ export const Reader: React.FC<ReaderProps> = ({
     );
   }
 
-  const isInShelf = shelfBookIds.includes(novelId);
-
   return (
     <div className={`reader-container reader-theme-${theme} page-container-full`}>
-      {toastMessage && <div className="toast-msg">{toastMessage}</div>}
-
-      {/* Floating Back Button (Always visible when unlocked) */}
-      {!isLocked && (
-        <button 
-          className="reader-floating-back-btn" 
-          onClick={() => onNavigate('detail', { id: novelId })}
-          aria-label="Go back"
-          style={{
-            position: 'absolute',
-            top: '12px',
-            left: '12px',
-            width: '36px',
-            height: '36px',
-            borderRadius: '50%',
-            border: '1px solid var(--reader-border)',
-            backgroundColor: 'var(--reader-bg)',
-            color: 'var(--reader-text)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            zIndex: 90,
-            cursor: 'pointer',
-            boxShadow: '0 2px 8px rgba(0, 0, 0, 0.08)',
-          }}
-        >
-          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2.5} stroke="currentColor" style={{ width: '18px', height: '18px' }}>
-            <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 19.5L8.25 12l7.5-7.5" />
-          </svg>
-        </button>
-      )}
+      {/* Floating Back Button */}
+      <button 
+        className="reader-floating-back-btn" 
+        onClick={() => onNavigate('detail', { id: novelId })}
+        aria-label="Go back"
+        style={{
+          position: 'absolute',
+          top: '12px',
+          left: '12px',
+          width: '36px',
+          height: '36px',
+          borderRadius: '50%',
+          border: '1px solid var(--reader-border)',
+          backgroundColor: 'var(--reader-bg)',
+          color: 'var(--reader-text)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          zIndex: 90,
+          cursor: 'pointer',
+          boxShadow: '0 2px 8px rgba(0, 0, 0, 0.08)',
+        }}
+      >
+        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2.5} stroke="currentColor" style={{ width: '18px', height: '18px' }}>
+          <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 19.5L8.25 12l7.5-7.5" />
+        </svg>
+      </button>
 
       {/* Settings HUD panel */}
-      {!isLocked && (
-        <ReaderSettings
-          visible={showSettings}
-          fontSize={fontSize}
-          onFontSizeChange={setFontSize}
-          theme={theme}
-          onThemeChange={setTheme}
-          onOpenDrawer={() => setShowTOC(true)}
-          novelTitle={novel.title}
-          onBack={() => onNavigate('detail', { id: novelId })}
-          isInShelf={isInShelf}
-          onAddToShelf={handleToggleShelf}
-        />
-      )}
-
-      {/* Header displayed on Locked Screen */}
-      {isLocked && (
-        <header className="app-header glass-panel" style={{ color: 'var(--text-primary)', position: 'absolute', top: 0, left: 0, right: 0, zIndex: 10 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <button className="header-btn" onClick={() => onNavigate('detail', { id: novelId })} aria-label="Go back">
-              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2.5} stroke="currentColor" style={{ width: '20px', height: '20px' }}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 19.5L8.25 12l7.5-7.5" />
-              </svg>
-            </button>
-            <h1 className="header-title" style={{ fontSize: '15px' }}>{novel.title}</h1>
-          </div>
-          <button className="header-btn" onClick={() => setShowTOC(true)} aria-label="Open TOC">
-            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" style={{ width: '20px', height: '20px' }}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M8.25 6.75h12M8.25 12h12m-12 5.25h12M3.75 6.75h.007v.008H3.75V6.75zm.375 0a.375.375 0 11-.75 0 .375.375 0 01.75 0zM3.75 12h.007v.008H3.75V12zm.375 0a.375.375 0 11-.75 0 .375.375 0 01.75 0zm-.375 5.25h.007v.008H3.75v-.008zm.375 0a.375.375 0 11-.75 0 .375.375 0 01.75 0z" />
-            </svg>
-          </button>
-        </header>
-      )}
+      <ReaderSettings
+        visible={showSettings}
+        fontSize={fontSize}
+        onFontSizeChange={setFontSize}
+        theme={theme}
+        onThemeChange={setTheme}
+        fontFamily={fontFamily}
+        onFontFamilyChange={setFontFamily}
+        lineHeight={lineHeight}
+        onLineHeightChange={setLineHeight}
+        onOpenDrawer={() => setShowTOC(true)}
+        novelTitle={novel.title}
+        onBack={() => onNavigate('detail', { id: novelId })}
+        isInShelf={isInShelf}
+        onAddToShelf={handleToggleShelf}
+      />
 
       {/* Sidebar Drawer: Table of Contents */}
       <Drawer
@@ -407,7 +572,7 @@ export const Reader: React.FC<ReaderProps> = ({
                   backgroundColor: isCurrent ? 'var(--accent-light)' : 'transparent',
                   borderLeft: isCurrent ? '4px solid var(--accent-color)' : '4px solid transparent'
                 }}
-                onClick={() => handleChapterSelect(index, 'top')}
+                onClick={() => handleJumpToChapter(index)}
               >
                 <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                   <span 
@@ -428,199 +593,160 @@ export const Reader: React.FC<ReaderProps> = ({
         </div>
       </Drawer>
 
-      {/* Main Text Content */}
+      {/* Scroll Mode High-Performance Reader Engine */}
       <div 
         ref={scrollRef}
-        className={`reader-scroll-area ${isLocked ? 'reader-locked-preview' : ''}`}
-        onScroll={isLocked ? undefined : handleScroll}
-        onClick={isLocked ? undefined : handleScreenClick}
-        onTouchStart={handleTouchStart}
-        onTouchEnd={handleTouchEnd}
+        className="reader-scroll-area"
+        onScroll={handleScroll}
+        onClick={handleScreenClick}
         style={{
           fontFamily: fontFamily === 'serif' ? 'var(--font-serif)' : 'var(--font-sans)',
           fontSize: `${fontSize}px`,
           lineHeight: getLineHeightVal(),
-          overflowY: isLocked ? 'hidden' : 'auto',
-          maxHeight: isLocked ? 'calc(100vh - 56px)' : 'none',
+          overflowY: 'auto',
+          height: '100vh',
           position: 'relative',
           paddingTop: '64px',
-          paddingBottom: isLocked ? '260px' : '80px'
+          paddingBottom: '120px'
         }}
       >
-        <h2 className="reader-chapter-title">{chapterDetail.title}</h2>
-        
         {loading ? (
-          <div style={{ textAlign: 'center', padding: '40px', color: 'var(--text-secondary)' }}>
+          <div style={{ textAlign: 'center', padding: '100px 20px', color: 'var(--text-secondary)' }}>
             Loading chapter text...
           </div>
         ) : (
-          (chapterDetail.content || '').split('\n\n').map((paragraph, index) => (
-            <p key={index} className="reader-text-paragraph">
-              {paragraph}
-            </p>
+          feedItems.map((item) => (
+            <article 
+              key={item.index} 
+              data-chapter-index={item.index}
+              style={{ marginBottom: '48px', paddingBottom: '32px', borderBottom: '1px dashed var(--reader-border)' }}
+            >
+              <h2 className="reader-chapter-title">{item.chapter.title}</h2>
+              
+              {/* Unlocked Text Paragraphs */}
+              {!item.locked && (item.chapter.content || '').split('\n\n').map((paragraph, pIdx) => (
+                <p key={pIdx} data-paragraph-index={pIdx} className="reader-text-paragraph">
+                  {paragraph}
+                </p>
+              ))}
+
+              {/* Locked Preview Card Embedded in Continuous Stream */}
+              {item.locked && (
+                <div style={{ position: 'relative', marginTop: '20px' }}>
+                  <p className="reader-text-paragraph" style={{ opacity: 0.25, filter: 'blur(0.5px)', userSelect: 'none' }}>
+                    The ancient pathways of the cosmos were shrouded in starlight, hiding secrets that even the celestial kings dared not speak aloud...
+                  </p>
+                  
+                  <div style={{
+                    backgroundColor: 'var(--bg-secondary)',
+                    borderRadius: '20px',
+                    padding: '24px 20px',
+                    border: '1px solid var(--border-color)',
+                    boxShadow: '0 10px 30px rgba(0, 0, 0, 0.1)',
+                    marginTop: '24px',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    alignItems: 'center',
+                    gap: '12px',
+                    textAlign: 'center'
+                  }}>
+                    <div style={{
+                      width: '48px',
+                      height: '48px',
+                      borderRadius: '50%',
+                      backgroundColor: 'var(--reader-border)',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      fontSize: '20px',
+                      color: 'var(--reader-text)'
+                    }}>
+                      🔒
+                    </div>
+                    <h3 style={{ fontSize: '16px', fontWeight: 800, margin: 0, color: 'var(--reader-text)' }}>
+                      Unlock to Continue Reading
+                    </h3>
+                    <p style={{ fontSize: '12px', color: 'var(--text-tertiary)', margin: 0 }}>
+                      This chapter is locked ({item.chapter.word_count.toLocaleString()} words)
+                    </p>
+
+                    <div style={{ width: '100%', maxWidth: '280px', display: 'flex', justifyContent: 'space-between', fontSize: '13px', borderTop: '1px solid var(--border-color)', paddingTop: '12px' }}>
+                      <span style={{ color: 'var(--text-secondary)' }}>Price:</span>
+                      <span style={{ fontWeight: 700, color: 'var(--text-primary)' }}>{item.price} Coins</span>
+                    </div>
+                    <div style={{ width: '100%', maxWidth: '280px', display: 'flex', justifyContent: 'space-between', fontSize: '13px' }}>
+                      <span style={{ color: 'var(--text-secondary)' }}>Your Balance:</span>
+                      <span style={{ fontWeight: 700, color: userCoins >= item.price ? '#22c55e' : '#ef4444' }}>
+                        {userCoins} Coins
+                      </span>
+                    </div>
+
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '12px', marginTop: '4px' }}>
+                      <input 
+                        type="checkbox" 
+                        id={`auto-unlock-scroll-${item.index}`}
+                        checked={autoUnlock}
+                        onChange={(e) => setAutoUnlock(e.target.checked)}
+                        style={{ width: '15px', height: '15px', accentColor: 'var(--accent-color)', cursor: 'pointer' }}
+                      />
+                      <label htmlFor={`auto-unlock-scroll-${item.index}`} style={{ cursor: 'pointer', color: 'var(--text-secondary)' }}>
+                        Auto-unlock next chapters
+                      </label>
+                    </div>
+
+                    <button 
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleUnlockChapterFeed(item);
+                      }}
+                      disabled={isUnlocking}
+                      style={{
+                        width: '100%',
+                        maxWidth: '280px',
+                        height: '46px',
+                        borderRadius: '23px',
+                        border: 'none',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        gap: '8px',
+                        fontSize: '15px',
+                        fontWeight: 700,
+                        cursor: 'pointer',
+                        color: 'white',
+                        marginTop: '8px',
+                        boxShadow: userCoins >= item.price 
+                          ? '0 6px 20px rgba(79, 70, 229, 0.4)' 
+                          : '0 6px 20px rgba(239, 68, 68, 0.4)',
+                        background: userCoins >= item.price 
+                          ? 'linear-gradient(135deg, #6366f1 0%, #493cd6 100%)' 
+                          : 'linear-gradient(135deg, #ef4444 0%, #ca2b2b 100%)',
+                      }}
+                    >
+                      {userCoins >= item.price ? (
+                        <>
+                          <span>Unlock Now</span>
+                          <span style={{ display: 'inline-flex', alignItems: 'center', gap: '3px', backgroundColor: 'rgba(255,255,255,0.15)', padding: '2px 8px', borderRadius: '12px', fontSize: '12px' }}>
+                            <GoldCoin size={12} />
+                            <span>{item.price}</span>
+                          </span>
+                        </>
+                      ) : (
+                        <>
+                          <span>Top Up Coins</span>
+                          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2.5} stroke="currentColor" style={{ width: '16px', height: '16px' }}>
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5" />
+                          </svg>
+                        </>
+                      )}
+                    </button>
+                  </div>
+                </div>
+              )}
+            </article>
           ))
         )}
-
-        {/* Faded partial text indicator for locked preview */}
-        {isLocked && !loading && (
-          <p className="reader-text-paragraph" style={{ opacity: 0.25, userSelect: 'none', filter: 'blur(0.5px)' }}>
-            The ancient pathways of the cosmos were shrouded in starlight, hiding secrets that even the celestial kings dared not speak aloud...
-          </p>
-        )}
-
-        {/* Regular Reader Navigation links */}
-        {!isLocked && (
-          <div className="reader-bottom-nav-row" onClick={(e) => e.stopPropagation()}>
-            <button
-              className="reader-chapter-nav-btn"
-              disabled={currentChIndex === 0}
-              onClick={() => handleChapterSelect(currentChIndex - 1, 'top')}
-            >
-              ← Previous Chapter
-            </button>
-            <button
-              className="reader-chapter-nav-btn"
-              disabled={currentChIndex === chapters.length - 1}
-              onClick={() => handleChapterSelect(currentChIndex + 1, 'top')}
-            >
-              Next Chapter →
-            </button>
-          </div>
-        )}
       </div>
-
-      {/* Lock Screen Overlay */}
-      {isLocked && !loading && (
-        <div style={{
-          position: 'absolute',
-          bottom: 0,
-          left: 0,
-          right: 0,
-          height: '70%',
-          background: 'linear-gradient(to bottom, var(--reader-bg-transparent) 0%, var(--reader-bg) 35%, var(--reader-bg) 100%)',
-          display: 'flex',
-          flexDirection: 'column',
-          alignItems: 'center',
-          justifyContent: 'flex-end',
-          padding: '24px 20px 48px',
-          zIndex: 10,
-          pointerEvents: 'none'
-        }}>
-          <div style={{
-            pointerEvents: 'auto',
-            display: 'flex',
-            flexDirection: 'column',
-            alignItems: 'center',
-            width: '100%',
-            maxWidth: '340px'
-          }}>
-            <div style={{
-              width: '52px',
-              height: '52px',
-              borderRadius: '50%',
-              backgroundColor: 'var(--reader-border)',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              fontSize: '22px',
-              marginBottom: '10px',
-              boxShadow: 'var(--card-shadow)',
-              color: 'var(--reader-text)'
-            }}>
-              🔒
-            </div>
-
-            <h3 className="rr-unlock-title" style={{ fontSize: '16px', fontWeight: 800, marginBottom: '4px', color: 'var(--reader-text)' }}>
-              Unlock to Continue Reading
-            </h3>
-            <p style={{ fontSize: '12px', color: 'var(--text-tertiary)', marginBottom: '16px' }}>
-              This chapter is locked ({chapterDetail.word_count.toLocaleString()} words)
-            </p>
-
-            <div style={{
-              width: '100%',
-              backgroundColor: 'var(--bg-secondary)',
-              borderRadius: '16px',
-              padding: '16px',
-              border: '1px solid var(--border-color)',
-              boxShadow: 'var(--card-shadow)',
-              marginBottom: '16px',
-              display: 'flex',
-              flexDirection: 'column',
-              gap: '10px'
-            }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '13px' }}>
-                <span style={{ color: 'var(--text-secondary)' }}>Price:</span>
-                <span style={{ fontWeight: 700, color: 'var(--text-primary)' }}>{chapterPrice} Coins</span>
-              </div>
-              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '13px', borderTop: '1px solid var(--border-color)', paddingTop: '10px' }}>
-                <span style={{ color: 'var(--text-secondary)' }}>Your Balance:</span>
-                <span style={{ fontWeight: 700, color: userCoins >= chapterPrice ? '#22c55e' : '#ef4444' }}>
-                  {userCoins} Coins
-                </span>
-              </div>
-
-              {/* Auto Unlock checkbox */}
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '12px', marginTop: '2px' }}>
-                <input 
-                  type="checkbox" 
-                  id="auto-unlock" 
-                  checked={autoUnlock}
-                  onChange={(e) => setAutoUnlock(e.target.checked)}
-                  style={{ width: '15px', height: '15px', accentColor: 'var(--accent-color)', cursor: 'pointer' }}
-                />
-                <label htmlFor="auto-unlock" style={{ cursor: 'pointer', color: 'var(--text-secondary)' }}>
-                  Auto-unlock next chapters
-                </label>
-              </div>
-            </div>
-
-            {/* Unlock Button */}
-            <button 
-              className={userCoins >= chapterPrice ? "btn-unlock-now" : "btn-top-up-now"}
-              onClick={handleUnlockNow}
-              disabled={isUnlocking}
-              style={{
-                width: '100%',
-                height: '48px',
-                borderRadius: '24px',
-                border: 'none',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                gap: '8px',
-                fontSize: '15px',
-                fontWeight: 700,
-                cursor: 'pointer',
-                color: 'white',
-                boxShadow: userCoins >= chapterPrice 
-                  ? '0 6px 20px rgba(79, 70, 229, 0.4)' 
-                  : '0 6px 20px rgba(239, 68, 68, 0.4)',
-                background: userCoins >= chapterPrice 
-                  ? 'linear-gradient(135deg, #6366f1 0%, #493cd6 100%)' 
-                  : 'linear-gradient(135deg, #ef4444 0%, #ca2b2b 100%)',
-              }}
-            >
-              {userCoins >= chapterPrice ? (
-                <>
-                  <span>Unlock Now</span>
-                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: '3px', backgroundColor: 'rgba(255,255,255,0.15)', padding: '2px 8px', borderRadius: '12px', fontSize: '12px' }}>
-                    <GoldCoin size={12} />
-                    <span>{chapterPrice}</span>
-                  </span>
-                </>
-              ) : (
-                <>
-                  <span>Insufficient Balance - Top Up</span>
-                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2.5} stroke="currentColor" style={{ width: '16px', height: '16px' }}>
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5" />
-                  </svg>
-                </>
-              )}
-            </button>
-          </div>
-        </div>
-      )}
     </div>
   );
 };
