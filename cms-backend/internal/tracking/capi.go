@@ -119,22 +119,37 @@ func SendFacebookEvent(eventName string, userID string, email string, ip string,
 
 	pixelID := config.AppConfig.FbPixelID
 	accessToken := config.AppConfig.FbAccessToken
+	apiVersion := os.Getenv("META_API_VERSION")
+	if apiVersion == "" {
+		apiVersion = os.Getenv("FB_CAPI_VERSION")
+	}
 
-	// Try reading from db system_configs if empty in config
-	if pixelID == "" || accessToken == "" {
-		var dbPixel, dbToken string
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		if db.DB != nil {
-			_ = db.DB.QueryRow(ctx, "SELECT value FROM system_configs WHERE key = 'fb_pixel_id'").Scan(&dbPixel)
-			_ = db.DB.QueryRow(ctx, "SELECT value FROM system_configs WHERE key = 'fb_access_token'").Scan(&dbToken)
+	// Try reading from db system_configs
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if db.DB != nil {
+		var dbPixel, dbToken, dbVersion string
+		_ = db.DB.QueryRow(ctx, "SELECT value FROM system_configs WHERE key = 'fb_pixel_id'").Scan(&dbPixel)
+		_ = db.DB.QueryRow(ctx, "SELECT value FROM system_configs WHERE key = 'fb_access_token'").Scan(&dbToken)
+		if apiVersion == "" {
+			_ = db.DB.QueryRow(ctx, "SELECT value FROM system_configs WHERE key = 'meta_api_version'").Scan(&dbVersion)
 		}
-		if dbPixel != "" {
+		if dbPixel != "" && pixelID == "" {
 			pixelID = dbPixel
 		}
-		if dbToken != "" {
+		if dbToken != "" && accessToken == "" {
 			accessToken = dbToken
 		}
+		if dbVersion != "" && apiVersion == "" {
+			apiVersion = dbVersion
+		}
+	}
+
+	if apiVersion == "" {
+		apiVersion = "v25.0"
+	}
+	if !strings.HasPrefix(apiVersion, "v") {
+		apiVersion = "v" + apiVersion
 	}
 
 	if pixelID == "" {
@@ -149,7 +164,7 @@ func SendFacebookEvent(eventName string, userID string, email string, ip string,
 		return
 	}
 
-	apiURL := fmt.Sprintf("https://graph.facebook.com/v19.0/%s/events?access_token=%s", pixelID, accessToken)
+	apiURL := fmt.Sprintf("https://graph.facebook.com/%s/%s/events?access_token=%s", apiVersion, pixelID, accessToken)
 	req, err := http.NewRequest("POST", apiURL, bytes.NewBuffer(jsonBytes))
 	if err != nil {
 		log.Printf("Failed to create FB CAPI request: %v", err)

@@ -17,6 +17,7 @@ import TemplatesTab from './pages/TemplatesTab';
 import PromotionsTab from './pages/PromotionsTab';
 import TrackingLogsTab from './pages/TrackingLogsTab';
 import DomainsTab from './pages/DomainsTab';
+import MetaAdStatsTab from './pages/MetaAdStatsTab';
 import {
   LayoutDashboard,
   Book,
@@ -36,7 +37,8 @@ import {
   FileText,
   Sun,
   Moon,
-  Globe
+  Globe,
+  BarChart3
 } from 'lucide-react';
 
 
@@ -74,6 +76,12 @@ const navItems = [
       { id: 'settings-payment', label: '支付管理', path: '/settings/payment', icon: <CreditCard size={14} /> },
       { id: 'settings-accounts', label: '账号管理', path: '/settings/accounts', icon: <ShieldCheck size={14} /> }
     ]
+  },
+  {
+    id: 'meta-ad-stats',
+    label: 'Meta广告统计',
+    path: '/meta-ad-stats',
+    icon: <BarChart3 size={18} />
   },
 ];
 
@@ -547,6 +555,7 @@ function AppContent() {
           <Route path="/orders" element={<OrdersTab />} />
           <Route path="/promotions" element={<PromotionsTab />} />
           <Route path="/recharge-templates" element={<TemplatesTab />} />
+          <Route path="/meta-ad-stats" element={<MetaAdStatsTab />} />
           <Route path="/campaign" element={<CampaignTab />} />
           <Route path="/ad-config/pixels" element={<PixelsTab />} />
           <Route path="/ad-config/logs" element={<TrackingLogsTab />} />

@@ -193,6 +193,99 @@ func InitDB() {
 			log.Println("Seeded default domain h5.star-novel.com successfully")
 		}
 	}
+
+	// 7. Create Meta Ad Statistic tables
+	createMetaTablesQuery := `
+	CREATE TABLE IF NOT EXISTS meta_accounts (
+		id VARCHAR(64) PRIMARY KEY,
+		name VARCHAR(255) NOT NULL,
+		currency VARCHAR(10) DEFAULT 'USD',
+		timezone VARCHAR(50) DEFAULT 'UTC',
+		status VARCHAR(50) DEFAULT 'ACTIVE',
+		bm_id VARCHAR(64) DEFAULT '',
+		updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+	);
+
+	CREATE TABLE IF NOT EXISTS meta_campaigns (
+		id VARCHAR(64) PRIMARY KEY,
+		account_id VARCHAR(64) NOT NULL,
+		name VARCHAR(255) NOT NULL,
+		objective VARCHAR(64) DEFAULT '',
+		status VARCHAR(50) DEFAULT 'ACTIVE',
+		updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+	);
+	CREATE INDEX IF NOT EXISTS idx_meta_camp_acc ON meta_campaigns(account_id);
+
+	CREATE TABLE IF NOT EXISTS meta_adsets (
+		id VARCHAR(64) PRIMARY KEY,
+		campaign_id VARCHAR(64) NOT NULL,
+		account_id VARCHAR(64) NOT NULL,
+		name VARCHAR(255) NOT NULL,
+		daily_budget NUMERIC(12,4) DEFAULT 0,
+		status VARCHAR(50) DEFAULT 'ACTIVE',
+		updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+	);
+	CREATE INDEX IF NOT EXISTS idx_meta_adset_camp ON meta_adsets(campaign_id);
+	CREATE INDEX IF NOT EXISTS idx_meta_adset_acc ON meta_adsets(account_id);
+
+	CREATE TABLE IF NOT EXISTS meta_ads (
+		id VARCHAR(64) PRIMARY KEY,
+		ad_set_id VARCHAR(64) NOT NULL,
+		campaign_id VARCHAR(64) NOT NULL,
+		account_id VARCHAR(64) NOT NULL,
+		name VARCHAR(255) NOT NULL,
+		status VARCHAR(50) DEFAULT 'ACTIVE',
+		created_time TIMESTAMP WITH TIME ZONE,
+		updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+	);
+	CREATE INDEX IF NOT EXISTS idx_meta_ad_adset ON meta_ads(ad_set_id);
+	CREATE INDEX IF NOT EXISTS idx_meta_ad_camp ON meta_ads(campaign_id);
+	CREATE INDEX IF NOT EXISTS idx_meta_ad_acc ON meta_ads(account_id);
+
+	CREATE TABLE IF NOT EXISTS meta_daily_insights (
+		id VARCHAR(128) PRIMARY KEY,
+		entity_level VARCHAR(20) NOT NULL,
+		entity_id VARCHAR(64) NOT NULL,
+		stat_date VARCHAR(10) NOT NULL,
+		spend NUMERIC(12,4) DEFAULT 0,
+		impressions BIGINT DEFAULT 0,
+		reach BIGINT DEFAULT 0,
+		frequency NUMERIC(8,4) DEFAULT 0,
+		cpm NUMERIC(12,4) DEFAULT 0,
+		clicks BIGINT DEFAULT 0,
+		cpc NUMERIC(12,4) DEFAULT 0,
+		ctr NUMERIC(8,4) DEFAULT 0,
+		link_clicks BIGINT DEFAULT 0,
+		cost_per_link_click NUMERIC(12,4) DEFAULT 0,
+		link_ctr NUMERIC(8,4) DEFAULT 0,
+		landing_page_views BIGINT DEFAULT 0,
+		cost_per_landing_page_view NUMERIC(12,4) DEFAULT 0,
+		view_content_count BIGINT DEFAULT 0,
+		cost_per_view_content NUMERIC(12,4) DEFAULT 0,
+		add_to_cart_count BIGINT DEFAULT 0,
+		cost_per_add_to_cart NUMERIC(12,4) DEFAULT 0,
+		initiate_checkout_count BIGINT DEFAULT 0,
+		cost_per_initiate_checkout NUMERIC(12,4) DEFAULT 0,
+		complete_registration_count BIGINT DEFAULT 0,
+		cost_per_complete_registration NUMERIC(12,4) DEFAULT 0,
+		purchase_count BIGINT DEFAULT 0,
+		cost_per_purchase NUMERIC(12,4) DEFAULT 0,
+		purchase_value NUMERIC(14,4) DEFAULT 0,
+		purchase_roas NUMERIC(10,4) DEFAULT 0,
+		created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+		updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+	);
+	CREATE INDEX IF NOT EXISTS idx_meta_insight_entity_date ON meta_daily_insights(entity_level, entity_id, stat_date);
+
+	CREATE TABLE IF NOT EXISTS meta_configs (
+		key VARCHAR(64) PRIMARY KEY,
+		value TEXT NOT NULL,
+		updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+	);`
+	_, err = pool.Exec(ctx, createMetaTablesQuery)
+	if err != nil {
+		log.Printf("Warning: Failed to create meta tables: %v", err)
+	}
 }
 
 func CloseDB() {
