@@ -31,17 +31,19 @@ type Chapter struct {
 }
 
 type PromotionLink struct {
-	ID                 int       `json:"id"`
-	Name               string    `json:"name"`
-	NovelID            int64     `json:"novel_id"`
-	NovelTitle         string    `json:"novel_title"`
-	ChapterIndex       int       `json:"chapter_index"`
-	UtmSource          string    `json:"utm_source"`
-	UtmCampaign        string    `json:"utm_campaign"`
-	GeneratedURL       string    `json:"generated_url"`
-	FBPixelID          *int      `json:"fb_pixel_id"`
-	RechargeTemplateID *int      `json:"recharge_template_id"`
-	CreatedAt          time.Time `json:"created_at"`
+	ID                   int       `json:"id"`
+	Name                 string    `json:"name"`
+	NovelID              int64     `json:"novel_id"`
+	NovelTitle           string    `json:"novel_title"`
+	ChapterIndex         int       `json:"chapter_index"`
+	UtmSource            string    `json:"utm_source"`
+	UtmCampaign          string    `json:"utm_campaign"`
+	GeneratedURL         string    `json:"generated_url"`
+	FBPixelID            *int      `json:"fb_pixel_id"`
+	RechargeTemplateID   *int      `json:"recharge_template_id"`
+	CoinCostPerThousand  *int      `json:"coin_cost_per_thousand"`
+	StartPayChapterIndex *int      `json:"start_pay_chapter_index"`
+	CreatedAt            time.Time `json:"created_at"`
 }
 
 type FBPixel struct {

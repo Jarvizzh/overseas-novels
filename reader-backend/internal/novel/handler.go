@@ -24,7 +24,7 @@ func (h *Handler) RegisterRoutes(r *gin.RouterGroup) {
 		novelGroup.GET("", h.GetNovels)
 		novelGroup.GET("/search", h.SearchNovels)
 		novelGroup.GET("/:id", h.GetNovelDetail)
-		novelGroup.GET("/:id/chapters", h.GetChaptersList)
+		novelGroup.GET("/:id/chapters", auth.OptionalAuthMiddleware(), h.GetChaptersList)
 		novelGroup.GET("/:id/chapters/:index", auth.OptionalAuthMiddleware(), h.GetChapterContent)
 	}
 }
@@ -118,9 +118,33 @@ func (h *Handler) GetChaptersList(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid novel ID"})
 		return
 	}
+
+	var userID int64
+	if val, exists := c.Get("user_id"); exists {
+		userID = val.(int64)
+	}
+
+	promoIDStr := c.GetHeader("X-Promo-ID")
+	if promoIDStr == "" {
+		promoIDStr = c.Query("link_id")
+		if promoIDStr == "" {
+			promoIDStr = c.Query("promo_id")
+		}
+	}
+	promoID, _ := strconv.Atoi(promoIDStr)
+
+	utmSource := c.GetHeader("X-UTM-Source")
+	if utmSource == "" {
+		utmSource = c.Query("utm_source")
+	}
+	utmCampaign := c.GetHeader("X-UTM-Campaign")
+	if utmCampaign == "" {
+		utmCampaign = c.Query("utm_campaign")
+	}
+
 	ctx := c.Request.Context()
 
-	chapters, err := h.service.GetChaptersList(ctx, id)
+	chapters, err := h.service.GetChaptersList(ctx, userID, id, promoID, utmSource, utmCampaign)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch chapters list"})
 		return
@@ -149,8 +173,26 @@ func (h *Handler) GetChapterContent(c *gin.Context) {
 		userID = val.(int64)
 	}
 
+	promoIDStr := c.GetHeader("X-Promo-ID")
+	if promoIDStr == "" {
+		promoIDStr = c.Query("link_id")
+		if promoIDStr == "" {
+			promoIDStr = c.Query("promo_id")
+		}
+	}
+	promoID, _ := strconv.Atoi(promoIDStr)
+
+	utmSource := c.GetHeader("X-UTM-Source")
+	if utmSource == "" {
+		utmSource = c.Query("utm_source")
+	}
+	utmCampaign := c.GetHeader("X-UTM-Campaign")
+	if utmCampaign == "" {
+		utmCampaign = c.Query("utm_campaign")
+	}
+
 	ctx := c.Request.Context()
-	result, err := h.service.GetChapterContent(ctx, userID, id, chapterIndex)
+	result, err := h.service.GetChapterContent(ctx, userID, id, chapterIndex, promoID, utmSource, utmCampaign)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch chapter content"})
 		return

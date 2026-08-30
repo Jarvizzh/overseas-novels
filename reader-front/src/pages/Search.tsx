@@ -79,7 +79,7 @@ export const Search: React.FC<SearchProps> = ({ onNavigate, initialGenre }) => {
   };
 
   return (
-    <div className="scroll-container animate-fade-in" style={{ paddingBottom: '32px' }}>
+    <div className="scroll-container animate-fade-in" style={{ paddingBottom: '90px' }}>
       {/* Search Input Box */}
       <div className="search-input-wrapper">
         <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2.5} stroke="currentColor" style={{ width: '18px', height: '18px', color: 'var(--text-tertiary)' }}>

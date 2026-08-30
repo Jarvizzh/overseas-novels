@@ -24,6 +24,8 @@ export interface PromotionFormData {
   utmCampaign: string;
   fbPixelId: string;
   rechargeTemplateId: string;
+  coinCostPerThousand: string;
+  startPayChapterIndex: string;
 }
 
 interface PromotionLinkModalProps {
@@ -182,6 +184,35 @@ export const PromotionLinkModal: React.FC<PromotionLinkModalProps> = ({
               value={promotionForm.utmCampaign}
               onChange={(e) => setPromotionForm({ ...promotionForm, utmCampaign: e.target.value })}
             />
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
+            <div>
+              <label style={{ display: 'block', fontSize: '0.75rem', color: 'hsl(var(--text-secondary))', marginBottom: '4px' }}>
+                专属千字计费 (可选)
+              </label>
+              <input
+                type="number"
+                className="input-field"
+                placeholder="留空继承书籍/全局"
+                min={0}
+                value={promotionForm.coinCostPerThousand}
+                onChange={(e) => setPromotionForm({ ...promotionForm, coinCostPerThousand: e.target.value })}
+              />
+            </div>
+            <div>
+              <label style={{ display: 'block', fontSize: '0.75rem', color: 'hsl(var(--text-secondary))', marginBottom: '4px' }}>
+                专属起付章节 (可选)
+              </label>
+              <input
+                type="number"
+                className="input-field"
+                placeholder="留空继承书籍/全局"
+                min={1}
+                value={promotionForm.startPayChapterIndex}
+                onChange={(e) => setPromotionForm({ ...promotionForm, startPayChapterIndex: e.target.value })}
+              />
+            </div>
           </div>
 
           <div>

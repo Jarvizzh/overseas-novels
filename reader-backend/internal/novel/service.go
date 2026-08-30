@@ -3,10 +3,12 @@ package novel
 import (
 	"context"
 	"fmt"
+	"math"
 	"strings"
 
 	"golang.org/x/sync/singleflight"
 	"reader-backend/internal/model"
+	"reader-backend/internal/storage"
 )
 
 type ChapterReadResult struct {
@@ -19,20 +21,22 @@ type Service interface {
 	GetNovels(ctx context.Context, genre string, limit, offset int) ([]model.Novel, error)
 	SearchNovels(ctx context.Context, search string, limit, offset int) ([]model.Novel, error)
 	GetNovelDetail(ctx context.Context, id int64) (*model.Novel, error)
-	GetChaptersList(ctx context.Context, novelID int64) ([]model.Chapter, error)
-	GetChapterContent(ctx context.Context, userID int64, novelID int64, chapterIndex int) (*ChapterReadResult, error)
+	GetChaptersList(ctx context.Context, userID int64, novelID int64, promoID int, utmSource, utmCampaign string) ([]model.Chapter, error)
+	GetChapterContent(ctx context.Context, userID int64, novelID int64, chapterIndex int, promoID int, utmSource, utmCampaign string) (*ChapterReadResult, error)
 }
 
 type service struct {
-	repo  Repository
-	cache Cache
-	sf    singleflight.Group
+	repo    Repository
+	cache   Cache
+	storage storage.ContentStorage
+	sf      singleflight.Group
 }
 
-func NewService(repo Repository, cache Cache) Service {
+func NewService(repo Repository, cache Cache, storage storage.ContentStorage) Service {
 	return &service{
-		repo:  repo,
-		cache: cache,
+		repo:    repo,
+		cache:   cache,
+		storage: storage,
 	}
 }
 
@@ -72,37 +76,50 @@ func (s *service) GetNovelDetail(ctx context.Context, id int64) (*model.Novel, e
 	return val.(*model.Novel), nil
 }
 
-func (s *service) GetChaptersList(ctx context.Context, novelID int64) ([]model.Chapter, error) {
+func (s *service) GetChaptersList(ctx context.Context, userID int64, novelID int64, promoID int, utmSource, utmCampaign string) ([]model.Chapter, error) {
 	list, err := s.cache.GetChaptersList(ctx, novelID)
-	if err == nil && len(list) > 0 {
-		return list, nil
+	if err != nil || len(list) == 0 {
+		sfKey := fmt.Sprintf("sf:novel:chapters:%d", novelID)
+		val, errSF, _ := s.sf.Do(sfKey, func() (interface{}, error) {
+			if cached, _ := s.cache.GetChaptersList(ctx, novelID); len(cached) > 0 {
+				return cached, nil
+			}
+			listDB, errDB := s.repo.GetChaptersList(ctx, novelID)
+			if errDB != nil {
+				return nil, errDB
+			}
+			if len(listDB) > 0 {
+				_ = s.cache.SetChaptersList(ctx, novelID, listDB)
+			}
+			return listDB, nil
+		})
+
+		if errSF != nil {
+			return nil, errSF
+		}
+		if val != nil {
+			list = val.([]model.Chapter)
+		}
 	}
 
-	sfKey := fmt.Sprintf("sf:novel:chapters:%d", novelID)
-	val, err, _ := s.sf.Do(sfKey, func() (interface{}, error) {
-		if cached, _ := s.cache.GetChaptersList(ctx, novelID); len(cached) > 0 {
-			return cached, nil
-		}
-		listDB, errDB := s.repo.GetChaptersList(ctx, novelID)
-		if errDB != nil {
-			return nil, errDB
-		}
-		if len(listDB) > 0 {
-			_ = s.cache.SetChaptersList(ctx, novelID, listDB)
-		}
-		return listDB, nil
-	})
+	effectiveStartPay, effectiveCost, _ := s.repo.GetEffectivePricingRule(ctx, userID, novelID, promoID, utmSource, utmCampaign)
 
-	if err != nil {
-		return nil, err
+	resultList := make([]model.Chapter, len(list))
+	for i, ch := range list {
+		isPaid := (ch.ChapterIndex >= (effectiveStartPay - 1))
+		price := 0
+		if isPaid {
+			price = int(math.Round((float64(ch.WordCount) / 1000.0) * float64(effectiveCost)))
+		}
+		ch.IsPaid = isPaid
+		ch.Price = price
+		resultList[i] = ch
 	}
-	if val == nil {
-		return nil, nil
-	}
-	return val.([]model.Chapter), nil
+
+	return resultList, nil
 }
 
-func (s *service) GetChapterContent(ctx context.Context, userID int64, novelID int64, chapterIndex int) (*ChapterReadResult, error) {
+func (s *service) GetChapterContent(ctx context.Context, userID int64, novelID int64, chapterIndex int, promoID int, utmSource, utmCampaign string) (*ChapterReadResult, error) {
 	ch, err := s.cache.GetChapter(ctx, novelID, chapterIndex)
 	if err != nil || ch == nil {
 		sfKey := fmt.Sprintf("sf:chapter:%d:%d", novelID, chapterIndex)
@@ -114,6 +131,15 @@ func (s *service) GetChapterContent(ctx context.Context, userID int64, novelID i
 			if errDB != nil || chDB == nil {
 				return chDB, errDB
 			}
+
+			// If storage is provided and (chDB.Content is empty or storage is OSS), load content from storage
+			if s.storage != nil && (chDB.Content == "" || s.storage.StorageType() == "oss") {
+				content, errStorage := s.storage.GetContent(ctx, novelID, chapterIndex)
+				if errStorage == nil && content != "" {
+					chDB.Content = content
+				}
+			}
+
 			_ = s.cache.SetChapter(ctx, novelID, chapterIndex, chDB)
 			return chDB, nil
 		})
@@ -126,25 +152,42 @@ func (s *service) GetChapterContent(ctx context.Context, userID int64, novelID i
 		ch = val.(*model.Chapter)
 	}
 
-	result := &ChapterReadResult{
-		Price: ch.Price,
+	effectiveStartPay, effectiveCost, _ := s.repo.GetEffectivePricingRule(ctx, userID, novelID, promoID, utmSource, utmCampaign)
+
+	isPaid := (ch.ChapterIndex >= (effectiveStartPay - 1))
+	price := 0
+	if isPaid {
+		price = int(math.Round((float64(ch.WordCount) / 1000.0) * float64(effectiveCost)))
 	}
 
-	if !ch.IsPaid {
-		result.Chapter = ch
+	result := &ChapterReadResult{
+		Price: price,
+	}
+
+	if !isPaid {
+		clone := *ch
+		clone.IsPaid = false
+		clone.Price = 0
+		result.Chapter = &clone
 		result.Locked = false
 		return result, nil
 	}
 
 	if userID == 0 {
-		result.Chapter = getLockedPreview(ch)
+		preview := getLockedPreview(ch)
+		preview.IsPaid = true
+		preview.Price = price
+		result.Chapter = preview
 		result.Locked = true
 		return result, nil
 	}
 
 	unlocked, err := s.cache.IsChapterUnlocked(ctx, userID, novelID, chapterIndex)
 	if err == nil && unlocked {
-		result.Chapter = ch
+		clone := *ch
+		clone.IsPaid = true
+		clone.Price = price
+		result.Chapter = &clone
 		result.Locked = false
 		return result, nil
 	}
@@ -175,10 +218,16 @@ func (s *service) GetChapterContent(ctx context.Context, userID int64, novelID i
 
 	dbUnlocked := valUnlock.(bool)
 	if dbUnlocked {
-		result.Chapter = ch
+		clone := *ch
+		clone.IsPaid = true
+		clone.Price = price
+		result.Chapter = &clone
 		result.Locked = false
 	} else {
-		result.Chapter = getLockedPreview(ch)
+		preview := getLockedPreview(ch)
+		preview.IsPaid = true
+		preview.Price = price
+		result.Chapter = preview
 		result.Locked = true
 	}
 
@@ -188,9 +237,24 @@ func (s *service) GetChapterContent(ctx context.Context, userID int64, novelID i
 func getLockedPreview(original *model.Chapter) *model.Chapter {
 	preview := *original // shallow copy
 
+	// Try splitting by double newline first
 	paragraphs := strings.Split(original.Content, "\n\n")
 	if len(paragraphs) > 2 {
 		preview.Content = strings.Join(paragraphs[:2], "\n\n")
+		return &preview
+	}
+
+	// Fallback to single newline if text uses \n
+	lines := strings.Split(original.Content, "\n")
+	if len(lines) > 3 {
+		preview.Content = strings.Join(lines[:3], "\n")
+		return &preview
+	}
+
+	// If no line breaks or single long block, truncate to first 250 runes
+	runes := []rune(original.Content)
+	if len(runes) > 250 {
+		preview.Content = string(runes[:250]) + "..."
 	} else {
 		preview.Content = original.Content
 	}

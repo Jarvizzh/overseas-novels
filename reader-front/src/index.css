@@ -80,15 +80,17 @@
   -webkit-tap-highlight-color: transparent;
 }
 
-body {
-  font-family: var(--font-ui);
-  background-color: #020617; /* Very dark background to isolate H5 device on desktop */
+html, body {
+  width: 100%;
+  height: 100%;
+  height: 100dvh;
+  background-color: var(--bg-outer);
+  font-family: var(--font-sans);
   color: var(--text-primary);
   display: flex;
   justify-content: center;
   align-items: center;
-  min-height: 100vh;
-  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
 }
 
 /* Scrollbar Customization for Modern Web */
@@ -120,7 +122,9 @@ body {
 #root {
   width: 100%;
   max-width: var(--app-max-width);
-  height: 100vh;
+  height: 100%;
+  height: 100dvh;
+  max-height: 100dvh;
   background-color: var(--bg-primary);
   position: relative;
   display: flex;
@@ -135,17 +139,25 @@ body {
 /* Layout Classes */
 .scroll-container {
   flex: 1;
+  min-height: 0;
+  width: 100%;
+  box-sizing: border-box;
   overflow-y: auto;
   overflow-x: hidden;
   padding: 16px;
   -webkit-overflow-scrolling: touch;
+  overscroll-behavior-y: contain;
 }
 
 .scroll-container-no-pad {
   flex: 1;
+  min-height: 0;
+  width: 100%;
+  box-sizing: border-box;
   overflow-y: auto;
   overflow-x: hidden;
   -webkit-overflow-scrolling: touch;
+  overscroll-behavior-y: contain;
 }
 
 /* Glassmorphism Styles */

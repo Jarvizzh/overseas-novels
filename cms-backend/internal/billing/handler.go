@@ -124,7 +124,7 @@ func (h *Handler) ListRechargeTemplates(c *gin.Context) {
 }
 
 type SlotReq struct {
-	SlotIndex   int    `json:"slot_index" binding:"required"`
+	SlotIndex   int    `json:"slot_index" binding:"gte=0"`
 	Type        string `json:"type" binding:"required"`
 	Coins       int    `json:"coins"`
 	Bonus       int    `json:"bonus"`

@@ -53,7 +53,7 @@
 | **CMS 前端 (`cms-front`)** | React 19, Vite 8, Lucide React, Custom Select | 运营可视化数据仪表盘 |
 | **读者端后端 (`reader-backend`)** | Go 1.25, Gin Framework, pgxpool, go-redis/v9, SingleFlight | 高并发 REST API (默认端口 `8080`) |
 | **CMS 后端 (`cms-backend`)** | Go 1.25, Gin Framework, pgxpool, go-redis/v9 | 运营管理 API (默认端口 `8081`) |
-| **存储基础设施** | PostgreSQL 15, Redis 7, pg_trgm (Gin Index) | Docker 容器化部署，全文模糊搜索索引 |
+| **存储基础设施** | PostgreSQL 18, Redis 7, pg_trgm (Gin Index) | Docker 容器化部署，全文模糊搜索索引 |
 | **支付与广告追踪** | Stripe SDK, PayPal REST API, Facebook CAPI | 海外合规支付网关与 CAPI 异步追踪 |
 
 ---
@@ -84,7 +84,7 @@ graph TD
     WorkerPool -->|"Async Facebook Event"| FBCAPI["Facebook Conversions API"]
     WorkerPool -->|"Async Batch Log"| LogChan["Batch CAPI Log Flusher"]
     
-    RowLock -->|"Atomic Transaction"| Postgres[("PostgreSQL 15")]
+    RowLock -->|"Atomic Transaction"| Postgres[("PostgreSQL 18")]
     LogChan --> Postgres
     CMSBackend --> Postgres
     CMSBackend --> Redis

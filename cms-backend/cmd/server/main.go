@@ -17,9 +17,11 @@ import (
 	"star-novel-cms/internal/config"
 	"star-novel-cms/internal/db"
 	"star-novel-cms/internal/domain"
+	"star-novel-cms/internal/feedback"
 	"star-novel-cms/internal/meta"
 	"star-novel-cms/internal/novel"
 	"star-novel-cms/internal/redis"
+	"star-novel-cms/internal/storage"
 	"star-novel-cms/internal/tracking"
 	"star-novel-cms/internal/user"
 )
@@ -86,8 +88,14 @@ func main() {
 		authHandler := auth.NewAuthHandler(authService)
 		authHandler.RegisterRoutes(api)
 
+		contentStorage, err := storage.NewContentStorage(config.AppConfig, db.DB)
+		if err != nil {
+			log.Fatalf("Failed to initialize content storage: %v", err)
+		}
+		log.Printf("CMS Content Storage initialized with driver: %s", contentStorage.StorageType())
+
 		novelRepo := novel.NewNovelRepository()
-		novelService := novel.NewNovelService(novelRepo)
+		novelService := novel.NewNovelService(novelRepo, contentStorage)
 		novelHandler := novel.NewHandler(novelService)
 		novelHandler.RegisterRoutes(api)
 
@@ -115,6 +123,11 @@ func main() {
 		metaService := meta.NewService(metaRepo)
 		metaHandler := meta.NewHandler(metaService)
 		metaHandler.RegisterRoutes(api)
+
+		feedbackRepo := feedback.NewRepository()
+		feedbackService := feedback.NewService(feedbackRepo)
+		feedbackHandler := feedback.NewHandler(feedbackService)
+		feedbackHandler.RegisterRoutes(api)
 	}
 
 	// 7. Setup graceful shutdown server

@@ -2,6 +2,7 @@ package novel
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/jackc/pgx/v5"
 	"reader-backend/internal/db"
@@ -16,6 +17,7 @@ type Repository interface {
 	GetChapter(ctx context.Context, novelID int64, chapterIndex int) (*model.Chapter, error)
 	CheckChapterUnlocked(ctx context.Context, userID, novelID int64, chapterIndex int) (bool, error)
 	GetUnlockedChapterIndices(ctx context.Context, userID, novelID int64) ([]int, error)
+	GetEffectivePricingRule(ctx context.Context, userID int64, novelID int64, promoID int, utmSource, utmCampaign string) (int, int, error)
 }
 
 type dbRepository struct{}
@@ -203,4 +205,54 @@ func (r *dbRepository) GetUnlockedChapterIndices(ctx context.Context, userID, no
 		}
 	}
 	return indices, nil
+}
+
+func (r *dbRepository) GetEffectivePricingRule(ctx context.Context, userID int64, novelID int64, promoID int, utmSource, utmCampaign string) (int, int, error) {
+	// 1. Try finding promotion link
+	var promoStartPay, promoCost *int
+	if promoID > 0 {
+		_ = db.DB.QueryRow(ctx, "SELECT start_pay_chapter_index, coin_cost_per_thousand FROM promotion_links WHERE id = $1 AND (novel_id = $2 OR novel_id = 0)", promoID, novelID).Scan(&promoStartPay, &promoCost)
+	}
+	if (promoStartPay == nil && promoCost == nil) && utmSource != "" && utmCampaign != "" {
+		_ = db.DB.QueryRow(ctx, "SELECT start_pay_chapter_index, coin_cost_per_thousand FROM promotion_links WHERE utm_source = $1 AND utm_campaign = $2 AND (novel_id = $3 OR novel_id = 0) ORDER BY id DESC LIMIT 1", utmSource, utmCampaign, novelID).Scan(&promoStartPay, &promoCost)
+	}
+	if (promoStartPay == nil && promoCost == nil) && userID > 0 {
+		_ = db.DB.QueryRow(ctx, "SELECT pl.start_pay_chapter_index, pl.coin_cost_per_thousand FROM users u JOIN promotion_links pl ON (u.utm_source = pl.utm_source AND u.utm_campaign = pl.utm_campaign) WHERE u.id = $1 AND u.utm_source IS NOT NULL AND u.utm_source != '' AND (pl.novel_id = $2 OR pl.novel_id = 0) ORDER BY pl.id DESC LIMIT 1", userID, novelID).Scan(&promoStartPay, &promoCost)
+	}
+
+	// 2. Fetch novel settings
+	var novelStartPay, novelCost *int
+	_ = db.DB.QueryRow(ctx, "SELECT start_pay_chapter_index, coin_cost_per_thousand FROM novels WHERE id = $1", novelID).Scan(&novelStartPay, &novelCost)
+
+	// 3. Fetch global settings
+	globalStartPay := 3
+	globalCost := 5
+	var gStartStr, gCostStr string
+	_ = db.DB.QueryRow(ctx, "SELECT value FROM system_configs WHERE key = 'global_start_pay_chapter_index'").Scan(&gStartStr)
+	if gStartStr != "" {
+		_, _ = fmt.Sscanf(gStartStr, "%d", &globalStartPay)
+	}
+	_ = db.DB.QueryRow(ctx, "SELECT value FROM system_configs WHERE key = 'global_coin_cost_per_thousand'").Scan(&gCostStr)
+	if gCostStr != "" {
+		_, _ = fmt.Sscanf(gCostStr, "%d", &globalCost)
+	}
+
+	// 4. Cascading Priority: Promotion Link > Single Novel > Global Config
+	effectiveStartPay := globalStartPay
+	if novelStartPay != nil && *novelStartPay > 0 {
+		effectiveStartPay = *novelStartPay
+	}
+	if promoStartPay != nil && *promoStartPay > 0 {
+		effectiveStartPay = *promoStartPay
+	}
+
+	effectiveCost := globalCost
+	if novelCost != nil && *novelCost > 0 {
+		effectiveCost = *novelCost
+	}
+	if promoCost != nil && *promoCost > 0 {
+		effectiveCost = *promoCost
+	}
+
+	return effectiveStartPay, effectiveCost, nil
 }

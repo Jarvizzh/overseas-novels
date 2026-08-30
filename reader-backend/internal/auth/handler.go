@@ -48,6 +48,7 @@ func (h *AuthHandler) RegisterRoutes(r *gin.RouterGroup) {
 		authGroup.POST("/guest", GuestRateLimitMiddleware(0.1, 5), h.GuestLogin)
 		authGroup.POST("/register", h.Register)
 		authGroup.POST("/login", h.Login)
+		authGroup.POST("/bind", AuthMiddleware(), h.BindEmail)
 		authGroup.GET("/profile", AuthMiddleware(), h.GetProfile)
 	}
 }
@@ -182,3 +183,49 @@ func (h *AuthHandler) GetProfile(c *gin.Context) {
 
 	c.JSON(http.StatusOK, user)
 }
+
+type BindEmailRequest struct {
+	Email    string `json:"email" binding:"required,email"`
+	Password string `json:"password" binding:"required,min=6"`
+	Nickname string `json:"nickname"`
+}
+
+func (h *AuthHandler) BindEmail(c *gin.Context) {
+	userIDVal, exists := c.Get("user_id")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		return
+	}
+	userID, ok := userIDVal.(int64)
+	if !ok {
+		if floatVal, ok := userIDVal.(float64); ok {
+			userID = int64(floatVal)
+		} else {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user ID type in context"})
+			return
+		}
+	}
+
+	var req BindEmailRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	ctx := c.Request.Context()
+	user, token, err := h.service.BindEmail(ctx, userID, req.Email, req.Password, req.Nickname)
+	if err != nil {
+		if errors.Is(err, ErrEmailExists) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to bind email: " + err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, AuthResponse{
+		Token: token,
+		User:  *user,
+	})
+}
+

@@ -24,6 +24,7 @@ type AuthService interface {
 	Register(ctx context.Context, email, password, nickname, device, ipAddress, utmSource, utmCampaign, fbp, fbc, pixelID, userAgent, sourceURL, country string) (*model.User, string, error)
 	Login(ctx context.Context, email, password string) (*model.User, string, error)
 	GetProfile(ctx context.Context, userID int64) (*model.User, error)
+	BindEmail(ctx context.Context, userID int64, email, password, nickname string) (*model.User, string, error)
 }
 
 type authService struct {
@@ -171,3 +172,31 @@ func (s *authService) GetProfile(ctx context.Context, userID int64) (*model.User
 	}
 	return user, nil
 }
+
+func (s *authService) BindEmail(ctx context.Context, userID int64, email, password, nickname string) (*model.User, string, error) {
+	exists, err := s.repo.EmailExists(ctx, email)
+	if err != nil {
+		return nil, "", err
+	}
+	if exists {
+		return nil, "", ErrEmailExists
+	}
+
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return nil, "", err
+	}
+
+	user, err := s.repo.BindEmail(ctx, userID, email, string(hashedPassword), nickname)
+	if err != nil {
+		return nil, "", err
+	}
+
+	token, err := GenerateToken(user.ID)
+	if err != nil {
+		return nil, "", err
+	}
+
+	return user, token, nil
+}
+

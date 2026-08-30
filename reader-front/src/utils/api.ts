@@ -26,6 +26,7 @@ async function request<T>(endpoint: string, options: RequestInit = {}): Promise<
   const utmCampaign = localStorage.getItem('utm_campaign');
   const pixelId = localStorage.getItem('fb_pixel_id');
   const templateId = localStorage.getItem('recharge_template_id');
+  const promoId = localStorage.getItem('promo_id');
   const pageURL = window.location.href;
 
   if (fbp) headers.set('X-FB-FBP', fbp);
@@ -34,6 +35,7 @@ async function request<T>(endpoint: string, options: RequestInit = {}): Promise<
   if (utmCampaign) headers.set('X-UTM-Campaign', utmCampaign);
   if (pixelId) headers.set('X-FB-Pixel-ID', pixelId);
   if (templateId) headers.set('X-Recharge-Template-ID', templateId);
+  if (promoId) headers.set('X-Promo-ID', promoId);
   headers.set('X-Event-Source-URL', pageURL);
 
   const response = await fetch(`${BASE_URL}${endpoint}`, {
@@ -147,6 +149,12 @@ export const api = {
       body: JSON.stringify(body),
     }),
     
+  bindEmail: (body: { email: string; password: string; nickname?: string }) =>
+    request<{ token: string; user: User }>('/auth/bind', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
   getProfile: () => 
     request<User>('/auth/profile'),
 
@@ -219,6 +227,17 @@ export const api = {
       body: JSON.stringify({ amount_cents: amountCents, coins_amount: coinsAmount }),
     }),
 
+  createPayPalOrder: (amountCents: number, coinsAmount: number, returnUrl?: string, cancelUrl?: string) =>
+    request<{ order_id: string; approve_url: string }>('/wallet/recharge/paypal/create-order', {
+      method: 'POST',
+      body: JSON.stringify({
+        amount_cents: amountCents,
+        coins_amount: coinsAmount,
+        return_url: returnUrl,
+        cancel_url: cancelUrl,
+      }),
+    }),
+
   capturePayPalPayment: (orderId: string, coinsAmount: number) => 
     request<{ message: string }>('/wallet/recharge/paypal/capture', {
       method: 'POST',
@@ -249,5 +268,11 @@ export const api = {
     request<{ message: string; coins_awarded: number }>('/wallet/rewards/checkin', {
       method: 'POST',
       body: JSON.stringify({ day, coins }),
+    }),
+
+  submitFeedback: (email: string, content: string, subject: string = '') =>
+    request<{ message: string; id: number }>('/feedback', {
+      method: 'POST',
+      body: JSON.stringify({ email, content, subject }),
     }),
 };

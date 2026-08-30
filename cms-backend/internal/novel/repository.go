@@ -16,6 +16,7 @@ type NovelRepository interface {
 	UpdateNovel(ctx context.Context, n *Novel) error
 	DeleteNovel(ctx context.Context, id int64) (int64, error)
 	UpdateChapterPrices(ctx context.Context, startIdx int, cost *int, novelID int64) error
+	BatchUpdateAllNovelChapterPrices(ctx context.Context, startPayChapterIndex int, coinCostPerThousand int) error
 
 	ListChapters(ctx context.Context, novelID int64) ([]Chapter, error)
 	GetChapter(ctx context.Context, novelID int64, chapterIndex int) (*Chapter, error)
@@ -29,7 +30,7 @@ type NovelRepository interface {
 
 	ListPromotionLinks(ctx context.Context) ([]PromotionLink, error)
 	CreatePromotionLink(ctx context.Context, link *PromotionLink) (int, error)
-	UpdatePromotionLink(ctx context.Context, id int, name string, chapterIndex int, source, campaign, url string, pixelID, templateID *int) error
+	UpdatePromotionLink(ctx context.Context, id int, name string, chapterIndex int, source, campaign, url string, pixelID, templateID, coinCost, startPayIndex *int) error
 	DeletePromotionLink(ctx context.Context, id int) error
 
 	ListFBPixels(ctx context.Context) ([]FBPixel, error)
@@ -140,12 +141,13 @@ func (r *dbNovelRepository) DeleteNovel(ctx context.Context, id int64) (int64, e
 }
 
 func (r *dbNovelRepository) UpdateChapterPrices(ctx context.Context, startIdx int, cost *int, novelID int64) error {
+	// startIdx is 1-based (e.g. Chapter 3 means chapter_index >= 2 is paid)
 	_, err := db.DB.Exec(ctx, `
 		UPDATE chapters
 		SET 
-			is_paid = (chapter_index >= $1),
+			is_paid = (chapter_index >= ($1 - 1)),
 			price = CASE 
-				WHEN (chapter_index >= $1) 
+				WHEN (chapter_index >= ($1 - 1)) 
 				THEN ROUND((word_count::decimal / 1000.0) * COALESCE($2, (SELECT value::integer FROM system_configs WHERE key = 'global_coin_cost_per_thousand'), 5))::integer 
 				ELSE 0 
 			END
@@ -154,9 +156,45 @@ func (r *dbNovelRepository) UpdateChapterPrices(ctx context.Context, startIdx in
 	return err
 }
 
+func (r *dbNovelRepository) BatchUpdateAllNovelChapterPrices(ctx context.Context, startPayChapterIndex int, coinCostPerThousand int) error {
+	tx, err := db.DB.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	_, err = tx.Exec(ctx, `
+		UPDATE novels 
+		SET 
+			start_pay_chapter_index = $1, 
+			coin_cost_per_thousand = $2
+	`, startPayChapterIndex, coinCostPerThousand)
+	if err != nil {
+		return err
+	}
+
+	_, err = tx.Exec(ctx, `
+		UPDATE chapters c
+		SET 
+			is_paid = (c.chapter_index >= ($1 - 1)),
+			price = CASE 
+				WHEN (c.chapter_index >= ($1 - 1)) 
+				THEN ROUND((c.word_count::decimal / 1000.0) * $2)::integer 
+				ELSE 0 
+			END
+		FROM novels n
+		WHERE c.novel_id = n.id
+	`, startPayChapterIndex, coinCostPerThousand)
+	if err != nil {
+		return err
+	}
+
+	return tx.Commit(ctx)
+}
+
 func (r *dbNovelRepository) ListChapters(ctx context.Context, novelID int64) ([]Chapter, error) {
 	query := `
-		SELECT id, novel_id, chapter_index, title, content, word_count, is_paid, price, created_at
+		SELECT id, novel_id, chapter_index, title, '' AS content, word_count, is_paid, price, created_at
 		FROM chapters
 		WHERE novel_id = $1
 		ORDER BY chapter_index ASC`
@@ -246,13 +284,17 @@ func (r *dbNovelRepository) GetSettings(ctx context.Context) (map[string]string,
 }
 
 func (r *dbNovelRepository) UpdateSettingTx(ctx context.Context, tx pgx.Tx, key, value string) error {
-	_, err := tx.Exec(ctx, "UPDATE system_configs SET value = $1 WHERE key = $2", value, key)
+	_, err := tx.Exec(ctx, `
+		INSERT INTO system_configs (key, value) 
+		VALUES ($2, $1) 
+		ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+	`, value, key)
 	return err
 }
 
 func (r *dbNovelRepository) ListPromotionLinks(ctx context.Context) ([]PromotionLink, error) {
 	query := `
-		SELECT id, name, novel_id, novel_title, chapter_index, utm_source, utm_campaign, generated_url, fb_pixel_id, recharge_template_id, created_at
+		SELECT id, name, novel_id, novel_title, chapter_index, utm_source, utm_campaign, generated_url, fb_pixel_id, recharge_template_id, coin_cost_per_thousand, start_pay_chapter_index, created_at
 		FROM promotion_links
 		ORDER BY created_at DESC`
 	rows, err := db.DB.Query(ctx, query)
@@ -266,7 +308,8 @@ func (r *dbNovelRepository) ListPromotionLinks(ctx context.Context) ([]Promotion
 		var link PromotionLink
 		err = rows.Scan(
 			&link.ID, &link.Name, &link.NovelID, &link.NovelTitle, &link.ChapterIndex,
-			&link.UtmSource, &link.UtmCampaign, &link.GeneratedURL, &link.FBPixelID, &link.RechargeTemplateID, &link.CreatedAt,
+			&link.UtmSource, &link.UtmCampaign, &link.GeneratedURL, &link.FBPixelID, &link.RechargeTemplateID,
+			&link.CoinCostPerThousand, &link.StartPayChapterIndex, &link.CreatedAt,
 		)
 		if err != nil {
 			return nil, err
@@ -278,20 +321,20 @@ func (r *dbNovelRepository) ListPromotionLinks(ctx context.Context) ([]Promotion
 
 func (r *dbNovelRepository) CreatePromotionLink(ctx context.Context, link *PromotionLink) (int, error) {
 	query := `
-		INSERT INTO promotion_links (name, novel_id, novel_title, chapter_index, utm_source, utm_campaign, generated_url, fb_pixel_id, recharge_template_id)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		INSERT INTO promotion_links (name, novel_id, novel_title, chapter_index, utm_source, utm_campaign, generated_url, fb_pixel_id, recharge_template_id, coin_cost_per_thousand, start_pay_chapter_index)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 		RETURNING id, created_at`
 	var id int
-	err := db.DB.QueryRow(ctx, query, link.Name, link.NovelID, link.NovelTitle, link.ChapterIndex, link.UtmSource, link.UtmCampaign, link.GeneratedURL, link.FBPixelID, link.RechargeTemplateID).Scan(&id, &link.CreatedAt)
+	err := db.DB.QueryRow(ctx, query, link.Name, link.NovelID, link.NovelTitle, link.ChapterIndex, link.UtmSource, link.UtmCampaign, link.GeneratedURL, link.FBPixelID, link.RechargeTemplateID, link.CoinCostPerThousand, link.StartPayChapterIndex).Scan(&id, &link.CreatedAt)
 	return id, err
 }
 
-func (r *dbNovelRepository) UpdatePromotionLink(ctx context.Context, id int, name string, chapterIndex int, source, campaign, url string, pixelID, templateID *int) error {
+func (r *dbNovelRepository) UpdatePromotionLink(ctx context.Context, id int, name string, chapterIndex int, source, campaign, url string, pixelID, templateID, coinCost, startPayIndex *int) error {
 	query := `
 		UPDATE promotion_links
-		SET name = $1, chapter_index = $2, utm_source = $3, utm_campaign = $4, generated_url = $5, fb_pixel_id = $6, recharge_template_id = $7
-		WHERE id = $8`
-	_, err := db.DB.Exec(ctx, query, name, chapterIndex, source, campaign, url, pixelID, templateID, id)
+		SET name = $1, chapter_index = $2, utm_source = $3, utm_campaign = $4, generated_url = $5, fb_pixel_id = $6, recharge_template_id = $7, coin_cost_per_thousand = $8, start_pay_chapter_index = $9
+		WHERE id = $10`
+	_, err := db.DB.Exec(ctx, query, name, chapterIndex, source, campaign, url, pixelID, templateID, coinCost, startPayIndex, id)
 	return err
 }
 

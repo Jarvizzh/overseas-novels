@@ -106,7 +106,7 @@ export const Rewards: React.FC<RewardsProps> = ({ onAddCoins, globalTheme = 'lig
   }
 
   return (
-    <div className="scroll-container animate-fade-in" style={{ paddingBottom: '32px' }}>
+    <div className="scroll-container animate-fade-in" style={{ paddingBottom: '90px' }}>
       {/* Daily Check-In Card Section */}
       <div 
         className="checkin-card" 

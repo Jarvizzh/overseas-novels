@@ -18,6 +18,7 @@ type UserRepository interface {
 	EmailExists(ctx context.Context, email string) (bool, error)
 	GetUserByEmail(ctx context.Context, email string) (*model.User, string, error)
 	GetUserByID(ctx context.Context, id int64) (*model.User, error)
+	BindEmail(ctx context.Context, userID int64, email, passwordHash, nickname string) (*model.User, error)
 }
 
 type dbUserRepository struct{}
@@ -137,3 +138,23 @@ func (r *dbUserRepository) GetUserByID(ctx context.Context, id int64) (*model.Us
 	}
 	return &user, nil
 }
+
+func (r *dbUserRepository) BindEmail(ctx context.Context, userID int64, email, passwordHash, nickname string) (*model.User, error) {
+	query := `
+		UPDATE users
+		SET email = $1, password_hash = $2, nickname = COALESCE(NULLIF($3, ''), nickname)
+		WHERE id = $4
+		RETURNING id, email, nickname, avatar_url, status, created_at`
+
+	var user model.User
+	var emailStr string
+	err := db.DB.QueryRow(ctx, query, email, passwordHash, nickname, userID).Scan(
+		&user.ID, &emailStr, &user.Nickname, &user.AvatarURL, &user.Status, &user.CreatedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+	user.Email = &emailStr
+	return &user, nil
+}
+

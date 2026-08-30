@@ -14,6 +14,7 @@ import (
 
 	"github.com/google/uuid"
 	redisclient "star-novel-cms/internal/redis"
+	"star-novel-cms/internal/storage"
 )
 
 var (
@@ -39,7 +40,7 @@ type NovelService interface {
 
 	ListPromotionLinks(ctx context.Context) ([]PromotionLink, error)
 	CreatePromotionLink(ctx context.Context, link *PromotionLink) (*PromotionLink, error)
-	UpdatePromotionLink(ctx context.Context, id int, name string, chapterIndex int, source, campaign, url string, pixelID, templateID *int) error
+	UpdatePromotionLink(ctx context.Context, id int, name string, chapterIndex int, source, campaign, url string, pixelID, templateID, coinCost, startPayIndex *int) error
 	DeletePromotionLink(ctx context.Context, id int) error
 
 	ListFBPixels(ctx context.Context) ([]FBPixel, error)
@@ -49,12 +50,14 @@ type NovelService interface {
 }
 
 type novelService struct {
-	repo NovelRepository
+	repo    NovelRepository
+	storage storage.ContentStorage
 }
 
-func NewNovelService(repo NovelRepository) NovelService {
+func NewNovelService(repo NovelRepository, storage storage.ContentStorage) NovelService {
 	return &novelService{
-		repo: repo,
+		repo:    repo,
+		storage: storage,
 	}
 }
 
@@ -210,6 +213,10 @@ func (s *novelService) DeleteNovel(ctx context.Context, id int64) error {
 		return ErrNovelNotFound
 	}
 
+	if s.storage != nil {
+		_ = s.storage.DeleteNovelContent(ctx, id)
+	}
+
 	s.invalidateNovelCache(ctx, id)
 	s.invalidateAllChaptersCache(ctx, id)
 	return nil
@@ -227,16 +234,29 @@ func (s *novelService) GetChapterDetail(ctx context.Context, novelID int64, chap
 	if c == nil {
 		return nil, ErrChapterNotFound
 	}
+
+	if s.storage != nil && (c.Content == "" || s.storage.StorageType() == "oss") {
+		content, err := s.storage.GetContent(ctx, novelID, chapterIndex)
+		if err == nil && content != "" {
+			c.Content = content
+		}
+	}
+
 	return c, nil
 }
 
 func (s *novelService) CreateChapter(ctx context.Context, novelID int64, chapterIndex int, title, content string, isPaid bool, price int) (*Chapter, error) {
+	dbContent := content
+	if s.storage != nil && s.storage.StorageType() == "oss" {
+		dbContent = ""
+	}
+
 	c := &Chapter{
 		ID:           strings.ReplaceAll(uuid.New().String(), "-", ""),
 		NovelID:      novelID,
 		ChapterIndex: chapterIndex,
 		Title:        title,
-		Content:      content,
+		Content:      dbContent,
 		WordCount:    countCharacters(content),
 		IsPaid:       isPaid,
 		Price:        price,
@@ -247,16 +267,28 @@ func (s *novelService) CreateChapter(ctx context.Context, novelID int64, chapter
 		return nil, err
 	}
 
+	if s.storage != nil && s.storage.StorageType() == "oss" {
+		if err := s.storage.PutContent(ctx, novelID, chapterIndex, content); err != nil {
+			return nil, fmt.Errorf("failed to store chapter content to OSS: %w", err)
+		}
+	}
+
+	c.Content = content
 	s.invalidateNovelCache(ctx, novelID)
 	return c, nil
 }
 
 func (s *novelService) UpdateChapter(ctx context.Context, novelID int64, chapterIndex int, title, content string, isPaid bool, price int) error {
+	dbContent := content
+	if s.storage != nil && s.storage.StorageType() == "oss" {
+		dbContent = ""
+	}
+
 	c := &Chapter{
 		NovelID:      novelID,
 		ChapterIndex: chapterIndex,
 		Title:        title,
-		Content:      content,
+		Content:      dbContent,
 		WordCount:    countCharacters(content),
 		IsPaid:       isPaid,
 		Price:        price,
@@ -265,6 +297,12 @@ func (s *novelService) UpdateChapter(ctx context.Context, novelID int64, chapter
 	err := s.repo.UpdateChapter(ctx, c)
 	if err != nil {
 		return err
+	}
+
+	if s.storage != nil && s.storage.StorageType() == "oss" {
+		if err := s.storage.PutContent(ctx, novelID, chapterIndex, content); err != nil {
+			return fmt.Errorf("failed to update chapter content in OSS: %w", err)
+		}
 	}
 
 	s.invalidateNovelCache(ctx, novelID)
@@ -420,6 +458,8 @@ func (s *novelService) BulkImportChapters(ctx context.Context, novelID int64, zi
 
 	// Insert parsed chapters
 	var totalWords int = 0
+	var storageItems []storage.ChapterContentItem
+
 	for _, item := range parsedChapters {
 		words := countCharacters(item.Content)
 		totalWords += words
@@ -429,12 +469,17 @@ func (s *novelService) BulkImportChapters(ctx context.Context, novelID int64, zi
 			price = int(float64(words) / 1000.0 * float64(costPerThousand))
 		}
 
+		dbContent := item.Content
+		if s.storage != nil && s.storage.StorageType() == "oss" {
+			dbContent = ""
+		}
+
 		ch := &Chapter{
 			ID:           strings.ReplaceAll(uuid.New().String(), "-", ""),
 			NovelID:      novelID,
 			ChapterIndex: item.Index,
 			Title:        item.Title,
-			Content:      item.Content,
+			Content:      dbContent,
 			WordCount:    words,
 			IsPaid:       isPaid,
 			Price:        price,
@@ -444,6 +489,11 @@ func (s *novelService) BulkImportChapters(ctx context.Context, novelID int64, zi
 		if err != nil {
 			return err
 		}
+
+		storageItems = append(storageItems, storage.ChapterContentItem{
+			ChapterIndex: item.Index,
+			Content:      item.Content,
+		})
 	}
 
 	// Update word count in novel
@@ -455,6 +505,14 @@ func (s *novelService) BulkImportChapters(ctx context.Context, novelID int64, zi
 	err = tx.Commit(ctx)
 	if err != nil {
 		return err
+	}
+
+	// Write chapter contents to storage (in OSS mode, this cleans previous objects and executes concurrent uploads)
+	if s.storage != nil && s.storage.StorageType() == "oss" {
+		_ = s.storage.DeleteNovelContent(ctx, novelID)
+		if err := s.storage.BatchPutContent(ctx, novelID, storageItems); err != nil {
+			return fmt.Errorf("failed to upload chapter contents to storage: %w", err)
+		}
 	}
 
 	// Invalidate reader page cache
@@ -476,6 +534,9 @@ func (s *novelService) UpdateSettings(ctx context.Context, configs map[string]st
 	defer tx.Rollback(ctx)
 
 	for k, v := range configs {
+		if k == "apply_to_all_novels" {
+			continue
+		}
 		err := s.repo.UpdateSettingTx(ctx, tx, k, v)
 		if err != nil {
 			return err
@@ -487,11 +548,47 @@ func (s *novelService) UpdateSettings(ctx context.Context, configs map[string]st
 		return err
 	}
 
-	// Invalidate Redis Cache safely using SCAN iterator instead of blocking KEYS command
+	// Always update all novels and chapter prices unless explicitly requested not to
+	if configs["apply_to_all_novels"] != "false" {
+		startPay := 3
+		if val, ok := configs["global_start_pay_chapter_index"]; ok {
+			_, _ = fmt.Sscanf(val, "%d", &startPay)
+		} else {
+			// Read from db if not in request
+			allSettings, _ := s.repo.GetSettings(ctx)
+			if dbVal, ok := allSettings["global_start_pay_chapter_index"]; ok {
+				_, _ = fmt.Sscanf(dbVal, "%d", &startPay)
+			}
+		}
+
+		costPerThousand := 5
+		if val, ok := configs["global_coin_cost_per_thousand"]; ok {
+			_, _ = fmt.Sscanf(val, "%d", &costPerThousand)
+		} else {
+			allSettings, _ := s.repo.GetSettings(ctx)
+			if dbVal, ok := allSettings["global_coin_cost_per_thousand"]; ok {
+				_, _ = fmt.Sscanf(dbVal, "%d", &costPerThousand)
+			}
+		}
+
+		if startPay > 0 && costPerThousand >= 0 {
+			_ = s.repo.BatchUpdateAllNovelChapterPrices(ctx, startPay, costPerThousand)
+		}
+	}
+
+	// Invalidate Redis Cache safely using SCAN iterator
 	if redisclient.RDB != nil {
 		iter := redisclient.RDB.Scan(ctx, 0, "novel:*", 100).Iterator()
 		for iter.Next(ctx) {
 			redisclient.RDB.Del(ctx, iter.Val())
+		}
+		iterCh := redisclient.RDB.Scan(ctx, 0, "chapter:*", 100).Iterator()
+		for iterCh.Next(ctx) {
+			redisclient.RDB.Del(ctx, iterCh.Val())
+		}
+		iterSf := redisclient.RDB.Scan(ctx, 0, "sf:*", 100).Iterator()
+		for iterSf.Next(ctx) {
+			redisclient.RDB.Del(ctx, iterSf.Val())
 		}
 	}
 
@@ -511,8 +608,8 @@ func (s *novelService) CreatePromotionLink(ctx context.Context, link *PromotionL
 	return link, nil
 }
 
-func (s *novelService) UpdatePromotionLink(ctx context.Context, id int, name string, chapterIndex int, source, campaign, url string, pixelID, templateID *int) error {
-	return s.repo.UpdatePromotionLink(ctx, id, name, chapterIndex, source, campaign, url, pixelID, templateID)
+func (s *novelService) UpdatePromotionLink(ctx context.Context, id int, name string, chapterIndex int, source, campaign, url string, pixelID, templateID, coinCost, startPayIndex *int) error {
+	return s.repo.UpdatePromotionLink(ctx, id, name, chapterIndex, source, campaign, url, pixelID, templateID, coinCost, startPayIndex)
 }
 
 func (s *novelService) DeletePromotionLink(ctx context.Context, id int) error {

@@ -15,6 +15,8 @@ interface PromotionLink {
   generated_url: string;
   fb_pixel_id?: number | null;
   recharge_template_id?: number | null;
+  coin_cost_per_thousand?: number | null;
+  start_pay_chapter_index?: number | null;
   created_at: string;
 }
 
@@ -39,16 +41,18 @@ export default function PromotionsTab() {
   const [sourceFilter, setSourceFilter] = useState('');
 
   const [colWidths, setColWidths] = useState<number[]>([
-    150, // 创建时间
-    140, // 推广名称
-    150, // 小说书名
-    100, // 渠道 (Source)
-    120, // 绑定像素
-    120, // 绑定模板
-    120, // 活动 (Campaign)
-    90,  // 落地页
-    180, // 推广地址
-    140  // 操作
+    140, // 创建时间
+    130, // 推广名称
+    140, // 小说书名
+    90,  // 渠道 (Source)
+    110, // 绑定像素
+    110, // 绑定模板
+    110, // 专属千字计费
+    100, // 专属起付章节
+    110, // 活动 (Campaign)
+    80,  // 落地页
+    160, // 推广地址
+    130  // 操作
   ]);
 
   const columns = [
@@ -58,6 +62,8 @@ export default function PromotionsTab() {
     { label: '投放渠道', key: 'utm_source' },
     { label: '绑定像素', key: 'fb_pixel_id' },
     { label: '绑定模板', key: 'recharge_template_id' },
+    { label: '千字计费', key: 'coin_cost_per_thousand' },
+    { label: '起付章节', key: 'start_pay_chapter_index' },
     { label: '广告名称', key: 'utm_campaign' },
     { label: '落地页', key: 'chapter_index' },
     { label: '推广地址', key: 'generated_url' },
@@ -122,7 +128,9 @@ export default function PromotionsTab() {
     utmSource: 'facebook',
     utmCampaign: '',
     fbPixelId: '',
-    rechargeTemplateId: ''
+    rechargeTemplateId: '',
+    coinCostPerThousand: '',
+    startPayChapterIndex: '',
   });
 
   const fetchLinks = async () => {
@@ -168,7 +176,9 @@ export default function PromotionsTab() {
       utmSource: link.utm_source || 'facebook',
       utmCampaign: link.utm_campaign || '',
       fbPixelId: link.fb_pixel_id ? String(link.fb_pixel_id) : '',
-      rechargeTemplateId: link.recharge_template_id ? String(link.recharge_template_id) : ''
+      rechargeTemplateId: link.recharge_template_id ? String(link.recharge_template_id) : '',
+      coinCostPerThousand: link.coin_cost_per_thousand !== null && link.coin_cost_per_thousand !== undefined ? String(link.coin_cost_per_thousand) : '',
+      startPayChapterIndex: link.start_pay_chapter_index !== null && link.start_pay_chapter_index !== undefined ? String(link.start_pay_chapter_index) : '',
     });
     setIsEditModalOpen(true);
   };
@@ -199,6 +209,15 @@ export default function PromotionsTab() {
       params.set('template_id', editForm.rechargeTemplateId);
     }
 
+    if (editForm.coinCostPerThousand) {
+      params.set('cost', editForm.coinCostPerThousand);
+    }
+    if (editForm.startPayChapterIndex) {
+      params.set('pay_ch', editForm.startPayChapterIndex);
+    }
+
+    params.set('link_id', String(editingLink.id));
+
     const path = editForm.chapterIndex ? '/content' : '/detail';
     const finalUrl = `${baseUrl}${path}?${params.toString()}`;
 
@@ -210,7 +229,9 @@ export default function PromotionsTab() {
         utm_campaign: editForm.utmCampaign,
         generated_url: finalUrl,
         fb_pixel_id: editForm.fbPixelId ? parseInt(editForm.fbPixelId, 10) : null,
-        recharge_template_id: editForm.rechargeTemplateId ? parseInt(editForm.rechargeTemplateId, 10) : null
+        recharge_template_id: editForm.rechargeTemplateId ? parseInt(editForm.rechargeTemplateId, 10) : null,
+        coin_cost_per_thousand: editForm.coinCostPerThousand ? parseInt(editForm.coinCostPerThousand, 10) : null,
+        start_pay_chapter_index: editForm.startPayChapterIndex ? parseInt(editForm.startPayChapterIndex, 10) : null,
       });
 
       window.showToast?.("修改推广链接成功！", "success");
@@ -378,6 +399,20 @@ export default function PromotionsTab() {
                       <span style={{ color: 'hsl(var(--text-muted))' }}>-</span>
                     )}
                   </td>
+                  <td style={{ padding: '14px 12px', whiteSpace: 'nowrap' }}>
+                    {link.coin_cost_per_thousand !== null && link.coin_cost_per_thousand !== undefined ? (
+                      <span className="badge badge-amber">{link.coin_cost_per_thousand} 币/千字</span>
+                    ) : (
+                      <span style={{ color: 'hsl(var(--text-muted))', fontSize: '0.8rem' }}>继承默认</span>
+                    )}
+                  </td>
+                  <td style={{ padding: '14px 12px', whiteSpace: 'nowrap' }}>
+                    {link.start_pay_chapter_index !== null && link.start_pay_chapter_index !== undefined ? (
+                      <span className="badge badge-purple">第 {link.start_pay_chapter_index} 章起</span>
+                    ) : (
+                      <span style={{ color: 'hsl(var(--text-muted))', fontSize: '0.8rem' }}>继承默认</span>
+                    )}
+                  </td>
                   <td style={{ padding: '14px 12px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={link.utm_campaign || '-'}>
                     {link.utm_campaign || <span style={{ color: 'hsl(var(--text-muted))' }}>-</span>}
                   </td>
@@ -518,6 +553,35 @@ export default function PromotionsTab() {
                   value={editForm.utmCampaign}
                   onChange={(e) => setEditForm({ ...editForm, utmCampaign: e.target.value })}
                 />
+              </div>
+
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
+                <div>
+                  <label style={{ display: 'block', fontSize: '0.75rem', color: 'hsl(var(--text-secondary))', marginBottom: '4px' }}>
+                    专属千字计费 (可选)
+                  </label>
+                  <input
+                    type="number"
+                    className="input-field"
+                    placeholder="留空继承默认"
+                    min={0}
+                    value={editForm.coinCostPerThousand}
+                    onChange={(e) => setEditForm({ ...editForm, coinCostPerThousand: e.target.value })}
+                  />
+                </div>
+                <div>
+                  <label style={{ display: 'block', fontSize: '0.75rem', color: 'hsl(var(--text-secondary))', marginBottom: '4px' }}>
+                    专属起付章节 (可选)
+                  </label>
+                  <input
+                    type="number"
+                    className="input-field"
+                    placeholder="留空继承默认"
+                    min={1}
+                    value={editForm.startPayChapterIndex}
+                    onChange={(e) => setEditForm({ ...editForm, startPayChapterIndex: e.target.value })}
+                  />
+                </div>
               </div>
 
               <div>

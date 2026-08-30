@@ -2,6 +2,8 @@ import React, { useState } from 'react';
 import { useToast } from '../context/ToastContext';
 import { GoldCoin } from '../components/GoldCoin';
 import { api } from '../utils/api';
+import { LegalModal } from '../components/LegalModal';
+import type { LegalModalType } from '../components/LegalModal';
 
 interface RechargeProps {
   userCoins: number;
@@ -16,17 +18,11 @@ export const Recharge: React.FC<RechargeProps> = ({
 }) => {
   const { showToast } = useToast();
   const [selectedPack, setSelectedPack] = useState<number | null>(null);
-  const [paymentMethod, setPaymentMethod] = useState<'stripe' | 'paypal'>('stripe');
   const [isProcessing, setIsProcessing] = useState(false);
   const [paymentStep, setPaymentStep] = useState(0); // 0: Idle, 1: connecting, 2: processing
-  const [showStripeModal, setShowStripeModal] = useState(false);
   const [showSuccess, setShowSuccess] = useState(false);
   const [successAmount, setSuccessAmount] = useState(0);
-
-  // Stripe form fields
-  const [cardNumber, setCardNumber] = useState('4242 4242 4242 4242');
-  const [expiry, setExpiry] = useState('12/28');
-  const [cvc, setCvc] = useState('321');
+  const [activeLegalModal, setActiveLegalModal] = useState<LegalModalType | null>(null);
 
   // Recharge slot configurations from active default template
   const [slots, setSlots] = useState<Array<{
@@ -60,6 +56,67 @@ export const Recharge: React.FC<RechargeProps> = ({
       }
     };
     fetchTemplates();
+  }, []);
+
+  // Handle PayPal redirect return
+  React.useEffect(() => {
+    const handlePayPalReturn = async () => {
+      const urlParams = new URLSearchParams(window.location.search);
+      const paymentStatus = urlParams.get('payment');
+      const token = urlParams.get('token'); // PayPal Order ID is passed in token
+
+      if (paymentStatus === 'cancel') {
+        showToast("PayPal payment was cancelled.", "info");
+        sessionStorage.removeItem('pending_paypal_recharge');
+        window.history.replaceState({}, '', window.location.pathname);
+        return;
+      }
+
+      if (token) {
+        setIsProcessing(true);
+        setPaymentStep(2);
+
+        let pendingInfo: any = null;
+        try {
+          const saved = sessionStorage.getItem('pending_paypal_recharge');
+          if (saved) {
+            pendingInfo = JSON.parse(saved);
+          }
+        } catch (_) {}
+
+        const expectedCoins = pendingInfo?.coins || 1000;
+
+        try {
+          await api.capturePayPalPayment(token, expectedCoins);
+          setIsProcessing(false);
+          setPaymentStep(0);
+
+          let reason = 'PayPal Recharge Topup';
+          if (pendingInfo) {
+            if (pendingInfo.type === 'single') {
+              reason = `PayPal Recharge: ${pendingInfo.price} pack`;
+            } else if (pendingInfo.type === 'vip') {
+              reason = `PayPal Subscription: ${pendingInfo.name}`;
+            } else {
+              reason = `PayPal Purchase: Whole Book (${pendingInfo.name})`;
+            }
+          }
+
+          onAddCoins(expectedCoins, reason);
+          setSuccessAmount(expectedCoins);
+          setShowSuccess(true);
+          sessionStorage.removeItem('pending_paypal_recharge');
+        } catch (err: any) {
+          setIsProcessing(false);
+          setPaymentStep(0);
+          showToast(err.message || "Failed to complete PayPal payment capture", "error");
+        } finally {
+          window.history.replaceState({}, '', window.location.pathname);
+        }
+      }
+    };
+
+    handlePayPalReturn();
   }, []);
 
   const coinPacks = slots
@@ -104,105 +161,45 @@ export const Recharge: React.FC<RechargeProps> = ({
     const tSlot = slots.find(p => p.id === selectedPack);
     if (!tSlot) return;
 
-    const pack = {
-      id: tSlot.id,
-      coins: tSlot.coins,
-      bonus: tSlot.bonus,
-      price: tSlot.price,
-      priceCents: tSlot.price_cents,
-      total: tSlot.coins + tSlot.bonus,
-      type: tSlot.type,
-      name: tSlot.vip_name,
-      desc: tSlot.vip_desc
-    };
-
+    const totalCoins = tSlot.coins + tSlot.bonus;
     setIsProcessing(true);
     setPaymentStep(1);
 
     try {
-      if (paymentMethod === 'stripe') {
-        // 1. Create Stripe Intent via API
-        await api.createStripeIntent(pack.priceCents, pack.total);
-        
-        // 2. Open Stripe Card payment sheet
-        setIsProcessing(false);
-        setPaymentStep(0);
-        setShowStripeModal(true);
-      } else {
-        // PayPal Flow: Send InitiateCheckout event then execute capture simulation
-        try { await api.initiateCheckout(pack.priceCents, pack.total); } catch (_) {}
-        setPaymentStep(2);
-        const orderId = "mock_paypal_order_" + Date.now();
-        await api.capturePayPalPayment(orderId, pack.total);
-        
-        setIsProcessing(false);
-        setPaymentStep(0);
+      // Save pending recharge info in sessionStorage
+      sessionStorage.setItem('pending_paypal_recharge', JSON.stringify({
+        slotId: tSlot.id,
+        coins: totalCoins,
+        type: tSlot.type,
+        name: tSlot.vip_name || tSlot.price,
+        price: tSlot.price,
+        time: Date.now(),
+      }));
 
-        let reason = '';
-        if (pack.type === 'single') {
-          reason = `PayPal Recharge: ${pack.price} pack`;
-        } else if (pack.type === 'vip') {
-          reason = `PayPal Subscription: ${pack.name}`;
-        } else {
-          reason = `PayPal Purchase: Whole Book (${pack.name})`;
-        }
-        onAddCoins(pack.total, reason);
-        setSuccessAmount(pack.total);
-        setShowSuccess(true);
+      // Build return & cancel URLs
+      const currentUrl = new URL(window.location.href);
+      currentUrl.searchParams.delete('token');
+      currentUrl.searchParams.delete('PayerID');
+      currentUrl.searchParams.delete('payment');
+
+      const returnUrl = `${currentUrl.origin}${currentUrl.pathname}?payment=success`;
+      const cancelUrl = `${currentUrl.origin}${currentUrl.pathname}?payment=cancel`;
+
+      const resp = await api.createPayPalOrder(tSlot.price_cents, totalCoins, returnUrl, cancelUrl);
+
+      if (resp?.approve_url) {
+        window.location.href = resp.approve_url;
+      } else {
+        throw new Error("No PayPal checkout URL received");
       }
     } catch (err: any) {
       setIsProcessing(false);
       setPaymentStep(0);
-      showToast(err.message || "Payment intent creation failed. Please try again.", "error");
+      showToast(err.message || "Failed to initiate PayPal checkout. Please try again.", "error");
     }
   };
 
-  const handleStripePaymentSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setShowStripeModal(false);
-    setIsProcessing(true);
-    setPaymentStep(2);
-
-    const tSlot = slots.find(p => p.id === selectedPack);
-    if (!tSlot) return;
-
-    const pack = {
-      id: tSlot.id,
-      coins: tSlot.coins,
-      bonus: tSlot.bonus,
-      price: tSlot.price,
-      priceCents: tSlot.price_cents,
-      total: tSlot.coins + tSlot.bonus,
-      type: tSlot.type,
-      name: tSlot.vip_name,
-      desc: tSlot.vip_desc
-    };
-
-    try {
-      // Simulate real db write using PayPal capturing backdoor in local sandbox mode
-      const simulatedOrderId = "simulated_stripe_charge_" + Date.now();
-      await api.capturePayPalPayment(simulatedOrderId, pack.total);
-
-      setIsProcessing(false);
-      setPaymentStep(0);
-
-      let reason = '';
-      if (pack.type === 'single') {
-        reason = `Stripe Recharge: ${pack.price} pack`;
-      } else if (pack.type === 'vip') {
-        reason = `Stripe Subscription: ${pack.name}`;
-      } else {
-        reason = `Stripe Purchase: Whole Book (${pack.name})`;
-      }
-      onAddCoins(pack.total, reason);
-      setSuccessAmount(pack.total);
-      setShowSuccess(true);
-    } catch (err: any) {
-      setIsProcessing(false);
-      setPaymentStep(0);
-      showToast(err.message || "Stripe mock payment processing failed.", "error");
-    }
-  };
+  const selectedSlot = slots.find(p => p.id === selectedPack);
 
   if (loadingTemplates) {
     return (
@@ -230,7 +227,7 @@ export const Recharge: React.FC<RechargeProps> = ({
       </header>
 
       {/* Main Content Area */}
-      <div className="scroll-container-no-pad" style={{ height: 'calc(100vh - 56px)', padding: '16px 16px 40px' }}>
+      <div className="scroll-container-no-pad" style={{ flex: 1, minHeight: 0, padding: '16px 16px 60px' }}>
         {/* Balance Display Card */}
         <div style={{
           backgroundColor: 'var(--bg-secondary)',
@@ -429,70 +426,79 @@ export const Recharge: React.FC<RechargeProps> = ({
           </>
         )}
 
-        {/* Payment Method Selector */}
-        <h3 className="hot-tags-title" style={{ fontSize: '13px', marginBottom: '10px' }}>Payment Method</h3>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginBottom: '24px' }}>
-          <div 
-            onClick={() => setPaymentMethod('stripe')}
-            style={{
+        {/* Direct PayPal Checkout Card */}
+        {selectedSlot && (
+          <div style={{
+            backgroundColor: 'var(--bg-secondary)',
+            borderRadius: '16px',
+            padding: '18px',
+            border: '1px solid var(--border-color)',
+            boxShadow: 'var(--card-shadow)',
+            marginBottom: '24px'
+          }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+              <div>
+                <span style={{ fontSize: '11px', color: 'var(--text-tertiary)', textTransform: 'uppercase', letterSpacing: '0.5px', fontWeight: 600 }}>Selected Item</span>
+                <span style={{ fontSize: '15px', fontWeight: 800, color: 'var(--text-primary)', display: 'block', marginTop: '2px' }}>
+                  {selectedSlot.type === 'single'
+                    ? `${selectedSlot.coins} Coins (+${selectedSlot.bonus} Bonus)`
+                    : selectedSlot.vip_name}
+                </span>
+              </div>
+              <div style={{ textAlign: 'right' }}>
+                <span style={{ fontSize: '11px', color: 'var(--text-tertiary)', textTransform: 'uppercase', letterSpacing: '0.5px', fontWeight: 600 }}>Amount Due</span>
+                <span style={{ fontSize: '22px', fontWeight: 900, color: 'var(--accent-color)', display: 'block', marginTop: '2px' }}>
+                  {selectedSlot.price}
+                </span>
+              </div>
+            </div>
+
+            {/* Official Branded PayPal Checkout Button */}
+            <button
+              onClick={handlePurchase}
+              disabled={isProcessing}
+              style={{
+                width: '100%',
+                padding: '14px 0',
+                backgroundColor: '#ffc439',
+                color: '#003087',
+                border: 'none',
+                borderRadius: '24px',
+                fontSize: '15px',
+                fontWeight: 800,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: '8px',
+                boxShadow: '0 4px 14px rgba(255, 196, 57, 0.4)',
+                cursor: isProcessing ? 'not-allowed' : 'pointer',
+                transition: 'all 0.2s ease',
+                fontFamily: 'system-ui, -apple-system, sans-serif'
+              }}
+            >
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" style={{ flexShrink: 0 }}>
+                <path d="M7.076 21.337H2.47a.64.64 0 0 1-.633-.74L4.931 2.378A.853.853 0 0 1 5.774 1.7h7.24c3.483 0 5.69 1.642 5.093 5.372-.44 2.75-2.228 4.316-4.945 4.316h-2.14l-1.07 6.776-.026.173a.853.853 0 0 1-.85.8z" fill="#003087"/>
+                <path d="M8.766 18.066l1.24-7.852h2.64c2.717 0 4.505-1.566 4.945-4.316.597-3.73-1.61-5.372-5.093-5.372H5.258a.853.853 0 0 0-.843.678L1.321 19.723a.64.64 0 0 0 .633.74h4.606l1.07-6.776.026-.173a.853.853 0 0 1 .85-.8z" fill="#0079C1"/>
+                <path d="M9.13 14.77l1.07-6.776h2.14c2.717 0 4.505-1.566 4.945-4.316.14-.876.105-1.614-.078-2.217C16.89 2.532 15.65 2 13.904 2H8.354a.853.853 0 0 0-.843.678L4.417 21.2a.64.64 0 0 0 .633.74h4.606l1.07-6.776.026-.173a.853.853 0 0 1 .85-.8z" fill="#00457C"/>
+              </svg>
+              <span>{isProcessing ? 'Connecting to PayPal...' : `PayPal · Pay ${selectedSlot.price}`}</span>
+            </button>
+
+            <div style={{
               display: 'flex',
               alignItems: 'center',
-              justifyContent: 'space-between',
-              padding: '14px 16px',
-              backgroundColor: 'var(--bg-secondary)',
-              borderRadius: '12px',
-              border: paymentMethod === 'stripe' ? '2.5px solid var(--accent-color)' : '1px solid var(--border-color)',
-              cursor: 'pointer'
-            }}
-          >
-            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-              <span style={{ fontSize: '20px' }}>💳</span>
-              <span style={{ fontSize: '14px', fontWeight: 600, color: 'var(--text-primary)' }}>Stripe (Credit / Debit Card)</span>
+              justifyContent: 'center',
+              gap: '12px',
+              marginTop: '12px',
+              fontSize: '11px',
+              color: 'var(--text-tertiary)'
+            }}>
+              <span>🔒 256-Bit SSL Encrypted</span>
+              <span>•</span>
+              <span>⚡ Instant Coins Delivery</span>
             </div>
-            <div style={{
-              width: '18px',
-              height: '18px',
-              borderRadius: '50%',
-              border: '2px solid var(--border-color)',
-              backgroundColor: paymentMethod === 'stripe' ? 'var(--accent-color)' : 'transparent'
-            }} />
           </div>
-
-          <div 
-            onClick={() => setPaymentMethod('paypal')}
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'space-between',
-              padding: '14px 16px',
-              backgroundColor: 'var(--bg-secondary)',
-              borderRadius: '12px',
-              border: paymentMethod === 'paypal' ? '2.5px solid var(--accent-color)' : '1px solid var(--border-color)',
-              cursor: 'pointer'
-            }}
-          >
-            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-              <span style={{ fontSize: '20px' }}>🅿️</span>
-              <span style={{ fontSize: '14px', fontWeight: 600, color: 'var(--text-primary)' }}>PayPal Checkout</span>
-            </div>
-            <div style={{
-              width: '18px',
-              height: '18px',
-              borderRadius: '50%',
-              border: '2px solid var(--border-color)',
-              backgroundColor: paymentMethod === 'paypal' ? 'var(--accent-color)' : 'transparent'
-            }} />
-          </div>
-        </div>
-
-        {/* Recharge Action Button */}
-        <button
-          className="btn-cta-primary"
-          onClick={handlePurchase}
-          style={{ width: '100%', padding: '14px 0', fontSize: '15px', fontWeight: 700, borderRadius: '12px', marginBottom: '28px' }}
-        >
-          Confirm Purchase
-        </button>
+        )}
 
         {/* Tips Box */}
         <div style={{
@@ -505,13 +511,34 @@ export const Recharge: React.FC<RechargeProps> = ({
           lineHeight: '1.6'
         }}>
           <h4 style={{ fontWeight: 700, marginBottom: '6px', color: 'var(--text-primary)', fontSize: '12px' }}>Tips:</h4>
-          <p style={{ marginBottom: '4px' }}>1. Coins are virtual items and cannot be refunded. They can only be used within this app.</p>
-          <p style={{ marginBottom: '4px' }}>2. Reward coins are time-sensitive. Please use them within the 7-day validity period, as they will be deducted first when unlocking content. Coins are not redeemable or transferable to other users.</p>
-          <p>3. For other questions, please contact us via Profile &gt; Customer Service.</p>
+          <p style={{ marginBottom: '4px' }}>1. Coins are virtual items and cannot be refunded once consumed. They can only be used within this app.</p>
+          <p style={{ marginBottom: '4px' }}>2. Reward coins are time-sensitive. Please use them within the 7-day validity period, as they will be deducted first when unlocking content.</p>
+          <p>3. For billing assistance or issues, please reach out via <span style={{ color: 'var(--accent-color)', fontWeight: 600, cursor: 'pointer', textDecoration: 'underline' }} onClick={() => setActiveLegalModal('contact')}>Customer Support</span>.</p>
+        </div>
+
+        {/* Compliance & Legal Footer Links */}
+        <div style={{
+          display: 'flex',
+          flexWrap: 'wrap',
+          justifyContent: 'center',
+          alignItems: 'center',
+          gap: '8px 12px',
+          marginTop: '20px',
+          padding: '0 8px',
+          fontSize: '11px',
+          color: 'var(--text-tertiary)'
+        }}>
+          <span style={{ cursor: 'pointer', textDecoration: 'underline' }} onClick={() => setActiveLegalModal('terms')}>Terms of Service</span>
+          <span>•</span>
+          <span style={{ cursor: 'pointer', textDecoration: 'underline' }} onClick={() => setActiveLegalModal('privacy')}>Privacy Policy</span>
+          <span>•</span>
+          <span style={{ cursor: 'pointer', textDecoration: 'underline' }} onClick={() => setActiveLegalModal('refund')}>Refund Policy</span>
+          <span>•</span>
+          <span style={{ cursor: 'pointer', textDecoration: 'underline' }} onClick={() => setActiveLegalModal('contact')}>Contact Us</span>
         </div>
       </div>
 
-      {/* Simulated Payment Gateway Loading Screen */}
+      {/* Payment Processing Loading Screen */}
       {isProcessing && (
         <div style={{
           position: 'fixed',
@@ -536,137 +563,9 @@ export const Recharge: React.FC<RechargeProps> = ({
             marginBottom: '20px'
           }} />
           <h3 style={{ fontSize: '16px', fontWeight: 700 }}>
-            {paymentStep === 1 ? 'Connecting to payment gateway...' : 'Processing transaction...'}
+            {paymentStep === 1 ? 'Redirecting to PayPal Checkout...' : 'Processing PayPal transaction...'}
           </h3>
           <p style={{ fontSize: '12px', color: '#94a3b8', marginTop: '6px' }}>Please do not close this window</p>
-        </div>
-      )}
-
-      {/* Stripe Payment Form Modal */}
-      {showStripeModal && (
-        <div style={{
-          position: 'fixed',
-          inset: 0,
-          backgroundColor: 'rgba(0,0,0,0.6)',
-          backdropFilter: 'blur(5px)',
-          zIndex: 999,
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          padding: '20px'
-        }}>
-          <div className="animate-fade-in" style={{
-            backgroundColor: 'var(--bg-secondary)',
-            borderRadius: '16px',
-            padding: '24px',
-            width: '100%',
-            maxWidth: '340px',
-            boxShadow: '0 20px 25px -5px rgba(0,0,0,0.3)',
-            border: '1px solid var(--border-color)',
-            position: 'relative'
-          }}>
-            <button 
-              onClick={() => setShowStripeModal(false)}
-              style={{
-                position: 'absolute',
-                top: '14px',
-                right: '14px',
-                background: 'none',
-                border: 'none',
-                color: 'var(--text-secondary)',
-                fontSize: '20px',
-                cursor: 'pointer'
-              }}
-            >
-              ×
-            </button>
-
-            <h3 style={{ fontSize: '18px', fontWeight: 800, marginBottom: '20px', color: 'var(--text-primary)', textAlign: 'center' }}>
-              💳 Pay with Stripe
-            </h3>
-
-            <form onSubmit={handleStripePaymentSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
-              <div>
-                <label style={{ fontSize: '12px', color: 'var(--text-secondary)', display: 'block', marginBottom: '4px' }}>Card Number</label>
-                <input 
-                  type="text" 
-                  value={cardNumber}
-                  onChange={(e) => setCardNumber(e.target.value)}
-                  required 
-                  style={{
-                    width: '100%',
-                    padding: '10px 14px',
-                    borderRadius: '8px',
-                    border: '1px solid var(--border-color)',
-                    backgroundColor: 'var(--bg-primary)',
-                    color: 'var(--text-primary)',
-                    fontSize: '14px'
-                  }}
-                />
-              </div>
-
-              <div style={{ display: 'flex', gap: '14px' }}>
-                <div style={{ flex: 1 }}>
-                  <label style={{ fontSize: '12px', color: 'var(--text-secondary)', display: 'block', marginBottom: '4px' }}>Expiry</label>
-                  <input 
-                    type="text" 
-                    placeholder="MM/YY"
-                    value={expiry}
-                    onChange={(e) => setExpiry(e.target.value)}
-                    required 
-                    style={{
-                      width: '100%',
-                      padding: '10px 14px',
-                      borderRadius: '8px',
-                      border: '1px solid var(--border-color)',
-                      backgroundColor: 'var(--bg-primary)',
-                      color: 'var(--text-primary)',
-                      fontSize: '14px'
-                    }}
-                  />
-                </div>
-                <div style={{ flex: 1 }}>
-                  <label style={{ fontSize: '12px', color: 'var(--text-secondary)', display: 'block', marginBottom: '4px' }}>CVC</label>
-                  <input 
-                    type="text" 
-                    placeholder="123"
-                    value={cvc}
-                    onChange={(e) => setCvc(e.target.value)}
-                    required 
-                    maxLength={4}
-                    style={{
-                      width: '100%',
-                      padding: '10px 14px',
-                      borderRadius: '8px',
-                      border: '1px solid var(--border-color)',
-                      backgroundColor: 'var(--bg-primary)',
-                      color: 'var(--text-primary)',
-                      fontSize: '14px'
-                    }}
-                  />
-                </div>
-              </div>
-
-              <button 
-                type="submit" 
-                style={{
-                  width: '100%',
-                  padding: '12px',
-                  backgroundColor: 'var(--accent-color)',
-                  color: 'white',
-                  border: 'none',
-                  borderRadius: '24px',
-                  fontSize: '15px',
-                  fontWeight: 700,
-                  cursor: 'pointer',
-                  boxShadow: '0 4px 14px rgba(79,70,229,0.3)',
-                  marginTop: '10px'
-                }}
-              >
-                Pay Now
-              </button>
-            </form>
-          </div>
         </div>
       )}
 
@@ -726,6 +625,13 @@ export const Recharge: React.FC<RechargeProps> = ({
           </div>
         </div>
       )}
+
+      {/* Legal & Compliance Policy Modal */}
+      <LegalModal
+        isOpen={activeLegalModal !== null}
+        type={activeLegalModal || 'contact'}
+        onClose={() => setActiveLegalModal(null)}
+      />
     </div>
   );
 };

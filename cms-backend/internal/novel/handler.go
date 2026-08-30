@@ -248,7 +248,7 @@ func (h *Handler) GetChapterDetail(c *gin.Context) {
 }
 
 type CreateChapterReq struct {
-	ChapterIndex int    `json:"chapter_index" binding:"required"`
+	ChapterIndex int    `json:"chapter_index" binding:"gte=0"`
 	Title        string `json:"title" binding:"required"`
 	Content      string `json:"content" binding:"required"`
 	IsPaid       bool   `json:"is_paid"`
@@ -397,15 +397,17 @@ func (h *Handler) ListPromotionLinks(c *gin.Context) {
 }
 
 type CreatePromotionLinkReq struct {
-	Name               string `json:"name"`
-	NovelID            int64  `json:"novel_id" binding:"required"`
-	NovelTitle         string `json:"novel_title" binding:"required"`
-	ChapterIndex       int    `json:"chapter_index"`
-	UtmSource          string `json:"utm_source"`
-	UtmCampaign        string `json:"utm_campaign"`
-	GeneratedURL       string `json:"generated_url" binding:"required"`
-	FBPixelID          *int   `json:"fb_pixel_id"`
-	RechargeTemplateID *int   `json:"recharge_template_id"`
+	Name                 string `json:"name"`
+	NovelID              int64  `json:"novel_id" binding:"required"`
+	NovelTitle           string `json:"novel_title" binding:"required"`
+	ChapterIndex         int    `json:"chapter_index"`
+	UtmSource            string `json:"utm_source"`
+	UtmCampaign          string `json:"utm_campaign"`
+	GeneratedURL         string `json:"generated_url" binding:"required"`
+	FBPixelID            *int   `json:"fb_pixel_id"`
+	RechargeTemplateID   *int   `json:"recharge_template_id"`
+	CoinCostPerThousand  *int   `json:"coin_cost_per_thousand"`
+	StartPayChapterIndex *int   `json:"start_pay_chapter_index"`
 }
 
 func (h *Handler) CreatePromotionLink(c *gin.Context) {
@@ -417,15 +419,17 @@ func (h *Handler) CreatePromotionLink(c *gin.Context) {
 
 	ctx := c.Request.Context()
 	link := &PromotionLink{
-		Name:               req.Name,
-		NovelID:            req.NovelID,
-		NovelTitle:         req.NovelTitle,
-		ChapterIndex:       req.ChapterIndex,
-		UtmSource:          req.UtmSource,
-		UtmCampaign:        req.UtmCampaign,
-		GeneratedURL:       req.GeneratedURL,
-		FBPixelID:          req.FBPixelID,
-		RechargeTemplateID: req.RechargeTemplateID,
+		Name:                 req.Name,
+		NovelID:              req.NovelID,
+		NovelTitle:           req.NovelTitle,
+		ChapterIndex:         req.ChapterIndex,
+		UtmSource:            req.UtmSource,
+		UtmCampaign:          req.UtmCampaign,
+		GeneratedURL:         req.GeneratedURL,
+		FBPixelID:            req.FBPixelID,
+		RechargeTemplateID:   req.RechargeTemplateID,
+		CoinCostPerThousand:  req.CoinCostPerThousand,
+		StartPayChapterIndex: req.StartPayChapterIndex,
 	}
 
 	created, err := h.service.CreatePromotionLink(ctx, link)
@@ -438,13 +442,15 @@ func (h *Handler) CreatePromotionLink(c *gin.Context) {
 }
 
 type UpdatePromotionLinkReq struct {
-	Name               string `json:"name"`
-	ChapterIndex       int    `json:"chapter_index"`
-	UtmSource          string `json:"utm_source"`
-	UtmCampaign        string `json:"utm_campaign"`
-	GeneratedURL       string `json:"generated_url" binding:"required"`
-	FBPixelID          *int   `json:"fb_pixel_id"`
-	RechargeTemplateID *int   `json:"recharge_template_id"`
+	Name                 string `json:"name"`
+	ChapterIndex         int    `json:"chapter_index"`
+	UtmSource            string `json:"utm_source"`
+	UtmCampaign          string `json:"utm_campaign"`
+	GeneratedURL         string `json:"generated_url" binding:"required"`
+	FBPixelID            *int   `json:"fb_pixel_id"`
+	RechargeTemplateID   *int   `json:"recharge_template_id"`
+	CoinCostPerThousand  *int   `json:"coin_cost_per_thousand"`
+	StartPayChapterIndex *int   `json:"start_pay_chapter_index"`
 }
 
 func (h *Handler) UpdatePromotionLink(c *gin.Context) {
@@ -462,7 +468,7 @@ func (h *Handler) UpdatePromotionLink(c *gin.Context) {
 	}
 
 	ctx := c.Request.Context()
-	err = h.service.UpdatePromotionLink(ctx, id, req.Name, req.ChapterIndex, req.UtmSource, req.UtmCampaign, req.GeneratedURL, req.FBPixelID, req.RechargeTemplateID)
+	err = h.service.UpdatePromotionLink(ctx, id, req.Name, req.ChapterIndex, req.UtmSource, req.UtmCampaign, req.GeneratedURL, req.FBPixelID, req.RechargeTemplateID, req.CoinCostPerThousand, req.StartPayChapterIndex)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return

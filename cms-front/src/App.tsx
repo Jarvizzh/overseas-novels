@@ -18,6 +18,7 @@ import PromotionsTab from './pages/PromotionsTab';
 import TrackingLogsTab from './pages/TrackingLogsTab';
 import DomainsTab from './pages/DomainsTab';
 import MetaAdStatsTab from './pages/MetaAdStatsTab';
+import FeedbackTab from './pages/FeedbackTab';
 import {
   LayoutDashboard,
   Book,
@@ -38,7 +39,8 @@ import {
   Sun,
   Moon,
   Globe,
-  BarChart3
+  BarChart3,
+  MessageSquare
 } from 'lucide-react';
 
 
@@ -55,6 +57,7 @@ const navItems = [
     path: '/campaign',
     icon: <Gift size={18} />
   },
+  { id: 'feedback', label: '客服留言', path: '/feedback', icon: <MessageSquare size={18} /> },
   {
     id: 'ad-config',
     label: '广告配置',
@@ -553,6 +556,7 @@ function AppContent() {
           <Route path="/novels" element={<NovelsTab />} />
           <Route path="/users" element={<UsersTab />} />
           <Route path="/orders" element={<OrdersTab />} />
+          <Route path="/feedback" element={<FeedbackTab />} />
           <Route path="/promotions" element={<PromotionsTab />} />
           <Route path="/recharge-templates" element={<TemplatesTab />} />
           <Route path="/meta-ad-stats" element={<MetaAdStatsTab />} />

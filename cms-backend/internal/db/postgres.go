@@ -45,8 +45,9 @@ func InitDB() {
 	_, _ = pool.Exec(ctx, `
 		ALTER TABLE novels 
 		ADD COLUMN IF NOT EXISTS coin_cost_per_thousand INT DEFAULT NULL,
-		ADD COLUMN IF NOT EXISTS start_pay_chapter_index INT DEFAULT 10;
+		ADD COLUMN IF NOT EXISTS start_pay_chapter_index INT DEFAULT 3;
 		ALTER TABLE novels ALTER COLUMN coin_cost_per_thousand SET DEFAULT NULL;
+		ALTER TABLE novels ALTER COLUMN start_pay_chapter_index SET DEFAULT 3;
 	`)
 
 	// Create system_configs table and seed global billing settings
@@ -56,6 +57,7 @@ func InitDB() {
 			value VARCHAR(255) NOT NULL
 		);
 		INSERT INTO system_configs (key, value) VALUES ('global_coin_cost_per_thousand', '5') ON CONFLICT DO NOTHING;
+		INSERT INTO system_configs (key, value) VALUES ('global_start_pay_chapter_index', '3') ON CONFLICT DO NOTHING;
 	`)
 
 	// 1. Create recharge_templates table
@@ -131,6 +133,8 @@ func InitDB() {
 	// 5. Link promotion_links to fb_pixels
 	_, _ = pool.Exec(ctx, "ALTER TABLE promotion_links ADD COLUMN IF NOT EXISTS fb_pixel_id INT REFERENCES fb_pixels(id) ON DELETE SET NULL")
 	_, _ = pool.Exec(ctx, "ALTER TABLE promotion_links ADD COLUMN IF NOT EXISTS recharge_template_id INT REFERENCES recharge_templates(id) ON DELETE SET NULL")
+	_, _ = pool.Exec(ctx, "ALTER TABLE promotion_links ADD COLUMN IF NOT EXISTS coin_cost_per_thousand INT DEFAULT NULL")
+	_, _ = pool.Exec(ctx, "ALTER TABLE promotion_links ADD COLUMN IF NOT EXISTS start_pay_chapter_index INT DEFAULT NULL")
 
 	// Seed templates if table is empty
 	var count int

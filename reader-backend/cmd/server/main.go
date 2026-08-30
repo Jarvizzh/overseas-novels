@@ -15,10 +15,12 @@ import (
 	"reader-backend/internal/auth"
 	"reader-backend/internal/config"
 	"reader-backend/internal/db"
+	"reader-backend/internal/feedback"
 	"reader-backend/internal/novel"
 	"reader-backend/internal/payment"
 	"reader-backend/internal/redis"
 	"reader-backend/internal/shelf"
+	"reader-backend/internal/storage"
 	"reader-backend/internal/tracking"
 	"reader-backend/internal/wallet"
 	"reader-backend/internal/workerpool"
@@ -82,9 +84,15 @@ func main() {
 		authHandler := auth.NewAuthHandler(authService)
 		authHandler.RegisterRoutes(api)
 
+		contentStorage, err := storage.NewContentStorage(config.AppConfig, db.DB)
+		if err != nil {
+			log.Fatalf("Failed to initialize content storage: %v", err)
+		}
+		log.Printf("Reader Content Storage initialized with driver: %s", contentStorage.StorageType())
+
 		novelRepo := novel.NewDBRepository()
 		novelCache := novel.NewRedisCache()
-		novelService := novel.NewService(novelRepo, novelCache)
+		novelService := novel.NewService(novelRepo, novelCache, contentStorage)
 		novelHandler := novel.NewHandler(novelService)
 		novelHandler.RegisterRoutes(api)
 
@@ -100,6 +108,11 @@ func main() {
 		walletService := wallet.NewService(walletRepo, novelRepo, novelCache, stripeClient, paypalClient)
 		walletHandler := wallet.NewHandler(walletService)
 		walletHandler.RegisterRoutes(api)
+
+		feedbackRepo := feedback.NewRepository()
+		feedbackService := feedback.NewService(feedbackRepo)
+		feedbackHandler := feedback.NewHandler(feedbackService)
+		feedbackHandler.RegisterRoutes(api)
 	}
 
 	r.GET("/health", func(c *gin.Context) {

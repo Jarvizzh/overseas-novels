@@ -53,13 +53,13 @@ export default function NovelsTab() {
   const [newNovel, setNewNovel] = useState<NovelFormData>({
     title: '', author: '', cover_url: 'https://images.unsplash.com/photo-1543002588-bfa74002ed7e?w=300',
     status: 'Ongoing', rating: 4.5, synopsis: '', genres: 'Romance, Werewolf',
-    coin_cost_per_thousand: 5, start_pay_chapter_index: 10
+    coin_cost_per_thousand: 5, start_pay_chapter_index: 3
   });
 
   const [isEditing, setIsEditing] = useState(false);
   const [editNovelForm, setEditNovelForm] = useState<NovelFormData>({
     title: '', author: '', cover_url: '', status: 'Ongoing', rating: 4.5, synopsis: '', genres: '',
-    coin_cost_per_thousand: 5, start_pay_chapter_index: 10
+    coin_cost_per_thousand: 5, start_pay_chapter_index: 3
   });
 
   const [importFile, setImportFile] = useState<File | null>(null);
@@ -94,6 +94,8 @@ export default function NovelsTab() {
     utmCampaign: string;
     fbPixelId: string;
     rechargeTemplateId: string;
+    coinCostPerThousand: string;
+    startPayChapterIndex: string;
   }>({
     name: '',
     novelId: 0,
@@ -102,12 +104,16 @@ export default function NovelsTab() {
     utmSource: 'facebook',
     utmCampaign: '',
     fbPixelId: '',
-    rechargeTemplateId: ''
+    rechargeTemplateId: '',
+    coinCostPerThousand: '',
+    startPayChapterIndex: ''
   });
   const [generatedLink, setGeneratedLink] = useState('');
 
   // Global config states
   const [globalCoinCost, setGlobalCoinCost] = useState(5);
+  const [globalStartPayChapter, setGlobalStartPayChapter] = useState(3);
+  const [applyToAllNovels, setApplyToAllNovels] = useState(true);
   const [isConfiguringGlobal, setIsConfiguringGlobal] = useState(false);
 
   const filteredNovels = novels.filter(novel =>
@@ -178,7 +184,12 @@ export default function NovelsTab() {
   const fetchGlobalConfig = async () => {
     try {
       const data = await apiRequest('GET', '/settings');
-      setGlobalCoinCost(data.global_coin_cost_per_thousand);
+      if (data.global_coin_cost_per_thousand) {
+        setGlobalCoinCost(Number(data.global_coin_cost_per_thousand));
+      }
+      if (data.global_start_pay_chapter_index) {
+        setGlobalStartPayChapter(Number(data.global_start_pay_chapter_index));
+      }
     } catch (err) {
       console.error("加载全局配置失败:", err);
     }
@@ -265,7 +276,7 @@ export default function NovelsTab() {
       setNewNovel({
         title: '', author: '', cover_url: 'https://images.unsplash.com/photo-1543002588-bfa74002ed7e?w=300',
         status: 'Ongoing', rating: 4.5, synopsis: '', genres: 'Romance, Werewolf',
-        coin_cost_per_thousand: 5, start_pay_chapter_index: 10
+        coin_cost_per_thousand: 5, start_pay_chapter_index: globalStartPayChapter || 3
       });
       fetchNovels();
     } catch (err: any) {
@@ -277,13 +288,22 @@ export default function NovelsTab() {
     e.preventDefault();
     try {
       await apiRequest('POST', '/settings', {
-        global_coin_cost_per_thousand: String(globalCoinCost)
+        global_coin_cost_per_thousand: String(globalCoinCost),
+        global_start_pay_chapter_index: String(globalStartPayChapter),
+        apply_to_all_novels: applyToAllNovels ? 'true' : 'false'
       });
-      window.showToast?.('全局运营千字收费单价保存成功！', 'success');
+      window.showToast?.(
+        applyToAllNovels 
+          ? `全局运营计费配置已保存，并已将全部书籍更新为第 ${globalStartPayChapter} 章起付费！` 
+          : '全局运营计费配置保存成功！', 
+        'success'
+      );
       setIsConfiguringGlobal(false);
-      fetchNovels();
+      await fetchNovels();
       if (selectedNovel) {
-        fetchChapters(selectedNovel.id);
+        await fetchChapters(selectedNovel.id);
+        const updated = await apiRequest('GET', `/novels/${selectedNovel.id}`);
+        if (updated) setSelectedNovel(updated);
       }
     } catch (err: any) {
       window.showToast?.(err.message || '保存全局配置失败', 'error');
@@ -379,11 +399,18 @@ export default function NovelsTab() {
       params.set('template_id', promotionForm.rechargeTemplateId);
     }
 
+    if (promotionForm.coinCostPerThousand) {
+      params.set('cost', promotionForm.coinCostPerThousand);
+    }
+    if (promotionForm.startPayChapterIndex) {
+      params.set('pay_ch', promotionForm.startPayChapterIndex);
+    }
+
     const path = promotionForm.chapterIndex ? '/content' : '/detail';
     const finalUrl = `${baseUrl}${path}?${params.toString()}`;
 
     try {
-      await apiRequest('POST', '/promotion-links', {
+      const created = await apiRequest('POST', '/promotion-links', {
         name: promotionForm.name,
         novel_id: promotionForm.novelId,
         novel_title: promotionForm.title,
@@ -393,8 +420,17 @@ export default function NovelsTab() {
         generated_url: finalUrl,
         fb_pixel_id: promotionForm.fbPixelId ? parseInt(promotionForm.fbPixelId, 10) : null,
         recharge_template_id: promotionForm.rechargeTemplateId ? parseInt(promotionForm.rechargeTemplateId, 10) : null,
+        coin_cost_per_thousand: promotionForm.coinCostPerThousand ? parseInt(promotionForm.coinCostPerThousand, 10) : null,
+        start_pay_chapter_index: promotionForm.startPayChapterIndex ? parseInt(promotionForm.startPayChapterIndex, 10) : null,
       });
-      setGeneratedLink(finalUrl);
+
+      // If link was created with an ID, append link_id to the final URL for accurate tracking
+      let resolvedUrl = finalUrl;
+      if (created && created.id) {
+        params.set('link_id', String(created.id));
+        resolvedUrl = `${baseUrl}${path}?${params.toString()}`;
+      }
+      setGeneratedLink(resolvedUrl);
       window.showToast?.('推广链接已成功生成并记录！', 'success');
     } catch (err: any) {
       window.showToast?.('保存推广链接失败：' + err.message, 'error');
@@ -446,7 +482,9 @@ export default function NovelsTab() {
                 utmSource: 'facebook',
                 utmCampaign: '',
                 fbPixelId: '',
-                rechargeTemplateId: ''
+                rechargeTemplateId: '',
+                coinCostPerThousand: '',
+                startPayChapterIndex: ''
               });
               setGeneratedLink('');
               setIsPromoModalOpen(true);
@@ -463,7 +501,7 @@ export default function NovelsTab() {
                 synopsis: selectedNovel.synopsis || '',
                 genres: selectedNovel.genres.join(', '),
                 coin_cost_per_thousand: selectedNovel.coin_cost_per_thousand || 5,
-                start_pay_chapter_index: selectedNovel.start_pay_chapter_index || 10
+                start_pay_chapter_index: selectedNovel.start_pay_chapter_index || 3
               });
               setIsEditing(true);
             }} className="btn-primary" style={{ display: 'inline-flex', gap: '8px' }}>
@@ -504,7 +542,7 @@ export default function NovelsTab() {
               </div>
               <div>
                 <span style={{ display: 'block', fontSize: '0.75rem', color: 'hsl(var(--text-muted))' }}>收费起点</span>
-                <span style={{ fontSize: '1.2rem', fontWeight: 600, color: 'hsl(var(--primary))' }}>第 {selectedNovel.start_pay_chapter_index || 10} 章起</span>
+                <span style={{ fontSize: '1.2rem', fontWeight: 600, color: 'hsl(var(--primary))' }}>第 {selectedNovel.start_pay_chapter_index || 3} 章起</span>
               </div>
               <div>
                 <span style={{ display: 'block', fontSize: '0.75rem', color: 'hsl(var(--text-muted))' }}>分类标签</span>
@@ -768,7 +806,7 @@ export default function NovelsTab() {
         </div>
         <div style={{ display: 'flex', gap: '12px' }}>
           <button onClick={() => setIsConfiguringGlobal(!isConfiguringGlobal)} className="btn-secondary" style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
-            <Settings size={16} /> 全局千字价格 ({globalCoinCost} 金币)
+            <Settings size={16} /> 全局计费配置 (千字 {globalCoinCost} 币 · 第 {globalStartPayChapter} 章起)
           </button>
           <button onClick={() => setIsCreating(!isCreating)} className="btn-primary" style={{ display: 'flex', gap: '6px' }}>
             <Plus size={16} /> 新建书籍档案
@@ -779,10 +817,10 @@ export default function NovelsTab() {
       {isConfiguringGlobal && (
         <form onSubmit={handleSaveGlobalConfig} className="glass-panel" style={{ padding: '24px', marginBottom: '30px' }}>
           <h3 style={{ marginBottom: '18px', display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <Settings size={18} style={{ color: 'hsl(var(--primary))' }} /> 配置全局千字收费单价
+            <Settings size={18} style={{ color: 'hsl(var(--primary))' }} /> 配置全局运营计费与起付章节
           </h3>
-          <div style={{ display: 'flex', gap: '16px', alignItems: 'flex-end', maxWidth: '500px' }}>
-            <div style={{ flex: 1 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px', maxWidth: '640px', marginBottom: '16px' }}>
+            <div>
               <label style={{ display: 'block', fontSize: '0.8rem', color: 'hsl(var(--text-secondary))', marginBottom: '6px' }}>
                 全局千字收费价格 (金币)
               </label>
@@ -795,8 +833,37 @@ export default function NovelsTab() {
                 required
               />
             </div>
+            <div>
+              <label style={{ display: 'block', fontSize: '0.8rem', color: 'hsl(var(--text-secondary))', marginBottom: '6px' }}>
+                全局默认起始付费章节 (从第几章起)
+              </label>
+              <input
+                type="number"
+                className="input-field"
+                min={1}
+                value={globalStartPayChapter}
+                onChange={(e) => setGlobalStartPayChapter(e.target.value === '' ? '' as any : Number(e.target.value))}
+                required
+              />
+            </div>
+          </div>
+
+          <div style={{ marginBottom: '18px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <input
+              type="checkbox"
+              id="applyAllNovelsCheckbox"
+              checked={applyToAllNovels}
+              onChange={(e) => setApplyToAllNovels(e.target.checked)}
+              style={{ width: '16px', height: '16px', cursor: 'pointer' }}
+            />
+            <label htmlFor="applyAllNovelsCheckbox" style={{ fontSize: '0.85rem', color: 'hsl(var(--text-primary))', cursor: 'pointer' }}>
+              同步覆盖并应用到全部已有书籍（所有书籍均从第 {globalStartPayChapter} 章开始付费）
+            </label>
+          </div>
+
+          <div style={{ display: 'flex', gap: '12px' }}>
             <button type="submit" className="btn-primary" style={{ height: '38px' }}>
-              保存全局配置
+              保存全局计费配置
             </button>
             <button type="button" className="btn-secondary" style={{ height: '38px' }} onClick={() => setIsConfiguringGlobal(false)}>
               取消
@@ -934,7 +1001,9 @@ export default function NovelsTab() {
                             utmSource: 'facebook',
                             utmCampaign: '',
                             fbPixelId: '',
-                            rechargeTemplateId: ''
+                            rechargeTemplateId: '',
+                            coinCostPerThousand: '',
+                            startPayChapterIndex: ''
                           });
                           setGeneratedLink('');
                           setIsPromoModalOpen(true);

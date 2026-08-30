@@ -27,9 +27,10 @@ var (
 type Service interface {
 	GetWallet(ctx context.Context, userID int64) (*model.Wallet, error)
 	GetHistory(ctx context.Context, userID int64, limit, offset int) ([]model.Transaction, error)
-	UnlockChapter(ctx context.Context, userID int64, novelID int64, chapterIndex int) error
+	UnlockChapter(ctx context.Context, userID int64, novelID int64, chapterIndex int, promoID int, utmSource, utmCampaign string) error
 	InitiateCheckout(ctx context.Context, userID int64, amountCents int64, coinsAmount int, fbp, fbc, pixelID, ip, ua, sourceURL, country string) error
 	CreateStripeIntent(ctx context.Context, userID int64, amountCents int64, coinsAmount int, fbp, fbc, pixelID, ip, ua, sourceURL, country string) (string, error)
+	CreatePayPalOrder(ctx context.Context, userID int64, amountCents int64, coinsAmount int, returnURL, cancelURL, fbp, fbc, pixelID, ip, ua, sourceURL, country string) (string, string, error)
 	CapturePayPalPayment(ctx context.Context, userID int64, orderID string, coinsAmount int, fbp, fbc, pixelID, ip, ua, sourceURL, country string) error
 	ProcessStripeWebhook(ctx context.Context, payload []byte, sigHeader string, webhookSecret string) error
 	AwardDailyCheckIn(ctx context.Context, userID int64, coinsAmount int, day int) error
@@ -73,7 +74,7 @@ func (s *service) GetHistory(ctx context.Context, userID int64, limit, offset in
 	return s.repo.GetTransactions(ctx, userID, limit, offset)
 }
 
-func (s *service) UnlockChapter(ctx context.Context, userID int64, novelID int64, chapterIndex int) error {
+func (s *service) UnlockChapter(ctx context.Context, userID int64, novelID int64, chapterIndex int, promoID int, utmSource, utmCampaign string) error {
 	ch, err := s.novelRepo.GetChapter(ctx, novelID, chapterIndex)
 	if err != nil {
 		return err
@@ -82,11 +83,19 @@ func (s *service) UnlockChapter(ctx context.Context, userID int64, novelID int64
 		return errors.New("chapter not found")
 	}
 
-	if !ch.IsPaid {
+	effectiveStartPay, effectiveCost, _ := s.novelRepo.GetEffectivePricingRule(ctx, userID, novelID, promoID, utmSource, utmCampaign)
+
+	isPaid := (chapterIndex >= (effectiveStartPay - 1))
+	if !isPaid {
 		return nil
 	}
 
-	err = s.repo.UnlockChapterTx(ctx, userID, novelID, chapterIndex, ch.Price, ch.Title)
+	price := int(math.Round((float64(ch.WordCount) / 1000.0) * float64(effectiveCost)))
+	if price <= 0 {
+		price = ch.Price
+	}
+
+	err = s.repo.UnlockChapterTx(ctx, userID, novelID, chapterIndex, price, ch.Title)
 	if err != nil {
 		return err
 	}
@@ -126,6 +135,36 @@ func (s *service) CreateStripeIntent(ctx context.Context, userID int64, amountCe
 	})
 
 	return clientSecret, nil
+}
+
+func (s *service) CreatePayPalOrder(ctx context.Context, userID int64, amountCents int64, coinsAmount int, returnURL, cancelURL, fbp, fbc, pixelID, ip, ua, sourceURL, country string) (string, string, error) {
+	// Security Check: Verify amount against expected price in recharge_slots
+	expectedPriceCents, err := s.repo.GetPriceCentsByCoins(ctx, coinsAmount)
+	if err == nil && expectedPriceCents > 0 && amountCents < int64(expectedPriceCents) {
+		log.Printf("[Security Risk] User %d attempted PayPal amount tampering! Paid Cents: %d, Expected Cents: %d", userID, amountCents, expectedPriceCents)
+		return "", "", errors.New("payment amount does not match the configured price for requested coins")
+	}
+
+	description := fmt.Sprintf("Star Novel %d Coins Topup", coinsAmount)
+	orderID, approveURL, err := s.paypalClient.CreateOrder(ctx, amountCents, coinsAmount, userID, description, returnURL, cancelURL)
+	if err != nil {
+		return "", "", err
+	}
+
+	// Create a Pending order in our local database
+	err = s.repo.CreatePendingOrder(ctx, userID, orderID, coinsAmount, amountCents, "USD", "paypal")
+	if err != nil {
+		log.Printf("[Warning] Failed to pre-create PayPal Pending order: %v", err)
+	}
+
+	email, _ := s.repo.GetUserEmail(ctx, userID)
+
+	// Trigger FB Conversions API InitiateCheckout event asynchronously via WorkerPool
+	workerpool.Submit(func() {
+		tracking.SendFacebookEvent(pixelID, "InitiateCheckout", strconv.FormatInt(userID, 10), email, ip, ua, fbc, fbp, float64(amountCents)/100.0, "USD", sourceURL, country)
+	})
+
+	return orderID, approveURL, nil
 }
 
 func (s *service) CapturePayPalPayment(ctx context.Context, userID int64, orderID string, coinsAmount int, fbp, fbc, pixelID, ip, ua, sourceURL, country string) error {

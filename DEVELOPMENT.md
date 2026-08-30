@@ -14,7 +14,7 @@
 ### 技术栈详情
 * **前端 (H5 & CMS)**：React 19, Vite 8, TypeScript 6, Vanilla CSS (微秒级动效与极简毛玻璃卡片风格)。
 * **后端 (Go REST API)**：Go 1.25, Gin, pgxpool (高性能 PostgreSQL 驱动), go-redis/v9 (缓存与高并发 ACL)。
-* **基础设施**：PostgreSQL 15, Redis 7, Docker Compose。
+* **基础设施**：PostgreSQL 18, Redis 7, Docker Compose。
 * **开发分层规范**：详细的分层职责定义、高并发防刷、缓存设计和高可用事务标准请参见工程根目录下的 [development_guidelines.md](file:///Users/jarvizzhang/IdeaProjects/star-novel/development_guidelines.md)。
 
 ---

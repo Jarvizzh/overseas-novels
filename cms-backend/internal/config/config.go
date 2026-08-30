@@ -18,6 +18,12 @@ type Config struct {
 	PayPalClientID     string
 	PayPalClientSecret string
 	DefaultDomain      string
+	StorageType        string
+	OSSEndpoint        string
+	OSSAccessKeyID     string
+	OSSAccessKeySecret string
+	OSSBucket          string
+	OSSBasePath        string
 }
 
 var AppConfig *Config
@@ -38,6 +44,12 @@ func LoadConfig() {
 		PayPalClientID:     getEnv("PAYPAL_CLIENT_ID", ""),
 		PayPalClientSecret: getEnv("PAYPAL_CLIENT_SECRET", ""),
 		DefaultDomain:      getEnv("DEFAULT_DOMAIN", "https://h5.star-novel.com"),
+		StorageType:        getEnv("STORAGE_TYPE", "postgres"),
+		OSSEndpoint:        getEnv("OSS_ENDPOINT", ""),
+		OSSAccessKeyID:     getEnv("OSS_ACCESS_KEY_ID", ""),
+		OSSAccessKeySecret: getEnv("OSS_ACCESS_KEY_SECRET", ""),
+		OSSBucket:          getEnv("OSS_BUCKET", ""),
+		OSSBasePath:        getEnv("OSS_BASE_PATH", "novels"),
 	}
 	App = AppConfig
 }

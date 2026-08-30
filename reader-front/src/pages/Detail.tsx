@@ -78,7 +78,7 @@ export const Detail: React.FC<DetailProps> = ({
     <div className="page-container-full animate-fade-in">
       <div 
         className="scroll-container-no-pad" 
-        style={{ height: 'calc(100vh - 68px)' }}
+        style={{ flex: 1, minHeight: 0 }}
       >
         {/* Cover backdrop header */}
         <div className="detail-bg">

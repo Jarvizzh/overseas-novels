@@ -15,9 +15,16 @@ type Config struct {
 	StripeSecretKey    string
 	PayPalClientID     string
 	PayPalClientSecret string
+	PayPalMode         string // "sandbox" or "live"
 	FbPixelID          string
 	FbAccessToken      string
 	DefaultDomain      string
+	StorageType        string
+	OSSEndpoint        string
+	OSSAccessKeyID     string
+	OSSAccessKeySecret string
+	OSSBucket          string
+	OSSBasePath        string
 }
 
 var AppConfig *Config
@@ -41,9 +48,16 @@ func LoadConfig() {
 		StripeSecretKey:    getEnv("STRIPE_SECRET_KEY", ""),
 		PayPalClientID:     getEnv("PAYPAL_CLIENT_ID", ""),
 		PayPalClientSecret: getEnv("PAYPAL_CLIENT_SECRET", ""),
+		PayPalMode:         getEnv("PAYPAL_MODE", "sandbox"),
 		FbPixelID:          getEnv("FB_PIXEL_ID", ""),
 		FbAccessToken:      getEnv("FB_ACCESS_TOKEN", ""),
 		DefaultDomain:      getEnv("DEFAULT_DOMAIN", "https://h5.star-novel.com"),
+		StorageType:        getEnv("STORAGE_TYPE", "postgres"),
+		OSSEndpoint:        getEnv("OSS_ENDPOINT", ""),
+		OSSAccessKeyID:     getEnv("OSS_ACCESS_KEY_ID", ""),
+		OSSAccessKeySecret: getEnv("OSS_ACCESS_KEY_SECRET", ""),
+		OSSBucket:          getEnv("OSS_BUCKET", ""),
+		OSSBasePath:        getEnv("OSS_BASE_PATH", "novels"),
 	}
 	App = AppConfig
 }

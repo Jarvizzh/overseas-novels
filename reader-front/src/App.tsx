@@ -1,6 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { Routes, Route, useNavigate, useLocation, useSearchParams } from 'react-router-dom';
-import { MOCK_NOVELS } from './data/novels';
 import { Header } from './components/Header';
 import { BottomNav } from './components/BottomNav';
 import { Home } from './pages/Home';
@@ -26,8 +25,8 @@ function AppContent() {
   // User auth state
   const [user, setUser] = useState<User | null>(null);
 
-  // Dynamic Novels State
-  const [novels, setNovels] = useState<Novel[]>(MOCK_NOVELS as unknown as Novel[]);
+  // Dynamic Novels State loaded from Backend API
+  const [novels, setNovels] = useState<Novel[]>([]);
 
   // Personal Shelf Saved Books
   const [shelfBookIds, setShelfBookIds] = useState<number[]>([]);
@@ -38,7 +37,7 @@ function AppContent() {
   }>({});
 
   // Global theme settings
-  const [globalTheme, setGlobalTheme] = useState<'light' | 'dark'>(() => {
+  const [globalTheme] = useState<'light' | 'dark'>(() => {
     const saved = localStorage.getItem('color-scheme');
     if (saved === 'dark' || saved === 'light') return saved;
     return 'light';
@@ -69,7 +68,7 @@ function AppContent() {
       const balance = await api.getWalletBalance();
       setUserCoins(balance.charged_coins + balance.bonus_coins);
       
-      const shelfItems = await api.getShelf();
+      const shelfItems = (await api.getShelf()) || [];
       setShelfBookIds(shelfItems.map(item => item.novel_id));
       
       const progressMap: { [bookId: number]: { chapterIndex: number; scrollOffsetPercentage: number } } = {};
@@ -107,11 +106,13 @@ function AppContent() {
     const fbclid = params.get('fbclid');
     const pixelId = params.get('pixel_id');
     const templateId = params.get('template_id');
+    const linkId = params.get('link_id') || params.get('promo_id');
 
     if (utmSource) localStorage.setItem('utm_source', utmSource);
     if (utmCampaign) localStorage.setItem('utm_campaign', utmCampaign);
     if (pixelId) localStorage.setItem('fb_pixel_id', pixelId);
     if (templateId) localStorage.setItem('recharge_template_id', templateId);
+    if (linkId) localStorage.setItem('promo_id', linkId);
     if (fbclid) {
       localStorage.setItem('fbclid', fbclid);
       const creationTime = Date.now();
@@ -196,7 +197,7 @@ function AppContent() {
 
   // Centralized SPA Router Navigation helper preserving CMS tracking params
   const navigateTo = useCallback((pageOrPath: string, params: any = null) => {
-    const trackingKeys = ['utm_source', 'utm_campaign', 'fbclid', 'pixel_id', 'template_id'];
+    const trackingKeys = ['utm_source', 'utm_campaign', 'fbclid', 'pixel_id', 'template_id', 'link_id', 'promo_id'];
     const newSearchParams = new URLSearchParams();
     
     trackingKeys.forEach((key) => {
@@ -440,8 +441,6 @@ function AppContent() {
                 shelfBookIds={shelfBookIds}
                 readingProgress={readingProgress}
                 onNavigate={navigateTo}
-                globalTheme={globalTheme}
-                onChangeGlobalTheme={setGlobalTheme}
                 userCoins={userCoins}
                 transactionHistory={transactionHistory}
                 currentUser={user}

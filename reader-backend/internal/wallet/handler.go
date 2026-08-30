@@ -29,6 +29,7 @@ func (h *Handler) RegisterRoutes(r *gin.RouterGroup) {
 		walletGroup.POST("/unlock", h.UnlockChapter)
 		walletGroup.POST("/recharge/initiate", h.InitiateCheckout)
 		walletGroup.POST("/recharge/stripe", h.CreateStripeIntent)
+		walletGroup.POST("/recharge/paypal/create-order", h.CreatePayPalOrder)
 		walletGroup.POST("/recharge/paypal/capture", h.CapturePayPalPayment)
 		walletGroup.POST("/rewards/checkin", h.DailyCheckIn)
 		walletGroup.GET("/recharge/templates", h.GetRechargeTemplates)
@@ -79,7 +80,7 @@ func (h *Handler) GetHistory(c *gin.Context) {
 
 type UnlockRequest struct {
 	NovelID      int64 `json:"novel_id" binding:"required"`
-	ChapterIndex int   `json:"chapter_index" binding:"required"`
+	ChapterIndex int   `json:"chapter_index" binding:"gte=0"`
 }
 
 func (h *Handler) UnlockChapter(c *gin.Context) {
@@ -90,8 +91,26 @@ func (h *Handler) UnlockChapter(c *gin.Context) {
 		return
 	}
 
+	promoIDStr := c.GetHeader("X-Promo-ID")
+	if promoIDStr == "" {
+		promoIDStr = c.Query("link_id")
+		if promoIDStr == "" {
+			promoIDStr = c.Query("promo_id")
+		}
+	}
+	promoID, _ := strconv.Atoi(promoIDStr)
+
+	utmSource := c.GetHeader("X-UTM-Source")
+	if utmSource == "" {
+		utmSource = c.Query("utm_source")
+	}
+	utmCampaign := c.GetHeader("X-UTM-Campaign")
+	if utmCampaign == "" {
+		utmCampaign = c.Query("utm_campaign")
+	}
+
 	ctx := c.Request.Context()
-	err := h.service.UnlockChapter(ctx, userID, req.NovelID, req.ChapterIndex)
+	err := h.service.UnlockChapter(ctx, userID, req.NovelID, req.ChapterIndex, promoID, utmSource, utmCampaign)
 	if err != nil {
 		if errors.Is(err, ErrInsufficientBalance) {
 			c.JSON(http.StatusPaymentRequired, gin.H{"error": "Insufficient balance. Please top up."})
@@ -177,6 +196,46 @@ func (h *Handler) CreateStripeIntent(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{
 		"client_secret": clientSecret,
+	})
+}
+
+type PayPalCreateOrderRequest struct {
+	AmountCents int64  `json:"amount_cents" binding:"required"`
+	CoinsAmount int    `json:"coins_amount" binding:"required"`
+	ReturnURL   string `json:"return_url"`
+	CancelURL   string `json:"cancel_url"`
+}
+
+func (h *Handler) CreatePayPalOrder(c *gin.Context) {
+	userID := c.MustGet("user_id").(int64)
+	var req PayPalCreateOrderRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	ctx := c.Request.Context()
+
+	fbp := c.GetHeader("X-FB-FBP")
+	fbc := c.GetHeader("X-FB-FBC")
+	pixelID := c.GetHeader("X-FB-Pixel-ID")
+	ip := c.ClientIP()
+	ua := c.Request.UserAgent()
+	sourceURL := c.GetHeader("X-Event-Source-URL")
+	country := c.GetHeader("X-Country")
+	if country == "" {
+		country = c.GetHeader("CF-IPCountry")
+	}
+
+	orderID, approveURL, err := h.service.CreatePayPalOrder(ctx, userID, req.AmountCents, req.CoinsAmount, req.ReturnURL, req.CancelURL, fbp, fbc, pixelID, ip, ua, sourceURL, country)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create PayPal order: " + err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"order_id":    orderID,
+		"approve_url": approveURL,
 	})
 }
 

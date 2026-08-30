@@ -198,12 +198,12 @@ export const NovelFormModal: React.FC<NovelFormModalProps> = ({
               </div>
               <div>
                 <label style={{ display: 'block', fontSize: '0.8rem', color: 'hsl(var(--text-secondary))', marginBottom: '6px' }}>
-                  起始收费章节 (默认从第 10 章起)
+                  起始收费章节 (默认从第 3 章起)
                 </label>
                 <input
                   type="number"
                   className="input-field"
-                  min={0}
+                  min={1}
                   value={formData.start_pay_chapter_index}
                   onChange={(e) =>
                     setFormData({

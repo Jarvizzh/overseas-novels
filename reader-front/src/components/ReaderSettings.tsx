@@ -15,6 +15,10 @@ interface ReaderSettingsProps {
   onBack: () => void;
   isInShelf: boolean;
   onAddToShelf: () => void;
+  currentChapterIndex?: number;
+  totalChapters?: number;
+  onPrevChapter?: () => void;
+  onNextChapter?: () => void;
 }
 
 export const ReaderSettings: React.FC<ReaderSettingsProps> = ({
@@ -32,6 +36,10 @@ export const ReaderSettings: React.FC<ReaderSettingsProps> = ({
   onBack,
   isInShelf,
   onAddToShelf,
+  currentChapterIndex = 0,
+  totalChapters = 1,
+  onPrevChapter,
+  onNextChapter,
 }) => {
   const themes = [
     { id: 'day', name: 'Day', bg: '#fdfdfd' },
@@ -78,6 +86,37 @@ export const ReaderSettings: React.FC<ReaderSettingsProps> = ({
 
       {/* Bottom Controls */}
       <div className={`reader-hud-bottom ${visible ? 'visible' : ''}`}>
+        {/* Chapter Quick Switcher */}
+        {totalChapters > 1 && (
+          <div className="hud-chapter-nav">
+            <button
+              className="hud-chapter-btn"
+              disabled={currentChapterIndex <= 0}
+              onClick={onPrevChapter}
+              aria-label="Previous chapter"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2.5} stroke="currentColor" style={{ width: '14px', height: '14px' }}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 19.5L8.25 12l7.5-7.5" />
+              </svg>
+              <span>Prev</span>
+            </button>
+            <span className="hud-chapter-info">
+              Chapter {currentChapterIndex + 1} / {totalChapters}
+            </span>
+            <button
+              className="hud-chapter-btn"
+              disabled={currentChapterIndex >= totalChapters - 1}
+              onClick={onNextChapter}
+              aria-label="Next chapter"
+            >
+              <span>Next</span>
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2.5} stroke="currentColor" style={{ width: '14px', height: '14px' }}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5" />
+              </svg>
+            </button>
+          </div>
+        )}
+
         {/* Themes Selector */}
         <div className="hud-section">
           <span className="hud-label">Theme</span>

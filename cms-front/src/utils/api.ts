@@ -68,3 +68,29 @@ export const domainApi = {
   deleteDomain: (id: number) =>
     apiRequest('DELETE', `/domains/${id}`),
 };
+
+export interface FeedbackItem {
+  id: number;
+  user_id: number;
+  email: string;
+  subject: string;
+  content: string;
+  status: 'pending' | 'replied' | 'resolved';
+  admin_reply: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export const feedbackApi = {
+  getFeedbackList: (params?: { page?: number; limit?: number; status?: string; keyword?: string }) => {
+    const query = new URLSearchParams();
+    if (params?.page) query.append('page', params.page.toString());
+    if (params?.limit) query.append('limit', params.limit.toString());
+    if (params?.status) query.append('status', params.status);
+    if (params?.keyword) query.append('keyword', params.keyword);
+    return apiRequest('GET', `/feedback?${query.toString()}`);
+  },
+  getFeedbackDetail: (id: number) => apiRequest('GET', `/feedback/${id}`),
+  updateFeedback: (id: number, data: { status: string; admin_reply: string }) =>
+    apiRequest('PUT', `/feedback/${id}`, data),
+};

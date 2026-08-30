@@ -4,6 +4,9 @@ import { GoldCoin } from '../components/GoldCoin';
 import { api } from '../utils/api';
 import type { User, Transaction } from '../utils/api';
 
+import { LegalModal } from '../components/LegalModal';
+import type { LegalModalType } from '../components/LegalModal';
+
 interface ProfileProps {
   shelfBookIds: number[];
   readingProgress: {
@@ -13,8 +16,6 @@ interface ProfileProps {
     };
   };
   onNavigate: (page: string, params?: any) => void;
-  globalTheme: 'light' | 'dark';
-  onChangeGlobalTheme: (theme: 'light' | 'dark') => void;
   userCoins: number;
   transactionHistory: Transaction[];
   currentUser: User | null;
@@ -26,8 +27,6 @@ export const Profile: React.FC<ProfileProps> = ({
   shelfBookIds,
   readingProgress,
   onNavigate,
-  globalTheme,
-  onChangeGlobalTheme,
   userCoins,
   transactionHistory,
   currentUser,
@@ -41,7 +40,8 @@ export const Profile: React.FC<ProfileProps> = ({
   });
 
   const [activeSubTab, setActiveSubTab] = useState<'settings' | 'history'>('settings');
-  const [authMode, setAuthMode] = useState<'none' | 'login' | 'register'>('none');
+  const [authMode, setAuthMode] = useState<'none' | 'login' | 'signup'>('none');
+  const [activeLegalModal, setActiveLegalModal] = useState<LegalModalType | null>(null);
   
   // Auth Form fields
   const [email, setEmail] = useState('');
@@ -65,15 +65,7 @@ export const Profile: React.FC<ProfileProps> = ({
   }, []);
 
   const totalBooksRead = Object.keys(readingProgress).length;
-
-  const getThemeValueLabel = () => {
-    if (globalTheme === 'dark') return 'Dark Mode 🌙';
-    return 'Light Mode ☀️';
-  };
-
-  const handleCycleTheme = () => {
-    onChangeGlobalTheme(globalTheme === 'light' ? 'dark' : 'light');
-  };
+  const isGuest = !currentUser || !currentUser.email;
 
   // Auth Action Handler
   const handleAuthSubmit = async (e: React.FormEvent) => {
@@ -85,10 +77,18 @@ export const Profile: React.FC<ProfileProps> = ({
       if (authMode === 'login') {
         const res = await api.login({ email, password });
         onLoginSuccess(res.token, res.user);
+        showToast("Welcome back!", "success");
         setAuthMode('none');
-      } else if (authMode === 'register') {
-        const res = await api.register({ email, password, nickname });
-        onLoginSuccess(res.token, res.user);
+      } else if (authMode === 'signup') {
+        if (isGuest) {
+          const res = await api.bindEmail({ email, password, nickname });
+          onLoginSuccess(res.token, res.user);
+          showToast("Account created successfully! Your coins and progress are secured.", "success");
+        } else {
+          const res = await api.register({ email, password, nickname });
+          onLoginSuccess(res.token, res.user);
+          showToast("Account created successfully!", "success");
+        }
         setAuthMode('none');
       }
       // Reset inputs
@@ -102,14 +102,26 @@ export const Profile: React.FC<ProfileProps> = ({
     }
   };
 
-  const isGuest = !currentUser || !currentUser.email;
-
   return (
-    <div className="scroll-container animate-fade-in" style={{ paddingBottom: '32px' }}>
+    <div className="scroll-container animate-fade-in" style={{ paddingBottom: '90px' }}>
       
-      {/* Profile Header */}
-      <div className="profile-card" style={{ display: 'flex', alignItems: 'center', gap: '16px', position: 'relative' }}>
+      {/* Profile Header Card */}
+      <div 
+        className="profile-card" 
+        style={{ 
+          display: 'flex', 
+          alignItems: 'center', 
+          gap: '12px', 
+          padding: '16px',
+          backgroundColor: 'var(--bg-secondary)',
+          borderRadius: '16px',
+          border: '1px solid var(--border-color)',
+          marginBottom: '16px',
+          boxShadow: 'var(--card-shadow)'
+        }}
+      >
         <div className="profile-avatar" style={{ 
+          flex: 'none',
           background: isGuest ? 'linear-gradient(135deg, #a1a1aa 0%, #71717a 100%)' : 'linear-gradient(135deg, #6366f1 0%, #4338ca 100%)',
           color: 'white',
           fontSize: '20px',
@@ -117,52 +129,56 @@ export const Profile: React.FC<ProfileProps> = ({
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
-          width: '52px',
-          height: '52px',
+          width: '48px',
+          height: '48px',
           borderRadius: '50%'
         }}>
           {isGuest ? 'G' : (currentUser?.nickname ? currentUser.nickname[0].toUpperCase() : 'U')}
         </div>
-        <div style={{ flex: 1 }}>
-          <h2 className="profile-name" style={{ fontSize: '18px', fontWeight: 800 }}>
+        <div style={{ flex: 1, minWidth: 0, overflow: 'hidden' }}>
+          <h2 className="profile-name" style={{ fontSize: '15px', fontWeight: 800, margin: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: 'var(--text-primary)' }}>
             {currentUser?.nickname || 'Star Guest'}
           </h2>
-          <p className="profile-bio" style={{ fontSize: '12px', color: 'var(--text-tertiary)' }}>
+          <p className="profile-bio" style={{ fontSize: '11px', color: 'var(--text-tertiary)', margin: '4px 0 0', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
             {isGuest ? 'Guest Account (Sync not persisted)' : currentUser.email}
           </p>
         </div>
         {isGuest ? (
           <button 
-            onClick={() => setAuthMode('login')}
+            onClick={() => {
+              setAuthMode('signup');
+              setAuthError(null);
+            }}
             style={{
-              position: 'absolute',
-              right: '16px',
-              padding: '6px 12px',
+              flex: 'none',
+              padding: '7px 12px',
               fontSize: '11px',
               fontWeight: 700,
               backgroundColor: 'var(--accent-color)',
               color: 'white',
               border: 'none',
               borderRadius: '20px',
-              cursor: 'pointer'
+              cursor: 'pointer',
+              whiteSpace: 'nowrap',
+              boxShadow: '0 2px 8px rgba(79, 70, 229, 0.3)'
             }}
           >
-            Sign In / Bind
+            Sign Up / Sign In
           </button>
         ) : (
           <button 
             onClick={onLogout}
             style={{
-              position: 'absolute',
-              right: '16px',
-              padding: '6px 12px',
+              flex: 'none',
+              padding: '7px 12px',
               fontSize: '11px',
               fontWeight: 700,
               backgroundColor: 'var(--bg-tertiary)',
               color: '#ef4444',
               border: '1px solid var(--border-color)',
               borderRadius: '20px',
-              cursor: 'pointer'
+              cursor: 'pointer',
+              whiteSpace: 'nowrap'
             }}
           >
             Sign Out
@@ -172,30 +188,27 @@ export const Profile: React.FC<ProfileProps> = ({
 
       {/* Wallet Card Section */}
       <div style={{
-        background: globalTheme === 'dark' 
-          ? 'linear-gradient(135deg, #0f172a 0%, #1e293b 100%)' 
-          : 'linear-gradient(135deg, #eef2ff 0%, #f8fafc 100%)',
-        color: globalTheme === 'dark' ? '#ffffff' : '#1e1b4b',
+        background: 'linear-gradient(135deg, var(--bg-secondary) 0%, var(--bg-tertiary) 100%)',
         borderRadius: '16px',
         padding: '20px',
         marginBottom: '20px',
-        border: globalTheme === 'dark' ? '1px solid rgba(255,255,255,0.1)' : '1px solid #c7d2fe',
-        boxShadow: globalTheme === 'dark' ? '0 8px 20px rgba(0,0,0,0.3)' : '0 8px 20px rgba(99,102,241,0.12)',
+        border: '1px solid var(--border-color)',
+        boxShadow: 'var(--card-shadow)',
         display: 'flex',
         justifyContent: 'space-between',
         alignItems: 'center',
         transition: 'all 0.3s ease'
       }}>
         <div>
-          <span style={{ fontSize: '11px', color: globalTheme === 'dark' ? '#94a3b8' : '#6366f1', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+          <span style={{ fontSize: '11px', color: 'var(--accent-color)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.5px' }}>
             My Wallet
           </span>
           <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginTop: '4px' }}>
             <GoldCoin size={22} />
-            <span style={{ fontSize: '26px', fontWeight: 800, fontFamily: 'monospace', color: globalTheme === 'dark' ? '#ffffff' : '#0f172a' }}>
+            <span style={{ fontSize: '26px', fontWeight: 800, fontFamily: 'monospace', color: 'var(--text-primary)' }}>
               {userCoins}
             </span>
-            <span style={{ fontSize: '13px', color: globalTheme === 'dark' ? '#94a3b8' : '#64748b', fontWeight: 500 }}>
+            <span style={{ fontSize: '13px', color: 'var(--text-secondary)', fontWeight: 500 }}>
               Coins
             </span>
           </div>
@@ -210,58 +223,70 @@ export const Profile: React.FC<ProfileProps> = ({
             fontWeight: 700,
             width: 'auto',
             borderRadius: '99px',
-            boxShadow: '0 4px 12px rgba(79,70,229,0.35)'
+            boxShadow: '0 4px 14px rgba(79, 70, 229, 0.35)',
+            border: 'none',
+            color: 'white',
+            cursor: 'pointer'
           }}
         >
-          Top Up +
+          Top Up
         </button>
       </div>
 
-      {/* Reading Statistics */}
-      <div className="stats-grid">
-        <div className="stats-card">
-          <div className="stats-val">{readingTime}m</div>
-          <div className="stats-lbl">Reading Time</div>
-        </div>
-        <div className="stats-card">
-          <div className="stats-val">{shelfBookIds.length}</div>
-          <div className="stats-lbl">In Shelf</div>
-        </div>
-      </div>
-
-      {/* Sub Tabs Selector */}
-      <div className="detail-tabs" style={{ margin: '10px -16px 16px', padding: '0 16px' }}>
+      {/* Sub Tabs: Settings vs History */}
+      <div className="sub-tabs-container" style={{ marginBottom: '16px' }}>
         <button 
-          className={`detail-tab ${activeSubTab === 'settings' ? 'active' : ''}`}
+          className={`sub-tab-btn ${activeSubTab === 'settings' ? 'active' : ''}`}
           onClick={() => setActiveSubTab('settings')}
         >
-          Preferences
+          Account Settings
         </button>
         <button 
-          className={`detail-tab ${activeSubTab === 'history' ? 'active' : ''}`}
+          className={`sub-tab-btn ${activeSubTab === 'history' ? 'active' : ''}`}
           onClick={() => setActiveSubTab('history')}
         >
-          Bill History ({transactionHistory.length})
+          Coin History
         </button>
       </div>
 
-      {/* Settings list */}
       {activeSubTab === 'settings' ? (
-        <div>
+        <div className="settings-section">
           <div className="settings-list">
-            <div className="settings-item" onClick={handleCycleTheme}>
-              <span>App Display Theme</span>
-              <span className="settings-item-value">{getThemeValueLabel()}</span>
-            </div>
-            
-            <div className="settings-item" onClick={() => onNavigate('shelf')}>
-              <span>Reading History</span>
-              <span className="settings-item-value">View ({totalBooksRead}) ›</span>
+            <div className="settings-item" onClick={() => onNavigate('rewards')}>
+              <span>Daily Rewards & Tasks</span>
+              <span className="settings-item-value">Earn Coins ›</span>
             </div>
 
-            <div className="settings-item" onClick={() => showToast("Multi-language: English is currently default.", "info")}>
-              <span>Interface Language</span>
-              <span className="settings-item-value">English (US) ›</span>
+            <div className="settings-item">
+              <span>Total Reading Time</span>
+              <span className="settings-item-value">{readingTime} mins</span>
+            </div>
+
+            <div className="settings-item" onClick={() => onNavigate('shelf')}>
+              <span>Reading History & Shelf</span>
+              <span className="settings-item-value">View ({shelfBookIds.length} in shelf, {totalBooksRead} read) ›</span>
+            </div>
+          </div>
+
+          <div style={{ marginTop: '20px' }}>
+            <h3 className="hot-tags-title" style={{ fontSize: '13px', marginBottom: '10px' }}>Support & Legal Policies</h3>
+            <div className="settings-list">
+              <div className="settings-item" onClick={() => setActiveLegalModal('contact')}>
+                <span>Contact Us & Customer Support</span>
+                <span className="settings-item-value">Support ›</span>
+              </div>
+              <div className="settings-item" onClick={() => setActiveLegalModal('refund')}>
+                <span>Refund & Purchase Policy</span>
+                <span className="settings-item-value">View ›</span>
+              </div>
+              <div className="settings-item" onClick={() => setActiveLegalModal('terms')}>
+                <span>Terms of Service</span>
+                <span className="settings-item-value">View ›</span>
+              </div>
+              <div className="settings-item" onClick={() => setActiveLegalModal('privacy')}>
+                <span>Privacy Policy</span>
+                <span className="settings-item-value">View ›</span>
+              </div>
             </div>
           </div>
         </div>
@@ -330,7 +355,7 @@ export const Profile: React.FC<ProfileProps> = ({
             borderRadius: '16px',
             padding: '24px',
             width: '100%',
-            maxWidth: '340px',
+            maxWidth: '350px',
             boxShadow: '0 20px 25px -5px rgba(0,0,0,0.3)',
             border: '1px solid var(--border-color)',
             position: 'relative'
@@ -354,9 +379,66 @@ export const Profile: React.FC<ProfileProps> = ({
               ×
             </button>
 
-            <h3 style={{ fontSize: '18px', fontWeight: 800, marginBottom: '20px', color: 'var(--text-primary)', textAlign: 'center' }}>
-              {authMode === 'login' ? 'Sign In to Account' : 'Register New Account'}
+            {/* 2-Tab Auth Switcher */}
+            <div style={{
+              display: 'flex',
+              backgroundColor: 'var(--bg-primary)',
+              borderRadius: '10px',
+              padding: '3px',
+              marginBottom: '16px'
+            }}>
+              <button
+                type="button"
+                onClick={() => {
+                  setAuthMode('signup');
+                  setAuthError(null);
+                }}
+                style={{
+                  flex: 1,
+                  padding: '8px 4px',
+                  fontSize: '12px',
+                  fontWeight: authMode === 'signup' ? 700 : 500,
+                  borderRadius: '8px',
+                  border: 'none',
+                  backgroundColor: authMode === 'signup' ? 'var(--bg-secondary)' : 'transparent',
+                  color: authMode === 'signup' ? 'var(--accent-color)' : 'var(--text-secondary)',
+                  cursor: 'pointer',
+                  boxShadow: authMode === 'signup' ? '0 2px 4px rgba(0,0,0,0.1)' : 'none'
+                }}
+              >
+                Sign Up
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setAuthMode('login');
+                  setAuthError(null);
+                }}
+                style={{
+                  flex: 1,
+                  padding: '8px 4px',
+                  fontSize: '12px',
+                  fontWeight: authMode === 'login' ? 700 : 500,
+                  borderRadius: '8px',
+                  border: 'none',
+                  backgroundColor: authMode === 'login' ? 'var(--bg-secondary)' : 'transparent',
+                  color: authMode === 'login' ? 'var(--accent-color)' : 'var(--text-secondary)',
+                  cursor: 'pointer',
+                  boxShadow: authMode === 'login' ? '0 2px 4px rgba(0,0,0,0.1)' : 'none'
+                }}
+              >
+                Sign In
+              </button>
+            </div>
+
+            <h3 style={{ fontSize: '17px', fontWeight: 800, marginBottom: '6px', color: 'var(--text-primary)', textAlign: 'center' }}>
+              {authMode === 'signup' ? 'Sign Up for Account' : 'Sign In to Account'}
             </h3>
+            <p style={{ fontSize: '11px', color: 'var(--text-tertiary)', textAlign: 'center', marginBottom: '16px' }}>
+              {authMode === 'signup' 
+                ? 'Sign up to keep your coins and reading progress safe.'
+                : 'Sign in to access your existing account and reading library.'}
+            </p>
 
             <form onSubmit={handleAuthSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
               <div>
@@ -364,6 +446,7 @@ export const Profile: React.FC<ProfileProps> = ({
                 <input 
                   type="email" 
                   value={email}
+                  placeholder="name@example.com"
                   onChange={(e) => setEmail(e.target.value)}
                   required 
                   style={{
@@ -373,16 +456,20 @@ export const Profile: React.FC<ProfileProps> = ({
                     border: '1px solid var(--border-color)',
                     backgroundColor: 'var(--bg-primary)',
                     color: 'var(--text-primary)',
-                    fontSize: '14px'
+                    fontSize: '14px',
+                    boxSizing: 'border-box'
                   }}
                 />
               </div>
 
               <div>
-                <label style={{ fontSize: '12px', color: 'var(--text-secondary)', display: 'block', marginBottom: '4px' }}>Password</label>
+                <label style={{ fontSize: '12px', color: 'var(--text-secondary)', display: 'block', marginBottom: '4px' }}>
+                  {authMode === 'login' ? 'Password' : 'Set Password (min 6 chars)'}
+                </label>
                 <input 
                   type="password" 
                   value={password}
+                  placeholder="••••••••"
                   onChange={(e) => setPassword(e.target.value)}
                   required 
                   minLength={6}
@@ -393,17 +480,19 @@ export const Profile: React.FC<ProfileProps> = ({
                     border: '1px solid var(--border-color)',
                     backgroundColor: 'var(--bg-primary)',
                     color: 'var(--text-primary)',
-                    fontSize: '14px'
+                    fontSize: '14px',
+                    boxSizing: 'border-box'
                   }}
                 />
               </div>
 
-              {authMode === 'register' && (
+              {authMode === 'signup' && (
                 <div>
-                  <label style={{ fontSize: '12px', color: 'var(--text-secondary)', display: 'block', marginBottom: '4px' }}>Nickname</label>
+                  <label style={{ fontSize: '12px', color: 'var(--text-secondary)', display: 'block', marginBottom: '4px' }}>Nickname (Optional)</label>
                   <input 
                     type="text" 
                     value={nickname}
+                    placeholder="Star Reader"
                     onChange={(e) => setNickname(e.target.value)}
                     style={{
                       width: '100%',
@@ -412,7 +501,8 @@ export const Profile: React.FC<ProfileProps> = ({
                       border: '1px solid var(--border-color)',
                       backgroundColor: 'var(--bg-primary)',
                       color: 'var(--text-primary)',
-                      fontSize: '14px'
+                      fontSize: '14px',
+                      boxSizing: 'border-box'
                     }}
                   />
                 </div>
@@ -438,10 +528,12 @@ export const Profile: React.FC<ProfileProps> = ({
                   fontWeight: 700,
                   cursor: isSubmitting ? 'not-allowed' : 'pointer',
                   boxShadow: '0 4px 14px rgba(79,70,229,0.3)',
-                  marginTop: '10px'
+                  marginTop: '6px'
                 }}
               >
-                {isSubmitting ? 'Processing...' : (authMode === 'login' ? 'Sign In' : 'Register & Bind')}
+                {isSubmitting ? 'Processing...' : (
+                  authMode === 'signup' ? 'Sign Up & Save' : 'Sign In'
+                )}
               </button>
             </form>
 
@@ -451,12 +543,12 @@ export const Profile: React.FC<ProfileProps> = ({
                   New to Star Novel?{' '}
                   <span 
                     onClick={() => {
-                      setAuthMode('register');
+                      setAuthMode('signup');
                       setAuthError(null);
                     }} 
                     style={{ color: 'var(--accent-color)', fontWeight: 700, cursor: 'pointer' }}
                   >
-                    Create Account
+                    Sign Up
                   </span>
                 </>
               ) : (
@@ -477,6 +569,14 @@ export const Profile: React.FC<ProfileProps> = ({
           </div>
         </div>
       )}
+
+      {/* Legal & Compliance Policy Modal */}
+      <LegalModal
+        isOpen={activeLegalModal !== null}
+        type={activeLegalModal || 'contact'}
+        onClose={() => setActiveLegalModal(null)}
+        defaultEmail={currentUser?.email || ''}
+      />
     </div>
   );
 };
