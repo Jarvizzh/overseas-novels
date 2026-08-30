@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/stripe/stripe-go/v80"
+	"reader-backend/internal/db"
 	"reader-backend/internal/model"
 	"reader-backend/internal/novel"
 	"reader-backend/internal/payment"
@@ -107,9 +108,15 @@ func (s *service) UnlockChapter(ctx context.Context, userID int64, novelID int64
 func (s *service) InitiateCheckout(ctx context.Context, userID int64, amountCents int64, coinsAmount int, fbp, fbc, pixelID, ip, ua, sourceURL, country string) error {
 	email, _ := s.repo.GetUserEmail(ctx, userID)
 
-	// Trigger FB Conversions API InitiateCheckout event asynchronously via WorkerPool
+	// Trigger FB Conversions API InitiateCheckout event asynchronously via WorkerPool strictly using CMS configured pixel
 	workerpool.Submit(func() {
-		tracking.SendFacebookEvent(pixelID, "InitiateCheckout", strconv.FormatInt(userID, 10), email, ip, ua, fbc, fbp, float64(amountCents)/100.0, "USD", sourceURL, country)
+		effectivePixelID := pixelID
+		if effectivePixelID == "" && db.DB != nil {
+			_ = db.DB.QueryRow(context.Background(), "SELECT fp.pixel_id FROM users u JOIN promotion_links pl ON (u.utm_source = pl.utm_source AND u.utm_campaign = pl.utm_campaign) JOIN fb_pixels fp ON pl.fb_pixel_id = fp.id WHERE u.id = $1 LIMIT 1", userID).Scan(&effectivePixelID)
+		}
+		if effectivePixelID != "" {
+			tracking.SendFacebookEvent(effectivePixelID, "InitiateCheckout", strconv.FormatInt(userID, 10), email, ip, ua, fbc, fbp, float64(amountCents)/100.0, "USD", sourceURL, country)
+		}
 	})
 
 	return nil
@@ -129,9 +136,15 @@ func (s *service) CreateStripeIntent(ctx context.Context, userID int64, amountCe
 
 	email, _ := s.repo.GetUserEmail(ctx, userID)
 
-	// Trigger FB Conversions API InitiateCheckout event asynchronously via WorkerPool
+	// Trigger FB Conversions API InitiateCheckout event asynchronously via WorkerPool strictly using CMS configured pixel
 	workerpool.Submit(func() {
-		tracking.SendFacebookEvent(pixelID, "InitiateCheckout", strconv.FormatInt(userID, 10), email, ip, ua, fbc, fbp, float64(amountCents)/100.0, "USD", sourceURL, country)
+		effectivePixelID := pixelID
+		if effectivePixelID == "" && db.DB != nil {
+			_ = db.DB.QueryRow(context.Background(), "SELECT fp.pixel_id FROM users u JOIN promotion_links pl ON (u.utm_source = pl.utm_source AND u.utm_campaign = pl.utm_campaign) JOIN fb_pixels fp ON pl.fb_pixel_id = fp.id WHERE u.id = $1 LIMIT 1", userID).Scan(&effectivePixelID)
+		}
+		if effectivePixelID != "" {
+			tracking.SendFacebookEvent(effectivePixelID, "InitiateCheckout", strconv.FormatInt(userID, 10), email, ip, ua, fbc, fbp, float64(amountCents)/100.0, "USD", sourceURL, country)
+		}
 	})
 
 	return clientSecret, nil
@@ -159,9 +172,15 @@ func (s *service) CreatePayPalOrder(ctx context.Context, userID int64, amountCen
 
 	email, _ := s.repo.GetUserEmail(ctx, userID)
 
-	// Trigger FB Conversions API InitiateCheckout event asynchronously via WorkerPool
+	// Trigger FB Conversions API InitiateCheckout event asynchronously via WorkerPool strictly using CMS configured pixel
 	workerpool.Submit(func() {
-		tracking.SendFacebookEvent(pixelID, "InitiateCheckout", strconv.FormatInt(userID, 10), email, ip, ua, fbc, fbp, float64(amountCents)/100.0, "USD", sourceURL, country)
+		effectivePixelID := pixelID
+		if effectivePixelID == "" && db.DB != nil {
+			_ = db.DB.QueryRow(context.Background(), "SELECT fp.pixel_id FROM users u JOIN promotion_links pl ON (u.utm_source = pl.utm_source AND u.utm_campaign = pl.utm_campaign) JOIN fb_pixels fp ON pl.fb_pixel_id = fp.id WHERE u.id = $1 LIMIT 1", userID).Scan(&effectivePixelID)
+		}
+		if effectivePixelID != "" {
+			tracking.SendFacebookEvent(effectivePixelID, "InitiateCheckout", strconv.FormatInt(userID, 10), email, ip, ua, fbc, fbp, float64(amountCents)/100.0, "USD", sourceURL, country)
+		}
 	})
 
 	return orderID, approveURL, nil
@@ -248,8 +267,15 @@ func (s *service) CapturePayPalPayment(ctx context.Context, userID int64, orderI
 
 	email, _ := s.repo.GetUserEmail(ctx, userID)
 
+	// Trigger FB Conversions API purchase event via WorkerPool strictly using CMS configured pixel
 	workerpool.Submit(func() {
-		tracking.SendFacebookEvent(pixelID, "Purchase", strconv.FormatInt(userID, 10), email, ip, ua, fbc, fbp, float64(priceCents)/100.0, "USD", sourceURL, country)
+		effectivePixelID := pixelID
+		if effectivePixelID == "" && db.DB != nil {
+			_ = db.DB.QueryRow(context.Background(), "SELECT fp.pixel_id FROM users u JOIN promotion_links pl ON (u.utm_source = pl.utm_source AND u.utm_campaign = pl.utm_campaign) JOIN fb_pixels fp ON pl.fb_pixel_id = fp.id WHERE u.id = $1 LIMIT 1", userID).Scan(&effectivePixelID)
+		}
+		if effectivePixelID != "" {
+			tracking.SendFacebookEvent(effectivePixelID, "Purchase", strconv.FormatInt(userID, 10), email, ip, ua, fbc, fbp, float64(priceCents)/100.0, "USD", sourceURL, country)
+		}
 	})
 
 	return nil

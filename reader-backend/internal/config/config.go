@@ -16,8 +16,6 @@ type Config struct {
 	PayPalClientID     string
 	PayPalClientSecret string
 	PayPalMode         string // "sandbox" or "live"
-	FbPixelID          string
-	FbAccessToken      string
 	DefaultDomain      string
 	StorageType        string
 	OSSEndpoint        string
@@ -49,8 +47,6 @@ func LoadConfig() {
 		PayPalClientID:     getEnv("PAYPAL_CLIENT_ID", ""),
 		PayPalClientSecret: getEnv("PAYPAL_CLIENT_SECRET", ""),
 		PayPalMode:         getEnv("PAYPAL_MODE", "sandbox"),
-		FbPixelID:          getEnv("FB_PIXEL_ID", ""),
-		FbAccessToken:      getEnv("FB_ACCESS_TOKEN", ""),
 		DefaultDomain:      getEnv("DEFAULT_DOMAIN", "https://h5.star-novel.com"),
 		StorageType:        getEnv("STORAGE_TYPE", "postgres"),
 		OSSEndpoint:        getEnv("OSS_ENDPOINT", ""),

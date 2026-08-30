@@ -61,8 +61,8 @@ func HashSHA256(input string) string {
 	return hex.EncodeToString(hash.Sum(nil))
 }
 
-// SendFacebookEvent pushes a tracking event server-to-server to Facebook
-func SendFacebookEvent(eventName string, userID string, email string, ip string, ua string, fbc string, fbp string, value float64, currency string, sourceURL string, country string) {
+// SendFacebookEvent pushes a tracking event server-to-server to Facebook strictly using the configured pixel
+func SendFacebookEvent(pixelID string, eventName string, userID string, email string, ip string, ua string, fbc string, fbp string, value float64, currency string, sourceURL string, country string) {
 	// Construct payload first
 	userData := FacebookUserData{
 		ClientIPAddress: ip,
@@ -117,51 +117,41 @@ func SendFacebookEvent(eventName string, userID string, email string, ip string,
 		payloadStr = string(jsonBytes)
 	}
 
-	pixelID := config.AppConfig.FbPixelID
-	accessToken := config.AppConfig.FbAccessToken
-	apiVersion := os.Getenv("META_API_VERSION")
-	if apiVersion == "" {
-		apiVersion = os.Getenv("FB_CAPI_VERSION")
-	}
-
-	// Try reading from db system_configs
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	if db.DB != nil {
-		var dbPixel, dbToken, dbVersion string
-		_ = db.DB.QueryRow(ctx, "SELECT value FROM system_configs WHERE key = 'fb_pixel_id'").Scan(&dbPixel)
-		_ = db.DB.QueryRow(ctx, "SELECT value FROM system_configs WHERE key = 'fb_access_token'").Scan(&dbToken)
-		if apiVersion == "" {
-			_ = db.DB.QueryRow(ctx, "SELECT value FROM system_configs WHERE key = 'meta_api_version'").Scan(&dbVersion)
-		}
-		if dbPixel != "" && pixelID == "" {
-			pixelID = dbPixel
-		}
-		if dbToken != "" && accessToken == "" {
-			accessToken = dbToken
-		}
-		if dbVersion != "" && apiVersion == "" {
-			apiVersion = dbVersion
-		}
-	}
-
-	if apiVersion == "" {
-		apiVersion = "v25.0"
-	}
-	if !strings.HasPrefix(apiVersion, "v") {
-		apiVersion = "v" + apiVersion
-	}
-
+	// 1. Strictly validate Pixel ID
 	if pixelID == "" {
 		log.Printf("[FB CAPI Error] Pixel ID is missing. Event Name: %s, User: %s", eventName, userID)
 		saveCAPILog("N/A", eventName, userID, value, currency, testCode, -1, payloadStr, "Error - Pixel ID missing")
 		return
 	}
 
+	// 2. Query access token strictly from fb_pixels table configured in CMS
+	var accessToken string
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if db.DB != nil {
+		err := db.DB.QueryRow(ctx, "SELECT access_token FROM fb_pixels WHERE pixel_id = $1", pixelID).Scan(&accessToken)
+		if err != nil {
+			log.Printf("[FB CAPI Error] Failed to find access token for pixel %s: %v", pixelID, err)
+			saveCAPILog(pixelID, eventName, userID, value, currency, testCode, -2, payloadStr, fmt.Sprintf("Error - Access token query failed: %v", err))
+			return
+		}
+	}
+
 	if accessToken == "" || pixelID == "fb_pixel_id_placeholder" {
-		log.Printf("[FB CAPI Dry Run] Event: %s, User: %s, Value: %.2f %s. Facebook Pixel Credentials not configured.", eventName, userID, value, currency)
+		log.Printf("[FB CAPI Dry Run] Event: %s, User: %s, Value: %.2f %s. Facebook Pixel Credentials not configured for %s.", eventName, userID, value, currency, pixelID)
 		saveCAPILog(pixelID, eventName, userID, value, currency, testCode, 0, payloadStr, "Dry Run - Credentials not configured")
 		return
+	}
+
+	apiVersion := os.Getenv("META_API_VERSION")
+	if apiVersion == "" {
+		apiVersion = os.Getenv("FB_CAPI_VERSION")
+	}
+	if apiVersion == "" {
+		apiVersion = "v25.0"
+	}
+	if !strings.HasPrefix(apiVersion, "v") {
+		apiVersion = "v" + apiVersion
 	}
 
 	apiURL := fmt.Sprintf("https://graph.facebook.com/%s/%s/events?access_token=%s", apiVersion, pixelID, accessToken)

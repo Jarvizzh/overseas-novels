@@ -12,8 +12,6 @@ type Config struct {
 	DatabaseURL        string
 	RedisURL           string
 	JWTSecret          string
-	FbPixelID          string
-	FbAccessToken      string
 	StripeSecretKey    string
 	PayPalClientID     string
 	PayPalClientSecret string
@@ -38,8 +36,6 @@ func LoadConfig() {
 		DatabaseURL:        getEnv("DATABASE_URL", "postgres://postgres:password@localhost:5432/novel_db?sslmode=disable"),
 		RedisURL:           getEnv("REDIS_URL", "localhost:6379"),
 		JWTSecret:          getEnv("JWT_SECRET", "super-secret-key-star-novel-cms-2026"),
-		FbPixelID:          getEnv("FB_PIXEL_ID", ""),
-		FbAccessToken:      getEnv("FB_ACCESS_TOKEN", ""),
 		StripeSecretKey:    getEnv("STRIPE_SECRET_KEY", ""),
 		PayPalClientID:     getEnv("PAYPAL_CLIENT_ID", ""),
 		PayPalClientSecret: getEnv("PAYPAL_CLIENT_SECRET", ""),

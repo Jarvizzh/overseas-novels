@@ -7,6 +7,7 @@ import (
 
 	"github.com/google/uuid"
 	"golang.org/x/crypto/bcrypt"
+	"reader-backend/internal/db"
 	"reader-backend/internal/model"
 	"reader-backend/internal/tracking"
 	"reader-backend/internal/workerpool"
@@ -75,9 +76,15 @@ func (s *authService) GuestLogin(ctx context.Context, device, ipAddress, utmSour
 		return nil, "", err
 	}
 
-	// Trigger FB CompleteRegistration event asynchronously via WorkerPool
+	// Trigger FB CompleteRegistration event asynchronously via WorkerPool strictly using CMS configured pixel
 	workerpool.Submit(func() {
-		tracking.SendFacebookEvent(pixelID, "CompleteRegistration", strconv.FormatInt(user.ID, 10), "", ipAddress, userAgent, fbc, fbp, 0, "", sourceURL, country)
+		effectivePixelID := pixelID
+		if effectivePixelID == "" && utmSource != "" && utmCampaign != "" && db.DB != nil {
+			_ = db.DB.QueryRow(context.Background(), "SELECT fp.pixel_id FROM promotion_links pl JOIN fb_pixels fp ON pl.fb_pixel_id = fp.id WHERE pl.utm_source = $1 AND pl.utm_campaign = $2 LIMIT 1", utmSource, utmCampaign).Scan(&effectivePixelID)
+		}
+		if effectivePixelID != "" {
+			tracking.SendFacebookEvent(effectivePixelID, "CompleteRegistration", strconv.FormatInt(user.ID, 10), "", ipAddress, userAgent, fbc, fbp, 0, "", sourceURL, country)
+		}
 	})
 
 	return user, token, nil
@@ -135,9 +142,15 @@ func (s *authService) Register(ctx context.Context, email, password, nickname, d
 		return nil, "", err
 	}
 
-	// Trigger FB CompleteRegistration event asynchronously via WorkerPool
+	// Trigger FB CompleteRegistration event asynchronously via WorkerPool strictly using CMS configured pixel
 	workerpool.Submit(func() {
-		tracking.SendFacebookEvent(pixelID, "CompleteRegistration", strconv.FormatInt(user.ID, 10), email, ipAddress, userAgent, fbc, fbp, 0, "", sourceURL, country)
+		effectivePixelID := pixelID
+		if effectivePixelID == "" && utmSource != "" && utmCampaign != "" && db.DB != nil {
+			_ = db.DB.QueryRow(context.Background(), "SELECT fp.pixel_id FROM promotion_links pl JOIN fb_pixels fp ON pl.fb_pixel_id = fp.id WHERE pl.utm_source = $1 AND pl.utm_campaign = $2 LIMIT 1", utmSource, utmCampaign).Scan(&effectivePixelID)
+		}
+		if effectivePixelID != "" {
+			tracking.SendFacebookEvent(effectivePixelID, "CompleteRegistration", strconv.FormatInt(user.ID, 10), email, ipAddress, userAgent, fbc, fbp, 0, "", sourceURL, country)
+		}
 	})
 
 	return user, token, nil
