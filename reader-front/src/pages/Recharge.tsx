@@ -9,12 +9,14 @@ interface RechargeProps {
   userCoins: number;
   onAddCoins: (amount: number, reason: string) => void;
   onBack: () => void;
+  onNavigate?: (pageOrPath: string, params?: any) => void;
 }
 
 export const Recharge: React.FC<RechargeProps> = ({
   userCoins,
   onAddCoins,
   onBack,
+  onNavigate,
 }) => {
   const { showToast } = useToast();
   const [selectedPack, setSelectedPack] = useState<number | null>(null);
@@ -167,6 +169,7 @@ export const Recharge: React.FC<RechargeProps> = ({
 
     try {
       // Save pending recharge info in sessionStorage
+      const lastContentPath = localStorage.getItem('last_read_content_path');
       sessionStorage.setItem('pending_paypal_recharge', JSON.stringify({
         slotId: tSlot.id,
         coins: totalCoins,
@@ -174,6 +177,7 @@ export const Recharge: React.FC<RechargeProps> = ({
         name: tSlot.vip_name || tSlot.price,
         price: tSlot.price,
         time: Date.now(),
+        returnContentPath: lastContentPath || '',
       }));
 
       // Build return & cancel URLs
@@ -212,12 +216,43 @@ export const Recharge: React.FC<RechargeProps> = ({
     );
   }
 
+  const handleReturnToContent = () => {
+    let returnPath = '';
+    try {
+      const saved = sessionStorage.getItem('pending_paypal_recharge');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (parsed.returnContentPath) {
+          returnPath = parsed.returnContentPath;
+        }
+      }
+    } catch (_) {}
+
+    if (!returnPath) {
+      returnPath = localStorage.getItem('last_read_content_path') || '';
+    }
+
+    if (returnPath) {
+      if (onNavigate) {
+        onNavigate(returnPath);
+      } else {
+        window.location.href = returnPath;
+      }
+    } else {
+      if (onNavigate) {
+        onNavigate('shelf');
+      } else {
+        onBack();
+      }
+    }
+  };
+
   return (
     <div className="page-container-full animate-fade-in" style={{ backgroundColor: 'var(--bg-primary)' }}>
       {/* Top Header */}
       <header className="app-header glass-panel">
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-          <button className="header-btn" onClick={onBack} aria-label="Go back">
+          <button className="header-btn" onClick={handleReturnToContent} aria-label="Go back">
             <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2.5} stroke="currentColor" style={{ width: '20px', height: '20px' }}>
               <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 19.5L8.25 12l7.5-7.5" />
             </svg>
@@ -617,7 +652,7 @@ export const Recharge: React.FC<RechargeProps> = ({
               style={{ width: '100%', padding: '10px 0' }}
               onClick={() => {
                 setShowSuccess(false);
-                onBack(); // Return to previous page
+                handleReturnToContent();
               }}
             >
               Back to Reader

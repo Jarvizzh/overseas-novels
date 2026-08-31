@@ -188,6 +188,13 @@ function AppContent() {
     localStorage.setItem('unlocked-chapters', JSON.stringify(unlockedBookChapters));
   }, [unlockedBookChapters]);
 
+  // Track last reading content path for smooth post-payment redirect
+  useEffect(() => {
+    if (location.pathname === '/content' || location.pathname === '/detail') {
+      localStorage.setItem('last_read_content_path', `${location.pathname}${location.search}`);
+    }
+  }, [location.pathname, location.search]);
+
   // Handle Global Theme settings
   useEffect(() => {
     const root = document.documentElement;
@@ -465,7 +472,7 @@ function AppContent() {
           <Route path="/search" element={<Search novels={novels} onNavigate={navigateTo} initialGenre={searchGenre} />} />
           <Route path="/detail" element={<Detail novelId={detailNovelId} novels={novels} onNavigate={navigateTo} shelfBookIds={shelfBookIds} onToggleShelf={handleToggleShelf} readingProgress={readingProgress} />} />
           <Route path="/content" element={<Reader novelId={readerNovelId} chapterIndex={readerChapterIndex} novels={novels} onNavigate={navigateTo} shelfBookIds={shelfBookIds} onToggleShelf={handleToggleShelf} readingProgress={readingProgress} onSaveProgress={handleSaveProgress} unlockedBookChapters={unlockedBookChapters} onUnlockChapter={handleUnlockChapter} userCoins={userCoins} />} />
-          <Route path="/recharge" element={<Recharge userCoins={userCoins} onAddCoins={handleAddCoins} onBack={navigateBack} />} />
+          <Route path="/recharge" element={<Recharge userCoins={userCoins} onAddCoins={handleAddCoins} onBack={navigateBack} onNavigate={navigateTo} />} />
         </Routes>
       </main>
 
