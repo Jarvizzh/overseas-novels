@@ -115,7 +115,9 @@ func (r *dbBillingRepository) UpdateOrderStatusTx(ctx context.Context, tx pgx.Tx
 func (r *dbBillingRepository) DeductWalletBalanceTx(ctx context.Context, tx pgx.Tx, userID string, chargedAmt, bonusAmt int) error {
 	query := `
 		UPDATE wallets
-		SET charged_coins = charged_coins - $1, bonus_coins = bonus_coins - $2, updated_at = CURRENT_TIMESTAMP
+		SET charged_coins = GREATEST(0, charged_coins - $1), 
+		    bonus_coins = GREATEST(0, bonus_coins - $2), 
+		    updated_at = CURRENT_TIMESTAMP
 		WHERE user_id = $3`
 	_, err := tx.Exec(ctx, query, chargedAmt, bonusAmt, userID)
 	return err

@@ -118,7 +118,9 @@ export const Recharge: React.FC<RechargeProps> = ({
           }
         } catch (_) {}
 
-        const isSubOrder = pendingInfo?.type === 'subscription' || pendingInfo?.type === 'vip';
+        const hasSubIdParam = !!urlParams.get('subscription_id');
+        const isSubIdPattern = (subscriptionId && subscriptionId.startsWith('I-')) || (token && token.startsWith('I-'));
+        const isSubOrder = pendingInfo?.type === 'subscription' || pendingInfo?.type === 'vip' || hasSubIdParam || isSubIdPattern;
         const expectedCoins = pendingInfo?.coins || 0;
 
         try {

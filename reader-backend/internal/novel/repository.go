@@ -32,7 +32,7 @@ func (r *dbRepository) GetNovels(ctx context.Context, genre string, limit, offse
 
 	if genre != "" {
 		query := `
-			SELECT id, title, author, cover_url, rating, status, synopsis, genres, word_count, view_count, COALESCE(coin_cost_per_thousand, 5) AS coin_cost_per_thousand, start_pay_chapter_index, created_at
+			SELECT id, title, author, cover_url, rating, status, synopsis, genres, word_count, view_count, COALESCE(coin_cost_per_thousand, 500) AS coin_cost_per_thousand, start_pay_chapter_index, created_at
 			FROM novels
 			WHERE genres @> ARRAY[$1]::VARCHAR[] AND status != 'archived'
 			ORDER BY view_count DESC
@@ -40,7 +40,7 @@ func (r *dbRepository) GetNovels(ctx context.Context, genre string, limit, offse
 		rows, err = db.DB.Query(ctx, query, genre, limit, offset)
 	} else {
 		query := `
-			SELECT id, title, author, cover_url, rating, status, synopsis, genres, word_count, view_count, COALESCE(coin_cost_per_thousand, 5) AS coin_cost_per_thousand, start_pay_chapter_index, created_at
+			SELECT id, title, author, cover_url, rating, status, synopsis, genres, word_count, view_count, COALESCE(coin_cost_per_thousand, 500) AS coin_cost_per_thousand, start_pay_chapter_index, created_at
 			FROM novels
 			WHERE status != 'archived'
 			ORDER BY view_count DESC
@@ -73,7 +73,7 @@ func (r *dbRepository) GetNovels(ctx context.Context, genre string, limit, offse
 func (r *dbRepository) SearchNovels(ctx context.Context, search string, limit, offset int) ([]model.Novel, error) {
 	likeSearch := "%" + search + "%"
 	query := `
-		SELECT id, title, author, cover_url, rating, status, synopsis, genres, word_count, view_count, COALESCE(coin_cost_per_thousand, 5) AS coin_cost_per_thousand, start_pay_chapter_index, created_at
+		SELECT id, title, author, cover_url, rating, status, synopsis, genres, word_count, view_count, COALESCE(coin_cost_per_thousand, 500) AS coin_cost_per_thousand, start_pay_chapter_index, created_at
 		FROM novels
 		WHERE (title ILIKE $1 OR author ILIKE $1 OR synopsis ILIKE $1) AND status != 'archived'
 		ORDER BY view_count DESC
@@ -104,7 +104,7 @@ func (r *dbRepository) SearchNovels(ctx context.Context, search string, limit, o
 
 func (r *dbRepository) GetByID(ctx context.Context, id int64) (*model.Novel, error) {
 	query := `
-		SELECT id, title, author, cover_url, rating, status, synopsis, genres, word_count, view_count, COALESCE(coin_cost_per_thousand, 5) AS coin_cost_per_thousand, start_pay_chapter_index, created_at
+		SELECT id, title, author, cover_url, rating, status, synopsis, genres, word_count, view_count, COALESCE(coin_cost_per_thousand, 500) AS coin_cost_per_thousand, start_pay_chapter_index, created_at
 		FROM novels
 		WHERE id = $1`
 

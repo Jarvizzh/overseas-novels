@@ -106,7 +106,7 @@ func (r *dbRepository) UnlockChapterTx(ctx context.Context, userID int64, novelI
 	// 1. Fetch wallet balance WITH ROW LOCK (FOR UPDATE) FIRST to serialize concurrent unlocks for the user
 	walletQuery := `SELECT charged_coins, bonus_coins FROM wallets WHERE user_id = $1 FOR UPDATE`
 	var chargedCoins, bonusCoins int
-	err = tx.QueryRow(ctx, walletQuery, userID).Scan(&chargedCoins, &bonusCoins)
+	err = tx.QueryRow(txCtx, walletQuery, userID).Scan(&chargedCoins, &bonusCoins)
 	if err != nil {
 		return err
 	}
@@ -114,7 +114,7 @@ func (r *dbRepository) UnlockChapterTx(ctx context.Context, userID int64, novelI
 	// 2. Check if already unlocked inside the locked transaction
 	var exists bool
 	checkQuery := `SELECT EXISTS(SELECT 1 FROM unlock_records WHERE user_id = $1 AND novel_id = $2 AND chapter_index = $3)`
-	err = tx.QueryRow(ctx, checkQuery, userID, novelID, chapterIndex).Scan(&exists)
+	err = tx.QueryRow(txCtx, checkQuery, userID, novelID, chapterIndex).Scan(&exists)
 	if err != nil {
 		return err
 	}
@@ -134,7 +134,7 @@ func (r *dbRepository) UnlockChapterTx(ctx context.Context, userID int64, novelI
 		UPDATE wallets 
 		SET charged_coins = charged_coins - $1, bonus_coins = bonus_coins - $2, updated_at = CURRENT_TIMESTAMP 
 		WHERE user_id = $3`
-	_, err = tx.Exec(ctx, updateWalletQuery, deductCharged, deductBonus, userID)
+	_, err = tx.Exec(txCtx, updateWalletQuery, deductCharged, deductBonus, userID)
 	if err != nil {
 		return err
 	}
@@ -145,7 +145,7 @@ func (r *dbRepository) UnlockChapterTx(ctx context.Context, userID int64, novelI
 		INSERT INTO transactions (id, user_id, type, biz_type, amount, charged_amount, bonus_amount, description)
 		VALUES ($1, $2, 'debit', 'unlock', $3, $4, $5, $6)`
 	desc := "Unlocked: " + chapterTitle
-	_, err = tx.Exec(ctx, insertTxQuery, txID, userID, price, deductCharged, deductBonus, desc)
+	_, err = tx.Exec(txCtx, insertTxQuery, txID, userID, price, deductCharged, deductBonus, desc)
 	if err != nil {
 		return err
 	}
@@ -154,12 +154,12 @@ func (r *dbRepository) UnlockChapterTx(ctx context.Context, userID int64, novelI
 	insertUnlockQuery := `
 		INSERT INTO unlock_records (user_id, novel_id, chapter_index)
 		VALUES ($1, $2, $3)`
-	_, err = tx.Exec(ctx, insertUnlockQuery, userID, novelID, chapterIndex)
+	_, err = tx.Exec(txCtx, insertUnlockQuery, userID, novelID, chapterIndex)
 	if err != nil {
 		return err
 	}
 
-	return tx.Commit(ctx)
+	return tx.Commit(txCtx)
 }
 
 func (r *dbRepository) AddCoins(ctx context.Context, userID int64, amount int, isBonus bool, bizType string, description string) error {
@@ -515,11 +515,11 @@ func (r *dbRepository) RecordSubscriptionOrderTx(
 	defer tx.Rollback(txCtx)
 
 	var utmSource, utmCampaign sql.NullString
-	_ = tx.QueryRow(ctx, "SELECT utm_source, utm_campaign FROM users WHERE id = $1", userID).Scan(&utmSource, &utmCampaign)
+	_ = tx.QueryRow(txCtx, "SELECT utm_source, utm_campaign FROM users WHERE id = $1", userID).Scan(&utmSource, &utmCampaign)
 
 	var promoID, novelID sql.NullInt64
 	if utmSource.Valid && utmSource.String != "" && utmCampaign.Valid && utmCampaign.String != "" {
-		_ = tx.QueryRow(ctx, "SELECT id, novel_id FROM promotion_links WHERE utm_source = $1 AND utm_campaign = $2 LIMIT 1", utmSource.String, utmCampaign.String).Scan(&promoID, &novelID)
+		_ = tx.QueryRow(txCtx, "SELECT id, novel_id FROM promotion_links WHERE utm_source = $1 AND utm_campaign = $2 LIMIT 1", utmSource.String, utmCampaign.String).Scan(&promoID, &novelID)
 	}
 
 	var fbLeadVal *string
@@ -535,8 +535,8 @@ func (r *dbRepository) RecordSubscriptionOrderTx(
 	}
 
 	var orderID int64
-	checkQuery := `SELECT id FROM recharge_orders WHERE external_ref_id = $1`
-	err = tx.QueryRow(ctx, checkQuery, externalRefID).Scan(&orderID)
+	checkQuery := `SELECT id FROM recharge_orders WHERE external_ref_id = $1 FOR UPDATE`
+	err = tx.QueryRow(txCtx, checkQuery, externalRefID).Scan(&orderID)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			insertOrderQuery := `
@@ -548,7 +548,7 @@ func (r *dbRepository) RecordSubscriptionOrderTx(
 				)
 				VALUES ($1, $2, $3, $4, 0, 0, $5, 'Success', $6, $7, $8, CURRENT_TIMESTAMP, 'subscription', $9, $10, $11, $12)
 				RETURNING id`
-			err = tx.QueryRow(ctx, insertOrderQuery, userID, externalRefID, amountCents, currency, paymentMethod, utmSrcVal, utmCampVal, fbLeadVal, subID, slotID, promoID, novelID).Scan(&orderID)
+			err = tx.QueryRow(txCtx, insertOrderQuery, userID, externalRefID, amountCents, currency, paymentMethod, utmSrcVal, utmCampVal, fbLeadVal, subID, slotID, promoID, novelID).Scan(&orderID)
 			if err != nil {
 				return err
 			}
@@ -556,7 +556,7 @@ func (r *dbRepository) RecordSubscriptionOrderTx(
 			return err
 		}
 	} else {
-		_, err = tx.Exec(ctx, "UPDATE recharge_orders SET status = 'Success', paid_at = CURRENT_TIMESTAMP, subscription_id = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2", subID, orderID)
+		_, err = tx.Exec(txCtx, "UPDATE recharge_orders SET status = 'Success', paid_at = CURRENT_TIMESTAMP, subscription_id = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2", subID, orderID)
 		if err != nil {
 			return err
 		}
@@ -581,7 +581,7 @@ func (r *dbRepository) RecordSubscriptionOrderTx(
 		if rawPayload == "" {
 			rawPayload = "{}"
 		}
-		_, _ = tx.Exec(ctx, insertTPQuery,
+		_, _ = tx.Exec(txCtx, insertTPQuery,
 			orderID, tpOrder.PaymentProvider, tpOrder.ExternalOrderID, tpOrder.CaptureID,
 			tpOrder.PayerID, tpOrder.PayerEmail, tpOrder.PayerName, tpOrder.PayerCountry,
 			tpOrder.Currency, tpOrder.GrossAmount, tpOrder.FeeAmount, tpOrder.NetAmount,
@@ -589,7 +589,7 @@ func (r *dbRepository) RecordSubscriptionOrderTx(
 		)
 	}
 
-	return tx.Commit(ctx)
+	return tx.Commit(txCtx)
 }
 
 func (r *dbRepository) RecordSubscriptionRenewalOrderTx(
@@ -610,7 +610,7 @@ func (r *dbRepository) RecordSubscriptionRenewalOrderTx(
 	defer tx.Rollback(txCtx)
 
 	var exists bool
-	_ = tx.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM recharge_orders WHERE external_ref_id = $1)", externalRefID).Scan(&exists)
+	_ = tx.QueryRow(txCtx, "SELECT EXISTS(SELECT 1 FROM recharge_orders WHERE external_ref_id = $1)", externalRefID).Scan(&exists)
 	if exists {
 		return nil
 	}
@@ -624,7 +624,7 @@ func (r *dbRepository) RecordSubscriptionRenewalOrderTx(
 		)
 		VALUES ($1, $2, $3, $4, 0, 0, $5, 'Success', CURRENT_TIMESTAMP, 'subscription', $6, $7)
 		RETURNING id`
-	err = tx.QueryRow(ctx, insertOrderQuery, sub.UserID, externalRefID, amountCents, currency, sub.PaymentMethod, sub.SubscriptionID, sub.SlotID).Scan(&orderID)
+	err = tx.QueryRow(txCtx, insertOrderQuery, sub.UserID, externalRefID, amountCents, currency, sub.PaymentMethod, sub.SubscriptionID, sub.SlotID).Scan(&orderID)
 	if err != nil {
 		return err
 	}
@@ -646,7 +646,7 @@ func (r *dbRepository) RecordSubscriptionRenewalOrderTx(
 		UPDATE user_subscriptions
 		SET status = 'ACTIVE', last_payment_time = $1, current_period_end = $2, next_billing_time = $2, updated_at = CURRENT_TIMESTAMP
 		WHERE subscription_id = $3`
-	_, err = tx.Exec(ctx, updateSubQuery, now, newPeriodEnd, sub.SubscriptionID)
+	_, err = tx.Exec(txCtx, updateSubQuery, now, newPeriodEnd, sub.SubscriptionID)
 	if err != nil {
 		return err
 	}
@@ -665,7 +665,7 @@ func (r *dbRepository) RecordSubscriptionRenewalOrderTx(
 		if rawPayload == "" {
 			rawPayload = "{}"
 		}
-		_, _ = tx.Exec(ctx, insertTPQuery,
+		_, _ = tx.Exec(txCtx, insertTPQuery,
 			orderID, tpOrder.PaymentProvider, tpOrder.ExternalOrderID, tpOrder.CaptureID,
 			tpOrder.PayerID, tpOrder.PayerEmail, tpOrder.PayerName, tpOrder.PayerCountry,
 			tpOrder.Currency, tpOrder.GrossAmount, tpOrder.FeeAmount, tpOrder.NetAmount,
@@ -673,7 +673,7 @@ func (r *dbRepository) RecordSubscriptionRenewalOrderTx(
 		)
 	}
 
-	return tx.Commit(ctx)
+	return tx.Commit(txCtx)
 }
 
 
@@ -700,7 +700,7 @@ func (r *dbRepository) RecordRechargeOrderAndCreditCoinsTx(
 	// 1. Fetch UTM parameters from users table
 	var utmSource, utmCampaign sql.NullString
 	userQuery := `SELECT utm_source, utm_campaign FROM users WHERE id = $1`
-	err = tx.QueryRow(ctx, userQuery, userID).Scan(&utmSource, &utmCampaign)
+	err = tx.QueryRow(txCtx, userQuery, userID).Scan(&utmSource, &utmCampaign)
 	if err != nil && err != pgx.ErrNoRows {
 		return err
 	}
@@ -709,7 +709,7 @@ func (r *dbRepository) RecordRechargeOrderAndCreditCoinsTx(
 	var slotCoins, slotBonus, slotPriceCents int
 	var slotType string
 	slotQuery := `SELECT coins, bonus, price_cents, type FROM recharge_slots WHERE (coins + bonus) = $1 OR coins = $1 LIMIT 1`
-	err = tx.QueryRow(ctx, slotQuery, coinsAmount).Scan(&slotCoins, &slotBonus, &slotPriceCents, &slotType)
+	err = tx.QueryRow(txCtx, slotQuery, coinsAmount).Scan(&slotCoins, &slotBonus, &slotPriceCents, &slotType)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			// Fallback: treat all as charged coins
@@ -726,7 +726,7 @@ func (r *dbRepository) RecordRechargeOrderAndCreditCoinsTx(
 	var promotionLinkID, novelID sql.NullInt64
 	if utmSource.Valid && utmSource.String != "" && utmCampaign.Valid && utmCampaign.String != "" {
 		promoQuery := `SELECT id, novel_id FROM promotion_links WHERE utm_source = $1 AND utm_campaign = $2 LIMIT 1`
-		err = tx.QueryRow(ctx, promoQuery, utmSource.String, utmCampaign.String).Scan(&promotionLinkID, &novelID)
+		err = tx.QueryRow(txCtx, promoQuery, utmSource.String, utmCampaign.String).Scan(&promotionLinkID, &novelID)
 		if err != nil && err != pgx.ErrNoRows {
 			return err
 		}
@@ -738,11 +738,11 @@ func (r *dbRepository) RecordRechargeOrderAndCreditCoinsTx(
 		finalAmountCents = int(amountCents)
 	}
 
-	// 3. Check if this order (externalRefID) is already processed
+	// 3. Check if this order (externalRefID) is already processed WITH ROW LOCK (FOR UPDATE)
 	var orderID int64
 	var status string
-	checkQuery := `SELECT id, status FROM recharge_orders WHERE external_ref_id = $1`
-	err = tx.QueryRow(ctx, checkQuery, externalRefID).Scan(&orderID, &status)
+	checkQuery := `SELECT id, status FROM recharge_orders WHERE external_ref_id = $1 FOR UPDATE`
+	err = tx.QueryRow(txCtx, checkQuery, externalRefID).Scan(&orderID, &status)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			// Order doesn't exist at all, we insert a new Success order
@@ -766,7 +766,7 @@ func (r *dbRepository) RecordRechargeOrderAndCreditCoinsTx(
 				)
 				VALUES ($1, $2, $3, $4, $5, $6, $7, 'Success', $8, $9, $10, CURRENT_TIMESTAMP, $11, $12, $13)
 				RETURNING id`
-			err = tx.QueryRow(ctx, insertOrderQuery, userID, externalRefID, finalAmountCents, currency, slotCoins, slotBonus, paymentMethod, utmSrcVal, utmCampVal, fbLeadVal, slotType, promotionLinkID, novelID).Scan(&orderID)
+			err = tx.QueryRow(txCtx, insertOrderQuery, userID, externalRefID, finalAmountCents, currency, slotCoins, slotBonus, paymentMethod, utmSrcVal, utmCampVal, fbLeadVal, slotType, promotionLinkID, novelID).Scan(&orderID)
 			if err != nil {
 				return err
 			}
@@ -789,7 +789,7 @@ func (r *dbRepository) RecordRechargeOrderAndCreditCoinsTx(
 			SET status = 'Success', paid_at = CURRENT_TIMESTAMP, fb_lead_metadata = COALESCE($1, fb_lead_metadata), updated_at = CURRENT_TIMESTAMP
 			WHERE external_ref_id = $2
 			RETURNING id`
-		err = tx.QueryRow(ctx, updateOrderQuery, fbLeadVal, externalRefID).Scan(&orderID)
+		err = tx.QueryRow(txCtx, updateOrderQuery, fbLeadVal, externalRefID).Scan(&orderID)
 		if err != nil {
 			return err
 		}
@@ -815,7 +815,7 @@ func (r *dbRepository) RecordRechargeOrderAndCreditCoinsTx(
 		if rawPayload == "" {
 			rawPayload = "{}"
 		}
-		_, err = tx.Exec(ctx, insertTPQuery,
+		_, err = tx.Exec(txCtx, insertTPQuery,
 			orderID, tpOrder.PaymentProvider, tpOrder.ExternalOrderID, tpOrder.CaptureID,
 			tpOrder.PayerID, tpOrder.PayerEmail, tpOrder.PayerName, tpOrder.PayerCountry,
 			tpOrder.Currency, tpOrder.GrossAmount, tpOrder.FeeAmount, tpOrder.NetAmount,
@@ -834,7 +834,7 @@ func (r *dbRepository) RecordRechargeOrderAndCreditCoinsTx(
 		SET charged_coins = wallets.charged_coins + EXCLUDED.charged_coins, 
 		    bonus_coins = wallets.bonus_coins + EXCLUDED.bonus_coins, 
 		    updated_at = CURRENT_TIMESTAMP`
-	_, err = tx.Exec(ctx, updateQuery, userID, slotCoins, slotBonus)
+	_, err = tx.Exec(txCtx, updateQuery, userID, slotCoins, slotBonus)
 	if err != nil {
 		return err
 	}
@@ -845,12 +845,12 @@ func (r *dbRepository) RecordRechargeOrderAndCreditCoinsTx(
 		INSERT INTO transactions (id, user_id, type, biz_type, amount, charged_amount, bonus_amount, description)
 		VALUES ($1, $2, 'credit', 'recharge', $3, $4, $5, $6)`
 	desc := paymentMethod + " Recharge (+" + strconv.Itoa(coinsAmount) + " Coins)"
-	_, err = tx.Exec(ctx, insertTxQuery, txID, userID, coinsAmount, slotCoins, slotBonus, desc)
+	_, err = tx.Exec(txCtx, insertTxQuery, txID, userID, coinsAmount, slotCoins, slotBonus, desc)
 	if err != nil {
 		return err
 	}
 
-	return tx.Commit(ctx)
+	return tx.Commit(txCtx)
 }
 
 func (r *dbRepository) CreatePendingOrder(ctx context.Context, userID int64, externalRefID string, coinsAmount int, amountCents int64, currency string, paymentMethod string) error {
