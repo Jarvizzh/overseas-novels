@@ -6,14 +6,13 @@ import { LegalModal } from '../components/LegalModal';
 import type { LegalModalType } from '../components/LegalModal';
 
 interface RechargeProps {
-  userCoins: number;
+  userCoins?: number;
   onAddCoins: (amount: number, reason: string) => void;
   onBack: () => void;
   onNavigate?: (pageOrPath: string, params?: any) => void;
 }
 
 export const Recharge: React.FC<RechargeProps> = ({
-  userCoins,
   onAddCoins,
   onBack,
   onNavigate,
@@ -392,31 +391,6 @@ export const Recharge: React.FC<RechargeProps> = ({
             </div>
           </div>
         )}
-
-        {/* Balance Display Card */}
-        <div style={{
-          backgroundColor: 'var(--bg-secondary)',
-          borderRadius: '16px',
-          padding: '16px 20px',
-          border: '1px solid var(--border-color)',
-          boxShadow: 'var(--card-shadow)',
-          marginBottom: '20px',
-          display: 'flex',
-          justifyContent: 'space-between',
-          alignItems: 'center'
-        }}>
-          <div>
-            <span style={{ fontSize: '12px', color: 'var(--text-tertiary)' }}>Current Coin Balance</span>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '2px' }}>
-              <GoldCoin size={22} />
-              <span style={{ fontSize: '24px', fontWeight: 800, color: 'var(--text-primary)', fontFamily: 'monospace' }}>
-                {userCoins}
-              </span>
-              <span style={{ fontSize: '13px', color: 'var(--text-secondary)', fontWeight: 600 }}>Coins</span>
-            </div>
-          </div>
-          <span style={{ fontSize: '28px', opacity: 0.85 }}>👛</span>
-        </div>
 
         {/* Section 1: VIP Unlimited Membership Pass (if configured) */}
         {subscriptionPacks.length > 0 && (
