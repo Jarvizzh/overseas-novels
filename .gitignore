@@ -28,8 +28,10 @@ build/
 out/
 bin/
 
-# Go compiled binaries
+# Go compiled binaries (Local dev binaries ignored)
 cms-backend/cms-srv
+cms-backend/cms-server
+reader-backend/server
 backend/backend-srv
 *.exe
 *.exe~
@@ -38,3 +40,7 @@ backend/backend-srv
 *.dylib
 *.test
 *.out
+
+# Production Linux binaries are tracked
+!reader-backend/reader-server-linux-amd64
+!cms-backend/cms-server-linux-amd64
