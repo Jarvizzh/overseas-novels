@@ -48,7 +48,7 @@ export const ReaderSettings: React.FC<ReaderSettingsProps> = ({
             className="reader-hud-btn" 
             onClick={onAddToShelf}
             aria-label={isInShelf ? "Remove from Shelf" : "Add to Shelf"}
-            style={{ color: isInShelf ? '#818cf8' : 'white' }}
+            style={{ color: isInShelf ? 'var(--accent-color)' : 'var(--text-primary)' }}
           >
             {isInShelf ? (
               <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" style={{ width: '20px', height: '20px' }}>
