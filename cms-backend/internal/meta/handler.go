@@ -4,6 +4,7 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+	"star-novel-cms/internal/auth"
 )
 
 type Handler struct {
@@ -15,7 +16,7 @@ func NewHandler(service *Service) *Handler {
 }
 
 func (h *Handler) RegisterRoutes(r *gin.RouterGroup) {
-	metaGroup := r.Group("/meta")
+	metaGroup := r.Group("/meta", auth.AuthMiddleware(), auth.RoleMiddleware("SuperAdmin"))
 	{
 		metaGroup.GET("/hierarchy", h.GetHierarchy)
 		metaGroup.GET("/overview", h.GetOverview)

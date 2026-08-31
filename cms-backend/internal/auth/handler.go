@@ -33,7 +33,7 @@ type RegisterReq struct {
 	Username string `json:"username" binding:"required,min=4"`
 	Password string `json:"password" binding:"required,min=6"`
 	Nickname string `json:"nickname" binding:"required"`
-	Role     string `json:"role" binding:"required,oneof=SuperAdmin Editor Support MediaBuyer Finance"`
+	Role     string `json:"role" binding:"required,oneof=SuperAdmin Admin Editor Support MediaBuyer Finance"`
 }
 
 func (h *AuthHandler) Register(c *gin.Context) {
@@ -146,7 +146,7 @@ func (h *AuthHandler) ListAdmins(c *gin.Context) {
 
 type UpdateAdminReq struct {
 	Nickname string `json:"nickname" binding:"required"`
-	Role     string `json:"role" binding:"required,oneof=SuperAdmin Editor Support MediaBuyer Finance"`
+	Role     string `json:"role" binding:"required,oneof=SuperAdmin Admin Editor Support MediaBuyer Finance"`
 	Password string `json:"password"`
 }
 

@@ -84,7 +84,8 @@ const navItems = [
     id: 'meta-ad-stats',
     label: 'Meta广告统计',
     path: '/meta-ad-stats',
-    icon: <BarChart3 size={18} />
+    icon: <BarChart3 size={18} />,
+    roles: ['SuperAdmin']
   },
 ];
 
@@ -521,7 +522,14 @@ function AppContent() {
                 }}
               >
                 <div style={{ padding: '8px 12px', fontSize: '0.75rem', color: 'hsl(var(--text-muted))', borderBottom: '1px solid hsl(var(--border))' }}>
-                  角色: {admin.role === 'SuperAdmin' ? '超级管理员' : '管理员'}
+                  角色: {
+                    admin.role === 'SuperAdmin' ? '超级管理员' :
+                    admin.role === 'Admin' ? '管理员' :
+                    admin.role === 'Editor' ? '编辑' :
+                    admin.role === 'MediaBuyer' ? '投手' :
+                    admin.role === 'Finance' ? '财务' :
+                    admin.role === 'Support' ? '客服' : admin.role
+                  }
                 </div>
                 <div
                   onClick={() => {
@@ -559,7 +567,7 @@ function AppContent() {
           <Route path="/feedback" element={<FeedbackTab />} />
           <Route path="/promotions" element={<PromotionsTab />} />
           <Route path="/recharge-templates" element={<TemplatesTab />} />
-          <Route path="/meta-ad-stats" element={<MetaAdStatsTab />} />
+          <Route path="/meta-ad-stats" element={admin.role === 'SuperAdmin' ? <MetaAdStatsTab /> : <Navigate to="/" replace />} />
           <Route path="/campaign" element={<CampaignTab />} />
           <Route path="/ad-config/pixels" element={<PixelsTab />} />
           <Route path="/ad-config/logs" element={<TrackingLogsTab />} />

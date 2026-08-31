@@ -144,13 +144,21 @@ export default function AccountsTab() {
                   <td style={{ padding: '12px 8px', fontWeight: 500 }}>{admin.username}</td>
                   <td style={{ padding: '12px 8px' }}>{admin.nickname}</td>
                   <td style={{ padding: '12px 8px' }}>
-                    <span className={`badge ${admin.role === 'SuperAdmin' ? 'badge-red' :
+                    <span className={`badge ${
+                      admin.role === 'SuperAdmin' ? 'badge-red' :
+                      admin.role === 'Admin' ? 'badge-blue' :
                       admin.role === 'Editor' ? 'badge-violet' :
-                        admin.role === 'MediaBuyer' ? 'badge-green' : 'badge-orange'
-                      }`}>
-                      {admin.role === 'SuperAdmin' ? '超级管理员' :
+                      admin.role === 'MediaBuyer' ? 'badge-green' :
+                      admin.role === 'Finance' ? 'badge-amber' : 'badge-orange'
+                    }`}>
+                      {
+                        admin.role === 'SuperAdmin' ? '超级管理员' :
+                        admin.role === 'Admin' ? '管理员' :
                         admin.role === 'Editor' ? '编辑' :
-                          admin.role === 'MediaBuyer' ? '投手' : '财务'}
+                        admin.role === 'MediaBuyer' ? '投手' :
+                        admin.role === 'Finance' ? '财务' :
+                        admin.role === 'Support' ? '客服' : admin.role
+                      }
                     </span>
                   </td>
                   <td style={{ padding: '12px 8px' }}>
@@ -280,9 +288,11 @@ export default function AccountsTab() {
                   <label style={{ display: 'block', fontSize: '0.8rem', color: 'hsl(var(--text-secondary))', marginBottom: '6px', fontWeight: 500 }}>职员岗位指派 (RBAC 角色)</label>
                   <CustomSelect
                     options={[
+                      { value: 'Admin', label: '管理员 (Admin)' },
                       { value: 'Editor', label: '编辑 (Editor)' },
                       { value: 'MediaBuyer', label: '投手 (MediaBuyer)' },
                       { value: 'Finance', label: '财务 (Finance)' },
+                      { value: 'Support', label: '客服 (Support)' },
                       { value: 'SuperAdmin', label: '超级管理员 (SuperAdmin)' }
                     ]}
                     value={adminForm.role}
