@@ -22,6 +22,7 @@ type BillingRepository interface {
 	GetFirstPaidOrderIDByUserIDTx(ctx context.Context, tx pgx.Tx, userID string) (string, error)
 	CreateOrderTx(ctx context.Context, tx pgx.Tx, o *Order) error
 	UpsertWalletBalanceTx(ctx context.Context, tx pgx.Tx, userID string, chargedAmt, bonusAmt int) error
+	GetThirdPartyPaymentDetails(ctx context.Context, orderID int64) (*ThirdPartyPaymentOrder, error)
 
 	ListRechargeTemplates(ctx context.Context) ([]RechargeTemplate, error)
 	GetRechargeSlots(ctx context.Context, templateID int) ([]RechargeSlot, error)
@@ -170,6 +171,34 @@ func (r *dbBillingRepository) UpsertWalletBalanceTx(ctx context.Context, tx pgx.
 		    updated_at = CURRENT_TIMESTAMP`
 	_, err := tx.Exec(ctx, query, userID, chargedAmt, bonusAmt)
 	return err
+}
+
+func (r *dbBillingRepository) GetThirdPartyPaymentDetails(ctx context.Context, orderID int64) (*ThirdPartyPaymentOrder, error) {
+	query := `
+		SELECT id, order_id, payment_provider, COALESCE(external_order_id, ''), COALESCE(capture_id, ''),
+		       COALESCE(payer_id, ''), COALESCE(payer_email, ''), COALESCE(payer_name, ''), COALESCE(payer_country, ''),
+		       currency, gross_amount, fee_amount, net_amount, status,
+		       COALESCE(seller_protection_status, ''), COALESCE(raw_payload::text, '{}'),
+		       created_at, updated_at
+		FROM third_party_payment_orders
+		WHERE order_id = $1
+		ORDER BY id DESC
+		LIMIT 1`
+	var t ThirdPartyPaymentOrder
+	err := db.DB.QueryRow(ctx, query, orderID).Scan(
+		&t.ID, &t.OrderID, &t.PaymentProvider, &t.ExternalOrderID, &t.CaptureID,
+		&t.PayerID, &t.PayerEmail, &t.PayerName, &t.PayerCountry, &t.Currency,
+		&t.GrossAmount, &t.FeeAmount, &t.NetAmount, &t.Status,
+		&t.SellerProtectionStatus, &t.RawPayload,
+		&t.CreatedAt, &t.UpdatedAt,
+	)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &t, nil
 }
 
 func (r *dbBillingRepository) ListRechargeTemplates(ctx context.Context) ([]RechargeTemplate, error) {

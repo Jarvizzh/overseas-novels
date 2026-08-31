@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
 import { apiRequest } from '../utils/api';
-import { CreditCard, Activity, ChevronLeft, ChevronRight } from 'lucide-react';
+import { CreditCard, Activity, ChevronLeft, ChevronRight, Eye } from 'lucide-react';
 import CustomSelect from '../components/CustomSelect';
+import { ThirdPartyPaymentModal, type ThirdPartyPaymentDetail } from '../components/ThirdPartyPaymentModal';
 
 const paymentMethodOptions = [
   { value: 'stripe', label: 'Stripe 支付网关' },
@@ -52,6 +53,12 @@ export default function OrdersTab() {
   const [paidEndFilter, setPaidEndFilter] = useState('');
   const [loading, setLoading] = useState(true);
 
+  // Third-party payment details modal state
+  const [detailModalOpen, setDetailModalOpen] = useState(false);
+  const [selectedOrderForDetail, setSelectedOrderForDetail] = useState<number | string | null>(null);
+  const [paymentDetails, setPaymentDetails] = useState<ThirdPartyPaymentDetail | null>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
+
   // Mock webhook form state
   const [showMockForm, setShowMockForm] = useState(false);
   const [mockUserID, setMockUserID] = useState('');
@@ -63,6 +70,21 @@ export default function OrdersTab() {
   const [mockUtmSource, setMockUtmSource] = useState('facebook');
   const [mockUtmCampaign, setMockUtmCampaign] = useState('romance_novels_fb_ad');
   const [mockSuccessMsg, setMockSuccessMsg] = useState('');
+
+  const handleOpenPaymentDetails = async (orderId: number | string) => {
+    setSelectedOrderForDetail(orderId);
+    setDetailModalOpen(true);
+    setDetailLoading(true);
+    try {
+      const res = await apiRequest('GET', `/orders/${orderId}/payment-details`);
+      setPaymentDetails(res.details || null);
+    } catch (err: any) {
+      console.error("Failed to fetch payment details:", err);
+      setPaymentDetails(null);
+    } finally {
+      setDetailLoading(false);
+    }
+  };
 
   useEffect(() => {
     fetchOrders();
@@ -334,12 +356,13 @@ export default function OrdersTab() {
               <th style={{ padding: '12px 16px' }}>创建时间</th>
               <th style={{ padding: '12px 16px' }}>支付时间</th>
               <th style={{ padding: '12px 16px' }}>订单状态</th>
+              <th style={{ padding: '12px 16px', textAlign: 'center' }}>操作</th>
             </tr>
           </thead>
           <tbody>
             {orders.length === 0 ? (
               <tr>
-                <td colSpan={10} style={{ padding: '20px', textAlign: 'center', color: 'hsl(var(--text-muted))' }}>暂无充值交易订单记录。</td>
+                <td colSpan={11} style={{ padding: '20px', textAlign: 'center', color: 'hsl(var(--text-muted))' }}>暂无充值交易订单记录。</td>
               </tr>
             ) : (
               orders.map((o) => (
@@ -349,9 +372,15 @@ export default function OrdersTab() {
                   </td>
                   <td style={{ padding: '14px 16px', fontFamily: 'monospace', fontSize: '0.8rem' }}>{o.user_id}</td>
                   <td style={{ padding: '14px 16px', color: 'hsl(var(--text-secondary))' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                      <CreditCard size={14} color="hsl(var(--text-muted))" />
-                      <span style={{ fontSize: '0.8rem' }}>{o.payment_method.toUpperCase()}: {o.external_ref_id || '无'}</span>
+                    <div
+                      style={{ display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer' }}
+                      onClick={() => handleOpenPaymentDetails(o.id)}
+                      title="点击查看第三方支付凭据"
+                    >
+                      <CreditCard size={14} style={{ color: 'hsl(var(--primary))' }} />
+                      <span style={{ fontSize: '0.8rem', textDecoration: 'underline', textUnderlineOffset: '2px' }}>
+                        {o.payment_method.toUpperCase()}: {o.external_ref_id || '无'}
+                      </span>
                     </div>
                   </td>
                   <td style={{ padding: '14px 16px' }}>
@@ -400,6 +429,25 @@ export default function OrdersTab() {
                           o.status === 'Pending' ? '待付款' : o.status}
                     </span>
                   </td>
+                  <td style={{ padding: '14px 16px', textAlign: 'center' }}>
+                    <button
+                      className="btn-secondary"
+                      onClick={() => handleOpenPaymentDetails(o.id)}
+                      style={{
+                        padding: '4px 10px',
+                        fontSize: '0.75rem',
+                        borderRadius: '6px',
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: '4px',
+                        cursor: 'pointer'
+                      }}
+                      title="查看第三方支付凭据明细"
+                    >
+                      <Eye size={13} style={{ color: 'hsl(var(--primary))' }} />
+                      <span>第三方明细</span>
+                    </button>
+                  </td>
                 </tr>
               ))
             )}
@@ -433,6 +481,23 @@ export default function OrdersTab() {
           </div>
         )}
       </div>
+
+      {/* Third Party Payment Details Modal */}
+      <ThirdPartyPaymentModal
+        isOpen={detailModalOpen}
+        onClose={() => {
+          setDetailModalOpen(false);
+          setPaymentDetails(null);
+        }}
+        orderId={selectedOrderForDetail}
+        loading={detailLoading}
+        details={paymentDetails}
+        onRefresh={() => {
+          if (selectedOrderForDetail) {
+            handleOpenPaymentDetails(selectedOrderForDetail);
+          }
+        }}
+      />
     </div>
   );
 }

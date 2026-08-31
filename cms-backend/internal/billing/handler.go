@@ -22,6 +22,7 @@ func (h *Handler) RegisterRoutes(rg *gin.RouterGroup) {
 	orders := rg.Group("/orders")
 	{
 		orders.GET("", h.ListOrders)
+		orders.GET("/:id/payment-details", h.GetThirdPartyPaymentDetails)
 		orders.POST("/:id/refund", h.RefundOrder)
 		orders.POST("/mock-webhook", h.MockPaymentWebhook)
 	}
@@ -81,6 +82,35 @@ func (h *Handler) RefundOrder(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "Order successfully refunded. User wallet updated."})
+}
+
+func (h *Handler) GetThirdPartyPaymentDetails(c *gin.Context) {
+	idStr := c.Param("id")
+	orderID, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid order ID"})
+		return
+	}
+
+	ctx := c.Request.Context()
+	details, err := h.service.GetThirdPartyPaymentDetails(ctx, orderID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch third-party payment details: " + err.Error()})
+		return
+	}
+
+	if details == nil {
+		c.JSON(http.StatusOK, gin.H{
+			"found":   false,
+			"details": nil,
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"found":   true,
+		"details": details,
+	})
 }
 
 type MockWebhookReq struct {

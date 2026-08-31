@@ -23,6 +23,7 @@ var (
 
 type BillingService interface {
 	ListOrders(ctx context.Context, page, pageSize int, status, userID, orderType, promotionLinkID, paidStart, paidEnd string) ([]Order, int, error)
+	GetThirdPartyPaymentDetails(ctx context.Context, orderID int64) (*ThirdPartyPaymentOrder, error)
 	RefundOrder(ctx context.Context, orderID, adminID string) error
 	MockPaymentWebhook(ctx context.Context, userID string, amountCents, chargedCoins, bonusCoins int, method, status, utmSource, utmCampaign, extRef string) error
 
@@ -415,4 +416,8 @@ func (s *billingService) SetDefaultRechargeTemplate(ctx context.Context, id int)
 	}
 
 	return tx.Commit(ctx)
+}
+
+func (s *billingService) GetThirdPartyPaymentDetails(ctx context.Context, orderID int64) (*ThirdPartyPaymentOrder, error) {
+	return s.repo.GetThirdPartyPaymentDetails(ctx, orderID)
 }
