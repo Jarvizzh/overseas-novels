@@ -392,126 +392,78 @@ export const Recharge: React.FC<RechargeProps> = ({
           </div>
         )}
 
-        {/* Section 1: VIP Unlimited Membership Pass (if configured) */}
-        {subscriptionPacks.length > 0 && (
-          <div style={{ marginBottom: '28px' }}>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '12px' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                <span style={{ fontSize: '18px' }}>👑</span>
-                <h3 style={{ fontSize: '16px', fontWeight: 800, margin: 0, color: 'var(--text-primary)' }}>VIP Unlimited Access</h3>
-              </div>
-              <span style={{
-                fontSize: '10px',
-                backgroundColor: 'rgba(239, 68, 68, 0.12)',
-                color: '#ef4444',
-                padding: '2px 8px',
-                borderRadius: '99px',
-                fontWeight: 800,
-                border: '1px solid rgba(239, 68, 68, 0.25)'
-              }}>BEST VALUE</span>
-            </div>
-
-            <div style={{
-              backgroundColor: 'rgba(79, 70, 229, 0.08)',
-              border: '1px solid rgba(79, 70, 229, 0.2)',
-              borderRadius: '12px',
-              padding: '10px 14px',
-              marginBottom: '12px',
-              display: 'flex',
-              alignItems: 'center',
-              gap: '8px'
-            }}>
-              <span style={{ fontSize: '16px' }}>✨</span>
-              <p style={{ fontSize: '11.5px', color: 'var(--text-secondary)', margin: 0, lineHeight: 1.4 }}>
-                <strong style={{ color: 'var(--accent-color)' }}>VIP All-Access:</strong> Read every novel & paid chapter on the entire site without coins!
-              </p>
-            </div>
-
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-              {subscriptionPacks.map((pack) => {
-                const isSelected = selectedPack === pack.id;
-                return (
-                  <div
-                    key={pack.id}
-                    onClick={() => setSelectedPack(pack.id)}
-                    style={{
-                      display: 'flex',
-                      justifyContent: 'space-between',
-                      alignItems: 'center',
-                      backgroundColor: isSelected ? 'rgba(79, 70, 229, 0.06)' : 'var(--bg-secondary)',
-                      borderRadius: '14px',
-                      padding: '14px 16px',
-                      border: isSelected ? '2px solid var(--accent-color)' : '1px solid var(--border-color)',
-                      boxShadow: isSelected ? '0 4px 15px rgba(79, 70, 229, 0.15)' : 'var(--card-shadow)',
-                      cursor: 'pointer',
-                      position: 'relative',
-                      transition: 'all 0.2s ease'
-                    }}
-                  >
-                    <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
-                      <span style={{ fontSize: '26px' }}>👑</span>
-                      <div>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                          <h4 style={{ fontSize: '14.5px', fontWeight: 800, margin: 0, color: 'var(--text-primary)' }}>{pack.name}</h4>
-                          <span style={{
-                            fontSize: '10px',
-                            backgroundColor: 'rgba(79, 70, 229, 0.15)',
-                            color: 'var(--accent-color)',
-                            fontWeight: 700,
-                            padding: '1px 6px',
-                            borderRadius: '4px',
-                            textTransform: 'uppercase'
-                          }}>
-                            {pack.cycle}
-                          </span>
-                        </div>
-                        <p style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '2px', margin: 0 }}>{pack.desc}</p>
-                      </div>
-                    </div>
-
-                    <div style={{ textAlign: 'right' }}>
+        {/* Concentrated Recharge Packages: VIP on top, Coin packs below */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', marginBottom: '20px' }}>
+          {/* VIP Passes on Top */}
+          {subscriptionPacks.map((pack) => {
+            const isSelected = selectedPack === pack.id;
+            return (
+              <div
+                key={pack.id}
+                onClick={() => setSelectedPack(pack.id)}
+                style={{
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  backgroundColor: isSelected ? 'rgba(79, 70, 229, 0.06)' : 'var(--bg-secondary)',
+                  borderRadius: '14px',
+                  padding: '14px 16px',
+                  border: isSelected ? '2px solid var(--accent-color)' : '1px solid var(--border-color)',
+                  boxShadow: isSelected ? '0 4px 15px rgba(79, 70, 229, 0.15)' : 'var(--card-shadow)',
+                  cursor: 'pointer',
+                  position: 'relative',
+                  transition: 'all 0.2s ease'
+                }}
+              >
+                <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
+                  <span style={{ fontSize: '26px' }}>👑</span>
+                  <div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                      <h4 style={{ fontSize: '14.5px', fontWeight: 800, margin: 0, color: 'var(--text-primary)' }}>{pack.name}</h4>
                       <span style={{
-                        fontSize: '14px',
-                        fontWeight: 800,
-                        backgroundColor: isSelected ? 'var(--accent-color)' : 'var(--bg-tertiary)',
-                        color: isSelected ? '#ffffff' : 'var(--text-secondary)',
-                        padding: '6px 12px',
-                        borderRadius: '8px',
-                        display: 'inline-block',
-                        transition: 'var(--transition-fast)'
+                        fontSize: '10px',
+                        backgroundColor: 'rgba(79, 70, 229, 0.15)',
+                        color: 'var(--accent-color)',
+                        fontWeight: 700,
+                        padding: '1px 6px',
+                        borderRadius: '4px',
+                        textTransform: 'uppercase'
                       }}>
-                        {pack.price}
-                      </span>
-                      <span style={{ display: 'block', fontSize: '10px', color: 'var(--text-tertiary)', marginTop: '2px' }}>
-                        /{pack.cycle}
+                        {pack.cycle}
                       </span>
                     </div>
+                    <p style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '2px', margin: 0 }}>{pack.desc}</p>
                   </div>
-                );
-              })}
-            </div>
-          </div>
-        )}
+                </div>
 
-        {/* Section 2: Coin Top-Up Packages */}
-        {coinPacks.length > 0 && (
-          <div style={{ marginBottom: '24px' }}>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '12px' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                <span style={{ fontSize: '18px' }}>💰</span>
-                <h3 style={{ fontSize: '16px', fontWeight: 800, margin: 0, color: 'var(--text-primary)' }}>Coin Packages</h3>
+                <div style={{ textAlign: 'right' }}>
+                  <span style={{
+                    fontSize: '14px',
+                    fontWeight: 800,
+                    backgroundColor: isSelected ? 'var(--accent-color)' : 'var(--bg-tertiary)',
+                    color: isSelected ? '#ffffff' : 'var(--text-secondary)',
+                    padding: '6px 12px',
+                    borderRadius: '8px',
+                    display: 'inline-block',
+                    transition: 'var(--transition-fast)'
+                  }}>
+                    {pack.price}
+                  </span>
+                  <span style={{ display: 'block', fontSize: '10px', color: 'var(--text-tertiary)', marginTop: '2px' }}>
+                    /{pack.cycle}
+                  </span>
+                </div>
               </div>
-              <span style={{
-                fontSize: '10px',
-                color: 'var(--text-tertiary)',
-                fontWeight: 600
-              }}>Instant Delivery</span>
-            </div>
+            );
+          })}
 
+          {/* Coin Packs Directly Below */}
+          {coinPacks.length > 0 && (
             <div style={{
               display: 'grid',
               gridTemplateColumns: 'repeat(2, 1fr)',
-              gap: '12px'
+              gap: '12px',
+              marginTop: subscriptionPacks.length > 0 ? '4px' : '0'
             }}>
               {coinPacks.map((pack) => {
                 const isSelected = selectedPack === pack.id;
@@ -574,8 +526,8 @@ export const Recharge: React.FC<RechargeProps> = ({
                 );
               })}
             </div>
-          </div>
-        )}
+          )}
+        </div>
 
         {/* Clean & Prominent PayPal Checkout Button */}
         {selectedSlot && (
