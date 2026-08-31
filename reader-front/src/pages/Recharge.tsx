@@ -26,7 +26,6 @@ export const Recharge: React.FC<RechargeProps> = ({
   const [isVipSuccess, setIsVipSuccess] = useState(false);
   const [vipSuccessTitle, setVipSuccessTitle] = useState('');
   const [activeLegalModal, setActiveLegalModal] = useState<LegalModalType | null>(null);
-  const [isCancelling, setIsCancelling] = useState(false);
 
   // User VIP subscription status
   const [isVIP, setIsVIP] = useState(false);
@@ -240,24 +239,6 @@ export const Recharge: React.FC<RechargeProps> = ({
     }
   };
 
-  const handleCancelSubscription = async () => {
-    if (!userSubscription?.subscription_id) return;
-    if (!window.confirm("Are you sure you want to cancel your VIP subscription? You will still retain VIP unlimited access until the end of your current billing period.")) {
-      return;
-    }
-
-    setIsCancelling(true);
-    try {
-      await api.cancelSubscription(userSubscription.subscription_id, "User requested cancellation from frontend");
-      showToast("VIP subscription cancelled successfully. Access remains valid until current period ends.", "success");
-      fetchStatusAndTemplates();
-    } catch (err: any) {
-      showToast(err.message || "Failed to cancel subscription", "error");
-    } finally {
-      setIsCancelling(false);
-    }
-  };
-
   const selectedSlot = slots.find(p => p.id === selectedPack);
 
   if (loadingTemplates) {
@@ -371,22 +352,10 @@ export const Recharge: React.FC<RechargeProps> = ({
                     {userSubscription.current_period_end ? new Date(userSubscription.current_period_end).toLocaleDateString() : 'Active'}
                   </span>
                 </div>
-                {userSubscription.status === 'ACTIVE' && (
-                  <button
-                    onClick={handleCancelSubscription}
-                    disabled={isCancelling}
-                    style={{
-                      background: 'none',
-                      border: 'none',
-                      color: '#fca5a5',
-                      fontSize: '12px',
-                      textDecoration: 'underline',
-                      cursor: isCancelling ? 'not-allowed' : 'pointer'
-                    }}
-                  >
-                    {isCancelling ? 'Cancelling...' : 'Cancel Subscription'}
-                  </button>
-                )}
+                <span style={{ color: '#86efac', fontWeight: 600, fontSize: '11px', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                  <span style={{ width: '6px', height: '6px', borderRadius: '50%', backgroundColor: '#22c55e' }}></span>
+                  Active Member
+                </span>
               </div>
             </div>
           </div>
@@ -583,7 +552,7 @@ export const Recharge: React.FC<RechargeProps> = ({
           lineHeight: '1.6'
         }}>
           <p style={{ margin: '0 0 4px 0' }}>• <strong>VIP Unlimited Pass:</strong> Instant access to all novel chapters across the site without consuming coins.</p>
-          <p style={{ margin: '0 0 4px 0' }}>• <strong>Coin Top-up:</strong> Permanent coins to unlock chapters. Cancel subscriptions anytime.</p>
+          <p style={{ margin: '0 0 4px 0' }}>• <strong>Coin Top-up:</strong> Permanent coins to unlock chapters across the entire site.</p>
           <p style={{ margin: 0 }}>• Need help? <span style={{ color: 'var(--accent-color)', fontWeight: 600, cursor: 'pointer', textDecoration: 'underline' }} onClick={() => setActiveLegalModal('contact')}>Contact Customer Support</span>.</p>
         </div>
 
