@@ -66,14 +66,14 @@ CREATE TABLE IF NOT EXISTS novels (
     genres VARCHAR(50)[] DEFAULT '{}',
     word_count INT DEFAULT 0,
     view_count BIGINT DEFAULT 0,
-    coin_cost_per_thousand INT DEFAULT NULL,
-    start_pay_chapter_index INT DEFAULT 10,
+    coin_cost_per_thousand INT DEFAULT 500,
+    start_pay_chapter_index INT DEFAULT 3,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
 -- 增量补齐字段
-ALTER TABLE novels ADD COLUMN IF NOT EXISTS coin_cost_per_thousand INT DEFAULT NULL;
-ALTER TABLE novels ADD COLUMN IF NOT EXISTS start_pay_chapter_index INT DEFAULT 10;
+ALTER TABLE novels ADD COLUMN IF NOT EXISTS coin_cost_per_thousand INT DEFAULT 500;
+ALTER TABLE novels ADD COLUMN IF NOT EXISTS start_pay_chapter_index INT DEFAULT 3;
 
 -- 7. 章节表 (Chapters)
 CREATE TABLE IF NOT EXISTS chapters (

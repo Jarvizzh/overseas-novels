@@ -32,7 +32,7 @@ ON CONFLICT (domain) DO NOTHING;
 
 -- Mock Data Seeder for Star Novel
 
-INSERT INTO novels (id, title, author, cover_url, rating, status, synopsis, genres, word_count, view_count) VALUES (
+INSERT INTO novels (id, title, author, cover_url, rating, status, synopsis, genres, word_count, view_count, coin_cost_per_thousand, start_pay_chapter_index) VALUES (
   10000001,
   'The Bride They Replaced Became Heir',
   'Rola Rose',
@@ -57,8 +57,10 @@ The heir was erased.
 Now Daisy is coming back for everything they stole.',
   '{"Betrayal","Kickass Heroine","She-power","Revenge","Hidden Identity"}',
   47000,
-  7800000
-) ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title, author = EXCLUDED.author, cover_url = EXCLUDED.cover_url, rating = EXCLUDED.rating, status = EXCLUDED.status, synopsis = EXCLUDED.synopsis, genres = EXCLUDED.genres, word_count = EXCLUDED.word_count, view_count = EXCLUDED.view_count;
+  7800000,
+  500,
+  3
+) ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title, author = EXCLUDED.author, cover_url = EXCLUDED.cover_url, rating = EXCLUDED.rating, status = EXCLUDED.status, synopsis = EXCLUDED.synopsis, genres = EXCLUDED.genres, word_count = EXCLUDED.word_count, view_count = EXCLUDED.view_count, coin_cost_per_thousand = EXCLUDED.coin_cost_per_thousand, start_pay_chapter_index = EXCLUDED.start_pay_chapter_index;
 
 INSERT INTO chapters (id, novel_id, chapter_index, title, content, word_count, is_paid, price) VALUES (
   '10000001-ch1',
@@ -155,7 +157,7 @@ This was the first victory or realization of the long path ahead. (Locked Chapte
   50
 ) ON CONFLICT (novel_id, chapter_index) DO UPDATE SET title = EXCLUDED.title, content = EXCLUDED.content, word_count = EXCLUDED.word_count, is_paid = EXCLUDED.is_paid, price = EXCLUDED.price;
 
-INSERT INTO novels (id, title, author, cover_url, rating, status, synopsis, genres, word_count, view_count) VALUES (
+INSERT INTO novels (id, title, author, cover_url, rating, status, synopsis, genres, word_count, view_count, coin_cost_per_thousand, start_pay_chapter_index) VALUES (
   10000006,
   'Alpha Tristan Regretted Divorcing Me ',
   'Jimoh Omowumi',
@@ -179,8 +181,10 @@ Now Alpha Tristan wanted me back, the Alpha who signed my freedom with his own h
 But what he didn''t know was that… I wasn''t the desperate Luna he discarded.',
   '{"Dominant","Second Chance","Alpha","Regret","Billionaire"}',
   421000,
-  2000000
-) ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title, author = EXCLUDED.author, cover_url = EXCLUDED.cover_url, rating = EXCLUDED.rating, status = EXCLUDED.status, synopsis = EXCLUDED.synopsis, genres = EXCLUDED.genres, word_count = EXCLUDED.word_count, view_count = EXCLUDED.view_count;
+  2000000,
+  500,
+  3
+) ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title, author = EXCLUDED.author, cover_url = EXCLUDED.cover_url, rating = EXCLUDED.rating, status = EXCLUDED.status, synopsis = EXCLUDED.synopsis, genres = EXCLUDED.genres, word_count = EXCLUDED.word_count, view_count = EXCLUDED.view_count, coin_cost_per_thousand = EXCLUDED.coin_cost_per_thousand, start_pay_chapter_index = EXCLUDED.start_pay_chapter_index;
 
 INSERT INTO chapters (id, novel_id, chapter_index, title, content, word_count, is_paid, price) VALUES (
   '10000006-ch1',
@@ -277,7 +281,7 @@ This was the first victory or realization of the long path ahead. (Locked Chapte
   50
 ) ON CONFLICT (novel_id, chapter_index) DO UPDATE SET title = EXCLUDED.title, content = EXCLUDED.content, word_count = EXCLUDED.word_count, is_paid = EXCLUDED.is_paid, price = EXCLUDED.price;
 
-INSERT INTO novels (id, title, author, cover_url, rating, status, synopsis, genres, word_count, view_count) VALUES (
+INSERT INTO novels (id, title, author, cover_url, rating, status, synopsis, genres, word_count, view_count, coin_cost_per_thousand, start_pay_chapter_index) VALUES (
   10000007,
   'My Sister Stole My Wedding, So I Took Her Husband''s Company',
   'Rola Rose',
@@ -293,8 +297,10 @@ They took her wedding.
 But Elise took the empire.',
   '{"Betrayal","Regret","She-power","Independent","Cheating"}',
   8000,
-  13100000
-) ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title, author = EXCLUDED.author, cover_url = EXCLUDED.cover_url, rating = EXCLUDED.rating, status = EXCLUDED.status, synopsis = EXCLUDED.synopsis, genres = EXCLUDED.genres, word_count = EXCLUDED.word_count, view_count = EXCLUDED.view_count;
+  13100000,
+  500,
+  3
+) ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title, author = EXCLUDED.author, cover_url = EXCLUDED.cover_url, rating = EXCLUDED.rating, status = EXCLUDED.status, synopsis = EXCLUDED.synopsis, genres = EXCLUDED.genres, word_count = EXCLUDED.word_count, view_count = EXCLUDED.view_count, coin_cost_per_thousand = EXCLUDED.coin_cost_per_thousand, start_pay_chapter_index = EXCLUDED.start_pay_chapter_index;
 
 INSERT INTO chapters (id, novel_id, chapter_index, title, content, word_count, is_paid, price) VALUES (
   '10000007-ch1',
@@ -391,7 +397,7 @@ This was the first victory or realization of the long path ahead. (Locked Chapte
   50
 ) ON CONFLICT (novel_id, chapter_index) DO UPDATE SET title = EXCLUDED.title, content = EXCLUDED.content, word_count = EXCLUDED.word_count, is_paid = EXCLUDED.is_paid, price = EXCLUDED.price;
 
-INSERT INTO novels (id, title, author, cover_url, rating, status, synopsis, genres, word_count, view_count) VALUES (
+INSERT INTO novels (id, title, author, cover_url, rating, status, synopsis, genres, word_count, view_count, coin_cost_per_thousand, start_pay_chapter_index) VALUES (
   10000008,
   'His Dying Luna Became His Greatest Enemy',
   'Precious',
@@ -413,8 +419,10 @@ Now I have a choice: die quietly in the shadows or make Damon Reed regret every 
 It''s payback time—and cancer won''t stop me from destroying the man who broke my heart.',
   '{"Betrayal","Werewolf","Mate","Pregancy","Romance"}',
   83000,
-  18500000
-) ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title, author = EXCLUDED.author, cover_url = EXCLUDED.cover_url, rating = EXCLUDED.rating, status = EXCLUDED.status, synopsis = EXCLUDED.synopsis, genres = EXCLUDED.genres, word_count = EXCLUDED.word_count, view_count = EXCLUDED.view_count;
+  18500000,
+  500,
+  3
+) ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title, author = EXCLUDED.author, cover_url = EXCLUDED.cover_url, rating = EXCLUDED.rating, status = EXCLUDED.status, synopsis = EXCLUDED.synopsis, genres = EXCLUDED.genres, word_count = EXCLUDED.word_count, view_count = EXCLUDED.view_count, coin_cost_per_thousand = EXCLUDED.coin_cost_per_thousand, start_pay_chapter_index = EXCLUDED.start_pay_chapter_index;
 
 INSERT INTO chapters (id, novel_id, chapter_index, title, content, word_count, is_paid, price) VALUES (
   '10000008-ch1',
@@ -511,7 +519,7 @@ This was the first victory or realization of the long path ahead. (Locked Chapte
   50
 ) ON CONFLICT (novel_id, chapter_index) DO UPDATE SET title = EXCLUDED.title, content = EXCLUDED.content, word_count = EXCLUDED.word_count, is_paid = EXCLUDED.is_paid, price = EXCLUDED.price;
 
-INSERT INTO novels (id, title, author, cover_url, rating, status, synopsis, genres, word_count, view_count) VALUES (
+INSERT INTO novels (id, title, author, cover_url, rating, status, synopsis, genres, word_count, view_count, coin_cost_per_thousand, start_pay_chapter_index) VALUES (
   10000009,
   'The Alpha Chose My Sister, So I Chose Revenge',
   'DIMSON',
@@ -540,8 +548,10 @@ Now that Raven was back from her Europe, he had what he''d always really wanted.
 Before she left, though, Celeste had one final gift for her Alpha. Something that would set them both free.',
   '{"Werewolf","Rejection","Cheating","Romance","Second Chance"}',
   75000,
-  9800000
-) ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title, author = EXCLUDED.author, cover_url = EXCLUDED.cover_url, rating = EXCLUDED.rating, status = EXCLUDED.status, synopsis = EXCLUDED.synopsis, genres = EXCLUDED.genres, word_count = EXCLUDED.word_count, view_count = EXCLUDED.view_count;
+  9800000,
+  500,
+  3
+) ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title, author = EXCLUDED.author, cover_url = EXCLUDED.cover_url, rating = EXCLUDED.rating, status = EXCLUDED.status, synopsis = EXCLUDED.synopsis, genres = EXCLUDED.genres, word_count = EXCLUDED.word_count, view_count = EXCLUDED.view_count, coin_cost_per_thousand = EXCLUDED.coin_cost_per_thousand, start_pay_chapter_index = EXCLUDED.start_pay_chapter_index;
 
 INSERT INTO chapters (id, novel_id, chapter_index, title, content, word_count, is_paid, price) VALUES (
   '10000009-ch1',
@@ -638,7 +648,7 @@ This was the first victory or realization of the long path ahead. (Locked Chapte
   50
 ) ON CONFLICT (novel_id, chapter_index) DO UPDATE SET title = EXCLUDED.title, content = EXCLUDED.content, word_count = EXCLUDED.word_count, is_paid = EXCLUDED.is_paid, price = EXCLUDED.price;
 
-INSERT INTO novels (id, title, author, cover_url, rating, status, synopsis, genres, word_count, view_count) VALUES (
+INSERT INTO novels (id, title, author, cover_url, rating, status, synopsis, genres, word_count, view_count, coin_cost_per_thousand, start_pay_chapter_index) VALUES (
   10000010,
   'My hand for her dream.',
   'Temi writes',
@@ -650,8 +660,10 @@ INSERT INTO novels (id, title, author, cover_url, rating, status, synopsis, genr
 So I said yes to another man.',
   '{"Betrayal","Confident","Heart Wrenching","Independent","Billionaire"}',
   22000,
-  3400000
-) ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title, author = EXCLUDED.author, cover_url = EXCLUDED.cover_url, rating = EXCLUDED.rating, status = EXCLUDED.status, synopsis = EXCLUDED.synopsis, genres = EXCLUDED.genres, word_count = EXCLUDED.word_count, view_count = EXCLUDED.view_count;
+  3400000,
+  500,
+  3
+) ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title, author = EXCLUDED.author, cover_url = EXCLUDED.cover_url, rating = EXCLUDED.rating, status = EXCLUDED.status, synopsis = EXCLUDED.synopsis, genres = EXCLUDED.genres, word_count = EXCLUDED.word_count, view_count = EXCLUDED.view_count, coin_cost_per_thousand = EXCLUDED.coin_cost_per_thousand, start_pay_chapter_index = EXCLUDED.start_pay_chapter_index;
 
 INSERT INTO chapters (id, novel_id, chapter_index, title, content, word_count, is_paid, price) VALUES (
   '10000010-ch1',
@@ -748,7 +760,7 @@ This was the first victory or realization of the long path ahead. (Locked Chapte
   50
 ) ON CONFLICT (novel_id, chapter_index) DO UPDATE SET title = EXCLUDED.title, content = EXCLUDED.content, word_count = EXCLUDED.word_count, is_paid = EXCLUDED.is_paid, price = EXCLUDED.price;
 
-INSERT INTO novels (id, title, author, cover_url, rating, status, synopsis, genres, word_count, view_count) VALUES (
+INSERT INTO novels (id, title, author, cover_url, rating, status, synopsis, genres, word_count, view_count, coin_cost_per_thousand, start_pay_chapter_index) VALUES (
   10000011,
   'Spoiled By My Overprotective Brothers ',
   'A Knight In Skirt',
@@ -775,8 +787,10 @@ And when her ex-husband came crawling back, begging for another chance, her brot
 “Chasing after our sister? You’re not even worthy.”',
   '{"Confident","Kickass Heroine","Love Triangle","Billionaire","Revenge"}',
   245000,
-  2400000
-) ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title, author = EXCLUDED.author, cover_url = EXCLUDED.cover_url, rating = EXCLUDED.rating, status = EXCLUDED.status, synopsis = EXCLUDED.synopsis, genres = EXCLUDED.genres, word_count = EXCLUDED.word_count, view_count = EXCLUDED.view_count;
+  2400000,
+  500,
+  3
+) ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title, author = EXCLUDED.author, cover_url = EXCLUDED.cover_url, rating = EXCLUDED.rating, status = EXCLUDED.status, synopsis = EXCLUDED.synopsis, genres = EXCLUDED.genres, word_count = EXCLUDED.word_count, view_count = EXCLUDED.view_count, coin_cost_per_thousand = EXCLUDED.coin_cost_per_thousand, start_pay_chapter_index = EXCLUDED.start_pay_chapter_index;
 
 INSERT INTO chapters (id, novel_id, chapter_index, title, content, word_count, is_paid, price) VALUES (
   '10000011-ch1',
@@ -873,7 +887,7 @@ This was the first victory or realization of the long path ahead. (Locked Chapte
   50
 ) ON CONFLICT (novel_id, chapter_index) DO UPDATE SET title = EXCLUDED.title, content = EXCLUDED.content, word_count = EXCLUDED.word_count, is_paid = EXCLUDED.is_paid, price = EXCLUDED.price;
 
-INSERT INTO novels (id, title, author, cover_url, rating, status, synopsis, genres, word_count, view_count) VALUES (
+INSERT INTO novels (id, title, author, cover_url, rating, status, synopsis, genres, word_count, view_count, coin_cost_per_thousand, start_pay_chapter_index) VALUES (
   10000005,
   'The woman he destroyed, The mystery he’ll never solve',
   'JT Writes',
@@ -893,8 +907,10 @@ That night, while he called my name in our empty apartment, I became someone els
 When the investigation began and his world gradually unraveled, he would finally see what I had turned out to be: not his victim, but the architect of his ruin.',
   '{"Betrayal","Thriller","Romance","Cheating","Revenge"}',
   40000,
-  9700000
-) ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title, author = EXCLUDED.author, cover_url = EXCLUDED.cover_url, rating = EXCLUDED.rating, status = EXCLUDED.status, synopsis = EXCLUDED.synopsis, genres = EXCLUDED.genres, word_count = EXCLUDED.word_count, view_count = EXCLUDED.view_count;
+  9700000,
+  500,
+  3
+) ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title, author = EXCLUDED.author, cover_url = EXCLUDED.cover_url, rating = EXCLUDED.rating, status = EXCLUDED.status, synopsis = EXCLUDED.synopsis, genres = EXCLUDED.genres, word_count = EXCLUDED.word_count, view_count = EXCLUDED.view_count, coin_cost_per_thousand = EXCLUDED.coin_cost_per_thousand, start_pay_chapter_index = EXCLUDED.start_pay_chapter_index;
 
 INSERT INTO chapters (id, novel_id, chapter_index, title, content, word_count, is_paid, price) VALUES (
   '10000005-ch1',
@@ -991,7 +1007,7 @@ This was the first victory or realization of the long path ahead. (Locked Chapte
   50
 ) ON CONFLICT (novel_id, chapter_index) DO UPDATE SET title = EXCLUDED.title, content = EXCLUDED.content, word_count = EXCLUDED.word_count, is_paid = EXCLUDED.is_paid, price = EXCLUDED.price;
 
-INSERT INTO novels (id, title, author, cover_url, rating, status, synopsis, genres, word_count, view_count) VALUES (
+INSERT INTO novels (id, title, author, cover_url, rating, status, synopsis, genres, word_count, view_count, coin_cost_per_thousand, start_pay_chapter_index) VALUES (
   10000002,
   'Married Twice Loved Once',
   'Amyoga',
@@ -1026,8 +1042,10 @@ Yet beneath the glittering empire lies the truth of her first death…
 and if Aria isn’t careful, the crown she claims may cost her heart all over again.',
   '{"Betrayal","Second Chance","Reborn","Billionaire","Revenge"}',
   213000,
-  7400000
-) ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title, author = EXCLUDED.author, cover_url = EXCLUDED.cover_url, rating = EXCLUDED.rating, status = EXCLUDED.status, synopsis = EXCLUDED.synopsis, genres = EXCLUDED.genres, word_count = EXCLUDED.word_count, view_count = EXCLUDED.view_count;
+  7400000,
+  500,
+  3
+) ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title, author = EXCLUDED.author, cover_url = EXCLUDED.cover_url, rating = EXCLUDED.rating, status = EXCLUDED.status, synopsis = EXCLUDED.synopsis, genres = EXCLUDED.genres, word_count = EXCLUDED.word_count, view_count = EXCLUDED.view_count, coin_cost_per_thousand = EXCLUDED.coin_cost_per_thousand, start_pay_chapter_index = EXCLUDED.start_pay_chapter_index;
 
 INSERT INTO chapters (id, novel_id, chapter_index, title, content, word_count, is_paid, price) VALUES (
   '10000002-ch1',
@@ -1124,7 +1142,7 @@ This was the first victory or realization of the long path ahead. (Locked Chapte
   50
 ) ON CONFLICT (novel_id, chapter_index) DO UPDATE SET title = EXCLUDED.title, content = EXCLUDED.content, word_count = EXCLUDED.word_count, is_paid = EXCLUDED.is_paid, price = EXCLUDED.price;
 
-INSERT INTO novels (id, title, author, cover_url, rating, status, synopsis, genres, word_count, view_count) VALUES (
+INSERT INTO novels (id, title, author, cover_url, rating, status, synopsis, genres, word_count, view_count, coin_cost_per_thousand, start_pay_chapter_index) VALUES (
   10000012,
   'TWISTED OBSESSION: THE BILLIONAIRE''S VIRGIN BRIDE',
   'FLOATING INK',
@@ -1151,8 +1169,10 @@ His offer was simple: Marry me. Destroy them. I''ll give you power, wealth, and 
 My response shocked us both: "I''ll marry you. But first... take my virginity. Tonight."',
   '{"Betrayal","Billionaire","Erotic"}',
   156000,
-  1400000
-) ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title, author = EXCLUDED.author, cover_url = EXCLUDED.cover_url, rating = EXCLUDED.rating, status = EXCLUDED.status, synopsis = EXCLUDED.synopsis, genres = EXCLUDED.genres, word_count = EXCLUDED.word_count, view_count = EXCLUDED.view_count;
+  1400000,
+  500,
+  3
+) ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title, author = EXCLUDED.author, cover_url = EXCLUDED.cover_url, rating = EXCLUDED.rating, status = EXCLUDED.status, synopsis = EXCLUDED.synopsis, genres = EXCLUDED.genres, word_count = EXCLUDED.word_count, view_count = EXCLUDED.view_count, coin_cost_per_thousand = EXCLUDED.coin_cost_per_thousand, start_pay_chapter_index = EXCLUDED.start_pay_chapter_index;
 
 INSERT INTO chapters (id, novel_id, chapter_index, title, content, word_count, is_paid, price) VALUES (
   '10000012-ch1',
@@ -1249,7 +1269,7 @@ This was the first victory or realization of the long path ahead. (Locked Chapte
   50
 ) ON CONFLICT (novel_id, chapter_index) DO UPDATE SET title = EXCLUDED.title, content = EXCLUDED.content, word_count = EXCLUDED.word_count, is_paid = EXCLUDED.is_paid, price = EXCLUDED.price;
 
-INSERT INTO novels (id, title, author, cover_url, rating, status, synopsis, genres, word_count, view_count) VALUES (
+INSERT INTO novels (id, title, author, cover_url, rating, status, synopsis, genres, word_count, view_count, coin_cost_per_thousand, start_pay_chapter_index) VALUES (
   10000013,
   'Confessions While the Stars Are Still Out',
   '新知网络内容平台',
@@ -1327,8 +1347,10 @@ But what shattered me completely was the incident where I gave up my spot in the
 I’d already been accepted into our university’s master’s program. But Adam was desperate to start his business. He pulled me into an all-night talk, hoping I’d join him in the struggle, be his most solid support.',
   '{"Second Chance","Regret","She-power","Billionaire","Romance"}',
   7000,
-  922000
-) ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title, author = EXCLUDED.author, cover_url = EXCLUDED.cover_url, rating = EXCLUDED.rating, status = EXCLUDED.status, synopsis = EXCLUDED.synopsis, genres = EXCLUDED.genres, word_count = EXCLUDED.word_count, view_count = EXCLUDED.view_count;
+  922000,
+  500,
+  3
+) ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title, author = EXCLUDED.author, cover_url = EXCLUDED.cover_url, rating = EXCLUDED.rating, status = EXCLUDED.status, synopsis = EXCLUDED.synopsis, genres = EXCLUDED.genres, word_count = EXCLUDED.word_count, view_count = EXCLUDED.view_count, coin_cost_per_thousand = EXCLUDED.coin_cost_per_thousand, start_pay_chapter_index = EXCLUDED.start_pay_chapter_index;
 
 INSERT INTO chapters (id, novel_id, chapter_index, title, content, word_count, is_paid, price) VALUES (
   '10000013-ch1',
@@ -1425,7 +1447,7 @@ This was the first victory or realization of the long path ahead. (Locked Chapte
   50
 ) ON CONFLICT (novel_id, chapter_index) DO UPDATE SET title = EXCLUDED.title, content = EXCLUDED.content, word_count = EXCLUDED.word_count, is_paid = EXCLUDED.is_paid, price = EXCLUDED.price;
 
-INSERT INTO novels (id, title, author, cover_url, rating, status, synopsis, genres, word_count, view_count) VALUES (
+INSERT INTO novels (id, title, author, cover_url, rating, status, synopsis, genres, word_count, view_count, coin_cost_per_thousand, start_pay_chapter_index) VALUES (
   10000004,
   'After the Divorce, My Ex-husband came Crawling Back',
   'Tamara Knox',
@@ -1447,8 +1469,10 @@ But some women are only disposable once.
 And when a man comes crawling back after the divorce, he may find the door permanently closed.',
   '{"Second Chance","Twins","She-power","Friends to Lovers","Romance"}',
   120000,
-  6600000
-) ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title, author = EXCLUDED.author, cover_url = EXCLUDED.cover_url, rating = EXCLUDED.rating, status = EXCLUDED.status, synopsis = EXCLUDED.synopsis, genres = EXCLUDED.genres, word_count = EXCLUDED.word_count, view_count = EXCLUDED.view_count;
+  6600000,
+  500,
+  3
+) ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title, author = EXCLUDED.author, cover_url = EXCLUDED.cover_url, rating = EXCLUDED.rating, status = EXCLUDED.status, synopsis = EXCLUDED.synopsis, genres = EXCLUDED.genres, word_count = EXCLUDED.word_count, view_count = EXCLUDED.view_count, coin_cost_per_thousand = EXCLUDED.coin_cost_per_thousand, start_pay_chapter_index = EXCLUDED.start_pay_chapter_index;
 
 INSERT INTO chapters (id, novel_id, chapter_index, title, content, word_count, is_paid, price) VALUES (
   '10000004-ch1',
@@ -1545,7 +1569,7 @@ This was the first victory or realization of the long path ahead. (Locked Chapte
   50
 ) ON CONFLICT (novel_id, chapter_index) DO UPDATE SET title = EXCLUDED.title, content = EXCLUDED.content, word_count = EXCLUDED.word_count, is_paid = EXCLUDED.is_paid, price = EXCLUDED.price;
 
-INSERT INTO novels (id, title, author, cover_url, rating, status, synopsis, genres, word_count, view_count) VALUES (
+INSERT INTO novels (id, title, author, cover_url, rating, status, synopsis, genres, word_count, view_count, coin_cost_per_thousand, start_pay_chapter_index) VALUES (
   10000003,
   'Stay Away Ethan, Not Yours Anymore.',
   'Z_S_heaven',
@@ -1576,8 +1600,10 @@ Too late, Ethan.
 I’m not yours anymore.',
   '{"Heart Wrenching","Devil Husband","Billionaire","Revenge"}',
   63000,
-  8600000
-) ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title, author = EXCLUDED.author, cover_url = EXCLUDED.cover_url, rating = EXCLUDED.rating, status = EXCLUDED.status, synopsis = EXCLUDED.synopsis, genres = EXCLUDED.genres, word_count = EXCLUDED.word_count, view_count = EXCLUDED.view_count;
+  8600000,
+  500,
+  3
+) ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title, author = EXCLUDED.author, cover_url = EXCLUDED.cover_url, rating = EXCLUDED.rating, status = EXCLUDED.status, synopsis = EXCLUDED.synopsis, genres = EXCLUDED.genres, word_count = EXCLUDED.word_count, view_count = EXCLUDED.view_count, coin_cost_per_thousand = EXCLUDED.coin_cost_per_thousand, start_pay_chapter_index = EXCLUDED.start_pay_chapter_index;
 
 INSERT INTO chapters (id, novel_id, chapter_index, title, content, word_count, is_paid, price) VALUES (
   '10000003-ch1',
@@ -1674,7 +1700,7 @@ This was the first victory or realization of the long path ahead. (Locked Chapte
   50
 ) ON CONFLICT (novel_id, chapter_index) DO UPDATE SET title = EXCLUDED.title, content = EXCLUDED.content, word_count = EXCLUDED.word_count, is_paid = EXCLUDED.is_paid, price = EXCLUDED.price;
 
-INSERT INTO novels (id, title, author, cover_url, rating, status, synopsis, genres, word_count, view_count) VALUES (
+INSERT INTO novels (id, title, author, cover_url, rating, status, synopsis, genres, word_count, view_count, coin_cost_per_thousand, start_pay_chapter_index) VALUES (
   10000014,
   'Ashes of Betrayal, Flames of Revenge',
   'Penleak',
@@ -1691,8 +1717,10 @@ Time to take everything from his.
 Or not.',
   '{"Betrayal","She-power","Billionaire","Cheating","Revenge"}',
   36000,
-  10900000
-) ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title, author = EXCLUDED.author, cover_url = EXCLUDED.cover_url, rating = EXCLUDED.rating, status = EXCLUDED.status, synopsis = EXCLUDED.synopsis, genres = EXCLUDED.genres, word_count = EXCLUDED.word_count, view_count = EXCLUDED.view_count;
+  10900000,
+  500,
+  3
+) ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title, author = EXCLUDED.author, cover_url = EXCLUDED.cover_url, rating = EXCLUDED.rating, status = EXCLUDED.status, synopsis = EXCLUDED.synopsis, genres = EXCLUDED.genres, word_count = EXCLUDED.word_count, view_count = EXCLUDED.view_count, coin_cost_per_thousand = EXCLUDED.coin_cost_per_thousand, start_pay_chapter_index = EXCLUDED.start_pay_chapter_index;
 
 INSERT INTO chapters (id, novel_id, chapter_index, title, content, word_count, is_paid, price) VALUES (
   '10000014-ch1',
@@ -1789,7 +1817,7 @@ This was the first victory or realization of the long path ahead. (Locked Chapte
   50
 ) ON CONFLICT (novel_id, chapter_index) DO UPDATE SET title = EXCLUDED.title, content = EXCLUDED.content, word_count = EXCLUDED.word_count, is_paid = EXCLUDED.is_paid, price = EXCLUDED.price;
 
-INSERT INTO novels (id, title, author, cover_url, rating, status, synopsis, genres, word_count, view_count) VALUES (
+INSERT INTO novels (id, title, author, cover_url, rating, status, synopsis, genres, word_count, view_count, coin_cost_per_thousand, start_pay_chapter_index) VALUES (
   10000015,
   'The billionaire''s secret vow ',
   'EvieLuxe',
@@ -1808,8 +1836,10 @@ She might be the cure to the wounds he swore would never heal.
 Until a shocking revelation tears their fragile bond apart—and an unexpected twin from Aria’s past reappears, threatening everything they thought they knew.',
   '{"Pregancy","Billionaire","Romance","Revenge"}',
   141000,
-  1200000
-) ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title, author = EXCLUDED.author, cover_url = EXCLUDED.cover_url, rating = EXCLUDED.rating, status = EXCLUDED.status, synopsis = EXCLUDED.synopsis, genres = EXCLUDED.genres, word_count = EXCLUDED.word_count, view_count = EXCLUDED.view_count;
+  1200000,
+  500,
+  3
+) ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title, author = EXCLUDED.author, cover_url = EXCLUDED.cover_url, rating = EXCLUDED.rating, status = EXCLUDED.status, synopsis = EXCLUDED.synopsis, genres = EXCLUDED.genres, word_count = EXCLUDED.word_count, view_count = EXCLUDED.view_count, coin_cost_per_thousand = EXCLUDED.coin_cost_per_thousand, start_pay_chapter_index = EXCLUDED.start_pay_chapter_index;
 
 INSERT INTO chapters (id, novel_id, chapter_index, title, content, word_count, is_paid, price) VALUES (
   '10000015-ch1',
@@ -1906,7 +1936,7 @@ This was the first victory or realization of the long path ahead. (Locked Chapte
   50
 ) ON CONFLICT (novel_id, chapter_index) DO UPDATE SET title = EXCLUDED.title, content = EXCLUDED.content, word_count = EXCLUDED.word_count, is_paid = EXCLUDED.is_paid, price = EXCLUDED.price;
 
-INSERT INTO novels (id, title, author, cover_url, rating, status, synopsis, genres, word_count, view_count) VALUES (
+INSERT INTO novels (id, title, author, cover_url, rating, status, synopsis, genres, word_count, view_count, coin_cost_per_thousand, start_pay_chapter_index) VALUES (
   10000016,
   'The Triplets Alphas And Their Exclusive Doctor ',
   'Favourite',
@@ -1934,8 +1964,10 @@ What dark secrets are the triplets truly hiding?
  what will become of Alessia when she uncovers them?',
   '{"BDSM","Harem","Triplets","Werewolf","Cheating"}',
   119000,
-  636000
-) ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title, author = EXCLUDED.author, cover_url = EXCLUDED.cover_url, rating = EXCLUDED.rating, status = EXCLUDED.status, synopsis = EXCLUDED.synopsis, genres = EXCLUDED.genres, word_count = EXCLUDED.word_count, view_count = EXCLUDED.view_count;
+  636000,
+  500,
+  3
+) ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title, author = EXCLUDED.author, cover_url = EXCLUDED.cover_url, rating = EXCLUDED.rating, status = EXCLUDED.status, synopsis = EXCLUDED.synopsis, genres = EXCLUDED.genres, word_count = EXCLUDED.word_count, view_count = EXCLUDED.view_count, coin_cost_per_thousand = EXCLUDED.coin_cost_per_thousand, start_pay_chapter_index = EXCLUDED.start_pay_chapter_index;
 
 INSERT INTO chapters (id, novel_id, chapter_index, title, content, word_count, is_paid, price) VALUES (
   '10000016-ch1',
@@ -2032,7 +2064,7 @@ This was the first victory or realization of the long path ahead. (Locked Chapte
   50
 ) ON CONFLICT (novel_id, chapter_index) DO UPDATE SET title = EXCLUDED.title, content = EXCLUDED.content, word_count = EXCLUDED.word_count, is_paid = EXCLUDED.is_paid, price = EXCLUDED.price;
 
-INSERT INTO novels (id, title, author, cover_url, rating, status, synopsis, genres, word_count, view_count) VALUES (
+INSERT INTO novels (id, title, author, cover_url, rating, status, synopsis, genres, word_count, view_count, coin_cost_per_thousand, start_pay_chapter_index) VALUES (
   10000017,
   'I was an Angel, You made me a Villain',
   'R.F EWELE',
@@ -2042,8 +2074,10 @@ INSERT INTO novels (id, title, author, cover_url, rating, status, synopsis, genr
   'He repayed with evil, I show him to hell',
   '{"She-power","Independent","Romance","Getting Back Together","Cheating"}',
   15000,
-  12100000
-) ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title, author = EXCLUDED.author, cover_url = EXCLUDED.cover_url, rating = EXCLUDED.rating, status = EXCLUDED.status, synopsis = EXCLUDED.synopsis, genres = EXCLUDED.genres, word_count = EXCLUDED.word_count, view_count = EXCLUDED.view_count;
+  12100000,
+  500,
+  3
+) ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title, author = EXCLUDED.author, cover_url = EXCLUDED.cover_url, rating = EXCLUDED.rating, status = EXCLUDED.status, synopsis = EXCLUDED.synopsis, genres = EXCLUDED.genres, word_count = EXCLUDED.word_count, view_count = EXCLUDED.view_count, coin_cost_per_thousand = EXCLUDED.coin_cost_per_thousand, start_pay_chapter_index = EXCLUDED.start_pay_chapter_index;
 
 INSERT INTO chapters (id, novel_id, chapter_index, title, content, word_count, is_paid, price) VALUES (
   '10000017-ch1',
@@ -2140,7 +2174,7 @@ This was the first victory or realization of the long path ahead. (Locked Chapte
   50
 ) ON CONFLICT (novel_id, chapter_index) DO UPDATE SET title = EXCLUDED.title, content = EXCLUDED.content, word_count = EXCLUDED.word_count, is_paid = EXCLUDED.is_paid, price = EXCLUDED.price;
 
-INSERT INTO novels (id, title, author, cover_url, rating, status, synopsis, genres, word_count, view_count) VALUES (
+INSERT INTO novels (id, title, author, cover_url, rating, status, synopsis, genres, word_count, view_count, coin_cost_per_thousand, start_pay_chapter_index) VALUES (
   10000018,
   'My Alpha''s Retribution',
   'Temi writes',
@@ -2158,8 +2192,10 @@ Three years of devotion. Three years of lies.
 Now, I’m done being the obedient Luna everyone pities.',
   '{"Second Chance","Regret","Mate","Werewolf","Romance"}',
   19000,
-  2400000
-) ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title, author = EXCLUDED.author, cover_url = EXCLUDED.cover_url, rating = EXCLUDED.rating, status = EXCLUDED.status, synopsis = EXCLUDED.synopsis, genres = EXCLUDED.genres, word_count = EXCLUDED.word_count, view_count = EXCLUDED.view_count;
+  2400000,
+  500,
+  3
+) ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title, author = EXCLUDED.author, cover_url = EXCLUDED.cover_url, rating = EXCLUDED.rating, status = EXCLUDED.status, synopsis = EXCLUDED.synopsis, genres = EXCLUDED.genres, word_count = EXCLUDED.word_count, view_count = EXCLUDED.view_count, coin_cost_per_thousand = EXCLUDED.coin_cost_per_thousand, start_pay_chapter_index = EXCLUDED.start_pay_chapter_index;
 
 INSERT INTO chapters (id, novel_id, chapter_index, title, content, word_count, is_paid, price) VALUES (
   '10000018-ch1',
@@ -2256,7 +2292,7 @@ This was the first victory or realization of the long path ahead. (Locked Chapte
   50
 ) ON CONFLICT (novel_id, chapter_index) DO UPDATE SET title = EXCLUDED.title, content = EXCLUDED.content, word_count = EXCLUDED.word_count, is_paid = EXCLUDED.is_paid, price = EXCLUDED.price;
 
-INSERT INTO novels (id, title, author, cover_url, rating, status, synopsis, genres, word_count, view_count) VALUES (
+INSERT INTO novels (id, title, author, cover_url, rating, status, synopsis, genres, word_count, view_count, coin_cost_per_thousand, start_pay_chapter_index) VALUES (
   10000019,
   'Tangled With The Other Brother',
   'Nyx Rae',
@@ -2285,8 +2321,10 @@ But Jaxx isn’t just her escape. He’s everything her husband isn’t. Because
 Content Warning: This book contains mature themes intended for adult audiences (18+), including explicit sexual content, toxic relationships, manipulation, and emotional trauma. Reader discretion is strongly advised.',
   '{"Revenge","Explicit"}',
   102000,
-  1400000
-) ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title, author = EXCLUDED.author, cover_url = EXCLUDED.cover_url, rating = EXCLUDED.rating, status = EXCLUDED.status, synopsis = EXCLUDED.synopsis, genres = EXCLUDED.genres, word_count = EXCLUDED.word_count, view_count = EXCLUDED.view_count;
+  1400000,
+  500,
+  3
+) ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title, author = EXCLUDED.author, cover_url = EXCLUDED.cover_url, rating = EXCLUDED.rating, status = EXCLUDED.status, synopsis = EXCLUDED.synopsis, genres = EXCLUDED.genres, word_count = EXCLUDED.word_count, view_count = EXCLUDED.view_count, coin_cost_per_thousand = EXCLUDED.coin_cost_per_thousand, start_pay_chapter_index = EXCLUDED.start_pay_chapter_index;
 
 INSERT INTO chapters (id, novel_id, chapter_index, title, content, word_count, is_paid, price) VALUES (
   '10000019-ch1',
@@ -2383,7 +2421,7 @@ This was the first victory or realization of the long path ahead. (Locked Chapte
   50
 ) ON CONFLICT (novel_id, chapter_index) DO UPDATE SET title = EXCLUDED.title, content = EXCLUDED.content, word_count = EXCLUDED.word_count, is_paid = EXCLUDED.is_paid, price = EXCLUDED.price;
 
-INSERT INTO novels (id, title, author, cover_url, rating, status, synopsis, genres, word_count, view_count) VALUES (
+INSERT INTO novels (id, title, author, cover_url, rating, status, synopsis, genres, word_count, view_count, coin_cost_per_thousand, start_pay_chapter_index) VALUES (
   10000020,
   'Rejected by her Alpha Chosen By the Moon ',
   'Islaadyl',
@@ -2403,8 +2441,10 @@ Years later, when a deadly rogue uprising threatens to destroy his pack, the Alp
 But she’s no longer weak. No longer his. And the dark secrets she guards will change everything.',
   '{"Getting Back Together","Romance","Rejection","Werewolf","Twins"}',
   69000,
-  5800000
-) ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title, author = EXCLUDED.author, cover_url = EXCLUDED.cover_url, rating = EXCLUDED.rating, status = EXCLUDED.status, synopsis = EXCLUDED.synopsis, genres = EXCLUDED.genres, word_count = EXCLUDED.word_count, view_count = EXCLUDED.view_count;
+  5800000,
+  500,
+  3
+) ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title, author = EXCLUDED.author, cover_url = EXCLUDED.cover_url, rating = EXCLUDED.rating, status = EXCLUDED.status, synopsis = EXCLUDED.synopsis, genres = EXCLUDED.genres, word_count = EXCLUDED.word_count, view_count = EXCLUDED.view_count, coin_cost_per_thousand = EXCLUDED.coin_cost_per_thousand, start_pay_chapter_index = EXCLUDED.start_pay_chapter_index;
 
 INSERT INTO chapters (id, novel_id, chapter_index, title, content, word_count, is_paid, price) VALUES (
   '10000020-ch1',
