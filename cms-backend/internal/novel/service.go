@@ -127,7 +127,7 @@ func (s *novelService) ListNovels(ctx context.Context, page, pageSize int, statu
 	}
 
 	selectQuery := fmt.Sprintf(`
-		SELECT id, title, author, cover_url, rating, status, synopsis, genres, word_count, view_count, COALESCE(coin_cost_per_thousand, (SELECT value::integer FROM system_configs WHERE key = 'global_coin_cost_per_thousand'), 5) AS coin_cost_per_thousand, start_pay_chapter_index, created_at
+		SELECT id, title, author, cover_url, rating, status, synopsis, genres, word_count, view_count, COALESCE(coin_cost_per_thousand, (SELECT value::integer FROM system_configs WHERE key = 'global_coin_cost_per_thousand'), 500) AS coin_cost_per_thousand, start_pay_chapter_index, created_at
 		FROM novels
 		%s
 		ORDER BY created_at DESC

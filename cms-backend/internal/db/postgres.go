@@ -70,7 +70,7 @@ func autoMigrate(ctx context.Context, pool *pgxpool.Pool) {
 	} else {
 		// Ensure system configs and default recharge templates are present (idempotent)
 		_, _ = pool.Exec(ctx, `
-			INSERT INTO system_configs (key, value) VALUES ('global_coin_cost_per_thousand', '5') ON CONFLICT DO NOTHING;
+			INSERT INTO system_configs (key, value) VALUES ('global_coin_cost_per_thousand', '500') ON CONFLICT DO NOTHING;
 			INSERT INTO system_configs (key, value) VALUES ('global_start_pay_chapter_index', '3') ON CONFLICT DO NOTHING;
 			INSERT INTO system_domains (name, domain, type, status, is_default) VALUES ('主站默认落地页', 'h5.star-novel.com', 'main', 1, TRUE) ON CONFLICT (domain) DO NOTHING;
 		`)

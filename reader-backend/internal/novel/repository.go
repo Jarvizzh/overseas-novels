@@ -226,7 +226,7 @@ func (r *dbRepository) GetEffectivePricingRule(ctx context.Context, userID int64
 
 	// 3. Fetch global settings
 	globalStartPay := 3
-	globalCost := 5
+	globalCost := 500
 	var gStartStr, gCostStr string
 	_ = db.DB.QueryRow(ctx, "SELECT value FROM system_configs WHERE key = 'global_start_pay_chapter_index'").Scan(&gStartStr)
 	if gStartStr != "" {

@@ -9,7 +9,7 @@ VALUES ('10000000-0000-0000-0000-000000000001', 'admin', '$2a$10$N.zmdr9k7uOCQb3
 ON CONFLICT (username) DO NOTHING;
 
 -- 2. 全局计费与付费章节门槛配置
-INSERT INTO system_configs (key, value) VALUES ('global_coin_cost_per_thousand', '5') ON CONFLICT (key) DO NOTHING;
+INSERT INTO system_configs (key, value) VALUES ('global_coin_cost_per_thousand', '500') ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
 INSERT INTO system_configs (key, value) VALUES ('global_start_pay_chapter_index', '3') ON CONFLICT (key) DO NOTHING;
 
 -- 3. 默认充值模板 (6卡位)

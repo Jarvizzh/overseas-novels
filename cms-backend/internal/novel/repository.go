@@ -83,7 +83,7 @@ func (r *dbNovelRepository) ListNovels(ctx context.Context, selectQuery string, 
 
 func (r *dbNovelRepository) GetNovel(ctx context.Context, id int64) (*Novel, error) {
 	query := `
-		SELECT id, title, author, cover_url, rating, status, synopsis, genres, word_count, view_count, COALESCE(coin_cost_per_thousand, (SELECT value::integer FROM system_configs WHERE key = 'global_coin_cost_per_thousand'), 5) AS coin_cost_per_thousand, start_pay_chapter_index, created_at
+		SELECT id, title, author, cover_url, rating, status, synopsis, genres, word_count, view_count, COALESCE(coin_cost_per_thousand, (SELECT value::integer FROM system_configs WHERE key = 'global_coin_cost_per_thousand'), 500) AS coin_cost_per_thousand, start_pay_chapter_index, created_at
 		FROM novels
 		WHERE id = $1`
 
@@ -109,7 +109,7 @@ func (r *dbNovelRepository) CreateNovel(ctx context.Context, n *Novel) error {
 	query := `
 		INSERT INTO novels (title, author, cover_url, rating, status, synopsis, genres, word_count, view_count, coin_cost_per_thousand, start_pay_chapter_index)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, 0, 0, $8, $9)
-		RETURNING id, title, author, cover_url, rating, status, synopsis, genres, word_count, view_count, COALESCE(coin_cost_per_thousand, (SELECT value::integer FROM system_configs WHERE key = 'global_coin_cost_per_thousand'), 5) AS coin_cost_per_thousand, start_pay_chapter_index, created_at`
+		RETURNING id, title, author, cover_url, rating, status, synopsis, genres, word_count, view_count, COALESCE(coin_cost_per_thousand, (SELECT value::integer FROM system_configs WHERE key = 'global_coin_cost_per_thousand'), 500) AS coin_cost_per_thousand, start_pay_chapter_index, created_at`
 
 	return db.DB.QueryRow(ctx, query, n.Title, n.Author, n.CoverURL, n.Rating, n.Status, n.Synopsis, n.Genres, n.CoinCostPerThousand, n.StartPayChapterIndex).Scan(
 		&n.ID, &n.Title, &n.Author, &n.CoverURL, &n.Rating,
@@ -123,7 +123,7 @@ func (r *dbNovelRepository) UpdateNovel(ctx context.Context, n *Novel) error {
 		UPDATE novels
 		SET title = $1, author = $2, cover_url = $3, rating = $4, status = $5, synopsis = $6, genres = $7, coin_cost_per_thousand = $8, start_pay_chapter_index = $9
 		WHERE id = $10
-		RETURNING id, title, author, cover_url, rating, status, synopsis, genres, word_count, view_count, COALESCE(coin_cost_per_thousand, (SELECT value::integer FROM system_configs WHERE key = 'global_coin_cost_per_thousand'), 5) AS coin_cost_per_thousand, start_pay_chapter_index, created_at`
+		RETURNING id, title, author, cover_url, rating, status, synopsis, genres, word_count, view_count, COALESCE(coin_cost_per_thousand, (SELECT value::integer FROM system_configs WHERE key = 'global_coin_cost_per_thousand'), 500) AS coin_cost_per_thousand, start_pay_chapter_index, created_at`
 
 	return db.DB.QueryRow(ctx, query, n.Title, n.Author, n.CoverURL, n.Rating, n.Status, n.Synopsis, n.Genres, n.CoinCostPerThousand, n.StartPayChapterIndex, n.ID).Scan(
 		&n.ID, &n.Title, &n.Author, &n.CoverURL, &n.Rating,
@@ -148,7 +148,7 @@ func (r *dbNovelRepository) UpdateChapterPrices(ctx context.Context, startIdx in
 			is_paid = (chapter_index >= ($1 - 1)),
 			price = CASE 
 				WHEN (chapter_index >= ($1 - 1)) 
-				THEN ROUND((word_count::decimal / 1000.0) * COALESCE($2, (SELECT value::integer FROM system_configs WHERE key = 'global_coin_cost_per_thousand'), 5))::integer 
+				THEN ROUND((word_count::decimal / 1000.0) * COALESCE($2, (SELECT value::integer FROM system_configs WHERE key = 'global_coin_cost_per_thousand'), 500))::integer 
 				ELSE 0 
 			END
 		WHERE novel_id = $3
