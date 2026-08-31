@@ -386,9 +386,9 @@ CREATE INDEX IF NOT EXISTS idx_meta_ad_camp ON meta_ads(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_meta_ad_acc ON meta_ads(account_id);
 CREATE INDEX IF NOT EXISTS idx_meta_insight_entity_date ON meta_daily_insights(entity_level, entity_id, stat_date);
 
--- 每日签到防刷唯一偏索引
+-- 每日签到防刷唯一偏索引 (使用 UTC 转换保证 IMMUTABLE)
 CREATE UNIQUE INDEX IF NOT EXISTS idx_unique_user_daily_checkin 
-ON transactions(user_id, (created_at::date)) 
+ON transactions(user_id, ((created_at AT TIME ZONE 'UTC')::date)) 
 WHERE biz_type = 'checkin';
 
 -- GIN 模糊搜索三元索引
