@@ -54,13 +54,13 @@ export default function NovelsTab() {
   const [newNovel, setNewNovel] = useState<NovelFormData>({
     title: '', author: '', cover_url: 'https://images.unsplash.com/photo-1543002588-bfa74002ed7e?w=300',
     status: 'Ongoing', rating: 4.5, synopsis: '', genres: 'Romance, Werewolf',
-    coin_cost_per_thousand: 5, start_pay_chapter_index: 3
+    coin_cost_per_thousand: 500, start_pay_chapter_index: 3
   });
 
   const [isEditing, setIsEditing] = useState(false);
   const [editNovelForm, setEditNovelForm] = useState<NovelFormData>({
     title: '', author: '', cover_url: '', status: 'Ongoing', rating: 4.5, synopsis: '', genres: '',
-    coin_cost_per_thousand: 5, start_pay_chapter_index: 3
+    coin_cost_per_thousand: 500, start_pay_chapter_index: 3
   });
 
   const [importFile, setImportFile] = useState<File | null>(null);
@@ -115,7 +115,7 @@ export default function NovelsTab() {
   const [generatedLink, setGeneratedLink] = useState('');
 
   // Global config states
-  const [globalCoinCost, setGlobalCoinCost] = useState(5);
+  const [globalCoinCost, setGlobalCoinCost] = useState(500);
   const [globalStartPayChapter, setGlobalStartPayChapter] = useState(3);
   const [applyToAllNovels, setApplyToAllNovels] = useState(true);
   const [isConfiguringGlobal, setIsConfiguringGlobal] = useState(false);
@@ -290,7 +290,7 @@ export default function NovelsTab() {
       setNewNovel({
         title: '', author: '', cover_url: 'https://images.unsplash.com/photo-1543002588-bfa74002ed7e?w=300',
         status: 'Ongoing', rating: 4.5, synopsis: '', genres: 'Romance, Werewolf',
-        coin_cost_per_thousand: 5, start_pay_chapter_index: globalStartPayChapter || 3
+        coin_cost_per_thousand: globalCoinCost || 500, start_pay_chapter_index: globalStartPayChapter || 3
       });
       fetchNovels();
     } catch (err: any) {

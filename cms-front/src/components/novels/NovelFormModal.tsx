@@ -181,11 +181,12 @@ export const NovelFormModal: React.FC<NovelFormModalProps> = ({
               </div>
               <div>
                 <label style={{ display: 'block', fontSize: '0.8rem', color: 'hsl(var(--text-secondary))', marginBottom: '6px' }}>
-                  千字付费金币数 (为0或空则使用全局配置)
+                  千字付费金币数 (默认 500 金币/千字)
                 </label>
                 <input
                   type="number"
                   className="input-field"
+                  placeholder="500"
                   min={0}
                   value={formData.coin_cost_per_thousand}
                   onChange={(e) =>
