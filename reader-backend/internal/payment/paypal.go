@@ -10,23 +10,31 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"reader-backend/internal/config"
+	"reader-backend/internal/db"
 )
 
-type PayPalClient struct {
-	baseURL string
+type paypalConfigCache struct {
+	sync.RWMutex
+	clientID    string
+	secret      string
+	baseURL     string
+	mode        string
+	lastFetched time.Time
 }
 
+var (
+	ppCache  paypalConfigCache
+	cacheTTL = 5 * time.Minute
+)
+
+type PayPalClient struct{}
+
 func NewPayPalClient() *PayPalClient {
-	baseURL := "https://api-m.sandbox.paypal.com"
-	if config.AppConfig != nil && (strings.ToLower(config.AppConfig.PayPalMode) == "live" || strings.ToLower(config.AppConfig.PayPalMode) == "production") {
-		baseURL = "https://api-m.paypal.com"
-	}
-	client := &PayPalClient{
-		baseURL: baseURL,
-	}
+	client := &PayPalClient{}
 	// Register as default PayPal subscription provider
 	RegisterSubscriptionProvider(ProviderPayPal, client)
 	return client
@@ -36,19 +44,92 @@ func (p *PayPalClient) GetProviderName() string {
 	return ProviderPayPal
 }
 
+// getConfig retrieves PayPal credentials with highest priority to CMS database (system_configs)
+// and fallbacks to .env environment variables, protected by a thread-safe in-memory cache with 5-minute TTL.
+func (p *PayPalClient) getConfig(ctx context.Context) (clientID, secret, baseURL, mode string) {
+	// Fast path: Check read lock
+	ppCache.RLock()
+	if time.Since(ppCache.lastFetched) < cacheTTL && ppCache.lastFetched.Unix() > 0 {
+		cid := ppCache.clientID
+		sec := ppCache.secret
+		burl := ppCache.baseURL
+		m := ppCache.mode
+		ppCache.RUnlock()
+		return cid, sec, burl, m
+	}
+	ppCache.RUnlock()
+
+	// Slow path: Acquire write lock
+	ppCache.Lock()
+	defer ppCache.Unlock()
+
+	// Double check after acquiring write lock
+	if time.Since(ppCache.lastFetched) < cacheTTL && ppCache.lastFetched.Unix() > 0 {
+		return ppCache.clientID, ppCache.secret, ppCache.baseURL, ppCache.mode
+	}
+
+	var dbClientID, dbSecret, dbMode, dbSandboxMode string
+	if db.DB != nil {
+		_ = db.DB.QueryRow(ctx, "SELECT value FROM system_configs WHERE key = 'paypal_client_id'").Scan(&dbClientID)
+		_ = db.DB.QueryRow(ctx, "SELECT value FROM system_configs WHERE key = 'paypal_secret_key'").Scan(&dbSecret)
+		_ = db.DB.QueryRow(ctx, "SELECT value FROM system_configs WHERE key = 'paypal_mode'").Scan(&dbMode)
+		_ = db.DB.QueryRow(ctx, "SELECT value FROM system_configs WHERE key = 'payment_sandbox_mode'").Scan(&dbSandboxMode)
+	}
+
+	// 1. Determine ClientID and Secret (DB highest priority > .env fallback)
+	clientID = strings.TrimSpace(dbClientID)
+	secret = strings.TrimSpace(dbSecret)
+	if clientID == "" && config.AppConfig != nil {
+		clientID = config.AppConfig.PayPalClientID
+		secret = config.AppConfig.PayPalClientSecret
+	}
+
+	// 2. Determine Mode (DB highest priority > .env fallback)
+	mode = strings.ToLower(strings.TrimSpace(dbMode))
+	if mode == "" {
+		if dbSandboxMode != "" {
+			if dbSandboxMode == "false" {
+				mode = "live"
+			} else {
+				mode = "sandbox"
+			}
+		} else if config.AppConfig != nil {
+			mode = strings.ToLower(config.AppConfig.PayPalMode)
+		}
+	}
+	if mode != "live" && mode != "production" {
+		mode = "sandbox"
+	}
+
+	// 3. Determine BaseURL
+	if mode == "live" || mode == "production" {
+		baseURL = "https://api-m.paypal.com"
+	} else {
+		baseURL = "https://api-m.sandbox.paypal.com"
+	}
+
+	// Update cache
+	ppCache.clientID = clientID
+	ppCache.secret = secret
+	ppCache.baseURL = baseURL
+	ppCache.mode = mode
+	ppCache.lastFetched = time.Now()
+
+	return clientID, secret, baseURL, mode
+}
+
 type TokenResponse struct {
 	AccessToken string `json:"access_token"`
 }
 
 func (p *PayPalClient) getAccessToken(ctx context.Context) (string, error) {
-	clientID := config.AppConfig.PayPalClientID
-	secret := config.AppConfig.PayPalClientSecret
+	clientID, secret, baseURL, _ := p.getConfig(ctx)
 
 	if clientID == "" || secret == "" || clientID == "paypal_client_id_placeholder" {
 		return "mock_paypal_token", nil
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", p.baseURL+"/v1/oauth2/token", bytes.NewBufferString("grant_type=client_credentials"))
+	req, err := http.NewRequestWithContext(ctx, "POST", baseURL+"/v1/oauth2/token", bytes.NewBufferString("grant_type=client_credentials"))
 	if err != nil {
 		return "", err
 	}
@@ -192,7 +273,7 @@ type CreateOrderResponse struct {
 
 // CreateOrder creates a single order in PayPal
 func (p *PayPalClient) CreateOrder(ctx context.Context, amountCents int64, coinsAmount int, userID int64, description, returnURL, cancelURL string) (string, string, error) {
-	clientID := config.AppConfig.PayPalClientID
+	clientID, _, baseURL, mode := p.getConfig(ctx)
 	if clientID == "" || clientID == "paypal_client_id_placeholder" {
 		mockID := fmt.Sprintf("mock_paypal_order_%d", time.Now().UnixNano())
 		mockRedirect := returnURL
@@ -246,7 +327,7 @@ func (p *PayPalClient) CreateOrder(ctx context.Context, amountCents int64, coins
 		return "", "", err
 	}
 
-	url := fmt.Sprintf("%s/v2/checkout/orders", p.baseURL)
+	url := fmt.Sprintf("%s/v2/checkout/orders", baseURL)
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(reqBody))
 	if err != nil {
 		return "", "", err
@@ -282,7 +363,7 @@ func (p *PayPalClient) CreateOrder(ctx context.Context, amountCents int64, coins
 
 	if approveURL == "" {
 		domain := "www.sandbox.paypal.com"
-		if config.AppConfig != nil && (strings.ToLower(config.AppConfig.PayPalMode) == "live" || strings.ToLower(config.AppConfig.PayPalMode) == "production") {
+		if mode == "live" || mode == "production" {
 			domain = "www.paypal.com"
 		}
 		approveURL = fmt.Sprintf("https://%s/checkoutnow?token=%s", domain, createResp.ID)
@@ -293,7 +374,7 @@ func (p *PayPalClient) CreateOrder(ctx context.Context, amountCents int64, coins
 
 // CaptureOrder captures a PayPal single transaction
 func (p *PayPalClient) CaptureOrder(ctx context.Context, orderID string) (*PayPalCaptureResult, error) {
-	clientID := config.AppConfig.PayPalClientID
+	clientID, _, baseURL, _ := p.getConfig(ctx)
 	if clientID == "" || clientID == "paypal_client_id_placeholder" {
 		return &PayPalCaptureResult{
 			OrderID:                orderID,
@@ -318,7 +399,7 @@ func (p *PayPalClient) CaptureOrder(ctx context.Context, orderID string) (*PayPa
 		return nil, fmt.Errorf("failed to get paypal access token: %w", err)
 	}
 
-	url := fmt.Sprintf("%s/v2/checkout/orders/%s/capture", p.baseURL, orderID)
+	url := fmt.Sprintf("%s/v2/checkout/orders/%s/capture", baseURL, orderID)
 	req, err := http.NewRequestWithContext(ctx, "POST", url, nil)
 	if err != nil {
 		return nil, err
@@ -418,7 +499,7 @@ func (p *PayPalClient) CaptureOrder(ctx context.Context, orderID string) (*PayPa
 
 // CreateOrGetProduct ensures a default subscription product exists on PayPal
 func (p *PayPalClient) CreateOrGetProduct(ctx context.Context) (string, error) {
-	clientID := config.AppConfig.PayPalClientID
+	clientID, _, baseURL, _ := p.getConfig(ctx)
 	if clientID == "" || clientID == "paypal_client_id_placeholder" {
 		return "PROD_STAR_NOVEL_VIP", nil
 	}
@@ -436,7 +517,7 @@ func (p *PayPalClient) CreateOrGetProduct(ctx context.Context) (string, error) {
 	}
 
 	reqBody, _ := json.Marshal(productReq)
-	url := fmt.Sprintf("%s/v1/catalogs/products", p.baseURL)
+	url := fmt.Sprintf("%s/v1/catalogs/products", baseURL)
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(reqBody))
 	if err != nil {
 		return "", err
@@ -468,7 +549,7 @@ func (p *PayPalClient) CreateOrGetProduct(ctx context.Context) (string, error) {
 
 // CreatePlan creates a recurring billing plan on PayPal (Day, Week, Month)
 func (p *PayPalClient) CreatePlan(ctx context.Context, param CreateSubscriptionPlanParam) (string, error) {
-	clientID := config.AppConfig.PayPalClientID
+	clientID, _, baseURL, _ := p.getConfig(ctx)
 	if clientID == "" || clientID == "paypal_client_id_placeholder" {
 		return fmt.Sprintf("mock_paypal_plan_%s_%d", param.Cycle, param.PriceCents), nil
 	}
@@ -530,7 +611,7 @@ func (p *PayPalClient) CreatePlan(ctx context.Context, param CreateSubscriptionP
 	}
 
 	reqBody, _ := json.Marshal(planReq)
-	url := fmt.Sprintf("%s/v1/billing/plans", p.baseURL)
+	url := fmt.Sprintf("%s/v1/billing/plans", baseURL)
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(reqBody))
 	if err != nil {
 		return "", err
@@ -563,7 +644,7 @@ func (p *PayPalClient) CreatePlan(ctx context.Context, param CreateSubscriptionP
 
 // CreateSubscription creates a subscription agreement on PayPal and returns subscription ID and approval URL
 func (p *PayPalClient) CreateSubscription(ctx context.Context, param CreateSubscriptionParam) (*SubscriptionResult, error) {
-	clientID := config.AppConfig.PayPalClientID
+	clientID, _, baseURL, mode := p.getConfig(ctx)
 	if clientID == "" || clientID == "paypal_client_id_placeholder" {
 		mockSubID := fmt.Sprintf("I-MOCK%d", time.Now().UnixNano())
 		mockRedirect := param.ReturnURL
@@ -601,7 +682,7 @@ func (p *PayPalClient) CreateSubscription(ctx context.Context, param CreateSubsc
 	}
 
 	reqBody, _ := json.Marshal(subReq)
-	url := fmt.Sprintf("%s/v1/billing/subscriptions", p.baseURL)
+	url := fmt.Sprintf("%s/v1/billing/subscriptions", baseURL)
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(reqBody))
 	if err != nil {
 		return nil, err
@@ -644,7 +725,7 @@ func (p *PayPalClient) CreateSubscription(ctx context.Context, param CreateSubsc
 
 	if approveURL == "" {
 		domain := "www.sandbox.paypal.com"
-		if config.AppConfig != nil && (strings.ToLower(config.AppConfig.PayPalMode) == "live" || strings.ToLower(config.AppConfig.PayPalMode) == "production") {
+		if mode == "live" || mode == "production" {
 			domain = "www.paypal.com"
 		}
 		approveURL = fmt.Sprintf("https://%s/webapps/billing/subscriptions?ba_token=%s", domain, res.ID)
@@ -659,7 +740,7 @@ func (p *PayPalClient) CreateSubscription(ctx context.Context, param CreateSubsc
 
 // GetSubscription fetches the full subscription details from PayPal
 func (p *PayPalClient) GetSubscription(ctx context.Context, subscriptionID string) (*SubscriptionDetails, error) {
-	clientID := config.AppConfig.PayPalClientID
+	clientID, _, baseURL, _ := p.getConfig(ctx)
 	if clientID == "" || clientID == "paypal_client_id_placeholder" || strings.HasPrefix(subscriptionID, "I-MOCK") {
 		now := time.Now()
 		periodEnd := now.Add(30 * 24 * time.Hour)
@@ -684,7 +765,7 @@ func (p *PayPalClient) GetSubscription(ctx context.Context, subscriptionID strin
 		return nil, err
 	}
 
-	url := fmt.Sprintf("%s/v1/billing/subscriptions/%s", p.baseURL, subscriptionID)
+	url := fmt.Sprintf("%s/v1/billing/subscriptions/%s", baseURL, subscriptionID)
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, err
@@ -775,7 +856,8 @@ func (p *PayPalClient) ActivateSubscription(ctx context.Context, subscriptionID 
 		return err
 	}
 
-	url := fmt.Sprintf("%s/v1/billing/subscriptions/%s/activate", p.baseURL, subscriptionID)
+	_, _, baseURL, _ := p.getConfig(ctx)
+	url := fmt.Sprintf("%s/v1/billing/subscriptions/%s/activate", baseURL, subscriptionID)
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBufferString(`{"reason": "Activating subscription on star-novel"}`))
 	if err != nil {
 		return err
@@ -818,8 +900,9 @@ func (p *PayPalClient) CancelSubscription(ctx context.Context, subscriptionID st
 		reason = "User requested cancellation"
 	}
 
+	_, _, baseURL, _ := p.getConfig(ctx)
 	bodyJSON, _ := json.Marshal(map[string]string{"reason": reason})
-	url := fmt.Sprintf("%s/v1/billing/subscriptions/%s/cancel", p.baseURL, subscriptionID)
+	url := fmt.Sprintf("%s/v1/billing/subscriptions/%s/cancel", baseURL, subscriptionID)
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(bodyJSON))
 	if err != nil {
 		return err
