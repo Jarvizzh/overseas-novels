@@ -25,11 +25,6 @@ VALUES
 (1, 6, 'vip', 999, 0, 'month', 'VIP Monthly', 'Get 999 Coins + 80/day', '$9.99', 999)
 ON CONFLICT (template_id, slot_index) DO NOTHING;
 
--- 4. 默认主站落地页域名
-INSERT INTO system_domains (name, domain, type, status, is_default)
-VALUES ('主站默认落地页', 'h5.star-novel.com', 'main', 1, TRUE)
-ON CONFLICT (domain) DO NOTHING;
-
 -- Mock Data Seeder for Star Novel
 
 INSERT INTO novels (id, title, author, cover_url, rating, status, synopsis, genres, word_count, view_count, coin_cost_per_thousand, start_pay_chapter_index) VALUES (

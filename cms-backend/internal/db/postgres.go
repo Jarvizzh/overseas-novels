@@ -72,7 +72,6 @@ func autoMigrate(ctx context.Context, pool *pgxpool.Pool) {
 		_, _ = pool.Exec(ctx, `
 			INSERT INTO system_configs (key, value) VALUES ('global_coin_cost_per_thousand', '500') ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
 			INSERT INTO system_configs (key, value) VALUES ('global_start_pay_chapter_index', '3') ON CONFLICT (key) DO NOTHING;
-			INSERT INTO system_domains (name, domain, type, status, is_default) VALUES ('主站默认落地页', 'h5.star-novel.com', 'main', 1, TRUE) ON CONFLICT (domain) DO NOTHING;
 			INSERT INTO admins (id, username, password_hash, nickname, role, status) 
 			VALUES ('10000000-0000-0000-0000-000000000001', 'admin', '$2a$10$F18fKqJSG4r6zPEp3EokNesCxK005I2a66WHrWhwopOOBA./liWqa', '超级管理员', 'SuperAdmin', 1) 
 			ON CONFLICT (username) DO UPDATE SET password_hash = '$2a$10$F18fKqJSG4r6zPEp3EokNesCxK005I2a66WHrWhwopOOBA./liWqa' WHERE admins.username = 'admin' AND admins.password_hash = '$2a$10$N.zmdr9k7uOCQb376NoUnuTJ8iAt6Z5EHsM8lE9lBOsl7iKTVKIUi';
