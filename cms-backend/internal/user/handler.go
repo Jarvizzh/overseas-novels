@@ -7,6 +7,7 @@ import (
 	"strconv"
 
 	"github.com/gin-gonic/gin"
+	"star-novel-cms/internal/auth"
 )
 
 type Handler struct {
@@ -20,7 +21,7 @@ func NewHandler(service UserService) *Handler {
 }
 
 func (h *Handler) RegisterRoutes(rg *gin.RouterGroup) {
-	users := rg.Group("/users")
+	users := rg.Group("/users", auth.AuthMiddleware())
 	{
 		users.GET("", h.ListUsers)
 		users.GET("/:id", h.GetUserDetail)
@@ -90,10 +91,15 @@ func (h *Handler) ToggleUserStatus(c *gin.Context) {
 		return
 	}
 
-	adminID, _ := c.Get("admin_id")
+	var adminIDStr string
+	if val, exists := c.Get("admin_id"); exists && val != nil {
+		if s, ok := val.(string); ok {
+			adminIDStr = s
+		}
+	}
 	ctx := c.Request.Context()
 
-	statusStr, err := h.service.ToggleUserStatus(ctx, userID, req.Status, adminID.(string))
+	statusStr, err := h.service.ToggleUserStatus(ctx, userID, req.Status, adminIDStr)
 	if err != nil {
 		if errors.Is(err, ErrUserNotFound) {
 			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
@@ -109,7 +115,7 @@ func (h *Handler) ToggleUserStatus(c *gin.Context) {
 type AdjustWalletReq struct {
 	Amount  int    `json:"amount" binding:"required"` // Can be negative or positive
 	IsBonus bool   `json:"is_bonus"`                  // Adjust charged coins vs bonus coins
-	Reason  string `json:"reason" binding:"required,min=4"`
+	Reason  string `json:"reason" binding:"required"`
 }
 
 func (h *Handler) AdjustWallet(c *gin.Context) {
@@ -126,10 +132,15 @@ func (h *Handler) AdjustWallet(c *gin.Context) {
 		return
 	}
 
-	adminID, _ := c.Get("admin_id")
+	var adminIDStr string
+	if val, exists := c.Get("admin_id"); exists && val != nil {
+		if s, ok := val.(string); ok {
+			adminIDStr = s
+		}
+	}
 	ctx := c.Request.Context()
 
-	err = h.service.AdjustWallet(ctx, userID, req.Amount, req.IsBonus, req.Reason, adminID.(string))
+	err = h.service.AdjustWallet(ctx, userID, req.Amount, req.IsBonus, req.Reason, adminIDStr)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return

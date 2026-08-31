@@ -6,11 +6,12 @@ import CustomSelect from '../components/CustomSelect';
 interface RechargeSlot {
   id?: number;
   template_id?: number;
-  slot_index: number; // 1 to 6
-  type: 'single' | 'vip' | 'whole_book';
+  slot_index: number;
+  type: 'single' | 'subscription' | 'vip' | 'whole_book';
   coins: number;
   bonus: number;
-  vip_duration: string; // 'day', 'week', 'month', 'year'
+  vip_duration: string;
+  subscription_cycle?: string; // 'day', 'week', 'month'
   vip_name: string;
   vip_desc: string;
   price: string;
@@ -42,15 +43,17 @@ export default function TemplatesTab() {
   const [templateName, setTemplateName] = useState('');
   const [isDefaultTemplate, setIsDefaultTemplate] = useState(false);
 
-  // Initialize slots state with exactly 6 slots
+  // Initialize slots state with default 7 slots (4 single top-up + 3 subscriptions)
   const initDefaultSlots = (): RechargeSlot[] => [
-    { slot_index: 1, type: 'single', coins: 499, bonus: 50, vip_duration: '', vip_name: '', vip_desc: '', price: '$4.99', price_cents: 499, price_amount: 4.99 },
-    { slot_index: 2, type: 'single', coins: 999, bonus: 150, vip_duration: '', vip_name: '', vip_desc: '', price: '$9.99', price_cents: 999, price_amount: 9.99 },
-    { slot_index: 3, type: 'single', coins: 1999, bonus: 400, vip_duration: '', vip_name: '', vip_desc: '', price: '$19.99', price_cents: 1999, price_amount: 19.99 },
-    { slot_index: 4, type: 'single', coins: 4999, bonus: 1200, vip_duration: '', vip_name: '', vip_desc: '', price: '$49.99', price_cents: 4999, price_amount: 49.99 },
-    { slot_index: 5, type: 'vip', coins: 299, bonus: 0, vip_duration: 'week', vip_name: 'VIP Weekly', vip_desc: 'Get 299 Coins + 50/day', price: '$2.99', price_cents: 299, price_amount: 2.99 },
-    { slot_index: 6, type: 'vip', coins: 999, bonus: 0, vip_duration: 'month', vip_name: 'VIP Monthly', vip_desc: 'Get 999 Coins + 80/day', price: '$9.99', price_cents: 999, price_amount: 9.99 },
+    { slot_index: 1, type: 'single', coins: 499, bonus: 50, vip_duration: '', subscription_cycle: '', vip_name: '', vip_desc: '', price: '$4.99', price_cents: 499, price_amount: 4.99 },
+    { slot_index: 2, type: 'single', coins: 999, bonus: 150, vip_duration: '', subscription_cycle: '', vip_name: '', vip_desc: '', price: '$9.99', price_cents: 999, price_amount: 9.99 },
+    { slot_index: 3, type: 'single', coins: 1999, bonus: 400, vip_duration: '', subscription_cycle: '', vip_name: '', vip_desc: '', price: '$19.99', price_cents: 1999, price_amount: 19.99 },
+    { slot_index: 4, type: 'single', coins: 4999, bonus: 1200, vip_duration: '', subscription_cycle: '', vip_name: '', vip_desc: '', price: '$49.99', price_cents: 4999, price_amount: 49.99 },
+    { slot_index: 5, type: 'subscription', coins: 0, bonus: 0, vip_duration: 'day', subscription_cycle: 'day', vip_name: 'VIP Daily Pass', vip_desc: '全站小说24小时无限畅读，每日自动续费', price: '$0.99', price_cents: 99, price_amount: 0.99 },
+    { slot_index: 6, type: 'subscription', coins: 0, bonus: 0, vip_duration: 'week', subscription_cycle: 'week', vip_name: 'VIP Weekly Pass', vip_desc: '全站小说7天无限畅读，每周自动续费', price: '$4.99', price_cents: 499, price_amount: 4.99 },
+    { slot_index: 7, type: 'subscription', coins: 0, bonus: 0, vip_duration: 'month', subscription_cycle: 'month', vip_name: 'VIP Monthly Pass', vip_desc: '全站小说30天无限畅读，每月自动续费', price: '$14.99', price_cents: 1499, price_amount: 14.99 },
   ];
+
 
   const [slots, setSlots] = useState<RechargeSlot[]>(initDefaultSlots());
 
@@ -425,11 +428,11 @@ export default function TemplatesTab() {
                   <label style={{ display: 'block', fontSize: '0.7rem', color: 'hsl(var(--text-secondary))', marginBottom: '4px' }}>充值类型</label>
                   <CustomSelect
                     options={[
-                      { value: 'single', label: '单次充值' },
-                      { value: 'vip', label: '时长会员' },
+                      { value: 'single', label: '单次充值 (金币包)' },
+                      { value: 'subscription', label: '周期订阅 (VIP全站畅读)' },
                       { value: 'whole_book', label: '整部购买' }
                     ]}
-                    value={slot.type}
+                    value={slot.type === 'vip' ? 'subscription' : slot.type}
                     onChange={(val) => handleSlotChange(index, 'type', val as any)}
                     width="100%"
                     style={{ height: '32px' }}
@@ -438,7 +441,7 @@ export default function TemplatesTab() {
 
                 {/* Common Price Input */}
                 <div style={{ marginBottom: '12px' }}>
-                  <label style={{ display: 'block', fontSize: '0.7rem', color: 'hsl(var(--text-secondary))', marginBottom: '4px' }}>充值金额</label>
+                  <label style={{ display: 'block', fontSize: '0.7rem', color: 'hsl(var(--text-secondary))', marginBottom: '4px' }}>充值/扣费金额</label>
                   <div style={{ position: 'relative', display: 'flex', alignItems: 'center' }}>
                     <span style={{
                       position: 'absolute',
@@ -489,31 +492,22 @@ export default function TemplatesTab() {
                   </div>
                 )}
 
-                {slot.type === 'vip' && (
+                {(slot.type === 'subscription' || slot.type === 'vip') && (
                   <div style={{ marginBottom: '10px' }}>
-                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px', marginBottom: '10px' }}>
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: '10px', marginBottom: '10px' }}>
                       <div>
-                        <label style={{ display: 'block', fontSize: '0.7rem', color: 'hsl(var(--text-secondary))', marginBottom: '4px' }}>获得金币数</label>
-                        <input
-                          type="number"
-                          className="input-field"
-                          style={{ height: '32px', fontSize: '0.8rem' }}
-                          value={slot.coins}
-                          onChange={(e) => handleSlotChange(index, 'coins', Number(e.target.value))}
-                          required
-                        />
-                      </div>
-                      <div>
-                        <label style={{ display: 'block', fontSize: '0.7rem', color: 'hsl(var(--text-secondary))', marginBottom: '4px' }}>会员时长</label>
+                        <label style={{ display: 'block', fontSize: '0.7rem', color: 'hsl(var(--text-secondary))', marginBottom: '4px' }}>扣费与结算周期</label>
                         <CustomSelect
                           options={[
-                            { value: 'day', label: '天 (Day)' },
-                            { value: 'week', label: '周 (Week)' },
-                            { value: 'month', label: '月 (Month)' },
-                            { value: 'year', label: '年 (Year)' }
+                            { value: 'day', label: '按日扣费 (Daily)' },
+                            { value: 'week', label: '按周扣费 (Weekly)' },
+                            { value: 'month', label: '按月扣费 (Monthly)' }
                           ]}
-                          value={slot.vip_duration}
-                          onChange={(val) => handleSlotChange(index, 'vip_duration', val)}
+                          value={slot.subscription_cycle || slot.vip_duration || 'month'}
+                          onChange={(val) => {
+                            handleSlotChange(index, 'subscription_cycle', val);
+                            handleSlotChange(index, 'vip_duration', val);
+                          }}
                           width="100%"
                           style={{ height: '32px' }}
                         />
@@ -525,19 +519,19 @@ export default function TemplatesTab() {
                         type="text"
                         className="input-field"
                         style={{ height: '32px', fontSize: '0.8rem' }}
-                        placeholder="例如：VIP Weekly"
+                        placeholder="例如：VIP Weekly Pass"
                         value={slot.vip_name}
                         onChange={(e) => handleSlotChange(index, 'vip_name', e.target.value)}
                         required
                       />
                     </div>
                     <div>
-                      <label style={{ display: 'block', fontSize: '0.7rem', color: 'hsl(var(--text-secondary))', marginBottom: '4px' }}>权益介绍描述</label>
+                      <label style={{ display: 'block', fontSize: '0.7rem', color: 'hsl(var(--text-secondary))', marginBottom: '4px' }}>会员权益描述 (全站无限畅读)</label>
                       <input
                         type="text"
                         className="input-field"
                         style={{ height: '32px', fontSize: '0.8rem' }}
-                        placeholder="例如：300 Coins + 50/day"
+                        placeholder="例如：全站小说无限畅读，支持随时取消"
                         value={slot.vip_desc}
                         onChange={(e) => handleSlotChange(index, 'vip_desc', e.target.value)}
                         required

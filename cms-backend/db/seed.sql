@@ -12,18 +12,29 @@ ON CONFLICT (username) DO UPDATE SET password_hash = EXCLUDED.password_hash;
 INSERT INTO system_configs (key, value) VALUES ('global_coin_cost_per_thousand', '500') ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
 INSERT INTO system_configs (key, value) VALUES ('global_start_pay_chapter_index', '3') ON CONFLICT (key) DO NOTHING;
 
--- 3. 默认充值模板 (6卡位)
+-- 3. 默认充值模板 (7卡位: 4个单次充值 + 3个订阅日/周/月)
 INSERT INTO recharge_templates (id, name, is_default) VALUES (1, '默认充值模板', TRUE) ON CONFLICT (id) DO NOTHING;
 
-INSERT INTO recharge_slots (template_id, slot_index, type, coins, bonus, vip_duration, vip_name, vip_desc, price, price_cents)
+INSERT INTO recharge_slots (template_id, slot_index, type, coins, bonus, vip_duration, subscription_cycle, vip_name, vip_desc, price, price_cents)
 VALUES
-(1, 1, 'single', 499, 50, '', '', '', '$4.99', 499),
-(1, 2, 'single', 999, 150, '', '', '', '$9.99', 999),
-(1, 3, 'single', 1999, 400, '', '', '', '$19.99', 1999),
-(1, 4, 'single', 4999, 1200, '', '', '', '$49.99', 4999),
-(1, 5, 'vip', 299, 0, 'week', 'VIP Weekly', 'Get 299 Coins + 50/day', '$2.99', 299),
-(1, 6, 'vip', 999, 0, 'month', 'VIP Monthly', 'Get 999 Coins + 80/day', '$9.99', 999)
-ON CONFLICT (template_id, slot_index) DO NOTHING;
+(1, 1, 'single', 499, 50, '', '', '', '', '$4.99', 499),
+(1, 2, 'single', 999, 150, '', '', '', '', '$9.99', 999),
+(1, 3, 'single', 1999, 400, '', '', '', '', '$19.99', 1999),
+(1, 4, 'single', 4999, 1200, '', '', '', '', '$49.99', 4999),
+(1, 5, 'subscription', 0, 0, 'day', 'day', 'VIP Daily Pass', 'Unlimited reading for 24 hours, renews daily', '$0.99', 99),
+(1, 6, 'subscription', 0, 0, 'week', 'week', 'VIP Weekly Pass', 'Unlimited reading for 7 days, renews weekly', '$4.99', 499),
+(1, 7, 'subscription', 0, 0, 'month', 'month', 'VIP Monthly Pass', 'Unlimited reading for 30 days, renews monthly', '$14.99', 1499)
+ON CONFLICT (template_id, slot_index) DO UPDATE SET 
+    type = EXCLUDED.type,
+    coins = EXCLUDED.coins,
+    bonus = EXCLUDED.bonus,
+    vip_duration = EXCLUDED.vip_duration,
+    subscription_cycle = EXCLUDED.subscription_cycle,
+    vip_name = EXCLUDED.vip_name,
+    vip_desc = EXCLUDED.vip_desc,
+    price = EXCLUDED.price,
+    price_cents = EXCLUDED.price_cents;
+
 
 -- Mock Data Seeder for Star Novel
 

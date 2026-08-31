@@ -253,16 +253,69 @@ export const api = {
         id: number;
         template_id: number;
         slot_index: number;
-        type: 'single' | 'vip' | 'whole_book';
+        type: 'single' | 'subscription' | 'vip' | 'whole_book';
         coins: number;
         bonus: number;
         vip_duration: string;
+        subscription_cycle?: string;
         vip_name: string;
         vip_desc: string;
         price: string;
         price_cents: number;
       }>;
     }>('/wallet/recharge/templates'),
+
+  createSubscription: (slotId: number, paymentMethod: string = 'paypal', returnUrl?: string, cancelUrl?: string) =>
+    request<{ subscription_id: string; approve_url: string; status: string }>('/wallet/recharge/subscription/create', {
+      method: 'POST',
+      body: JSON.stringify({
+        slot_id: slotId,
+        payment_method: paymentMethod,
+        return_url: returnUrl,
+        cancel_url: cancelUrl,
+      }),
+    }),
+
+  activateSubscription: (subscriptionId: string, paymentMethod: string = 'paypal') =>
+    request<{ message: string }>('/wallet/recharge/subscription/activate', {
+      method: 'POST',
+      body: JSON.stringify({
+        subscription_id: subscriptionId,
+        payment_method: paymentMethod,
+      }),
+    }),
+
+  getSubscriptionStatus: () =>
+    request<{
+      is_vip: boolean;
+      subscription: {
+        id: number;
+        user_id: number;
+        subscription_id: string;
+        plan_id: string;
+        slot_id: number;
+        template_id: number;
+        status: string;
+        cycle: string;
+        price_cents: number;
+        currency: string;
+        payment_method: string;
+        current_period_start?: string;
+        current_period_end?: string;
+        next_billing_time?: string;
+        last_payment_time?: string;
+        cancelled_at?: string;
+      } | null;
+    }>('/wallet/subscription/status'),
+
+  cancelSubscription: (subscriptionId: string, reason: string = 'User requested cancellation') =>
+    request<{ message: string }>('/wallet/subscription/cancel', {
+      method: 'POST',
+      body: JSON.stringify({
+        subscription_id: subscriptionId,
+        reason: reason,
+      }),
+    }),
 
   dailyCheckIn: (day: number, coins: number) => 
     request<{ message: string; coins_awarded: number }>('/wallet/rewards/checkin', {

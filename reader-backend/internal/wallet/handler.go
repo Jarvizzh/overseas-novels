@@ -31,11 +31,19 @@ func (h *Handler) RegisterRoutes(r *gin.RouterGroup) {
 		walletGroup.POST("/recharge/stripe", h.CreateStripeIntent)
 		walletGroup.POST("/recharge/paypal/create-order", h.CreatePayPalOrder)
 		walletGroup.POST("/recharge/paypal/capture", h.CapturePayPalPayment)
+		walletGroup.POST("/recharge/subscription/create", h.CreateSubscription)
+		walletGroup.POST("/recharge/subscription/activate", h.ActivateSubscription)
+		walletGroup.POST("/recharge/paypal/create-subscription", h.CreateSubscription)
+		walletGroup.POST("/recharge/paypal/activate-subscription", h.ActivateSubscription)
+		walletGroup.GET("/subscription/status", h.GetSubscriptionStatus)
+		walletGroup.POST("/subscription/cancel", h.CancelSubscription)
 		walletGroup.POST("/rewards/checkin", h.DailyCheckIn)
 		walletGroup.GET("/recharge/templates", h.GetRechargeTemplates)
 	}
 
 	r.POST("/wallet/webhook/stripe", h.StripeWebhook)
+	r.POST("/wallet/webhook/paypal", h.SubscriptionWebhook)
+	r.POST("/wallet/webhook/subscription/:provider", h.SubscriptionWebhook)
 }
 
 func (h *Handler) GetBalance(c *gin.Context) {
@@ -326,11 +334,168 @@ func (h *Handler) GetRechargeTemplates(c *gin.Context) {
 	ctx := c.Request.Context()
 	templateIDHeader := c.GetHeader("X-Recharge-Template-ID")
 
-	t, err := h.service.GetRechargeTemplates(ctx, templateIDHeader)
+	slots, err := h.service.GetRechargeTemplates(ctx, templateIDHeader)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to query template slots: " + err.Error()})
 		return
 	}
 
-	c.JSON(http.StatusOK, t)
+	c.JSON(http.StatusOK, slots)
 }
+
+type CreateSubscriptionRequest struct {
+	SlotID        int    `json:"slot_id" binding:"required"`
+	PaymentMethod string `json:"payment_method"` // paypal, stripe, etc.
+	ReturnURL     string `json:"return_url"`
+	CancelURL     string `json:"cancel_url"`
+}
+
+func (h *Handler) CreateSubscription(c *gin.Context) {
+	userID := c.MustGet("user_id").(int64)
+	var req CreateSubscriptionRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	provider := req.PaymentMethod
+	if provider == "" {
+		provider = "paypal"
+	}
+
+	ctx := c.Request.Context()
+	fbp := c.GetHeader("X-FB-FBP")
+	fbc := c.GetHeader("X-FB-FBC")
+	pixelID := c.GetHeader("X-FB-Pixel-ID")
+	ip := c.ClientIP()
+	ua := c.Request.UserAgent()
+	sourceURL := c.GetHeader("X-Event-Source-URL")
+	country := c.GetHeader("X-Country")
+	if country == "" {
+		country = c.GetHeader("CF-IPCountry")
+	}
+
+	res, err := h.service.CreateSubscription(ctx, userID, provider, req.SlotID, req.ReturnURL, req.CancelURL, fbp, fbc, pixelID, ip, ua, sourceURL, country)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create subscription: " + err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, res)
+}
+
+type ActivateSubscriptionRequest struct {
+	SubscriptionID string `json:"subscription_id" binding:"required"`
+	PaymentMethod  string `json:"payment_method"`
+}
+
+func (h *Handler) ActivateSubscription(c *gin.Context) {
+	userID := c.MustGet("user_id").(int64)
+	var req ActivateSubscriptionRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	provider := req.PaymentMethod
+	if provider == "" {
+		provider = "paypal"
+	}
+
+	ctx := c.Request.Context()
+	fbp := c.GetHeader("X-FB-FBP")
+	fbc := c.GetHeader("X-FB-FBC")
+	pixelID := c.GetHeader("X-FB-Pixel-ID")
+	ip := c.ClientIP()
+	ua := c.Request.UserAgent()
+	sourceURL := c.GetHeader("X-Event-Source-URL")
+	country := c.GetHeader("X-Country")
+	if country == "" {
+		country = c.GetHeader("CF-IPCountry")
+	}
+
+	err := h.service.ActivateSubscription(ctx, userID, provider, req.SubscriptionID, fbp, fbc, pixelID, ip, ua, sourceURL, country)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Subscription activated successfully. VIP unlimited access enabled!"})
+}
+
+func (h *Handler) GetSubscriptionStatus(c *gin.Context) {
+	userID := c.MustGet("user_id").(int64)
+	ctx := c.Request.Context()
+
+	sub, err := h.service.GetActiveSubscription(ctx, userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	if sub == nil {
+		c.JSON(http.StatusOK, gin.H{
+			"is_vip":       false,
+			"subscription": nil,
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"is_vip":       true,
+		"subscription": sub,
+	})
+}
+
+type CancelSubscriptionRequest struct {
+	SubscriptionID string `json:"subscription_id" binding:"required"`
+	Reason         string `json:"reason"`
+}
+
+func (h *Handler) CancelSubscription(c *gin.Context) {
+	userID := c.MustGet("user_id").(int64)
+	var req CancelSubscriptionRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	ctx := c.Request.Context()
+	err := h.service.CancelSubscription(ctx, userID, req.SubscriptionID, req.Reason)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Subscription cancelled successfully"})
+}
+
+func (h *Handler) SubscriptionWebhook(c *gin.Context) {
+	provider := c.Param("provider")
+	if provider == "" {
+		provider = "paypal"
+	}
+
+	payload, err := io.ReadAll(c.Request.Body)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Failed to read body"})
+		return
+	}
+
+	headers := make(map[string]string)
+	for k, v := range c.Request.Header {
+		if len(v) > 0 {
+			headers[k] = v[0]
+		}
+	}
+
+	ctx := c.Request.Context()
+	err = h.service.ProcessSubscriptionWebhook(ctx, provider, payload, headers)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"received": true})
+}
+

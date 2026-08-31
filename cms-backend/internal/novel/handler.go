@@ -7,6 +7,7 @@ import (
 	"strconv"
 
 	"github.com/gin-gonic/gin"
+	"star-novel-cms/internal/auth"
 )
 
 type Handler struct {
@@ -20,7 +21,7 @@ func NewHandler(service NovelService) *Handler {
 }
 
 func (h *Handler) RegisterRoutes(rg *gin.RouterGroup) {
-	novels := rg.Group("/novels")
+	novels := rg.Group("/novels", auth.AuthMiddleware())
 	{
 		novels.GET("", h.ListNovels)
 		novels.GET("/:id", h.GetNovel)
@@ -36,13 +37,13 @@ func (h *Handler) RegisterRoutes(rg *gin.RouterGroup) {
 		novels.POST("/:id/chapters/bulk-import", h.BulkImportChapters)
 	}
 
-	settings := rg.Group("/settings")
+	settings := rg.Group("/settings", auth.AuthMiddleware())
 	{
 		settings.GET("", h.GetSettings)
 		settings.POST("", h.UpdateSettings)
 	}
 
-	promo := rg.Group("/promotion-links")
+	promo := rg.Group("/promotion-links", auth.AuthMiddleware())
 	{
 		promo.GET("", h.ListPromotionLinks)
 		promo.POST("", h.CreatePromotionLink)
@@ -50,7 +51,7 @@ func (h *Handler) RegisterRoutes(rg *gin.RouterGroup) {
 		promo.DELETE("/:id", h.DeletePromotionLink)
 	}
 
-	pixels := rg.Group("/fb-pixels")
+	pixels := rg.Group("/fb-pixels", auth.AuthMiddleware())
 	{
 		pixels.GET("", h.ListFBPixels)
 		pixels.POST("", h.CreateFBPixel)
@@ -419,6 +420,11 @@ func (h *Handler) CreatePromotionLink(c *gin.Context) {
 		return
 	}
 
+	if req.FBPixelID == nil || *req.FBPixelID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "推广链接必须显式绑定 Facebook 像素"})
+		return
+	}
+
 	ctx := c.Request.Context()
 	link := &PromotionLink{
 		Name:                 req.Name,
@@ -470,6 +476,11 @@ func (h *Handler) UpdatePromotionLink(c *gin.Context) {
 	var req UpdatePromotionLinkReq
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	if req.FBPixelID == nil || *req.FBPixelID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "推广链接必须显式绑定 Facebook 像素"})
 		return
 	}
 

@@ -160,10 +160,14 @@ func (r *dbUserRepository) UpdateUserStatusTx(ctx context.Context, tx pgx.Tx, us
 }
 
 func (r *dbUserRepository) InsertAdminAuditLogTx(ctx context.Context, tx pgx.Tx, adminID, action, targetID, data string) error {
+	var adminIDVal *string
+	if adminID != "" {
+		adminIDVal = &adminID
+	}
 	query := `
 		INSERT INTO admin_audit_logs (admin_id, action, target_id, after_data)
 		VALUES ($1, $2, $3, $4)`
-	_, err := tx.Exec(ctx, query, adminID, action, targetID, data)
+	_, err := tx.Exec(ctx, query, adminIDVal, action, targetID, data)
 	return err
 }
 

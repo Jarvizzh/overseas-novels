@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { domainApi } from '../utils/api';
 import type { SystemDomain } from '../utils/api';
 import {
@@ -453,16 +454,18 @@ export default function DomainsTab() {
       </div>
 
       {/* Create Domain Modal */}
-      {isModalOpen && (
+      {isModalOpen && createPortal(
         <div
           style={{
             position: 'fixed',
             inset: 0,
-            backgroundColor: 'rgba(15, 23, 42, 0.6)',
+            backgroundColor: 'rgba(15, 23, 42, 0.35)',
+            backdropFilter: 'blur(2.5px)',
+            WebkitBackdropFilter: 'blur(2.5px)',
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
-            zIndex: 9999
+            zIndex: 10000
           }}
           className="animate-fade-in"
           onClick={() => setIsModalOpen(false)}
@@ -630,7 +633,8 @@ export default function DomainsTab() {
               </div>
             </form>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
     </div>
   );

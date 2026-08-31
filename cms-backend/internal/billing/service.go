@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/google/uuid"
 )
@@ -25,7 +24,6 @@ type BillingService interface {
 	ListOrders(ctx context.Context, page, pageSize int, status, userID, orderType, promotionLinkID, paidStart, paidEnd string) ([]Order, int, error)
 	GetThirdPartyPaymentDetails(ctx context.Context, orderID int64) (*ThirdPartyPaymentOrder, error)
 	RefundOrder(ctx context.Context, orderID, adminID string) error
-	MockPaymentWebhook(ctx context.Context, userID string, amountCents, chargedCoins, bonusCoins int, method, status, utmSource, utmCampaign, extRef string) error
 
 	ListRechargeTemplates(ctx context.Context) ([]RechargeTemplate, error)
 	CreateRechargeTemplate(ctx context.Context, name string, isDefault bool, slots []RechargeSlot) (int, error)
@@ -174,100 +172,6 @@ func (s *billingService) RefundOrder(ctx context.Context, orderID, adminID strin
 	return tx.Commit(ctx)
 }
 
-func (s *billingService) MockPaymentWebhook(ctx context.Context, userID string, amountCents, chargedCoins, bonusCoins int, method, status, utmSource, utmCampaign, extRef string) error {
-	tx, err := s.repo.BeginTx(ctx)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback(ctx)
-
-	if extRef == "" {
-		extRef = "mock_" + uuid.New().String()
-	}
-
-	if status == "Paid" {
-		// Look up promotion details if UTM parameters are present
-		var plID, nID *int64
-		if utmSource != "" && utmCampaign != "" {
-			var plVal, nVal int64
-			err := tx.QueryRow(ctx, "SELECT id, novel_id FROM promotion_links WHERE utm_source = $1 AND utm_campaign = $2 LIMIT 1", utmSource, utmCampaign).Scan(&plVal, &nVal)
-			if err == nil {
-				plID = &plVal
-				nID = &nVal
-			}
-		}
-
-		now := time.Now()
-		// 1. Create order
-		order := &Order{
-			UserID:             userID,
-			ExternalRefID:      extRef,
-			AmountCents:        amountCents,
-			Currency:           "USD",
-			Coins:              chargedCoins,
-			BonusCoinsCredited: bonusCoins,
-			PaymentMethod:      method,
-			Status:             "Success",
-			UtmSource:          utmSource,
-			UtmCampaign:        utmCampaign,
-			PaidAt:             &now,
-			OrderType:          "single",
-			PromotionLinkID:    plID,
-			NovelID:            nID,
-		}
-		err = s.repo.CreateOrderTx(ctx, tx, order)
-		if err != nil {
-			return err
-		}
-
-		// 2. Add coins to wallet
-		err = s.repo.UpsertWalletBalanceTx(ctx, tx, userID, chargedCoins, bonusCoins)
-		if err != nil {
-			return err
-		}
-
-		// 3. Create transaction record
-		txID := uuid.New().String()
-		desc := fmt.Sprintf("%s Recharge (+%d Coins)", method, chargedCoins+bonusCoins)
-		err = s.repo.InsertTransactionRecordTx(ctx, tx, txID, userID, "credit", "recharge", chargedCoins+bonusCoins, chargedCoins, bonusCoins, desc)
-		if err != nil {
-			return err
-		}
-	} else if status == "Refunded" {
-		// Mock refund simulation: search for a paid order and refund it
-		existOrderID, err := s.repo.GetFirstPaidOrderIDByUserIDTx(ctx, tx, userID)
-		if err != nil {
-			return err
-		}
-		if existOrderID == "" {
-			return errors.New("No success orders found for this user to refund")
-		}
-
-		// Update order
-		err = s.repo.UpdateOrderStatusTx(ctx, tx, existOrderID, "Refunded")
-		if err != nil {
-			return err
-		}
-
-		// Deduct coins (allow negative)
-		err = s.repo.DeductWalletBalanceTx(ctx, tx, userID, chargedCoins, bonusCoins)
-		if err != nil {
-			return err
-		}
-
-		// Record transaction
-		txID := uuid.New().String()
-		desc := fmt.Sprintf("Mock Refund deduction for User %s (-%d Charged, -%d Bonus)", userID, chargedCoins, bonusCoins)
-		totalDeducted := chargedCoins + bonusCoins
-		err = s.repo.InsertTransactionRecordTx(ctx, tx, txID, userID, "debit", "refund", totalDeducted, chargedCoins, bonusCoins, desc)
-		if err != nil {
-			return err
-		}
-	}
-
-	return tx.Commit(ctx)
-}
-
 func (s *billingService) ListRechargeTemplates(ctx context.Context) ([]RechargeTemplate, error) {
 	templates, err := s.repo.ListRechargeTemplates(ctx)
 	if err != nil {
@@ -315,7 +219,7 @@ func (s *billingService) CreateRechargeTemplate(ctx context.Context, name string
 	}
 
 	for _, slot := range slots {
-		err = s.repo.CreateRechargeSlotTx(ctx, tx, templateID, slot.SlotIndex, slot.Type, slot.Coins, slot.Bonus, slot.VipDuration, slot.VipName, slot.VipDesc, slot.Price, slot.PriceCents)
+		err = s.repo.CreateRechargeSlotTx(ctx, tx, templateID, slot.SlotIndex, slot.Type, slot.Coins, slot.Bonus, slot.VipDuration, slot.SubscriptionCycle, slot.VipName, slot.VipDesc, slot.Price, slot.PriceCents)
 		if err != nil {
 			return 0, err
 		}
@@ -367,7 +271,7 @@ func (s *billingService) UpdateRechargeTemplate(ctx context.Context, id int, nam
 	}
 
 	for _, slot := range slots {
-		err = s.repo.CreateRechargeSlotTx(ctx, tx, id, slot.SlotIndex, slot.Type, slot.Coins, slot.Bonus, slot.VipDuration, slot.VipName, slot.VipDesc, slot.Price, slot.PriceCents)
+		err = s.repo.CreateRechargeSlotTx(ctx, tx, id, slot.SlotIndex, slot.Type, slot.Coins, slot.Bonus, slot.VipDuration, slot.SubscriptionCycle, slot.VipName, slot.VipDesc, slot.Price, slot.PriceCents)
 		if err != nil {
 			return err
 		}

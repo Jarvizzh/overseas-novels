@@ -146,16 +146,39 @@ CREATE TABLE IF NOT EXISTS recharge_slots (
     id SERIAL PRIMARY KEY,
     template_id INT NOT NULL REFERENCES recharge_templates(id) ON DELETE CASCADE,
     slot_index INT NOT NULL,
-    type VARCHAR(20) NOT NULL, -- 'single', 'vip', 'whole_book'
+    type VARCHAR(20) NOT NULL, -- 'single', 'subscription', 'vip', 'whole_book'
     coins INT DEFAULT 0,
     bonus INT DEFAULT 0,
     vip_duration VARCHAR(10) DEFAULT '', -- 'day', 'week', 'month', 'year'
+    subscription_cycle VARCHAR(20) DEFAULT '', -- 'day', 'week', 'month'
     vip_name VARCHAR(50) DEFAULT '',
     vip_desc VARCHAR(255) DEFAULT '',
     price VARCHAR(20) NOT NULL,
     price_cents INT NOT NULL,
     CONSTRAINT unique_template_slot UNIQUE (template_id, slot_index)
 );
+
+ALTER TABLE recharge_slots ADD COLUMN IF NOT EXISTS subscription_cycle VARCHAR(20) DEFAULT '';
+
+-- 13b. 支付渠道计划映射表 (Payment Provider Plans)
+CREATE TABLE IF NOT EXISTS payment_provider_plans (
+    id SERIAL PRIMARY KEY,
+    provider VARCHAR(32) NOT NULL,          -- 'paypal', 'stripe', etc.
+    slot_id INT NOT NULL,                   -- 关联 recharge_slots.id
+    cycle VARCHAR(16) NOT NULL,             -- 'day', 'week', 'month'
+    price_cents INT NOT NULL,               -- 计费金额（美分）
+    currency VARCHAR(8) NOT NULL DEFAULT 'USD',
+    external_plan_id VARCHAR(128) NOT NULL, -- 第三方计划 ID (如 PayPal 的 P-XXXXX)
+    status VARCHAR(32) NOT NULL DEFAULT 'ACTIVE',
+    raw_payload JSONB DEFAULT '{}',
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uk_provider_slot UNIQUE (provider, slot_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_provider_plans_slot ON payment_provider_plans(slot_id);
+CREATE INDEX IF NOT EXISTS idx_provider_plans_lookup ON payment_provider_plans(provider, cycle, price_cents);
+
 
 -- 14. 落地页域名管理表 (System Domains)
 CREATE TABLE IF NOT EXISTS system_domains (
@@ -220,6 +243,7 @@ CREATE TABLE IF NOT EXISTS recharge_orders (
     fb_lead_metadata JSONB,              -- Stores fbp, fbc, user_agent, ip for Conversions API
     paid_at TIMESTAMP WITH TIME ZONE,
     order_type VARCHAR(20) DEFAULT 'single',
+    subscription_id VARCHAR(100),
     recharge_template_id INT REFERENCES recharge_templates(id) ON DELETE SET NULL,
     recharge_slot_id INT,
     promotion_link_id INT REFERENCES promotion_links(id) ON DELETE SET NULL,
@@ -227,6 +251,36 @@ CREATE TABLE IF NOT EXISTS recharge_orders (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
+
+ALTER TABLE recharge_orders ADD COLUMN IF NOT EXISTS subscription_id VARCHAR(100);
+
+-- 17b. 用户周期订阅表 (User Subscriptions)
+CREATE TABLE IF NOT EXISTS user_subscriptions (
+    id BIGSERIAL PRIMARY KEY,
+    user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    subscription_id VARCHAR(100) UNIQUE NOT NULL, -- PayPal Subscription ID (e.g. I-XXXXX)
+    plan_id VARCHAR(100),
+    slot_id INT,
+    template_id INT,
+    status VARCHAR(30) NOT NULL DEFAULT 'ACTIVE', -- 'PENDING', 'ACTIVE', 'CANCELLED', 'SUSPENDED', 'EXPIRED'
+    cycle VARCHAR(20) NOT NULL DEFAULT 'month',   -- 'day', 'week', 'month'
+    price_cents INT NOT NULL DEFAULT 0,
+    currency VARCHAR(10) DEFAULT 'USD',
+    payment_method VARCHAR(30) DEFAULT 'paypal',
+    current_period_start TIMESTAMP WITH TIME ZONE,
+    current_period_end TIMESTAMP WITH TIME ZONE,
+    next_billing_time TIMESTAMP WITH TIME ZONE,
+    last_payment_time TIMESTAMP WITH TIME ZONE,
+    cancelled_at TIMESTAMP WITH TIME ZONE,
+    raw_payload JSONB,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_user_subscriptions_user ON user_subscriptions(user_id);
+CREATE INDEX IF NOT EXISTS idx_user_subscriptions_status ON user_subscriptions(status);
+CREATE INDEX IF NOT EXISTS idx_user_subscriptions_sub_id ON user_subscriptions(subscription_id);
+
 
 -- 18. 首页推荐位表 (Recommendations)
 CREATE TABLE IF NOT EXISTS recommendations (

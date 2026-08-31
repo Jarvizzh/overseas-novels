@@ -33,6 +33,11 @@ type Service interface {
 	CreateStripeIntent(ctx context.Context, userID int64, amountCents int64, coinsAmount int, fbp, fbc, pixelID, ip, ua, sourceURL, country string) (string, error)
 	CreatePayPalOrder(ctx context.Context, userID int64, amountCents int64, coinsAmount int, returnURL, cancelURL, fbp, fbc, pixelID, ip, ua, sourceURL, country string) (string, string, error)
 	CapturePayPalPayment(ctx context.Context, userID int64, orderID string, coinsAmount int, fbp, fbc, pixelID, ip, ua, sourceURL, country string) error
+	CreateSubscription(ctx context.Context, userID int64, providerName string, slotID int, returnURL, cancelURL, fbp, fbc, pixelID, ip, ua, sourceURL, country string) (*payment.SubscriptionResult, error)
+	ActivateSubscription(ctx context.Context, userID int64, providerName string, subscriptionID string, fbp, fbc, pixelID, ip, ua, sourceURL, country string) error
+	GetActiveSubscription(ctx context.Context, userID int64) (*model.UserSubscription, error)
+	CancelSubscription(ctx context.Context, userID int64, subscriptionID string, reason string) error
+	ProcessSubscriptionWebhook(ctx context.Context, providerName string, payload []byte, headers map[string]string) error
 	ProcessStripeWebhook(ctx context.Context, payload []byte, sigHeader string, webhookSecret string) error
 	AwardDailyCheckIn(ctx context.Context, userID int64, coinsAmount int, day int) error
 	GetRechargeTemplates(ctx context.Context, templateIDHeader string) (*model.RechargeTemplate, error)
@@ -447,3 +452,354 @@ func (s *service) GetRechargeTemplates(ctx context.Context, templateIDHeader str
 
 	return t, nil
 }
+
+func (s *service) CreateSubscription(
+	ctx context.Context,
+	userID int64,
+	providerName string,
+	slotID int,
+	returnURL, cancelURL string,
+	fbp, fbc, pixelID, ip, ua, sourceURL, country string,
+) (*payment.SubscriptionResult, error) {
+	if providerName == "" {
+		providerName = payment.ProviderPayPal
+	}
+
+	provider, err := payment.GetSubscriptionProvider(providerName)
+	if err != nil {
+		return nil, err
+	}
+
+	slot, err := s.repo.GetRechargeSlotByID(ctx, slotID)
+	if err != nil || slot == nil {
+		return nil, errors.New("recharge slot not found")
+	}
+
+	if slot.Type != "subscription" && slot.Type != "vip" {
+		return nil, errors.New("selected recharge slot is not a subscription package")
+	}
+
+	cycleStr := slot.SubscriptionCycle
+	if cycleStr == "" {
+		cycleStr = slot.VipDuration
+	}
+	if cycleStr == "" {
+		cycleStr = "month"
+	}
+
+	existingPlan, _ := s.repo.GetProviderPlan(ctx, providerName, slot.ID)
+	var planID string
+	if existingPlan != nil && existingPlan.ExternalPlanID != "" {
+		planID = existingPlan.ExternalPlanID
+	} else {
+		planName := slot.VipName
+		if planName == "" {
+			planName = "Star Novel VIP " + strings.Title(cycleStr)
+		}
+		desc := slot.VipDesc
+		if desc == "" {
+			desc = "Unlimited reading access for VIP members"
+		}
+		newPlanID, errPlan := provider.CreatePlan(ctx, payment.CreateSubscriptionPlanParam{
+			PlanName:    planName,
+			Description: desc,
+			Cycle:       payment.SubscriptionCycle(cycleStr),
+			PriceCents:  int64(slot.PriceCents),
+			Currency:    "USD",
+		})
+		if errPlan != nil {
+			return nil, fmt.Errorf("failed to create subscription plan with %s: %w", providerName, errPlan)
+		}
+		planID = newPlanID
+		_ = s.repo.SaveProviderPlan(ctx, &model.PaymentProviderPlan{
+			Provider:       providerName,
+			SlotID:         slot.ID,
+			Cycle:          cycleStr,
+			PriceCents:     slot.PriceCents,
+			Currency:       "USD",
+			ExternalPlanID: planID,
+			Status:         "ACTIVE",
+		})
+	}
+
+	customID := fmt.Sprintf("%d:%d:%s", userID, slot.ID, cycleStr)
+	result, err := provider.CreateSubscription(ctx, payment.CreateSubscriptionParam{
+		UserID:     userID,
+		PlanID:     planID,
+		SlotID:     slot.ID,
+		PriceCents: int64(slot.PriceCents),
+		Currency:   "USD",
+		CustomID:   customID,
+		ReturnURL:  returnURL,
+		CancelURL:  cancelURL,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	// Pre-record pending subscription in database
+	now := time.Now()
+	sub := &model.UserSubscription{
+		UserID:             userID,
+		SubscriptionID:     result.SubscriptionID,
+		PlanID:             planID,
+		SlotID:             slot.ID,
+		TemplateID:         slot.TemplateID,
+		Status:             "PENDING",
+		Cycle:              cycleStr,
+		PriceCents:         slot.PriceCents,
+		Currency:           "USD",
+		PaymentMethod:      providerName,
+		CurrentPeriodStart: &now,
+		RawPayload:         "{}",
+	}
+	_ = s.repo.UpsertUserSubscription(ctx, sub)
+
+	email, _ := s.repo.GetUserEmail(ctx, userID)
+	workerpool.Submit(func() {
+		effectivePixelID := pixelID
+		if effectivePixelID == "" && db.DB != nil {
+			_ = db.DB.QueryRow(context.Background(), "SELECT fp.pixel_id FROM users u JOIN promotion_links pl ON (u.utm_source = pl.utm_source AND u.utm_campaign = pl.utm_campaign) JOIN fb_pixels fp ON pl.fb_pixel_id = fp.id WHERE u.id = $1 LIMIT 1", userID).Scan(&effectivePixelID)
+		}
+		if effectivePixelID != "" {
+			tracking.SendFacebookEvent(effectivePixelID, "InitiateCheckout", strconv.FormatInt(userID, 10), email, ip, ua, fbc, fbp, float64(slot.PriceCents)/100.0, "USD", sourceURL, country)
+		}
+	})
+
+	return result, nil
+}
+
+func (s *service) ActivateSubscription(
+	ctx context.Context,
+	userID int64,
+	providerName string,
+	subscriptionID string,
+	fbp, fbc, pixelID, ip, ua, sourceURL, country string,
+) error {
+	if providerName == "" {
+		providerName = payment.ProviderPayPal
+	}
+
+	if redisclient.RDB != nil && subscriptionID != "" {
+		lockKey := fmt.Sprintf("lock:sub:activate:%s", subscriptionID)
+		acquired, err := redisclient.RDB.SetNX(ctx, lockKey, "1", 10*time.Second).Result()
+		if err == nil && !acquired {
+			return errors.New("subscription is currently being activated by another request")
+		}
+		defer redisclient.RDB.Del(ctx, lockKey)
+	}
+
+	provider, err := payment.GetSubscriptionProvider(providerName)
+	if err != nil {
+		return err
+	}
+
+	_ = provider.ActivateSubscription(ctx, subscriptionID)
+	details, err := provider.GetSubscription(ctx, subscriptionID)
+	if err != nil {
+		return fmt.Errorf("failed to verify subscription with provider: %w", err)
+	}
+
+	if details.Status != "ACTIVE" && details.Status != "APPROVED" {
+		return fmt.Errorf("subscription is not active (status: %s)", details.Status)
+	}
+
+	// Fetch existing pending sub or parse slot
+	existingSub, _ := s.repo.GetSubscriptionByID(ctx, subscriptionID)
+	var slotID int
+	var templateID int
+	var cycleStr = "month"
+	var priceCents = 999
+
+	if existingSub != nil {
+		slotID = existingSub.SlotID
+		templateID = existingSub.TemplateID
+		cycleStr = existingSub.Cycle
+		priceCents = existingSub.PriceCents
+	} else if details.CustomID != "" {
+		parts := strings.Split(details.CustomID, ":")
+		if len(parts) >= 2 {
+			slotID, _ = strconv.Atoi(parts[1])
+		}
+		if len(parts) >= 3 {
+			cycleStr = parts[2]
+		}
+	}
+
+	if slotID > 0 {
+		if slot, errSlot := s.repo.GetRechargeSlotByID(ctx, slotID); errSlot == nil && slot != nil {
+			templateID = slot.TemplateID
+			if slot.SubscriptionCycle != "" {
+				cycleStr = slot.SubscriptionCycle
+			}
+			priceCents = slot.PriceCents
+		}
+	}
+
+	now := time.Now()
+	periodStart := details.CurrentPeriodStart
+	if periodStart == nil {
+		periodStart = &now
+	}
+	periodEnd := details.CurrentPeriodEnd
+	if periodEnd == nil {
+		var calcEnd time.Time
+		switch cycleStr {
+		case "day":
+			calcEnd = now.Add(24 * time.Hour)
+		case "week":
+			calcEnd = now.Add(7 * 24 * time.Hour)
+		case "month":
+			calcEnd = now.Add(30 * 24 * time.Hour)
+		default:
+			calcEnd = now.Add(30 * 24 * time.Hour)
+		}
+		periodEnd = &calcEnd
+	}
+
+	userSub := &model.UserSubscription{
+		UserID:             userID,
+		SubscriptionID:     subscriptionID,
+		PlanID:             details.PlanID,
+		SlotID:             slotID,
+		TemplateID:         templateID,
+		Status:             "ACTIVE",
+		Cycle:              cycleStr,
+		PriceCents:         priceCents,
+		Currency:           "USD",
+		PaymentMethod:      providerName,
+		CurrentPeriodStart: periodStart,
+		CurrentPeriodEnd:   periodEnd,
+		NextBillingTime:    details.NextBillingTime,
+		LastPaymentTime:    details.LastPaymentTime,
+		RawPayload:         details.RawPayload,
+	}
+
+	err = s.repo.UpsertUserSubscription(ctx, userSub)
+	if err != nil {
+		return fmt.Errorf("failed to save active user subscription: %w", err)
+	}
+
+	var fbLeadJSON string
+	if pixelID != "" {
+		fbLeadData := map[string]string{
+			"fbp":        fbp,
+			"fbc":        fbc,
+			"pixel_id":   pixelID,
+			"ip_address": ip,
+			"user_agent": ua,
+			"source_url": sourceURL,
+		}
+		fbLeadJSONBytes, _ := json.Marshal(fbLeadData)
+		fbLeadJSON = string(fbLeadJSONBytes)
+	}
+
+	tpOrder := &model.ThirdPartyPaymentOrder{
+		PaymentProvider:        providerName,
+		ExternalOrderID:        subscriptionID,
+		CaptureID:              subscriptionID,
+		PayerID:                details.PayerID,
+		PayerEmail:             details.PayerEmail,
+		PayerName:              details.PayerName,
+		Currency:               "USD",
+		GrossAmount:            float64(priceCents) / 100.0,
+		FeeAmount:              0.0,
+		NetAmount:              float64(priceCents) / 100.0,
+		Status:                 "COMPLETED",
+		SellerProtectionStatus: "ELIGIBLE",
+		RawPayload:             details.RawPayload,
+	}
+
+	err = s.repo.RecordSubscriptionOrderTx(ctx, userID, subscriptionID, subscriptionID, slotID, int64(priceCents), "USD", providerName, fbLeadJSON, tpOrder)
+	if err != nil {
+		log.Printf("[Warning] Failed to record initial subscription order: %v", err)
+	}
+
+	email, _ := s.repo.GetUserEmail(ctx, userID)
+	if email == "" && details.PayerEmail != "" {
+		email = details.PayerEmail
+	}
+
+	workerpool.Submit(func() {
+		effectivePixelID := pixelID
+		if effectivePixelID == "" && db.DB != nil {
+			_ = db.DB.QueryRow(context.Background(), "SELECT fp.pixel_id FROM users u JOIN promotion_links pl ON (u.utm_source = pl.utm_source AND u.utm_campaign = pl.utm_campaign) JOIN fb_pixels fp ON pl.fb_pixel_id = fp.id WHERE u.id = $1 LIMIT 1", userID).Scan(&effectivePixelID)
+		}
+		if effectivePixelID != "" {
+			tracking.SendFacebookEvent(effectivePixelID, "Subscribe", strconv.FormatInt(userID, 10), email, ip, ua, fbc, fbp, float64(priceCents)/100.0, "USD", sourceURL, country)
+		}
+	})
+
+	return nil
+}
+
+func (s *service) GetActiveSubscription(ctx context.Context, userID int64) (*model.UserSubscription, error) {
+	return s.repo.GetActiveSubscriptionByUserID(ctx, userID)
+}
+
+func (s *service) CancelSubscription(ctx context.Context, userID int64, subscriptionID string, reason string) error {
+	sub, err := s.repo.GetSubscriptionByID(ctx, subscriptionID)
+	if err != nil || sub == nil {
+		return errors.New("subscription not found")
+	}
+
+	if sub.UserID != userID {
+		return errors.New("subscription owner mismatch")
+	}
+
+	provider, err := payment.GetSubscriptionProvider(sub.PaymentMethod)
+	if err == nil && provider != nil {
+		_ = provider.CancelSubscription(ctx, subscriptionID, reason)
+	}
+
+	return s.repo.UpdateUserSubscriptionStatus(ctx, subscriptionID, "CANCELLED")
+}
+
+func (s *service) ProcessSubscriptionWebhook(ctx context.Context, providerName string, payload []byte, headers map[string]string) error {
+	if providerName == "" {
+		providerName = payment.ProviderPayPal
+	}
+
+	provider, err := payment.GetSubscriptionProvider(providerName)
+	if err != nil {
+		return err
+	}
+
+	eventRes, err := provider.ParseWebhook(ctx, payload, headers)
+	if err != nil {
+		return err
+	}
+
+	switch eventRes.EventType {
+	case "payment_succeeded":
+		sub, err := s.repo.GetSubscriptionByID(ctx, eventRes.SubscriptionID)
+		if err != nil || sub == nil {
+			log.Printf("[Webhook] Subscription not found for event: %s", eventRes.SubscriptionID)
+			return nil
+		}
+
+		tpOrder := &model.ThirdPartyPaymentOrder{
+			PaymentProvider:        providerName,
+			ExternalOrderID:        eventRes.SubscriptionID,
+			CaptureID:              eventRes.ExternalRefID,
+			PayerID:                eventRes.PayerID,
+			PayerEmail:             eventRes.PayerEmail,
+			PayerName:              eventRes.PayerName,
+			Currency:               eventRes.Currency,
+			GrossAmount:            float64(eventRes.AmountCents) / 100.0,
+			FeeAmount:              0.0,
+			NetAmount:              float64(eventRes.AmountCents) / 100.0,
+			Status:                 eventRes.Status,
+			SellerProtectionStatus: "ELIGIBLE",
+			RawPayload:             eventRes.RawPayload,
+		}
+
+		return s.repo.RecordSubscriptionRenewalOrderTx(ctx, sub, eventRes.ExternalRefID, eventRes.AmountCents, eventRes.Currency, tpOrder)
+
+	case "subscription_cancelled", "subscription_suspended", "subscription_expired":
+		return s.repo.UpdateUserSubscriptionStatus(ctx, eventRes.SubscriptionID, "CANCELLED")
+	}
+
+	return nil
+}
+

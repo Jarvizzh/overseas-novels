@@ -23,17 +23,18 @@ type Order struct {
 }
 
 type RechargeSlot struct {
-	ID          int    `json:"id"`
-	TemplateID  int    `json:"template_id"`
-	SlotIndex   int    `json:"slot_index"` // 1 to 6
-	Type        string `json:"type"`       // 'single', 'vip', 'whole_book'
-	Coins       int    `json:"coins"`
-	Bonus       int    `json:"bonus"`
-	VipDuration string `json:"vip_duration"`
-	VipName     string `json:"vip_name"`
-	VipDesc     string `json:"vip_desc"`
-	Price       string `json:"price"`
-	PriceCents  int    `json:"price_cents"`
+	ID                int    `json:"id"`
+	TemplateID        int    `json:"template_id"`
+	SlotIndex         int    `json:"slot_index"` // 1 to 8
+	Type              string `json:"type"`       // 'single', 'subscription', 'vip', 'whole_book'
+	Coins             int    `json:"coins"`
+	Bonus             int    `json:"bonus"`
+	VipDuration       string `json:"vip_duration"`
+	SubscriptionCycle string `json:"subscription_cycle"` // 'day', 'week', 'month'
+	VipName           string `json:"vip_name"`
+	VipDesc           string `json:"vip_desc"`
+	Price             string `json:"price"`
+	PriceCents        int    `json:"price_cents"`
 }
 
 type RechargeTemplate struct {

@@ -5,6 +5,7 @@ import (
 	"strconv"
 
 	"github.com/gin-gonic/gin"
+	"star-novel-cms/internal/auth"
 )
 
 type Handler struct {
@@ -16,7 +17,7 @@ func NewHandler(srv Service) *Handler {
 }
 
 func (h *Handler) RegisterRoutes(rg *gin.RouterGroup) {
-	rg.GET("/tracking-logs", h.ListLogs)
+	rg.GET("/tracking-logs", auth.AuthMiddleware(), h.ListLogs)
 }
 
 func (h *Handler) ListLogs(c *gin.Context) {

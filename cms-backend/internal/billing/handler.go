@@ -6,6 +6,7 @@ import (
 	"strconv"
 
 	"github.com/gin-gonic/gin"
+	"star-novel-cms/internal/auth"
 )
 
 type Handler struct {
@@ -19,15 +20,14 @@ func NewHandler(service BillingService) *Handler {
 }
 
 func (h *Handler) RegisterRoutes(rg *gin.RouterGroup) {
-	orders := rg.Group("/orders")
+	orders := rg.Group("/orders", auth.AuthMiddleware())
 	{
 		orders.GET("", h.ListOrders)
 		orders.GET("/:id/payment-details", h.GetThirdPartyPaymentDetails)
 		orders.POST("/:id/refund", h.RefundOrder)
-		orders.POST("/mock-webhook", h.MockPaymentWebhook)
 	}
 
-	templates := rg.Group("/recharge-templates")
+	templates := rg.Group("/recharge-templates", auth.AuthMiddleware())
 	{
 		templates.GET("", h.ListRechargeTemplates)
 		templates.POST("", h.CreateRechargeTemplate)
@@ -64,10 +64,15 @@ func (h *Handler) ListOrders(c *gin.Context) {
 
 func (h *Handler) RefundOrder(c *gin.Context) {
 	orderID := c.Param("id")
-	adminID, _ := c.Get("admin_id")
+	var adminIDStr string
+	if val, exists := c.Get("admin_id"); exists && val != nil {
+		if s, ok := val.(string); ok {
+			adminIDStr = s
+		}
+	}
 
 	ctx := c.Request.Context()
-	err := h.service.RefundOrder(ctx, orderID, adminID.(string))
+	err := h.service.RefundOrder(ctx, orderID, adminIDStr)
 	if err != nil {
 		if errors.Is(err, ErrOrderNotFound) {
 			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
@@ -113,34 +118,7 @@ func (h *Handler) GetThirdPartyPaymentDetails(c *gin.Context) {
 	})
 }
 
-type MockWebhookReq struct {
-	UserID        string `json:"user_id" binding:"required"`
-	AmountCents   int    `json:"amount_cents" binding:"required"`
-	ChargedCoins  int    `json:"charged_coins" binding:"required"`
-	BonusCoins    int    `json:"bonus_coins"`
-	PaymentMethod string `json:"payment_method" binding:"required,oneof=stripe paypal"`
-	Status        string `json:"status" binding:"required,oneof=Paid Refunded"`
-	UtmSource     string `json:"utm_source"`
-	UtmCampaign   string `json:"utm_campaign"`
-	ExternalRefID string `json:"external_ref_id"`
-}
 
-func (h *Handler) MockPaymentWebhook(c *gin.Context) {
-	var req MockWebhookReq
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	ctx := c.Request.Context()
-	err := h.service.MockPaymentWebhook(ctx, req.UserID, req.AmountCents, req.ChargedCoins, req.BonusCoins, req.PaymentMethod, req.Status, req.UtmSource, req.UtmCampaign, req.ExternalRefID)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{"message": "Mock payment webhook parsed successfully", "status": req.Status})
-}
 
 func (h *Handler) ListRechargeTemplates(c *gin.Context) {
 	ctx := c.Request.Context()
@@ -154,15 +132,16 @@ func (h *Handler) ListRechargeTemplates(c *gin.Context) {
 }
 
 type SlotReq struct {
-	SlotIndex   int    `json:"slot_index" binding:"gte=0"`
-	Type        string `json:"type" binding:"required"`
-	Coins       int    `json:"coins"`
-	Bonus       int    `json:"bonus"`
-	VipDuration string `json:"vip_duration"`
-	VipName     string `json:"vip_name"`
-	VipDesc     string `json:"vip_desc"`
-	Price       string `json:"price" binding:"required"`
-	PriceCents  int    `json:"price_cents" binding:"required"`
+	SlotIndex         int    `json:"slot_index" binding:"gte=0"`
+	Type              string `json:"type" binding:"required"`
+	Coins             int    `json:"coins"`
+	Bonus             int    `json:"bonus"`
+	VipDuration       string `json:"vip_duration"`
+	SubscriptionCycle string `json:"subscription_cycle"`
+	VipName           string `json:"vip_name"`
+	VipDesc           string `json:"vip_desc"`
+	Price             string `json:"price" binding:"required"`
+	PriceCents        int    `json:"price_cents" binding:"required"`
 }
 
 type SaveTemplateReq struct {
@@ -181,15 +160,16 @@ func (h *Handler) CreateRechargeTemplate(c *gin.Context) {
 	slots := make([]RechargeSlot, len(req.Slots))
 	for i, s := range req.Slots {
 		slots[i] = RechargeSlot{
-			SlotIndex:   s.SlotIndex,
-			Type:        s.Type,
-			Coins:       s.Coins,
-			Bonus:       s.Bonus,
-			VipDuration: s.VipDuration,
-			VipName:     s.VipName,
-			VipDesc:     s.VipDesc,
-			Price:       s.Price,
-			PriceCents:  s.PriceCents,
+			SlotIndex:         s.SlotIndex,
+			Type:              s.Type,
+			Coins:             s.Coins,
+			Bonus:             s.Bonus,
+			VipDuration:       s.VipDuration,
+			SubscriptionCycle: s.SubscriptionCycle,
+			VipName:           s.VipName,
+			VipDesc:           s.VipDesc,
+			Price:             s.Price,
+			PriceCents:        s.PriceCents,
 		}
 	}
 
@@ -223,21 +203,23 @@ func (h *Handler) UpdateRechargeTemplate(c *gin.Context) {
 	slots := make([]RechargeSlot, len(req.Slots))
 	for i, s := range req.Slots {
 		slots[i] = RechargeSlot{
-			SlotIndex:   s.SlotIndex,
-			Type:        s.Type,
-			Coins:       s.Coins,
-			Bonus:       s.Bonus,
-			VipDuration: s.VipDuration,
-			VipName:     s.VipName,
-			VipDesc:     s.VipDesc,
-			Price:       s.Price,
-			PriceCents:  s.PriceCents,
+			SlotIndex:         s.SlotIndex,
+			Type:              s.Type,
+			Coins:             s.Coins,
+			Bonus:             s.Bonus,
+			VipDuration:       s.VipDuration,
+			SubscriptionCycle: s.SubscriptionCycle,
+			VipName:           s.VipName,
+			VipDesc:           s.VipDesc,
+			Price:             s.Price,
+			PriceCents:        s.PriceCents,
 		}
 	}
 
 	ctx := c.Request.Context()
 	err = h.service.UpdateRechargeTemplate(ctx, id, req.Name, req.IsDefault, slots)
 	if err != nil {
+
 		if errors.Is(err, ErrTemplateSlotCountInvalid) || errors.Is(err, ErrTemplateSlotBonusTooHigh) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return

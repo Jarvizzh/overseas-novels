@@ -1,18 +1,8 @@
 import { useEffect, useState } from 'react';
 import { apiRequest } from '../utils/api';
-import { CreditCard, Activity, ChevronLeft, ChevronRight, Eye } from 'lucide-react';
+import { CreditCard, ChevronLeft, ChevronRight, Eye } from 'lucide-react';
 import CustomSelect from '../components/CustomSelect';
 import { ThirdPartyPaymentModal, type ThirdPartyPaymentDetail } from '../components/ThirdPartyPaymentModal';
-
-const paymentMethodOptions = [
-  { value: 'stripe', label: 'Stripe 支付网关' },
-  { value: 'paypal', label: 'PayPal 支付网关' }
-];
-
-const actionTypeOptions = [
-  { value: 'Paid', label: 'payment_intent.succeeded (支付成功/发放金币)' },
-  { value: 'Refunded', label: 'charge.refunded / 发生拒付 (退款扣减金币)' }
-];
 
 const statusFilterOptions = [
   { value: '', label: '所有订单状态' },
@@ -59,18 +49,6 @@ export default function OrdersTab() {
   const [paymentDetails, setPaymentDetails] = useState<ThirdPartyPaymentDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
 
-  // Mock webhook form state
-  const [showMockForm, setShowMockForm] = useState(false);
-  const [mockUserID, setMockUserID] = useState('');
-  const [mockAmount, setMockAmount] = useState('9.99');
-  const [mockCoins, setMockCoins] = useState(990);
-  const [mockBonusCoins, setMockBonusCoins] = useState(100);
-  const [mockMethod, setMockMethod] = useState<'stripe' | 'paypal'>('stripe');
-  const [mockStatus, setMockStatus] = useState<'Paid' | 'Refunded'>('Paid');
-  const [mockUtmSource, setMockUtmSource] = useState('facebook');
-  const [mockUtmCampaign, setMockUtmCampaign] = useState('romance_novels_fb_ad');
-  const [mockSuccessMsg, setMockSuccessMsg] = useState('');
-
   const handleOpenPaymentDetails = async (orderId: number | string) => {
     setSelectedOrderForDetail(orderId);
     setDetailModalOpen(true);
@@ -111,52 +89,6 @@ export default function OrdersTab() {
     }
   };
 
-  const handleMockWebhookSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!mockUserID) {
-      window.showToast?.('请输入接收金币的用户 ID', 'error');
-      return;
-    }
-    setMockSuccessMsg('');
-    try {
-      const cents = Math.round(parseFloat(mockAmount) * 100);
-      const data = await apiRequest('POST', '/orders/mock-webhook', {
-        user_id: mockUserID,
-        amount_cents: cents,
-        charged_coins: mockCoins,
-        bonus_coins: mockBonusCoins,
-        payment_method: mockMethod,
-        status: mockStatus,
-        utm_source: mockUtmSource,
-        utm_campaign: mockUtmCampaign
-      });
-
-      setMockSuccessMsg(`已发送模拟网关 Webhook 信号！处理结果: ${data.message} (${reqMethodDesc()})`);
-      fetchOrders();
-    } catch (err: any) {
-      window.showToast?.(err.message || '分发模拟 Webhook 失败', 'error');
-    }
-  };
-
-  const reqMethodDesc = () => {
-    return mockStatus === 'Paid'
-      ? `增加账户本金 +${mockCoins} 币 / 赠送金币 +${mockBonusCoins} 币`
-      : `扣减用户钱包中已退款的小说代币`;
-  };
-
-  const autofillFirstUser = async () => {
-    try {
-      const data = await apiRequest('GET', '/users?page_size=1');
-      if (data && data.users && data.users.length > 0) {
-        setMockUserID(data.users[0].id);
-      } else {
-        window.showToast?.('当前没有已注册用户，请先在 H5 端创建一个游客账号。', 'info');
-      }
-    } catch (e) {
-      console.error(e);
-    }
-  };
-
   if (loading && orders.length === 0) {
     return <div style={{ color: 'hsl(var(--text-secondary))', padding: '20px' }}>正在加载充值交易记录...</div>;
   }
@@ -166,84 +98,8 @@ export default function OrdersTab() {
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '24px' }}>
         <div>
           <h1 style={{ fontSize: '1.5rem', fontWeight: 700 }} className="gradient-text">订单管理</h1>
-
         </div>
-        <button onClick={() => setShowMockForm(!showMockForm)} className="btn-primary" style={{ display: 'flex', gap: '6px' }}>
-          <Activity size={16} /> Webhook 支付网关模拟器
-        </button>
       </div>
-
-      {/* Simulator Section */}
-      {showMockForm && (
-        <form onSubmit={handleMockWebhookSubmit} className="glass-panel" style={{ padding: '24px', marginBottom: '30px' }}>
-          <h3 style={{ marginBottom: '18px', display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <Activity size={18} color="hsl(var(--accent-pink))" />
-            模拟 Stripe & PayPal 支付网关回调分发
-          </h3>
-
-          {mockSuccessMsg && (
-            <div style={{ backgroundColor: 'rgba(16, 185, 129, 0.1)', border: '1px solid rgba(16, 185, 129, 0.25)', color: '#34d399', padding: '12px', borderRadius: '8px', fontSize: '0.85rem', marginBottom: '18px' }}>
-              {mockSuccessMsg}
-            </div>
-          )}
-
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '16px', marginBottom: '18px' }}>
-            <div>
-              <label style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem', color: 'hsl(var(--text-secondary))', marginBottom: '6px' }}>
-                购买用户 ID
-                <span onClick={autofillFirstUser} style={{ color: 'hsl(var(--primary))', cursor: 'pointer', textDecoration: 'underline' }}>自动填充首个用户</span>
-              </label>
-              <input type="text" className="input-field" placeholder="e.g. guest_uuid" value={mockUserID} onChange={(e) => setMockUserID(e.target.value)} required />
-            </div>
-            <div>
-              <label style={{ display: 'block', fontSize: '0.8rem', color: 'hsl(var(--text-secondary))', marginBottom: '6px' }}>充值金额 (USD)</label>
-              <input type="text" className="input-field" value={mockAmount} onChange={(e) => setMockAmount(e.target.value)} required />
-            </div>
-            <div>
-              <label style={{ display: 'block', fontSize: '0.8rem', color: 'hsl(var(--text-secondary))', marginBottom: '6px' }}>发放充值本金数</label>
-              <input type="number" className="input-field" value={mockCoins} onChange={(e) => setMockCoins(Number(e.target.value))} required />
-            </div>
-            <div>
-              <label style={{ display: 'block', fontSize: '0.8rem', color: 'hsl(var(--text-secondary))', marginBottom: '6px' }}>赠送金币数</label>
-              <input type="number" className="input-field" value={mockBonusCoins} onChange={(e) => setMockBonusCoins(Number(e.target.value))} required />
-            </div>
-          </div>
-
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '16px', marginBottom: '24px' }}>
-            <div>
-              <label style={{ display: 'block', fontSize: '0.8rem', color: 'hsl(var(--text-secondary))', marginBottom: '6px' }}>支付渠道</label>
-              <CustomSelect
-                options={paymentMethodOptions}
-                value={mockMethod}
-                onChange={(val) => setMockMethod(val as any)}
-                width="100%"
-              />
-            </div>
-            <div>
-              <label style={{ display: 'block', fontSize: '0.8rem', color: 'hsl(var(--text-secondary))', marginBottom: '6px' }}>网关动作类型</label>
-              <CustomSelect
-                options={actionTypeOptions}
-                value={mockStatus}
-                onChange={(val) => setMockStatus(val as any)}
-                width="100%"
-              />
-            </div>
-            <div>
-              <label style={{ display: 'block', fontSize: '0.8rem', color: 'hsl(var(--text-secondary))', marginBottom: '6px' }}>媒体渠道来源 (UTM Source)</label>
-              <input type="text" className="input-field" value={mockUtmSource} onChange={(e) => setMockUtmSource(e.target.value)} />
-            </div>
-            <div>
-              <label style={{ display: 'block', fontSize: '0.8rem', color: 'hsl(var(--text-secondary))', marginBottom: '6px' }}>广告活动名称 (UTM Campaign)</label>
-              <input type="text" className="input-field" value={mockUtmCampaign} onChange={(e) => setMockUtmCampaign(e.target.value)} />
-            </div>
-          </div>
-
-          <div style={{ display: 'flex', gap: '12px', justifyContent: 'flex-end' }}>
-            <button type="button" className="btn-secondary" onClick={() => setShowMockForm(false)}>关闭</button>
-            <button type="submit" className="btn-primary">发送模拟 Webhook 信号</button>
-          </div>
-        </form>
-      )}
 
       {/* Filter and Search Bar */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '16px', marginBottom: '24px', position: 'relative', zIndex: 10 }}>
@@ -445,7 +301,7 @@ export default function OrdersTab() {
                       title="查看第三方支付凭据明细"
                     >
                       <Eye size={13} style={{ color: 'hsl(var(--primary))' }} />
-                      <span>第三方明细</span>
+                      <span>明细</span>
                     </button>
                   </td>
                 </tr>

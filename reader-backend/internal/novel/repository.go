@@ -15,8 +15,8 @@ type Repository interface {
 	GetByID(ctx context.Context, id int64) (*model.Novel, error)
 	GetChaptersList(ctx context.Context, novelID int64) ([]model.Chapter, error)
 	GetChapter(ctx context.Context, novelID int64, chapterIndex int) (*model.Chapter, error)
-	CheckChapterUnlocked(ctx context.Context, userID, novelID int64, chapterIndex int) (bool, error)
 	GetUnlockedChapterIndices(ctx context.Context, userID, novelID int64) ([]int, error)
+	HasActiveSubscription(ctx context.Context, userID int64) (bool, error)
 	GetEffectivePricingRule(ctx context.Context, userID int64, novelID int64, promoID int, utmSource, utmCampaign string) (int, int, error)
 }
 
@@ -205,6 +205,23 @@ func (r *dbRepository) GetUnlockedChapterIndices(ctx context.Context, userID, no
 		}
 	}
 	return indices, nil
+}
+
+func (r *dbRepository) HasActiveSubscription(ctx context.Context, userID int64) (bool, error) {
+	if userID <= 0 {
+		return false, nil
+	}
+	var exists bool
+	query := `
+		SELECT EXISTS(
+			SELECT 1 FROM user_subscriptions 
+			WHERE user_id = $1 AND status = 'ACTIVE' AND (current_period_end IS NULL OR current_period_end > CURRENT_TIMESTAMP)
+		)`
+	err := db.DB.QueryRow(ctx, query, userID).Scan(&exists)
+	if err != nil {
+		return false, err
+	}
+	return exists, nil
 }
 
 func (r *dbRepository) GetEffectivePricingRule(ctx context.Context, userID int64, novelID int64, promoID int, utmSource, utmCampaign string) (int, int, error) {

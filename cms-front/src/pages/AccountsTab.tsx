@@ -185,11 +185,13 @@ export default function AccountsTab() {
           left: 0,
           right: 0,
           bottom: 0,
-          backgroundColor: 'rgba(15, 23, 42, 0.6)',
+          backgroundColor: 'rgba(15, 23, 42, 0.35)',
+          backdropFilter: 'blur(2.5px)',
+          WebkitBackdropFilter: 'blur(2.5px)',
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
-          zIndex: 9999
+          zIndex: 10000
         }} className="animate-fade-in">
           <div className="glass-panel" style={{
             width: '100%',

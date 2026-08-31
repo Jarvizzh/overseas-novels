@@ -95,17 +95,33 @@ type UnlockRecord struct {
 
 // RechargeSlot represents recharge slot settings
 type RechargeSlot struct {
-	ID          int    `json:"id" db:"id"`
-	TemplateID  int    `json:"template_id" db:"template_id"`
-	SlotIndex   int    `json:"slot_index" db:"slot_index"`
-	Type        string `json:"type" db:"type"`
-	Coins       int    `json:"coins" db:"coins"`
-	Bonus       int    `json:"bonus" db:"bonus"`
-	VipDuration string `json:"vip_duration" db:"vip_duration"`
-	VipName     string `json:"vip_name" db:"vip_name"`
-	VipDesc     string `json:"vip_desc" db:"vip_desc"`
-	Price       string `json:"price" db:"price"`
-	PriceCents  int    `json:"price_cents" db:"price_cents"`
+	ID                int    `json:"id" db:"id"`
+	TemplateID        int    `json:"template_id" db:"template_id"`
+	SlotIndex         int    `json:"slot_index" db:"slot_index"`
+	Type              string `json:"type" db:"type"` // 'single', 'subscription', 'vip', 'whole_book'
+	Coins             int    `json:"coins" db:"coins"`
+	Bonus             int    `json:"bonus" db:"bonus"`
+	VipDuration       string `json:"vip_duration" db:"vip_duration"`
+	SubscriptionCycle string `json:"subscription_cycle" db:"subscription_cycle"` // 'day', 'week', 'month'
+	VipName           string `json:"vip_name" db:"vip_name"`
+	VipDesc           string `json:"vip_desc" db:"vip_desc"`
+	Price             string `json:"price" db:"price"`
+	PriceCents        int    `json:"price_cents" db:"price_cents"`
+}
+
+// PaymentProviderPlan maps a recharge slot or pricing rule to a third-party payment provider plan ID (e.g. PayPal P-XXXXX, Stripe price_XXXXX)
+type PaymentProviderPlan struct {
+	ID             int64     `json:"id" db:"id"`
+	Provider       string    `json:"provider" db:"provider"`
+	SlotID         int       `json:"slot_id" db:"slot_id"`
+	Cycle          string    `json:"cycle" db:"cycle"`
+	PriceCents     int       `json:"price_cents" db:"price_cents"`
+	Currency       string    `json:"currency" db:"currency"`
+	ExternalPlanID string    `json:"external_plan_id" db:"external_plan_id"`
+	Status         string    `json:"status" db:"status"`
+	RawPayload     string    `json:"raw_payload,omitempty" db:"raw_payload"`
+	CreatedAt      time.Time `json:"created_at" db:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at" db:"updated_at"`
 }
 
 // RechargeTemplate represents recharge template settings
@@ -116,8 +132,32 @@ type RechargeTemplate struct {
 	Slots     []RechargeSlot `json:"slots" db:"-"`
 }
 
+// UserSubscription represents recurring subscription state and membership status
+type UserSubscription struct {
+	ID                 int64      `json:"id" db:"id"`
+	UserID             int64      `json:"user_id" db:"user_id"`
+	SubscriptionID     string     `json:"subscription_id" db:"subscription_id"` // Provider Sub ID (e.g. I-XXXXX)
+	PlanID             string     `json:"plan_id" db:"plan_id"`
+	SlotID             int        `json:"slot_id" db:"slot_id"`
+	TemplateID         int        `json:"template_id" db:"template_id"`
+	Status             string     `json:"status" db:"status"` // 'PENDING', 'ACTIVE', 'CANCELLED', 'SUSPENDED', 'EXPIRED'
+	Cycle              string     `json:"cycle" db:"cycle"`   // 'day', 'week', 'month'
+	PriceCents         int        `json:"price_cents" db:"price_cents"`
+	Currency           string     `json:"currency" db:"currency"`
+	PaymentMethod      string     `json:"payment_method" db:"payment_method"`
+	CurrentPeriodStart *time.Time `json:"current_period_start" db:"current_period_start"`
+	CurrentPeriodEnd   *time.Time `json:"current_period_end" db:"current_period_end"`
+	NextBillingTime    *time.Time `json:"next_billing_time" db:"next_billing_time"`
+	LastPaymentTime    *time.Time `json:"last_payment_time" db:"last_payment_time"`
+	CancelledAt        *time.Time `json:"cancelled_at" db:"cancelled_at"`
+	RawPayload         string     `json:"raw_payload,omitempty" db:"raw_payload"`
+	CreatedAt          time.Time  `json:"created_at" db:"created_at"`
+	UpdatedAt          time.Time  `json:"updated_at" db:"updated_at"`
+}
+
 // ThirdPartyPaymentOrder represents third-party payment transaction details (e.g. PayPal, Stripe)
 type ThirdPartyPaymentOrder struct {
+
 	ID                     int64     `json:"id" db:"id"`
 	OrderID                int64     `json:"order_id" db:"order_id"`
 	PaymentProvider        string    `json:"payment_provider" db:"payment_provider"`
@@ -137,4 +177,5 @@ type ThirdPartyPaymentOrder struct {
 	CreatedAt              time.Time `json:"created_at" db:"created_at"`
 	UpdatedAt              time.Time `json:"updated_at" db:"updated_at"`
 }
+
 

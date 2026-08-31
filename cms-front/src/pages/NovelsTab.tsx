@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { apiRequest, domainApi } from '../utils/api';
 import type { SystemDomain } from '../utils/api';
 import { Book, Plus, ArrowLeft, Upload, Edit, Trash, CheckCircle, HelpCircle, Search, Settings, Link2 } from 'lucide-react';
@@ -391,6 +392,11 @@ export default function NovelsTab() {
   };
 
   const handleGeneratePromotionLink = async () => {
+    if (!promotionForm.fbPixelId) {
+      window.showToast?.('推广链接必须显式绑定 Facebook 像素！请先选择像素。', 'error');
+      return;
+    }
+
     // 1. 匹配选中的可用域名或默认可用主域名
     const activeDomains = (domains || []).filter((d) => d.status === 1);
     const targetDomainObj = activeDomains.find((d) => String(d.id) === promotionForm.domainId);
@@ -740,11 +746,13 @@ export default function NovelsTab() {
         </div>
 
         {/* Chapter Preview Modal */}
-        {(previewChapter || previewLoading) && (
+        {(previewChapter || previewLoading) && createPortal(
           <div style={{
             position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
-            backgroundColor: 'rgba(15, 23, 42, 0.4)',
-            display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000,
+            backgroundColor: 'rgba(15, 23, 42, 0.35)',
+            backdropFilter: 'blur(2.5px)',
+            WebkitBackdropFilter: 'blur(2.5px)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 10000,
             padding: '20px'
           }} onClick={() => setPreviewChapter(null)}>
             <div className="glass-panel animate-fade-in" style={{
@@ -807,7 +815,8 @@ export default function NovelsTab() {
               </div>
 
             </div>
-          </div>
+          </div>,
+          document.body
         )}
 
         {renderPromotionModal()}

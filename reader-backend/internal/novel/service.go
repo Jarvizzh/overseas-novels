@@ -182,6 +182,17 @@ func (s *service) GetChapterContent(ctx context.Context, userID int64, novelID i
 		return result, nil
 	}
 
+	// VIP Subscription Check: Members with active subscription have unlimited free reading access to all content
+	if isVIP, errVIP := s.repo.HasActiveSubscription(ctx, userID); errVIP == nil && isVIP {
+		clone := *ch
+		clone.IsPaid = true
+		clone.Price = price
+		result.Chapter = &clone
+		result.Locked = false
+		return result, nil
+	}
+
+
 	unlocked, err := s.cache.IsChapterUnlocked(ctx, userID, novelID, chapterIndex)
 	if err == nil && unlocked {
 		clone := *ch

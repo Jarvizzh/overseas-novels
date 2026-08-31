@@ -19,9 +19,6 @@ type BillingRepository interface {
 	InsertTransactionRecordTx(ctx context.Context, tx pgx.Tx, id, userID, txType, bizType string, amount, chargedAmt, bonusAmt int, desc string) error
 	InsertAdminAuditLogTx(ctx context.Context, tx pgx.Tx, adminID, action, targetID, beforeData, afterData string) error
 
-	GetFirstPaidOrderIDByUserIDTx(ctx context.Context, tx pgx.Tx, userID string) (string, error)
-	CreateOrderTx(ctx context.Context, tx pgx.Tx, o *Order) error
-	UpsertWalletBalanceTx(ctx context.Context, tx pgx.Tx, userID string, chargedAmt, bonusAmt int) error
 	GetThirdPartyPaymentDetails(ctx context.Context, orderID int64) (*ThirdPartyPaymentOrder, error)
 
 	ListRechargeTemplates(ctx context.Context) ([]RechargeTemplate, error)
@@ -30,7 +27,7 @@ type BillingRepository interface {
 
 	ClearDefaultTemplatesTx(ctx context.Context, tx pgx.Tx) error
 	CreateRechargeTemplateTx(ctx context.Context, tx pgx.Tx, name string, isDefault bool) (int, error)
-	CreateRechargeSlotTx(ctx context.Context, tx pgx.Tx, templateID, index int, slotType string, coins, bonus int, duration, vipName, vipDesc, price string, priceCents int) error
+	CreateRechargeSlotTx(ctx context.Context, tx pgx.Tx, templateID, index int, slotType string, coins, bonus int, duration, cycle, vipName, vipDesc, price string, priceCents int) error
 
 	UpdateRechargeTemplateTx(ctx context.Context, tx pgx.Tx, id int, name string, isDefault bool) (int64, error)
 	SetDefaultTemplateOnlyTx(ctx context.Context, tx pgx.Tx, id int) (int64, error)
@@ -133,43 +130,14 @@ func (r *dbBillingRepository) InsertTransactionRecordTx(ctx context.Context, tx 
 }
 
 func (r *dbBillingRepository) InsertAdminAuditLogTx(ctx context.Context, tx pgx.Tx, adminID, action, targetID, beforeData, afterData string) error {
+	var adminIDVal *string
+	if adminID != "" {
+		adminIDVal = &adminID
+	}
 	query := `
 		INSERT INTO admin_audit_logs (admin_id, action, target_id, before_data, after_data)
 		VALUES ($1, $2, $3, $4, $5)`
-	_, err := tx.Exec(ctx, query, adminID, action, targetID, beforeData, afterData)
-	return err
-}
-
-func (r *dbBillingRepository) GetFirstPaidOrderIDByUserIDTx(ctx context.Context, tx pgx.Tx, userID string) (string, error) {
-	var orderIDVal int64
-	err := tx.QueryRow(ctx, "SELECT id FROM recharge_orders WHERE user_id = $1 AND status = 'Success' LIMIT 1", userID).Scan(&orderIDVal)
-	if err != nil {
-		if err == pgx.ErrNoRows {
-			return "", nil
-		}
-		return "", err
-	}
-	return strconv.FormatInt(orderIDVal, 10), nil
-}
-
-func (r *dbBillingRepository) CreateOrderTx(ctx context.Context, tx pgx.Tx, o *Order) error {
-	query := `
-		INSERT INTO recharge_orders (user_id, external_ref_id, amount_cents, currency, coins, bonus_coins_credited, payment_method, status, utm_source, utm_campaign, paid_at, order_type, promotion_link_id, novel_id)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
-		RETURNING id`
-	err := tx.QueryRow(ctx, query, o.UserID, o.ExternalRefID, o.AmountCents, o.Currency, o.Coins, o.BonusCoinsCredited, o.PaymentMethod, o.Status, o.UtmSource, o.UtmCampaign, o.PaidAt, o.OrderType, o.PromotionLinkID, o.NovelID).Scan(&o.ID)
-	return err
-}
-
-func (r *dbBillingRepository) UpsertWalletBalanceTx(ctx context.Context, tx pgx.Tx, userID string, chargedAmt, bonusAmt int) error {
-	query := `
-		INSERT INTO wallets (user_id, charged_coins, bonus_coins, updated_at)
-		VALUES ($1, $2, $3, CURRENT_TIMESTAMP)
-		ON CONFLICT (user_id) DO UPDATE
-		SET charged_coins = wallets.charged_coins + EXCLUDED.charged_coins,
-		    bonus_coins = wallets.bonus_coins + EXCLUDED.bonus_coins,
-		    updated_at = CURRENT_TIMESTAMP`
-	_, err := tx.Exec(ctx, query, userID, chargedAmt, bonusAmt)
+	_, err := tx.Exec(ctx, query, adminIDVal, action, targetID, beforeData, afterData)
 	return err
 }
 
@@ -226,7 +194,7 @@ func (r *dbBillingRepository) ListRechargeTemplates(ctx context.Context) ([]Rech
 
 func (r *dbBillingRepository) GetRechargeSlots(ctx context.Context, templateID int) ([]RechargeSlot, error) {
 	rows, err := db.DB.Query(ctx, `
-		SELECT id, template_id, slot_index, type, coins, bonus, COALESCE(vip_duration, ''), COALESCE(vip_name, ''), COALESCE(vip_desc, ''), price, price_cents
+		SELECT id, template_id, slot_index, type, coins, bonus, COALESCE(vip_duration, ''), COALESCE(subscription_cycle, ''), COALESCE(vip_name, ''), COALESCE(vip_desc, ''), price, price_cents
 		FROM recharge_slots
 		WHERE template_id = $1
 		ORDER BY slot_index ASC
@@ -239,7 +207,7 @@ func (r *dbBillingRepository) GetRechargeSlots(ctx context.Context, templateID i
 	var slots []RechargeSlot
 	for rows.Next() {
 		var s RechargeSlot
-		err := rows.Scan(&s.ID, &s.TemplateID, &s.SlotIndex, &s.Type, &s.Coins, &s.Bonus, &s.VipDuration, &s.VipName, &s.VipDesc, &s.Price, &s.PriceCents)
+		err := rows.Scan(&s.ID, &s.TemplateID, &s.SlotIndex, &s.Type, &s.Coins, &s.Bonus, &s.VipDuration, &s.SubscriptionCycle, &s.VipName, &s.VipDesc, &s.Price, &s.PriceCents)
 		if err != nil {
 			return nil, err
 		}
@@ -270,13 +238,14 @@ func (r *dbBillingRepository) CreateRechargeTemplateTx(ctx context.Context, tx p
 	return templateID, err
 }
 
-func (r *dbBillingRepository) CreateRechargeSlotTx(ctx context.Context, tx pgx.Tx, templateID, index int, slotType string, coins, bonus int, duration, vipName, vipDesc, price string, priceCents int) error {
+func (r *dbBillingRepository) CreateRechargeSlotTx(ctx context.Context, tx pgx.Tx, templateID, index int, slotType string, coins, bonus int, duration, cycle, vipName, vipDesc, price string, priceCents int) error {
 	query := `
-		INSERT INTO recharge_slots (template_id, slot_index, type, coins, bonus, vip_duration, vip_name, vip_desc, price, price_cents)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`
-	_, err := tx.Exec(ctx, query, templateID, index, slotType, coins, bonus, duration, vipName, vipDesc, price, priceCents)
+		INSERT INTO recharge_slots (template_id, slot_index, type, coins, bonus, vip_duration, subscription_cycle, vip_name, vip_desc, price, price_cents)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`
+	_, err := tx.Exec(ctx, query, templateID, index, slotType, coins, bonus, duration, cycle, vipName, vipDesc, price, priceCents)
 	return err
 }
+
 
 func (r *dbBillingRepository) UpdateRechargeTemplateTx(ctx context.Context, tx pgx.Tx, id int, name string, isDefault bool) (int64, error) {
 	query := `

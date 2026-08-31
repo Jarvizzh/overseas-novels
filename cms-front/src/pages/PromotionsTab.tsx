@@ -205,6 +205,11 @@ export default function PromotionsTab() {
     e.preventDefault();
     if (!editingLink) return;
 
+    if (!editForm.fbPixelId) {
+      window.showToast?.('推广链接必须显式绑定 Facebook 像素！', 'error');
+      return;
+    }
+
     const activeDomains = (domains || []).filter((d) => d.status === 1);
     const targetDomainObj = activeDomains.find(d => String(d.id) === editForm.domainId);
     const defaultDomainObj = activeDomains.find(d => d.is_default) || activeDomains.find(d => d.type === 'main') || activeDomains[0];
@@ -504,11 +509,13 @@ export default function PromotionsTab() {
           left: 0,
           right: 0,
           bottom: 0,
-          backgroundColor: 'rgba(15, 23, 42, 0.4)',
+          backgroundColor: 'rgba(15, 23, 42, 0.35)',
+          backdropFilter: 'blur(2.5px)',
+          WebkitBackdropFilter: 'blur(2.5px)',
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
-          zIndex: 1000,
+          zIndex: 10000,
           padding: '20px'
         }} onClick={() => setIsEditModalOpen(false)}>
           <div className="glass-panel animate-scale-in" style={{
@@ -596,10 +603,12 @@ export default function PromotionsTab() {
               </div>
 
               <div>
-                <label style={{ display: 'block', fontSize: '0.75rem', color: 'hsl(var(--text-secondary))', marginBottom: '4px' }}>选择 Facebook 像素</label>
+                <label style={{ display: 'block', fontSize: '0.75rem', color: 'hsl(var(--text-secondary))', marginBottom: '4px' }}>
+                  绑定 Facebook 像素 <span style={{ color: '#f87171' }}>*</span>
+                </label>
                 <CustomSelect
                   options={[
-                    { value: '', label: '-- 选择绑定的像素 (可选) --' },
+                    { value: '', label: pixels.length === 0 ? '-- 请先添加像素配置 --' : '-- 选择绑定的 Facebook 像素 (必选) --' },
                     ...pixels.map(p => ({ value: String(p.id), label: `${p.name} (${p.pixel_id})` }))
                   ]}
                   value={editForm.fbPixelId}
