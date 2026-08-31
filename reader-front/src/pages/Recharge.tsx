@@ -27,7 +27,6 @@ export const Recharge: React.FC<RechargeProps> = ({
   const [isVipSuccess, setIsVipSuccess] = useState(false);
   const [vipSuccessTitle, setVipSuccessTitle] = useState('');
   const [activeLegalModal, setActiveLegalModal] = useState<LegalModalType | null>(null);
-  const [activeTab, setActiveTab] = useState<'subscription' | 'coins'>('subscription');
   const [isCancelling, setIsCancelling] = useState(false);
 
   // User VIP subscription status
@@ -69,15 +68,13 @@ export const Recharge: React.FC<RechargeProps> = ({
         setUserSubscription(null);
       }
 
-      // Default select first available slot
+      // Default select first available slot (VIP or Coin)
       if (slotList.length > 0) {
         const subSlot = slotList.find(s => s.type === 'subscription' || s.type === 'vip');
         if (subSlot) {
           setSelectedPack(subSlot.id);
-          setActiveTab('subscription');
         } else {
           setSelectedPack(slotList[0].id);
-          setActiveTab('coins');
         }
       }
     } catch (err) {
@@ -421,94 +418,42 @@ export const Recharge: React.FC<RechargeProps> = ({
           <span style={{ fontSize: '28px', opacity: 0.85 }}>👛</span>
         </div>
 
-        {/* Mode Navigation Tabs: VIP Subscription vs Coins Top-Up */}
-        <div style={{
-          display: 'flex',
-          backgroundColor: 'var(--bg-secondary)',
-          borderRadius: '12px',
-          padding: '4px',
-          marginBottom: '20px',
-          border: '1px solid var(--border-color)'
-        }}>
-          <button
-            onClick={() => {
-              setActiveTab('subscription');
-              if (subscriptionPacks.length > 0) setSelectedPack(subscriptionPacks[0].id);
-            }}
-            style={{
-              flex: 1,
-              padding: '10px 0',
-              borderRadius: '8px',
-              border: 'none',
-              fontSize: '13px',
-              fontWeight: 700,
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              gap: '6px',
-              backgroundColor: activeTab === 'subscription' ? 'var(--accent-color)' : 'transparent',
-              color: activeTab === 'subscription' ? '#ffffff' : 'var(--text-secondary)',
-              cursor: 'pointer',
-              transition: 'all 0.2s ease'
-            }}
-          >
-            <span>👑 VIP Unlimited</span>
-            <span style={{
-              fontSize: '10px',
-              backgroundColor: activeTab === 'subscription' ? 'rgba(255,255,255,0.25)' : '#ef4444',
-              color: '#ffffff',
-              padding: '1px 5px',
-              borderRadius: '4px',
-              fontWeight: 800
-            }}>HOT</span>
-          </button>
+        {/* Section 1: VIP Unlimited Membership Pass (if configured) */}
+        {subscriptionPacks.length > 0 && (
+          <div style={{ marginBottom: '28px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '12px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <span style={{ fontSize: '18px' }}>👑</span>
+                <h3 style={{ fontSize: '16px', fontWeight: 800, margin: 0, color: 'var(--text-primary)' }}>VIP Unlimited Access</h3>
+              </div>
+              <span style={{
+                fontSize: '10px',
+                backgroundColor: 'rgba(239, 68, 68, 0.12)',
+                color: '#ef4444',
+                padding: '2px 8px',
+                borderRadius: '99px',
+                fontWeight: 800,
+                border: '1px solid rgba(239, 68, 68, 0.25)'
+              }}>BEST VALUE</span>
+            </div>
 
-          <button
-            onClick={() => {
-              setActiveTab('coins');
-              if (coinPacks.length > 0) setSelectedPack(coinPacks[0].id);
-            }}
-            style={{
-              flex: 1,
-              padding: '10px 0',
-              borderRadius: '8px',
-              border: 'none',
-              fontSize: '13px',
-              fontWeight: 700,
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              gap: '6px',
-              backgroundColor: activeTab === 'coins' ? 'var(--accent-color)' : 'transparent',
-              color: activeTab === 'coins' ? '#ffffff' : 'var(--text-secondary)',
-              cursor: 'pointer',
-              transition: 'all 0.2s ease'
-            }}
-          >
-            <span>💰 Coin Packs</span>
-          </button>
-        </div>
-
-        {/* Tab Content 1: VIP Subscription */}
-        {activeTab === 'subscription' && (
-          <div className="animate-fade-in" style={{ marginBottom: '24px' }}>
             <div style={{
               backgroundColor: 'rgba(79, 70, 229, 0.08)',
               border: '1px solid rgba(79, 70, 229, 0.2)',
               borderRadius: '12px',
-              padding: '12px 16px',
-              marginBottom: '16px',
+              padding: '10px 14px',
+              marginBottom: '12px',
               display: 'flex',
               alignItems: 'center',
-              gap: '10px'
+              gap: '8px'
             }}>
-              <span style={{ fontSize: '20px' }}>✨</span>
-              <p style={{ fontSize: '12px', color: 'var(--text-secondary)', margin: 0, lineHeight: 1.5 }}>
-                <strong style={{ color: 'var(--accent-color)' }}>VIP All-Access:</strong> Read every novel & paid chapter on the entire site without coins! Auto-renews, cancel anytime.
+              <span style={{ fontSize: '16px' }}>✨</span>
+              <p style={{ fontSize: '11.5px', color: 'var(--text-secondary)', margin: 0, lineHeight: 1.4 }}>
+                <strong style={{ color: 'var(--accent-color)' }}>VIP All-Access:</strong> Read every novel & paid chapter on the entire site without coins!
               </p>
             </div>
 
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
               {subscriptionPacks.map((pack) => {
                 const isSelected = selectedPack === pack.id;
                 return (
@@ -519,9 +464,9 @@ export const Recharge: React.FC<RechargeProps> = ({
                       display: 'flex',
                       justifyContent: 'space-between',
                       alignItems: 'center',
-                      backgroundColor: isSelected ? 'rgba(79, 70, 229, 0.05)' : 'var(--bg-secondary)',
+                      backgroundColor: isSelected ? 'rgba(79, 70, 229, 0.06)' : 'var(--bg-secondary)',
                       borderRadius: '14px',
-                      padding: '16px',
+                      padding: '14px 16px',
                       border: isSelected ? '2px solid var(--accent-color)' : '1px solid var(--border-color)',
                       boxShadow: isSelected ? '0 4px 15px rgba(79, 70, 229, 0.15)' : 'var(--card-shadow)',
                       cursor: 'pointer',
@@ -530,10 +475,10 @@ export const Recharge: React.FC<RechargeProps> = ({
                     }}
                   >
                     <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
-                      <span style={{ fontSize: '30px' }}>👑</span>
+                      <span style={{ fontSize: '26px' }}>👑</span>
                       <div>
                         <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                          <h4 style={{ fontSize: '15px', fontWeight: 800, margin: 0, color: 'var(--text-primary)' }}>{pack.name}</h4>
+                          <h4 style={{ fontSize: '14.5px', fontWeight: 800, margin: 0, color: 'var(--text-primary)' }}>{pack.name}</h4>
                           <span style={{
                             fontSize: '10px',
                             backgroundColor: 'rgba(79, 70, 229, 0.15)',
@@ -546,17 +491,17 @@ export const Recharge: React.FC<RechargeProps> = ({
                             {pack.cycle}
                           </span>
                         </div>
-                        <p style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '4px', margin: 0 }}>{pack.desc}</p>
+                        <p style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '2px', margin: 0 }}>{pack.desc}</p>
                       </div>
                     </div>
 
                     <div style={{ textAlign: 'right' }}>
                       <span style={{
-                        fontSize: '15px',
+                        fontSize: '14px',
                         fontWeight: 800,
                         backgroundColor: isSelected ? 'var(--accent-color)' : 'var(--bg-tertiary)',
                         color: isSelected ? '#ffffff' : 'var(--text-secondary)',
-                        padding: '6px 14px',
+                        padding: '6px 12px',
                         borderRadius: '8px',
                         display: 'inline-block',
                         transition: 'var(--transition-fast)'
@@ -574,9 +519,21 @@ export const Recharge: React.FC<RechargeProps> = ({
           </div>
         )}
 
-        {/* Tab Content 2: Single Coin Packs */}
-        {activeTab === 'coins' && (
-          <div className="animate-fade-in" style={{ marginBottom: '24px' }}>
+        {/* Section 2: Coin Top-Up Packages */}
+        {coinPacks.length > 0 && (
+          <div style={{ marginBottom: '24px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '12px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <span style={{ fontSize: '18px' }}>💰</span>
+                <h3 style={{ fontSize: '16px', fontWeight: 800, margin: 0, color: 'var(--text-primary)' }}>Coin Packages</h3>
+              </div>
+              <span style={{
+                fontSize: '10px',
+                color: 'var(--text-tertiary)',
+                fontWeight: 600
+              }}>Instant Delivery</span>
+            </div>
+
             <div style={{
               display: 'grid',
               gridTemplateColumns: 'repeat(2, 1fr)',
@@ -589,8 +546,8 @@ export const Recharge: React.FC<RechargeProps> = ({
                     key={pack.id}
                     onClick={() => setSelectedPack(pack.id)}
                     style={{
-                      backgroundColor: isSelected ? 'rgba(79, 70, 229, 0.05)' : 'var(--bg-secondary)',
-                      borderRadius: '12px',
+                      backgroundColor: isSelected ? 'rgba(79, 70, 229, 0.06)' : 'var(--bg-secondary)',
+                      borderRadius: '14px',
                       padding: '16px 12px',
                       border: isSelected ? '2px solid var(--accent-color)' : '1px solid var(--border-color)',
                       boxShadow: isSelected ? '0 4px 15px rgba(79, 70, 229, 0.15)' : 'var(--card-shadow)',
