@@ -4,6 +4,8 @@ interface ReaderSettingsProps {
   visible: boolean;
   fontSize: number;
   onFontSizeChange: (size: number) => void;
+  theme: string;
+  onThemeChange: (theme: string) => void;
   onOpenDrawer: () => void;
   novelTitle: string;
   onBack: () => void;
@@ -19,6 +21,8 @@ export const ReaderSettings: React.FC<ReaderSettingsProps> = ({
   visible,
   fontSize,
   onFontSizeChange,
+  theme,
+  onThemeChange,
   onOpenDrawer,
   novelTitle,
   onBack,
@@ -29,6 +33,14 @@ export const ReaderSettings: React.FC<ReaderSettingsProps> = ({
   onPrevChapter,
   onNextChapter,
 }) => {
+  const themes = [
+    { id: 'day', name: 'Day', bg: '#fdfdfd' },
+    { id: 'night', name: 'Night', bg: '#121214' },
+    { id: 'sepia', name: 'Sepia', bg: '#f4edd8' },
+    { id: 'forest', name: 'Forest', bg: '#e2edd5' },
+    { id: 'mint', name: 'Mint', bg: '#e6f3f0' },
+  ];
+
   return (
     <div className="reader-settings-overlay">
       {/* Top Controls */}
@@ -65,7 +77,7 @@ export const ReaderSettings: React.FC<ReaderSettingsProps> = ({
       </div>
 
       {/* Bottom Controls */}
-      <div className={`reader-hud-bottom ${visible ? 'visible' : ''}`} style={{ padding: '16px 20px', gap: '16px' }}>
+      <div className={`reader-hud-bottom ${visible ? 'visible' : ''}`} style={{ padding: '16px 20px', gap: '14px' }}>
         {/* Chapter Quick Switcher */}
         {totalChapters > 1 && (
           <div className="hud-chapter-nav">
@@ -97,7 +109,30 @@ export const ReaderSettings: React.FC<ReaderSettingsProps> = ({
           </div>
         )}
 
-        {/* Font Size Adjuster Only */}
+        {/* Themes Selector */}
+        <div className="hud-section" style={{ width: '100%' }}>
+          <span className="hud-label" style={{ width: 'auto', marginRight: '8px' }}>Theme</span>
+          <div className="hud-theme-picker">
+            {themes.map((t) => (
+              <button
+                key={t.id}
+                className={`hud-theme-dot ${theme === t.id ? 'active' : ''}`}
+                style={{ backgroundColor: t.bg }}
+                onClick={() => onThemeChange(t.id)}
+                title={t.name}
+                aria-label={`Switch to ${t.name} theme`}
+              >
+                {theme === t.id && (
+                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" style={{ width: '14px', height: '14px', color: t.id === 'day' ? '#1e293b' : '#818cf8' }}>
+                    <path fillRule="evenodd" d="M16.704 4.153a.75.75 0 01.143 1.052l-8 10.5a.75.75 0 01-1.127.075l-4.5-4.5a.75.75 0 011.06-1.06l3.894 3.893 7.48-9.817a.75.75 0 011.05-.143z" clipRule="evenodd" />
+                  </svg>
+                )}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Font Size Adjuster */}
         <div className="hud-section" style={{ width: '100%' }}>
           <span className="hud-label" style={{ width: 'auto', marginRight: '8px' }}>Font Size</span>
           <div className="hud-font-size-row" style={{ flex: 1, maxWidth: '240px' }}>

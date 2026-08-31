@@ -77,15 +77,22 @@ export const Reader: React.FC<ReaderProps> = ({
     unlockedBookChaptersRef.current = unlockedBookChapters;
   }, [unlockedBookChapters]);
 
-  // Typography settings: font size only, default white theme
+  // Typography settings: font size and theme (default to clean white/day theme)
   const [fontSize, setFontSize] = useState<number>(() => {
     return parseInt(localStorage.getItem('reader-font-size') || '18', 10);
   });
-  const theme = 'day'; // Default clean white theme
+  const [theme, setTheme] = useState<string>(() => {
+    return localStorage.getItem('reader-theme') || 'day';
+  });
 
   const handleFontSizeChange = (newSize: number) => {
     setFontSize(newSize);
     localStorage.setItem('reader-font-size', newSize.toString());
+  };
+
+  const handleThemeChange = (newTheme: string) => {
+    setTheme(newTheme);
+    localStorage.setItem('reader-theme', newTheme);
   };
 
   const [showSettings, setShowSettings] = useState(false);
@@ -392,6 +399,8 @@ export const Reader: React.FC<ReaderProps> = ({
         visible={showSettings}
         fontSize={fontSize}
         onFontSizeChange={handleFontSizeChange}
+        theme={theme}
+        onThemeChange={handleThemeChange}
         onOpenDrawer={() => setShowTOC(true)}
         novelTitle={novel.title}
         onBack={() => onNavigate('detail', { id: novelId })}
