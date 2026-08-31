@@ -77,19 +77,16 @@ export const Reader: React.FC<ReaderProps> = ({
     unlockedBookChaptersRef.current = unlockedBookChapters;
   }, [unlockedBookChapters]);
 
-  // Typography settings with localStorage defaults
+  // Typography settings: font size only, default white theme
   const [fontSize, setFontSize] = useState<number>(() => {
-    return parseInt(localStorage.getItem('reader-font-size') || '16', 10);
+    return parseInt(localStorage.getItem('reader-font-size') || '18', 10);
   });
-  const [theme, setTheme] = useState<string>(() => {
-    return localStorage.getItem('reader-theme') || 'sepia';
-  });
-  const [fontFamily, setFontFamily] = useState<'serif' | 'sans'>(() => {
-    return (localStorage.getItem('reader-font-family') as 'serif' | 'sans') || 'serif';
-  });
-  const [lineHeight, setLineHeight] = useState<'narrow' | 'medium' | 'wide'>(() => {
-    return (localStorage.getItem('reader-line-height') as 'narrow' | 'medium' | 'wide') || 'medium';
-  });
+  const theme = 'day'; // Default clean white theme
+
+  const handleFontSizeChange = (newSize: number) => {
+    setFontSize(newSize);
+    localStorage.setItem('reader-font-size', newSize.toString());
+  };
 
   const [showSettings, setShowSettings] = useState(false);
   const [showTOC, setShowTOC] = useState(false);
@@ -274,18 +271,6 @@ export const Reader: React.FC<ReaderProps> = ({
   }, [fontSize]);
 
   useEffect(() => {
-    localStorage.setItem('reader-theme', theme);
-  }, [theme]);
-
-  useEffect(() => {
-    localStorage.setItem('reader-font-family', fontFamily);
-  }, [fontFamily]);
-
-  useEffect(() => {
-    localStorage.setItem('reader-line-height', lineHeight);
-  }, [lineHeight]);
-
-  useEffect(() => {
     localStorage.setItem('reader-auto-unlock', autoUnlock.toString());
   }, [autoUnlock]);
 
@@ -361,12 +346,6 @@ export const Reader: React.FC<ReaderProps> = ({
     showToast(isInShelf ? "Removed from shelf" : "Added to shelf!", "success");
   };
 
-  const getLineHeightVal = () => {
-    if (lineHeight === 'narrow') return '1.5';
-    if (lineHeight === 'wide') return '2.0';
-    return '1.75';
-  };
-
   if (!novel) {
     return (
       <div className="scroll-container animate-fade-in" style={{ textAlign: 'center', paddingTop: '100px', color: 'var(--text-secondary)' }}>
@@ -412,13 +391,7 @@ export const Reader: React.FC<ReaderProps> = ({
       <ReaderSettings
         visible={showSettings}
         fontSize={fontSize}
-        onFontSizeChange={setFontSize}
-        theme={theme}
-        onThemeChange={setTheme}
-        fontFamily={fontFamily}
-        onFontFamilyChange={setFontFamily}
-        lineHeight={lineHeight}
-        onLineHeightChange={setLineHeight}
+        onFontSizeChange={handleFontSizeChange}
         onOpenDrawer={() => setShowTOC(true)}
         novelTitle={novel.title}
         onBack={() => onNavigate('detail', { id: novelId })}
@@ -477,9 +450,9 @@ export const Reader: React.FC<ReaderProps> = ({
         onScroll={handleScroll}
         onClick={handleScreenClick}
         style={{
-          fontFamily: fontFamily === 'serif' ? 'var(--font-serif)' : 'var(--font-sans)',
+          fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif',
           fontSize: `${fontSize}px`,
-          lineHeight: getLineHeightVal(),
+          lineHeight: '1.8',
           overflowY: 'auto',
           flex: 1,
           minHeight: 0,
