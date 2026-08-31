@@ -6,14 +6,13 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-	dbassets "reader-backend/db"
 	"reader-backend/internal/config"
 )
 
 var DB *pgxpool.Pool
 
 func InitDB() {
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	cfg, err := pgxpool.ParseConfig(config.AppConfig.DatabaseURL)
@@ -21,7 +20,7 @@ func InitDB() {
 		log.Fatalf("Unable to parse database URL: %v", err)
 	}
 
-	// Optimize connection pool for concurrency
+	// Optimize connection pool for high-concurrency reader traffic
 	cfg.MaxConns = 25
 	cfg.MinConns = 5
 	cfg.MaxConnIdleTime = 30 * time.Minute
@@ -36,36 +35,8 @@ func InitDB() {
 		log.Fatalf("Database ping failed: %v", err)
 	}
 
-	log.Println("Database connection pool initialized successfully")
+	log.Println("Reader Database connection pool initialized successfully")
 	DB = pool
-
-	// Execute safe auto-migration
-	autoMigrate(ctx, pool)
-}
-
-func autoMigrate(ctx context.Context, pool *pgxpool.Pool) {
-	// Execute full schema DDL (Idempotent table and index creation)
-	if dbassets.SchemaSQL != "" {
-		_, err := pool.Exec(ctx, dbassets.SchemaSQL)
-		if err != nil {
-			log.Printf("[MIGRATE WARNING] Schema migration notice: %v", err)
-		}
-	}
-
-	// Seed initial data if novels table is empty
-	var novelCount int
-	err := pool.QueryRow(ctx, "SELECT COUNT(*) FROM novels").Scan(&novelCount)
-	if err == nil && novelCount == 0 {
-		log.Println("Database is empty. Seeding initial novel content...")
-		if dbassets.SeedSQL != "" {
-			_, err = pool.Exec(ctx, dbassets.SeedSQL)
-			if err != nil {
-				log.Printf("[SEED WARNING] Initial seed notice: %v", err)
-			} else {
-				log.Println("Initial seed novels inserted successfully")
-			}
-		}
-	}
 }
 
 func CloseDB() {
