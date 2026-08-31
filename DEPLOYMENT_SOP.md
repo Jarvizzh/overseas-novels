@@ -205,7 +205,7 @@ OSS_BUCKET=star-novel-content
 OSS_BASE_PATH=novels
 ```
 
-### 4.4 构建并启动容器 (含容器清理防冲突)
+### 4.4 构建并启动容器 (含容器清理与多重验证)
 ```bash
 cd reader-backend
 
@@ -223,11 +223,35 @@ docker run -d \
   -p 8080:8080 \
   --env-file .env \
   star-reader-backend:latest
-
-# 4. 验证健康探测接口
-curl http://127.0.0.1:8080/healthz
-# 预期返回: {"status":{"database":"UP","redis":"UP"},"timestamp":"..."}
 ```
+
+#### 4.5 三步确认服务是否 100% 启动成功
+* **第一步：查看容器运行状态**
+  ```bash
+  docker ps | grep star_reader_backend
+  # 预期输出: STATUS 列显示 "Up X seconds" (持续存活未退出)
+  ```
+* **第二步：查看容器核心初始化日志**
+  ```bash
+  docker logs --tail 20 star_reader_backend
+  # 预期包含:
+  # Database connection pool initialized successfully
+  # Redis client initialized successfully
+  # Reader Content Storage initialized with driver: postgres (或 oss)
+  # Star Novel backend starting on port 8080
+  ```
+* **第三步：健康检查接口自测**
+  ```bash
+  curl http://127.0.0.1:8080/healthz
+  # 预期返回: {"status":{"database":"UP","redis":"UP"},"timestamp":"..."}
+  ```
+
+> [!TIP]
+> **启动异常常见排查字典**：
+> 1. 若 `docker ps` 显示 `Exited (1)`，立即执行 `docker logs star_reader_backend` 查看末尾报错：
+>    * `Database connection failed`：检查 RDS 白名单是否已添加该 ECS 的内网 IP，并核对 `.env` 中的数据库密码；
+>    * `Redis connection failed`：检查 Redis 容器或服务是否已启动，核对内网 IP/密码；
+>    * `[CRITICAL SECURITY ERROR] JWT_SECRET...`：`GIN_MODE=release` 模式下严禁使用默认密钥，请修改 `.env` 中的 `JWT_SECRET` 为自定义复杂字符串。
 
 ---
 
@@ -296,6 +320,9 @@ docker run -d \
   -p 127.0.0.1:8081:8081 \
   --env-file .env \
   star-cms-backend:latest
+
+# 4. 验证健康检查
+curl http://127.0.0.1:8081/healthz
 ```
 
 ---
