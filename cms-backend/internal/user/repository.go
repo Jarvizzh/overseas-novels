@@ -15,6 +15,7 @@ type UserRepository interface {
 	GetUserBaseProfile(ctx context.Context, userID int64) (*User, error)
 	GetUserWalletCoins(ctx context.Context, userID int64) (int, int, error)
 	GetBookshelfItems(ctx context.Context, userID int64) ([]UserBookshelfItem, error)
+	GetUserSubscriptions(ctx context.Context, userID int64) ([]UserSubscriptionItem, error)
 
 	UpdateUserStatusTx(ctx context.Context, tx pgx.Tx, userID int64, status int16) (int64, error)
 	InsertAdminAuditLogTx(ctx context.Context, tx pgx.Tx, adminID, action, targetID, data string) error
@@ -55,6 +56,7 @@ func (r *dbUserRepository) ListUsers(ctx context.Context, selectQuery string, ar
 			&u.ID, &u.Email, &u.Nickname, &u.AvatarURL, &u.Status,
 			&u.Device, &u.IPAddress, &u.UTMSource, &u.UTMCampaign,
 			&u.TotalRecharge, &u.Balance, &u.TotalSpent, &u.RecentlyReadBook,
+			&u.IsVIP, &u.VIPCycle, &u.VIPExpireAt, &u.VIPStatus,
 			&u.CreatedAt,
 		)
 		if err != nil {
@@ -88,6 +90,27 @@ func (r *dbUserRepository) GetUserBaseProfile(ctx context.Context, userID int64)
 				ORDER BY b.updated_at DESC 
 				LIMIT 1
 			), ''),
+			COALESCE((
+				SELECT EXISTS(
+					SELECT 1 FROM user_subscriptions us 
+					WHERE us.user_id = users.id AND us.status = 'ACTIVE' AND us.current_period_end > CURRENT_TIMESTAMP
+				)
+			), false) AS is_vip,
+			COALESCE((
+				SELECT us.cycle FROM user_subscriptions us 
+				WHERE us.user_id = users.id AND us.status = 'ACTIVE' AND us.current_period_end > CURRENT_TIMESTAMP
+				ORDER BY us.current_period_end DESC LIMIT 1
+			), '') AS vip_cycle,
+			(
+				SELECT us.current_period_end FROM user_subscriptions us 
+				WHERE us.user_id = users.id 
+				ORDER BY us.current_period_end DESC NULLS LAST LIMIT 1
+			) AS vip_expire_at,
+			COALESCE((
+				SELECT us.status FROM user_subscriptions us 
+				WHERE us.user_id = users.id 
+				ORDER BY us.current_period_end DESC NULLS LAST LIMIT 1
+			), '') AS vip_status,
 			created_at
 		FROM users
 		WHERE id = $1`
@@ -97,6 +120,7 @@ func (r *dbUserRepository) GetUserBaseProfile(ctx context.Context, userID int64)
 		&u.ID, &u.Email, &u.Nickname, &u.AvatarURL, &u.Status,
 		&u.Device, &u.IPAddress, &u.UTMSource, &u.UTMCampaign,
 		&u.TotalRecharge, &u.Balance, &u.TotalSpent, &u.RecentlyReadBook,
+		&u.IsVIP, &u.VIPCycle, &u.VIPExpireAt, &u.VIPStatus,
 		&u.CreatedAt,
 	)
 	if err != nil {
@@ -148,6 +172,50 @@ func (r *dbUserRepository) GetBookshelfItems(ctx context.Context, userID int64) 
 		bookshelf = append(bookshelf, bi)
 	}
 	return bookshelf, nil
+}
+
+func (r *dbUserRepository) GetUserSubscriptions(ctx context.Context, userID int64) ([]UserSubscriptionItem, error) {
+	query := `
+		SELECT 
+			id, 
+			subscription_id, 
+			COALESCE(plan_id, ''), 
+			status, 
+			cycle, 
+			price_cents, 
+			currency, 
+			COALESCE(payment_method, 'paypal'),
+			current_period_start, 
+			current_period_end, 
+			next_billing_time, 
+			last_payment_time, 
+			cancelled_at, 
+			created_at
+		FROM user_subscriptions
+		WHERE user_id = $1
+		ORDER BY created_at DESC`
+
+	rows, err := db.DB.Query(ctx, query, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	subs := []UserSubscriptionItem{}
+	for rows.Next() {
+		var item UserSubscriptionItem
+		err := rows.Scan(
+			&item.ID, &item.SubscriptionID, &item.PlanID, &item.Status, &item.Cycle,
+			&item.PriceCents, &item.Currency, &item.PaymentMethod,
+			&item.CurrentPeriodStart, &item.CurrentPeriodEnd, &item.NextBillingTime,
+			&item.LastPaymentTime, &item.CancelledAt, &item.CreatedAt,
+		)
+		if err != nil {
+			return nil, err
+		}
+		subs = append(subs, item)
+	}
+	return subs, nil
 }
 
 func (r *dbUserRepository) UpdateUserStatusTx(ctx context.Context, tx pgx.Tx, userID int64, status int16) (int64, error) {

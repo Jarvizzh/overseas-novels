@@ -91,6 +91,27 @@ func (s *userService) ListUsers(ctx context.Context, page, pageSize int, search,
 				ORDER BY b.updated_at DESC 
 				LIMIT 1
 			), '') AS recently_read_book,
+			COALESCE((
+				SELECT EXISTS(
+					SELECT 1 FROM user_subscriptions us 
+					WHERE us.user_id = u.id AND us.status = 'ACTIVE' AND us.current_period_end > CURRENT_TIMESTAMP
+				)
+			), false) AS is_vip,
+			COALESCE((
+				SELECT us.cycle FROM user_subscriptions us 
+				WHERE us.user_id = u.id AND us.status = 'ACTIVE' AND us.current_period_end > CURRENT_TIMESTAMP
+				ORDER BY us.current_period_end DESC LIMIT 1
+			), '') AS vip_cycle,
+			(
+				SELECT us.current_period_end FROM user_subscriptions us 
+				WHERE us.user_id = u.id 
+				ORDER BY us.current_period_end DESC NULLS LAST LIMIT 1
+			) AS vip_expire_at,
+			COALESCE((
+				SELECT us.status FROM user_subscriptions us 
+				WHERE us.user_id = u.id 
+				ORDER BY us.current_period_end DESC NULLS LAST LIMIT 1
+			), '') AS vip_status,
 			u.created_at
 		FROM users u
 		%s
@@ -125,11 +146,26 @@ func (s *userService) GetUserDetail(ctx context.Context, userID int64) (*UserDet
 		return nil, err
 	}
 
+	subscriptions, err := s.repo.GetUserSubscriptions(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+
+	var activeSub *UserSubscriptionItem
+	for i := range subscriptions {
+		if subscriptions[i].Status == "ACTIVE" {
+			activeSub = &subscriptions[i]
+			break
+		}
+	}
+
 	return &UserDetail{
-		User:         *u,
-		ChargedCoins: charged,
-		BonusCoins:   bonus,
-		Bookshelf:    bookshelf,
+		User:               *u,
+		ChargedCoins:       charged,
+		BonusCoins:         bonus,
+		Bookshelf:          bookshelf,
+		Subscriptions:      subscriptions,
+		ActiveSubscription: activeSub,
 	}, nil
 }
 
