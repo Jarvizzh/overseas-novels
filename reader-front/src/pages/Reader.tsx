@@ -406,10 +406,6 @@ export const Reader: React.FC<ReaderProps> = ({
         onBack={() => onNavigate('detail', { id: novelId })}
         isInShelf={isInShelf}
         onAddToShelf={handleToggleShelf}
-        currentChapterIndex={currentChIndex}
-        totalChapters={totalChaptersCount}
-        onPrevChapter={() => handleChapterSelect(currentChIndex - 1)}
-        onNextChapter={() => handleChapterSelect(currentChIndex + 1)}
       />
 
       {/* Sidebar Drawer: Table of Contents */}
