@@ -1,3 +1,35 @@
+-- =========================================================================
+-- STAR NOVEL - 生产环境种子与初始数据 (Seed Data)
+-- 包含：初始超管账号 (admin/admin123)、系统全局计费配置、默认充值模板、默认域名、精选示例小说与章节
+-- =========================================================================
+
+-- 1. 初始超级管理员 (admin / admin123)
+INSERT INTO admins (id, username, password_hash, nickname, role, status) 
+VALUES ('10000000-0000-0000-0000-000000000001', 'admin', '$2a$10$N.zmdr9k7uOCQb376NoUnuTJ8iAt6Z5EHsM8lE9lBOsl7iKTVKIUi', '超级管理员', 'SuperAdmin', 1) 
+ON CONFLICT (username) DO NOTHING;
+
+-- 2. 全局计费与付费章节门槛配置
+INSERT INTO system_configs (key, value) VALUES ('global_coin_cost_per_thousand', '5') ON CONFLICT (key) DO NOTHING;
+INSERT INTO system_configs (key, value) VALUES ('global_start_pay_chapter_index', '3') ON CONFLICT (key) DO NOTHING;
+
+-- 3. 默认充值模板 (6卡位)
+INSERT INTO recharge_templates (id, name, is_default) VALUES (1, '默认充值模板', TRUE) ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO recharge_slots (template_id, slot_index, type, coins, bonus, vip_duration, vip_name, vip_desc, price, price_cents)
+VALUES
+(1, 1, 'single', 499, 50, '', '', '', '$4.99', 499),
+(1, 2, 'single', 999, 150, '', '', '', '$9.99', 999),
+(1, 3, 'single', 1999, 400, '', '', '', '$19.99', 1999),
+(1, 4, 'single', 4999, 1200, '', '', '', '$49.99', 4999),
+(1, 5, 'vip', 299, 0, 'week', 'VIP Weekly', 'Get 299 Coins + 50/day', '$2.99', 299),
+(1, 6, 'vip', 999, 0, 'month', 'VIP Monthly', 'Get 999 Coins + 80/day', '$9.99', 999)
+ON CONFLICT (template_id, slot_index) DO NOTHING;
+
+-- 4. 默认主站落地页域名
+INSERT INTO system_domains (name, domain, type, status, is_default)
+VALUES ('主站默认落地页', 'h5.star-novel.com', 'main', 1, TRUE)
+ON CONFLICT (domain) DO NOTHING;
+
 -- Mock Data Seeder for Star Novel
 
 INSERT INTO novels (id, title, author, cover_url, rating, status, synopsis, genres, word_count, view_count) VALUES (
