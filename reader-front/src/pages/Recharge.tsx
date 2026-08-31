@@ -577,59 +577,31 @@ export const Recharge: React.FC<RechargeProps> = ({
           </div>
         )}
 
-        {/* Direct PayPal Checkout Card */}
+        {/* Clean & Prominent PayPal Checkout Button */}
         {selectedSlot && (
           <div style={{
-            backgroundColor: 'var(--bg-secondary)',
-            borderRadius: '16px',
-            padding: '18px',
-            border: '1px solid var(--border-color)',
-            boxShadow: 'var(--card-shadow)',
+            marginTop: '10px',
             marginBottom: '24px'
           }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
-              <div>
-                <span style={{ fontSize: '11px', color: 'var(--text-tertiary)', textTransform: 'uppercase', letterSpacing: '0.5px', fontWeight: 600 }}>Selected Package</span>
-                <span style={{ fontSize: '15px', fontWeight: 800, color: 'var(--text-primary)', display: 'block', marginTop: '2px' }}>
-                  {selectedSlot.type === 'single'
-                    ? `${selectedSlot.coins} Coins (+${selectedSlot.bonus} Bonus)`
-                    : selectedSlot.vip_name}
-                </span>
-                {(selectedSlot.type === 'subscription' || selectedSlot.type === 'vip') && (
-                  <span style={{ fontSize: '11px', color: '#16a34a', fontWeight: 600, display: 'block', marginTop: '2px' }}>
-                    ✓ VIP Unlimited Reading Access
-                  </span>
-                )}
-              </div>
-              <div style={{ textAlign: 'right' }}>
-                <span style={{ fontSize: '11px', color: 'var(--text-tertiary)', textTransform: 'uppercase', letterSpacing: '0.5px', fontWeight: 600 }}>Amount</span>
-                <span style={{ fontSize: '22px', fontWeight: 900, color: 'var(--accent-color)', display: 'block', marginTop: '2px' }}>
-                  {selectedSlot.price}
-                </span>
-              </div>
-            </div>
-
-            {/* Official Branded PayPal Checkout Button */}
             <button
               onClick={handlePurchase}
               disabled={isProcessing}
               style={{
                 width: '100%',
-                padding: '14px 0',
+                height: '52px',
                 backgroundColor: '#ffc439',
                 color: '#003087',
                 border: 'none',
-                borderRadius: '24px',
-                fontSize: '15px',
+                borderRadius: '26px',
+                fontSize: '16px',
                 fontWeight: 800,
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'center',
                 gap: '8px',
-                boxShadow: '0 4px 14px rgba(255, 196, 57, 0.4)',
+                boxShadow: '0 4px 16px rgba(255, 196, 57, 0.45)',
                 cursor: isProcessing ? 'not-allowed' : 'pointer',
-                transition: 'all 0.2s ease',
-                fontFamily: 'system-ui, -apple-system, sans-serif'
+                transition: 'transform 0.15s ease, box-shadow 0.15s ease',
               }}
             >
               <svg width="22" height="22" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" style={{ flexShrink: 0 }}>
@@ -641,41 +613,26 @@ export const Recharge: React.FC<RechargeProps> = ({
                 {isProcessing
                   ? 'Connecting to PayPal...'
                   : selectedSlot.type === 'subscription' || selectedSlot.type === 'vip'
-                    ? `PayPal · Subscribe ${selectedSlot.price}`
-                    : `PayPal · Pay ${selectedSlot.price}`}
+                    ? `Subscribe with PayPal · ${selectedSlot.price}`
+                    : `Pay with PayPal · ${selectedSlot.price}`}
               </span>
             </button>
-
-            <div style={{
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              gap: '12px',
-              marginTop: '12px',
-              fontSize: '11px',
-              color: 'var(--text-tertiary)'
-            }}>
-              <span>🔒 256-Bit SSL Encrypted</span>
-              <span>•</span>
-              <span>⚡ Instant VIP Activation</span>
-            </div>
           </div>
         )}
 
         {/* Tips Box */}
         <div style={{
-          backgroundColor: 'var(--bg-tertiary)',
+          backgroundColor: 'var(--bg-secondary)',
           borderRadius: '12px',
-          padding: '16px',
+          padding: '14px 16px',
           border: '1px solid var(--border-color)',
           fontSize: '11px',
-          color: 'var(--text-secondary)',
+          color: 'var(--text-tertiary)',
           lineHeight: '1.6'
         }}>
-          <h4 style={{ fontWeight: 700, marginBottom: '6px', color: 'var(--text-primary)', fontSize: '12px' }}>Tips:</h4>
-          <p style={{ marginBottom: '4px' }}>1. <strong>VIP Unlimited Membership</strong> grants instant, full reading access to all novel chapters across the site without consuming coins during the subscription period.</p>
-          <p style={{ marginBottom: '4px' }}>2. <strong>Coin Top-up</strong> is a one-time purchase. Coins never expire and can be used to unlock individual chapters.</p>
-          <p>3. You can cancel recurring subscriptions at any time. For support, please reach out via <span style={{ color: 'var(--accent-color)', fontWeight: 600, cursor: 'pointer', textDecoration: 'underline' }} onClick={() => setActiveLegalModal('contact')}>Customer Support</span>.</p>
+          <p style={{ margin: '0 0 4px 0' }}>• <strong>VIP Unlimited Pass:</strong> Instant access to all novel chapters across the site without consuming coins.</p>
+          <p style={{ margin: '0 0 4px 0' }}>• <strong>Coin Top-up:</strong> Permanent coins to unlock chapters. Cancel subscriptions anytime.</p>
+          <p style={{ margin: 0 }}>• Need help? <span style={{ color: 'var(--accent-color)', fontWeight: 600, cursor: 'pointer', textDecoration: 'underline' }} onClick={() => setActiveLegalModal('contact')}>Contact Customer Support</span>.</p>
         </div>
 
         {/* Compliance & Legal Footer Links */}
