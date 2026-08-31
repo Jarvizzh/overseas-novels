@@ -21,7 +21,7 @@ func (h *Handler) RegisterRoutes(r *gin.RouterGroup) {
 func (h *Handler) SubmitFeedback(c *gin.Context) {
 	var req CreateFeedbackRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request: " + err.Error()})
 		return
 	}
 
@@ -34,7 +34,7 @@ func (h *Handler) SubmitFeedback(c *gin.Context) {
 
 	id, err := h.service.SubmitFeedback(c.Request.Context(), userID, &req)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to submit feedback"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to submit feedback: " + err.Error()})
 		return
 	}
 
