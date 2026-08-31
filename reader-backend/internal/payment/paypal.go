@@ -68,18 +68,82 @@ func (p *PayPalClient) getAccessToken(ctx context.Context) (string, error) {
 	return tokenResp.AccessToken, nil
 }
 
+type PayPalCaptureResult struct {
+	OrderID                string `json:"order_id"`
+	CaptureID              string `json:"capture_id"`
+	CustomID               string `json:"custom_id"`
+	CurrencyCode           string `json:"currency_code"`
+	GrossAmount            string `json:"gross_amount"`
+	FeeAmount              string `json:"fee_amount"`
+	NetAmount              string `json:"net_amount"`
+	PayerID                string `json:"payer_id"`
+	PayerEmail             string `json:"payer_email"`
+	PayerName              string `json:"payer_name"`
+	PayerCountry           string `json:"payer_country"`
+	Status                 string `json:"status"`
+	SellerProtectionStatus string `json:"seller_protection_status"`
+	RawPayload             string `json:"raw_payload"`
+}
+
 type CaptureResponse struct {
 	ID            string `json:"id"`
 	Status        string `json:"status"` // COMPLETED
+	PaymentSource struct {
+		PayPal struct {
+			EmailAddress  string `json:"email_address"`
+			AccountID     string `json:"account_id"`
+			AccountStatus string `json:"account_status"`
+			Name          struct {
+				GivenName string `json:"given_name"`
+				Surname   string `json:"surname"`
+			} `json:"name"`
+			Address struct {
+				CountryCode string `json:"country_code"`
+			} `json:"address"`
+		} `json:"paypal"`
+	} `json:"payment_source"`
+	Payer struct {
+		EmailAddress string `json:"email_address"`
+		PayerID      string `json:"payer_id"`
+		Name         struct {
+			GivenName string `json:"given_name"`
+			Surname   string `json:"surname"`
+		} `json:"name"`
+		Address struct {
+			CountryCode string `json:"country_code"`
+		} `json:"address"`
+	} `json:"payer"`
 	PurchaseUnits []struct {
-		CustomID string `json:"custom_id"`
-		Payments struct {
+		ReferenceID string `json:"reference_id"`
+		CustomID    string `json:"custom_id"`
+		Payments    struct {
 			Captures []struct {
-				Amount struct {
+				ID       string `json:"id"`
+				Status   string `json:"status"`
+				CustomID string `json:"custom_id"`
+				Amount   struct {
 					CurrencyCode string `json:"currency_code"`
 					Value        string `json:"value"`
 				} `json:"amount"`
-				CustomID string `json:"custom_id"` // Holds user_id:coins_amount
+				SellerReceivableBreakdown struct {
+					GrossAmount struct {
+						CurrencyCode string `json:"currency_code"`
+						Value        string `json:"value"`
+					} `json:"gross_amount"`
+					PayPalFee struct {
+						CurrencyCode string `json:"currency_code"`
+						Value        string `json:"value"`
+					} `json:"paypal_fee"`
+					NetAmount struct {
+						CurrencyCode string `json:"currency_code"`
+						Value        string `json:"value"`
+					} `json:"net_amount"`
+				} `json:"seller_receivable_breakdown"`
+				SellerProtection struct {
+					Status string `json:"status"`
+				} `json:"seller_protection"`
+				CreateTime string `json:"create_time"`
+				UpdateTime string `json:"update_time"`
 			} `json:"captures"`
 		} `json:"payments"`
 	} `json:"purchase_units"`
@@ -220,23 +284,38 @@ func (p *PayPalClient) CreateOrder(ctx context.Context, amountCents int64, coins
 	return createResp.ID, approveURL, nil
 }
 
-// CaptureOrder captures a PayPal transaction and returns custom_id, currency, value, error
-func (p *PayPalClient) CaptureOrder(ctx context.Context, orderID string) (string, string, string, error) {
+// CaptureOrder captures a PayPal transaction and returns rich capture details
+func (p *PayPalClient) CaptureOrder(ctx context.Context, orderID string) (*PayPalCaptureResult, error) {
 	clientID := config.AppConfig.PayPalClientID
 	if clientID == "" || clientID == "paypal_client_id_placeholder" {
 		// Mock PayPal capture in local sandbox development
-		return "mock_user_id:1000", "USD", "9.99", nil
+		return &PayPalCaptureResult{
+			OrderID:                orderID,
+			CaptureID:              "mock_capture_" + orderID,
+			CustomID:               "mock_user_id:1000",
+			CurrencyCode:           "USD",
+			GrossAmount:            "9.99",
+			FeeAmount:              "0.49",
+			NetAmount:              "9.50",
+			PayerID:                "MOCK_PAYER_ID",
+			PayerEmail:             "mock_payer@example.com",
+			PayerName:              "Mock User",
+			PayerCountry:           "US",
+			Status:                 "COMPLETED",
+			SellerProtectionStatus: "ELIGIBLE",
+			RawPayload:             `{"mock": true}`,
+		}, nil
 	}
 
 	token, err := p.getAccessToken(ctx)
 	if err != nil {
-		return "", "", "", fmt.Errorf("failed to get paypal access token: %w", err)
+		return nil, fmt.Errorf("failed to get paypal access token: %w", err)
 	}
 
 	url := fmt.Sprintf("%s/v2/checkout/orders/%s/capture", p.baseURL, orderID)
 	req, err := http.NewRequestWithContext(ctx, "POST", url, nil)
 	if err != nil {
-		return "", "", "", err
+		return nil, err
 	}
 
 	req.Header.Set("Authorization", "Bearer "+token)
@@ -245,22 +324,26 @@ func (p *PayPalClient) CaptureOrder(ctx context.Context, orderID string) (string
 	client := &http.Client{Timeout: 15 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", "", "", err
+		return nil, err
 	}
 	defer resp.Body.Close()
 
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		body, _ := io.ReadAll(resp.Body)
-		return "", "", "", fmt.Errorf("paypal capture failed: %s", string(body))
+		return nil, fmt.Errorf("paypal capture failed (status %d): %s", resp.StatusCode, string(bodyBytes))
 	}
 
 	var captureResp CaptureResponse
-	if err := json.NewDecoder(resp.Body).Decode(&captureResp); err != nil {
-		return "", "", "", err
+	if err := json.Unmarshal(bodyBytes, &captureResp); err != nil {
+		return nil, err
 	}
 
 	if captureResp.Status != "COMPLETED" {
-		return "", "", "", fmt.Errorf("paypal transaction is not completed: status is %s", captureResp.Status)
+		return nil, fmt.Errorf("paypal transaction is not completed: status is %s", captureResp.Status)
 	}
 
 	// Extract details
@@ -272,9 +355,54 @@ func (p *PayPalClient) CaptureOrder(ctx context.Context, orderID string) (string
 			if customID == "" {
 				customID = pu.CustomID
 			}
-			return customID, capture.Amount.CurrencyCode, capture.Amount.Value, nil
+
+			payerEmail := captureResp.Payer.EmailAddress
+			if payerEmail == "" {
+				payerEmail = captureResp.PaymentSource.PayPal.EmailAddress
+			}
+
+			payerID := captureResp.Payer.PayerID
+			if payerID == "" {
+				payerID = captureResp.PaymentSource.PayPal.AccountID
+			}
+
+			payerName := strings.TrimSpace(captureResp.Payer.Name.GivenName + " " + captureResp.Payer.Name.Surname)
+			if payerName == "" {
+				payerName = strings.TrimSpace(captureResp.PaymentSource.PayPal.Name.GivenName + " " + captureResp.PaymentSource.PayPal.Name.Surname)
+			}
+
+			payerCountry := captureResp.Payer.Address.CountryCode
+			if payerCountry == "" {
+				payerCountry = captureResp.PaymentSource.PayPal.Address.CountryCode
+			}
+
+			fee := capture.SellerReceivableBreakdown.PayPalFee.Value
+			if fee == "" {
+				fee = "0.00"
+			}
+			net := capture.SellerReceivableBreakdown.NetAmount.Value
+			if net == "" {
+				net = capture.Amount.Value
+			}
+
+			return &PayPalCaptureResult{
+				OrderID:                orderID,
+				CaptureID:              capture.ID,
+				CustomID:               customID,
+				CurrencyCode:           capture.Amount.CurrencyCode,
+				GrossAmount:            capture.Amount.Value,
+				FeeAmount:              fee,
+				NetAmount:              net,
+				PayerID:                payerID,
+				PayerEmail:             payerEmail,
+				PayerName:              payerName,
+				PayerCountry:           payerCountry,
+				Status:                 capture.Status,
+				SellerProtectionStatus: capture.SellerProtection.Status,
+				RawPayload:             string(bodyBytes),
+			}, nil
 		}
 	}
 
-	return "", "", "", errors.New("no captures found in paypal response")
+	return nil, errors.New("no captures found in paypal response")
 }

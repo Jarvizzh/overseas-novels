@@ -395,6 +395,29 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_unique_user_daily_checkin
 ON transactions(user_id, ((created_at AT TIME ZONE 'UTC')::date)) 
 WHERE biz_type = 'checkin';
 
--- GIN 模糊搜索三元索引
-CREATE INDEX IF NOT EXISTS idx_novels_title_trgm ON novels USING gin (title gin_trgm_ops);
-CREATE INDEX IF NOT EXISTS idx_novels_author_trgm ON novels USING gin (author gin_trgm_ops);
+-- 25. 第三方支付订单详情表 (Third Party Payment Orders)
+CREATE TABLE IF NOT EXISTS third_party_payment_orders (
+    id BIGSERIAL PRIMARY KEY,
+    order_id BIGINT NOT NULL REFERENCES recharge_orders(id) ON DELETE CASCADE,
+    payment_provider VARCHAR(30) NOT NULL,       -- 'paypal', 'stripe'
+    external_order_id VARCHAR(100),               -- PayPal Order ID or Stripe PaymentIntent ID
+    capture_id VARCHAR(100),                      -- PayPal Capture ID or Stripe Charge ID
+    payer_id VARCHAR(100),                        -- PayPal Payer/Account ID
+    payer_email VARCHAR(255),                     -- Payer Email
+    payer_name VARCHAR(150),                      -- Payer Name
+    payer_country VARCHAR(10),                    -- Payer Country Code (US, C2, etc.)
+    currency VARCHAR(10) DEFAULT 'USD',
+    gross_amount DECIMAL(10, 2) NOT NULL,         -- Total amount paid (e.g. 49.99)
+    fee_amount DECIMAL(10, 2) DEFAULT 0.00,       -- Payment fee charged by provider (e.g. 2.00)
+    net_amount DECIMAL(10, 2) DEFAULT 0.00,       -- Net amount received (e.g. 47.99)
+    status VARCHAR(30) NOT NULL,                  -- 'COMPLETED', 'PENDING', 'FAILED', 'REFUNDED'
+    seller_protection_status VARCHAR(50),         -- 'ELIGIBLE', 'NOT_ELIGIBLE', etc.
+    raw_payload JSONB,                            -- Complete raw JSON response
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT unique_tp_provider_external_capture UNIQUE (payment_provider, external_order_id, capture_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_tp_payment_order_id ON third_party_payment_orders(order_id);
+CREATE INDEX IF NOT EXISTS idx_tp_payment_ext_id ON third_party_payment_orders(external_order_id);
+CREATE INDEX IF NOT EXISTS idx_tp_payment_capture_id ON third_party_payment_orders(capture_id);

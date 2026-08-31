@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"log"
 	"math"
 	"strconv"
 	"time"
@@ -31,7 +32,7 @@ type Repository interface {
 	GetDefaultRechargeTemplate(ctx context.Context) (*model.RechargeTemplate, error)
 	GetFirstRechargeTemplate(ctx context.Context) (*model.RechargeTemplate, error)
 	GetRechargeSlots(ctx context.Context, templateID int) ([]model.RechargeSlot, error)
-	RecordRechargeOrderAndCreditCoinsTx(ctx context.Context, userID int64, externalRefID string, coinsAmount int, amountCents int64, currency string, paymentMethod string, fbLeadJSON string) error
+	RecordRechargeOrderAndCreditCoinsTx(ctx context.Context, userID int64, externalRefID string, coinsAmount int, amountCents int64, currency string, paymentMethod string, fbLeadJSON string, tpOrder *model.ThirdPartyPaymentOrder) error
 	CreatePendingOrder(ctx context.Context, userID int64, externalRefID string, coinsAmount int, amountCents int64, currency string, paymentMethod string) error
 }
 
@@ -309,7 +310,17 @@ func (r *dbRepository) GetRechargeSlots(ctx context.Context, templateID int) ([]
 	return slots, nil
 }
 
-func (r *dbRepository) RecordRechargeOrderAndCreditCoinsTx(ctx context.Context, userID int64, externalRefID string, coinsAmount int, amountCents int64, currency string, paymentMethod string, fbLeadJSON string) error {
+func (r *dbRepository) RecordRechargeOrderAndCreditCoinsTx(
+	ctx context.Context,
+	userID int64,
+	externalRefID string,
+	coinsAmount int,
+	amountCents int64,
+	currency string,
+	paymentMethod string,
+	fbLeadJSON string,
+	tpOrder *model.ThirdPartyPaymentOrder,
+) error {
 	txCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
@@ -361,9 +372,10 @@ func (r *dbRepository) RecordRechargeOrderAndCreditCoinsTx(ctx context.Context, 
 	}
 
 	// 3. Check if this order (externalRefID) is already processed
+	var orderID int64
 	var status string
-	checkQuery := `SELECT status FROM recharge_orders WHERE external_ref_id = $1`
-	err = tx.QueryRow(ctx, checkQuery, externalRefID).Scan(&status)
+	checkQuery := `SELECT id, status FROM recharge_orders WHERE external_ref_id = $1`
+	err = tx.QueryRow(ctx, checkQuery, externalRefID).Scan(&orderID, &status)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			// Order doesn't exist at all, we insert a new Success order
@@ -385,8 +397,9 @@ func (r *dbRepository) RecordRechargeOrderAndCreditCoinsTx(ctx context.Context, 
 					bonus_coins_credited, payment_method, status, utm_source, utm_campaign, 
 					fb_lead_metadata, paid_at, order_type, promotion_link_id, novel_id
 				)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, 'Success', $8, $9, $10, CURRENT_TIMESTAMP, $11, $12, $13)`
-			_, err = tx.Exec(ctx, insertOrderQuery, userID, externalRefID, finalAmountCents, currency, slotCoins, slotBonus, paymentMethod, utmSrcVal, utmCampVal, fbLeadVal, slotType, promotionLinkID, novelID)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, 'Success', $8, $9, $10, CURRENT_TIMESTAMP, $11, $12, $13)
+				RETURNING id`
+			err = tx.QueryRow(ctx, insertOrderQuery, userID, externalRefID, finalAmountCents, currency, slotCoins, slotBonus, paymentMethod, utmSrcVal, utmCampVal, fbLeadVal, slotType, promotionLinkID, novelID).Scan(&orderID)
 			if err != nil {
 				return err
 			}
@@ -407,10 +420,42 @@ func (r *dbRepository) RecordRechargeOrderAndCreditCoinsTx(ctx context.Context, 
 		updateOrderQuery := `
 			UPDATE recharge_orders
 			SET status = 'Success', paid_at = CURRENT_TIMESTAMP, fb_lead_metadata = COALESCE($1, fb_lead_metadata), updated_at = CURRENT_TIMESTAMP
-			WHERE external_ref_id = $2`
-		_, err = tx.Exec(ctx, updateOrderQuery, fbLeadVal, externalRefID)
+			WHERE external_ref_id = $2
+			RETURNING id`
+		err = tx.QueryRow(ctx, updateOrderQuery, fbLeadVal, externalRefID).Scan(&orderID)
 		if err != nil {
 			return err
+		}
+	}
+
+	// 3b. Record third-party payment transaction details
+	if tpOrder != nil && orderID > 0 {
+		insertTPQuery := `
+			INSERT INTO third_party_payment_orders (
+				order_id, payment_provider, external_order_id, capture_id,
+				payer_id, payer_email, payer_name, payer_country,
+				currency, gross_amount, fee_amount, net_amount,
+				status, seller_protection_status, raw_payload
+			)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15::jsonb)
+			ON CONFLICT (payment_provider, external_order_id, capture_id) DO UPDATE SET
+				status = EXCLUDED.status,
+				fee_amount = EXCLUDED.fee_amount,
+				net_amount = EXCLUDED.net_amount,
+				raw_payload = EXCLUDED.raw_payload,
+				updated_at = CURRENT_TIMESTAMP`
+		rawPayload := tpOrder.RawPayload
+		if rawPayload == "" {
+			rawPayload = "{}"
+		}
+		_, err = tx.Exec(ctx, insertTPQuery,
+			orderID, tpOrder.PaymentProvider, tpOrder.ExternalOrderID, tpOrder.CaptureID,
+			tpOrder.PayerID, tpOrder.PayerEmail, tpOrder.PayerName, tpOrder.PayerCountry,
+			tpOrder.Currency, tpOrder.GrossAmount, tpOrder.FeeAmount, tpOrder.NetAmount,
+			tpOrder.Status, tpOrder.SellerProtectionStatus, rawPayload,
+		)
+		if err != nil {
+			log.Printf("[Warning] Failed to insert third_party_payment_orders: %v", err)
 		}
 	}
 

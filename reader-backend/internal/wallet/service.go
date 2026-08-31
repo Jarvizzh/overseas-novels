@@ -197,11 +197,12 @@ func (s *service) CapturePayPalPayment(ctx context.Context, userID int64, orderI
 		defer redisclient.RDB.Del(ctx, lockKey)
 	}
 
-	customID, currency, value, err := s.paypalClient.CaptureOrder(ctx, orderID)
+	paypalResult, err := s.paypalClient.CaptureOrder(ctx, orderID)
 	if err != nil {
 		return err
 	}
 
+	customID := paypalResult.CustomID
 	if customID == "mock_user_id:1000" {
 		customID = strconv.FormatInt(userID, 10) + ":" + strconv.Itoa(coinsAmount)
 	}
@@ -224,7 +225,7 @@ func (s *service) CapturePayPalPayment(ctx context.Context, userID int64, orderI
 		return errors.New("paypal transaction owner mismatch")
 	}
 
-	valFloat, err := strconv.ParseFloat(value, 64)
+	valFloat, err := strconv.ParseFloat(paypalResult.GrossAmount, 64)
 	if err != nil {
 		valFloat = 0.0
 	}
@@ -251,7 +252,27 @@ func (s *service) CapturePayPalPayment(ctx context.Context, userID int64, orderI
 		fbLeadJSON = string(fbLeadJSONBytes)
 	}
 
-	err = s.repo.RecordRechargeOrderAndCreditCoinsTx(ctx, targetUserIDVal, orderID, parsedCoinsAmount, amountCents, currency, "paypal", fbLeadJSON)
+	feeFloat, _ := strconv.ParseFloat(paypalResult.FeeAmount, 64)
+	netFloat, _ := strconv.ParseFloat(paypalResult.NetAmount, 64)
+
+	tpOrder := &model.ThirdPartyPaymentOrder{
+		PaymentProvider:        "paypal",
+		ExternalOrderID:        orderID,
+		CaptureID:              paypalResult.CaptureID,
+		PayerID:                paypalResult.PayerID,
+		PayerEmail:             paypalResult.PayerEmail,
+		PayerName:              paypalResult.PayerName,
+		PayerCountry:           paypalResult.PayerCountry,
+		Currency:               paypalResult.CurrencyCode,
+		GrossAmount:            valFloat,
+		FeeAmount:              feeFloat,
+		NetAmount:              netFloat,
+		Status:                 paypalResult.Status,
+		SellerProtectionStatus: paypalResult.SellerProtectionStatus,
+		RawPayload:             paypalResult.RawPayload,
+	}
+
+	err = s.repo.RecordRechargeOrderAndCreditCoinsTx(ctx, targetUserIDVal, orderID, parsedCoinsAmount, amountCents, paypalResult.CurrencyCode, "paypal", fbLeadJSON, tpOrder)
 	if err != nil {
 		return err
 	}
@@ -266,6 +287,9 @@ func (s *service) CapturePayPalPayment(ctx context.Context, userID int64, orderI
 	}
 
 	email, _ := s.repo.GetUserEmail(ctx, userID)
+	if email == "" && paypalResult.PayerEmail != "" {
+		email = paypalResult.PayerEmail
+	}
 
 	// Trigger FB Conversions API purchase event via WorkerPool strictly using CMS configured pixel
 	workerpool.Submit(func() {
@@ -320,7 +344,40 @@ func (s *service) ProcessStripeWebhook(ctx context.Context, payload []byte, sigH
 			defer redisclient.RDB.Del(ctx, lockKey)
 		}
 
-		err = s.repo.RecordRechargeOrderAndCreditCoinsTx(ctx, userID, pi.ID, coinsAmount, pi.Amount, strings.ToUpper(string(pi.Currency)), "stripe", "")
+		gross := float64(pi.Amount) / 100.0
+		var chargeID, customerID, receiptEmail, billingCountry string
+		if pi.LatestCharge != nil {
+			chargeID = pi.LatestCharge.ID
+			if pi.LatestCharge.BillingDetails != nil {
+				receiptEmail = pi.LatestCharge.BillingDetails.Email
+				if pi.LatestCharge.BillingDetails.Address != nil {
+					billingCountry = pi.LatestCharge.BillingDetails.Address.Country
+				}
+			}
+		}
+		if pi.Customer != nil {
+			customerID = pi.Customer.ID
+		}
+		if receiptEmail == "" && pi.ReceiptEmail != "" {
+			receiptEmail = pi.ReceiptEmail
+		}
+
+		tpOrder := &model.ThirdPartyPaymentOrder{
+			PaymentProvider: "stripe",
+			ExternalOrderID: pi.ID,
+			CaptureID:       chargeID,
+			PayerID:         customerID,
+			PayerEmail:      receiptEmail,
+			PayerCountry:    billingCountry,
+			Currency:        strings.ToUpper(string(pi.Currency)),
+			GrossAmount:     gross,
+			FeeAmount:       0.0,
+			NetAmount:       gross,
+			Status:          strings.ToUpper(string(pi.Status)),
+			RawPayload:      string(payload),
+		}
+
+		err = s.repo.RecordRechargeOrderAndCreditCoinsTx(ctx, userID, pi.ID, coinsAmount, pi.Amount, strings.ToUpper(string(pi.Currency)), "stripe", "", tpOrder)
 		return err
 	}
 

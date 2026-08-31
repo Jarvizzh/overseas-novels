@@ -116,3 +116,25 @@ type RechargeTemplate struct {
 	Slots     []RechargeSlot `json:"slots" db:"-"`
 }
 
+// ThirdPartyPaymentOrder represents third-party payment transaction details (e.g. PayPal, Stripe)
+type ThirdPartyPaymentOrder struct {
+	ID                     int64     `json:"id" db:"id"`
+	OrderID                int64     `json:"order_id" db:"order_id"`
+	PaymentProvider        string    `json:"payment_provider" db:"payment_provider"`
+	ExternalOrderID        string    `json:"external_order_id" db:"external_order_id"`
+	CaptureID              string    `json:"capture_id" db:"capture_id"`
+	PayerID                string    `json:"payer_id" db:"payer_id"`
+	PayerEmail             string    `json:"payer_email" db:"payer_email"`
+	PayerName              string    `json:"payer_name" db:"payer_name"`
+	PayerCountry           string    `json:"payer_country" db:"payer_country"`
+	Currency               string    `json:"currency" db:"currency"`
+	GrossAmount            float64   `json:"gross_amount" db:"gross_amount"`
+	FeeAmount              float64   `json:"fee_amount" db:"fee_amount"`
+	NetAmount              float64   `json:"net_amount" db:"net_amount"`
+	Status                 string    `json:"status" db:"status"`
+	SellerProtectionStatus string    `json:"seller_protection_status" db:"seller_protection_status"`
+	RawPayload             string    `json:"raw_payload" db:"raw_payload"`
+	CreatedAt              time.Time `json:"created_at" db:"created_at"`
+	UpdatedAt              time.Time `json:"updated_at" db:"updated_at"`
+}
+
