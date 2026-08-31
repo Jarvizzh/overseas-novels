@@ -147,22 +147,27 @@ curl -fsSL https://get.docker.com | sh
 sudo systemctl enable --now docker
 ```
 
-### 4.2 准备 `reader-backend/Dockerfile`
+### 4.2 准备 `reader-backend/Dockerfile` (基于预编译 Linux 二进制)
 ```dockerfile
-FROM golang:1.25-alpine AS builder
-WORKDIR /app
-RUN apk add --no-cache git ca-certificates tzdata
-COPY go.mod go.sum ./
-RUN go mod download
-COPY . .
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o /app/server cmd/server/main.go
-
+# =========================================================================
+# STAR NOVEL - reader-backend 极速轻量运行镜像 (基于预编译 Linux 二进制)
+# =========================================================================
 FROM alpine:3.19
+
 WORKDIR /app
-RUN apk add --no-cache ca-certificates tzdata
+
+# 安装基础运行时依赖 (CA 证书、时区、健康检查 curl)
+RUN apk add --no-cache ca-certificates tzdata curl
 ENV TZ=UTC
-COPY --from=builder /app/server /app/server
+
+# 复制在本地预编译好的 Linux 静态二进制文件
+COPY reader-server-linux-amd64 /app/server
+RUN chmod +x /app/server
+
+# 暴露读者端 API 端口
 EXPOSE 8080
+
+# 容器启动入口
 ENTRYPOINT ["/app/server"]
 ```
 
@@ -187,13 +192,31 @@ PAYPAL_CLIENT_ID=xxxxxx
 PAYPAL_CLIENT_SECRET=xxxxxx
 PAYPAL_MODE=live
 
+# 默认主站落地页域名
 DEFAULT_DOMAIN=https://h5.star-novel.com
+
+# 章节正文存储引擎配置 ("postgres" 或 "oss")
+STORAGE_TYPE=postgres
+# 若启用 OSS 存储，配置以下凭证:
+OSS_ENDPOINT=oss-cn-hangzhou.aliyuncs.com
+OSS_ACCESS_KEY_ID=your_aliyun_oss_access_key_id
+OSS_ACCESS_KEY_SECRET=your_aliyun_oss_access_key_secret
+OSS_BUCKET=star-novel-content
+OSS_BASE_PATH=novels
 ```
 
-### 4.4 构建并启动容器
+### 4.4 构建并启动容器 (含容器清理防冲突)
 ```bash
 cd reader-backend
+
+# 1. 构建镜像 (基于预编译二进制，仅耗时 1 秒，0 CPU 开销)
 docker build -t star-reader-backend:latest .
+
+# 2. 优雅停止并清理旧容器 (防端口与名称冲突)
+docker stop star_reader_backend 2>/dev/null || true
+docker rm star_reader_backend 2>/dev/null || true
+
+# 3. 启动新容器
 docker run -d \
   --name star_reader_backend \
   --restart always \
@@ -201,7 +224,7 @@ docker run -d \
   --env-file .env \
   star-reader-backend:latest
 
-# 验证健康探测接口
+# 4. 验证健康探测接口
 curl http://127.0.0.1:8080/healthz
 # 预期返回: {"status":{"database":"UP","redis":"UP"},"timestamp":"..."}
 ```
@@ -212,22 +235,27 @@ curl http://127.0.0.1:8080/healthz
 
 在网关/管理机（`ECS-Gateway`）上操作：
 
-### 5.1 准备 `cms-backend/Dockerfile`
+### 5.1 准备 `cms-backend/Dockerfile` (基于预编译 Linux 二进制)
 ```dockerfile
-FROM golang:1.25-alpine AS builder
-WORKDIR /app
-RUN apk add --no-cache git ca-certificates tzdata
-COPY go.mod go.sum ./
-RUN go mod download
-COPY . .
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o /app/cms-server cmd/server/main.go
-
+# =========================================================================
+# STAR NOVEL - cms-backend 极速轻量运行镜像 (基于预编译 Linux 二进制)
+# =========================================================================
 FROM alpine:3.19
+
 WORKDIR /app
-RUN apk add --no-cache ca-certificates tzdata
+
+# 安装基础运行时依赖 (CA 证书、时区、健康检查 curl)
+RUN apk add --no-cache ca-certificates tzdata curl
 ENV TZ=UTC
-COPY --from=builder /app/cms-server /app/cms-server
+
+# 复制在本地预编译好的 Linux 静态二进制文件
+COPY cms-server-linux-amd64 /app/cms-server
+RUN chmod +x /app/cms-server
+
+# 暴露 CMS API 端口
 EXPOSE 8081
+
+# 容器启动入口
 ENTRYPOINT ["/app/cms-server"]
 ```
 
@@ -239,11 +267,29 @@ DATABASE_URL=postgres://star_admin:YOUR_RDS_PASSWORD@pgm-xxxxxx.pgsql.rds.aliyun
 REDIS_URL=redis://:YOUR_STRONG_REDIS_PASSWORD_2026@172.16.0.15:6379/0
 JWT_SECRET=STAR_NOVEL_CMS_SUPER_KEY_2026
 DEFAULT_DOMAIN=https://h5.star-novel.com
+
+# 章节正文存储引擎配置 ("postgres" 或 "oss")
+STORAGE_TYPE=postgres
+# 若启用 OSS 存储，配置以下凭证:
+OSS_ENDPOINT=oss-cn-hangzhou.aliyuncs.com
+OSS_ACCESS_KEY_ID=your_aliyun_oss_access_key_id
+OSS_ACCESS_KEY_SECRET=your_aliyun_oss_access_key_secret
+OSS_BUCKET=star-novel-content
+OSS_BASE_PATH=novels
 ```
-启动容器：
+
+启动容器（含容器清理防冲突）：
 ```bash
 cd cms-backend
+
+# 1. 构建镜像 (基于预编译二进制，耗时不到 1 秒)
 docker build -t star-cms-backend:latest .
+
+# 2. 优雅停止并清理旧容器 (防端口与名称冲突)
+docker stop star_cms_backend 2>/dev/null || true
+docker rm star_cms_backend 2>/dev/null || true
+
+# 3. 启动新容器
 docker run -d \
   --name star_cms_backend \
   --restart always \
@@ -403,17 +449,37 @@ npm run build
 ```
 
 ### 8.2 读者端 Go 后端滚动升级（Zero Downtime）
-采取**逐台滚动重启**策略：
+
+#### 步骤 0：在本地 Mac 执行一键交叉编译并推送到 Git
 ```bash
-# 步骤 1: 登录 ECS-Reader-1
-cd reader-backend && git pull
+# 在本地 Mac 项目根目录执行
+./scripts/build-linux.sh
+
+# 提交并推送到 GitHub 远端仓库
+git add . && git commit -m "feat: 发布新版本二进制" && git push origin main
+```
+
+#### 步骤 1：登录服务器逐台滚动更新
+```bash
+# 1. 登录 ECS-Reader-1
+cd /path/to/star-novel/reader-backend && git pull origin main
+
+# 2. 构建镜像 (基于预编译二进制，仅耗时 1 秒，0 CPU 开销)
 docker build -t star-reader-backend:latest .
-docker stop star_reader_backend && docker rm star_reader_backend
-docker run -d --name star_reader_backend --restart always -p 8080:8080 --env-file .env star-reader-backend:latest
 
-# 步骤 2: 验证 ECS-Reader-1 启动健康通过 (curl 127.0.0.1:8080/healthz)
+# 3. 优雅重启容器
+docker stop star_reader_backend 2>/dev/null || true
+docker rm star_reader_backend 2>/dev/null || true
+docker run -d \
+  --name star_reader_backend \
+  --restart always \
+  -p 8080:8080 \
+  --env-file .env \
+  star-reader-backend:latest
 
-# 步骤 3: 登录 ECS-Reader-2 重复上述步骤
+# 4. 验证健康检查通过 (curl 127.0.0.1:8080/healthz)
+
+# 5. 登录 ECS-Reader-2 重复上述步骤
 ```
 *在更新节点 1 时，网关 Nginx 会自动将所有流量平滑导向节点 2，整个发布过程读者完全无感知。*
 
@@ -425,4 +491,4 @@ find /data/backup/ -name "star_novel_*.sql.gz" -mtime +7 -exec rm -f {} \;
 ```
 
 ---
-*文档版本：v1.0.0 | 维护团队：STAR NOVEL 架构组*
+*文档版本：v1.2.0 | 维护团队：STAR NOVEL 架构组*
