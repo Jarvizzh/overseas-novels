@@ -205,8 +205,9 @@ export default function PromotionsTab() {
     e.preventDefault();
     if (!editingLink) return;
 
-    const targetDomainObj = domains.find(d => String(d.id) === editForm.domainId);
-    const defaultDomainObj = domains.find(d => d.is_default) || domains.find(d => d.type === 'main') || domains[0];
+    const activeDomains = (domains || []).filter((d) => d.status === 1);
+    const targetDomainObj = activeDomains.find(d => String(d.id) === editForm.domainId);
+    const defaultDomainObj = activeDomains.find(d => d.is_default) || activeDomains.find(d => d.type === 'main') || activeDomains[0];
     const domainHost = targetDomainObj ? targetDomainObj.domain : (defaultDomainObj ? defaultDomainObj.domain : window.location.host);
 
     let baseUrl = domainHost.startsWith('http://') || domainHost.startsWith('https://')
@@ -551,21 +552,27 @@ export default function PromotionsTab() {
                 <label style={{ display: 'block', fontSize: '0.75rem', color: 'hsl(var(--text-secondary))', marginBottom: '4px' }}>
                   投放落地页域名 (可选，不选则默认主域名)
                 </label>
-                <CustomSelect
-                  options={[
-                    {
-                      value: '',
-                      label: `-- 默认主域名 (${domains.find(d => d.is_default)?.domain || domains.find(d => d.type === 'main')?.domain || '主站默认域名'}) --`
-                    },
-                    ...domains.filter(d => d.status === 1).map((d) => ({
-                      value: String(d.id),
-                      label: `${d.name} (${d.domain}) ${d.is_default ? '[默认主域名]' : ''}`
-                    }))
-                  ]}
-                  value={editForm.domainId}
-                  onChange={(val) => setEditForm({ ...editForm, domainId: val })}
-                  width="100%"
-                />
+                {(() => {
+                  const activeDomains = (domains || []).filter((d) => d.status === 1);
+                  const defaultDomain = activeDomains.find((d) => d.is_default) || activeDomains.find((d) => d.type === 'main') || activeDomains[0];
+                  return (
+                    <CustomSelect
+                      options={[
+                        {
+                          value: '',
+                          label: `-- 默认主域名 (${defaultDomain?.domain || '主站默认域名'}) --`
+                        },
+                        ...activeDomains.map((d) => ({
+                          value: String(d.id),
+                          label: `${d.name} (${d.domain}) ${d.is_default ? '[默认主域名]' : ''}`
+                        }))
+                      ]}
+                      value={editForm.domainId}
+                      onChange={(val) => setEditForm({ ...editForm, domainId: val })}
+                      width="100%"
+                    />
+                  );
+                })()}
               </div>
 
               <div>

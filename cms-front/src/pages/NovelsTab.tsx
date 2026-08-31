@@ -391,9 +391,10 @@ export default function NovelsTab() {
   };
 
   const handleGeneratePromotionLink = async () => {
-    // 1. 匹配选中的域名或默认主域名
-    const targetDomainObj = domains.find((d) => String(d.id) === promotionForm.domainId);
-    const defaultDomainObj = domains.find((d) => d.is_default) || domains.find((d) => d.type === 'main') || domains[0];
+    // 1. 匹配选中的可用域名或默认可用主域名
+    const activeDomains = (domains || []).filter((d) => d.status === 1);
+    const targetDomainObj = activeDomains.find((d) => String(d.id) === promotionForm.domainId);
+    const defaultDomainObj = activeDomains.find((d) => d.is_default) || activeDomains.find((d) => d.type === 'main') || activeDomains[0];
     const domainHost = targetDomainObj ? targetDomainObj.domain : (defaultDomainObj ? defaultDomainObj.domain : window.location.host);
 
     let baseUrl = domainHost.startsWith('http://') || domainHost.startsWith('https://')

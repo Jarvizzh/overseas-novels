@@ -139,21 +139,27 @@ export const PromotionLinkModal: React.FC<PromotionLinkModalProps> = ({
             <label style={{ display: 'block', fontSize: '0.75rem', color: 'hsl(var(--text-secondary))', marginBottom: '4px' }}>
               投放落地页域名 (可选，不选则默认主域名)
             </label>
-            <CustomSelect
-              options={[
-                {
-                  value: '',
-                  label: `-- 默认主域名 (${domains.find(d => d.is_default)?.domain || domains.find(d => d.type === 'main')?.domain || '主站默认域名'}) --`
-                },
-                ...domains.filter(d => d.status === 1).map((d) => ({
-                  value: String(d.id),
-                  label: `${d.name} (${d.domain}) ${d.is_default ? '[默认主域名]' : ''}`
-                }))
-              ]}
-              value={promotionForm.domainId || ''}
-              onChange={(val) => setPromotionForm({ ...promotionForm, domainId: val })}
-              width="100%"
-            />
+            {(() => {
+              const activeDomains = (domains || []).filter((d) => d.status === 1);
+              const defaultDomain = activeDomains.find((d) => d.is_default) || activeDomains.find((d) => d.type === 'main') || activeDomains[0];
+              return (
+                <CustomSelect
+                  options={[
+                    {
+                      value: '',
+                      label: `-- 默认主域名 (${defaultDomain?.domain || '主站默认域名'}) --`
+                    },
+                    ...activeDomains.map((d) => ({
+                      value: String(d.id),
+                      label: `${d.name} (${d.domain}) ${d.is_default ? '[默认主域名]' : ''}`
+                    }))
+                  ]}
+                  value={promotionForm.domainId || ''}
+                  onChange={(val) => setPromotionForm({ ...promotionForm, domainId: val })}
+                  width="100%"
+                />
+              );
+            })()}
           </div>
 
           <div>
