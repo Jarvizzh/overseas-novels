@@ -1,6 +1,7 @@
 import React from 'react';
 import { createPortal } from 'react-dom';
 import CustomSelect from '../CustomSelect';
+import type { SystemDomain } from '../../utils/api';
 
 export interface FBPixel {
   id: number;
@@ -22,6 +23,7 @@ export interface PromotionFormData {
   chapterIndex: string;
   utmSource: string;
   utmCampaign: string;
+  domainId?: string;
   fbPixelId: string;
   rechargeTemplateId: string;
   coinCostPerThousand: string;
@@ -35,6 +37,7 @@ interface PromotionLinkModalProps {
   setPromotionForm: (form: PromotionFormData) => void;
   pixels: FBPixel[];
   templates: RechargeTemplate[];
+  domains?: SystemDomain[];
   onGenerateLink: () => void;
   generatedLink: string;
   onCopyLink: () => void;
@@ -47,6 +50,7 @@ export const PromotionLinkModal: React.FC<PromotionLinkModalProps> = ({
   setPromotionForm,
   pixels,
   templates,
+  domains = [],
   onGenerateLink,
   generatedLink,
   onCopyLink,
@@ -129,6 +133,27 @@ export const PromotionLinkModal: React.FC<PromotionLinkModalProps> = ({
               目标书籍 (自动填充)
             </label>
             <input type="text" className="input-field" value={promotionForm.title} disabled style={{ opacity: 0.7 }} />
+          </div>
+
+          <div>
+            <label style={{ display: 'block', fontSize: '0.75rem', color: 'hsl(var(--text-secondary))', marginBottom: '4px' }}>
+              投放落地页域名 (可选，不选则默认主域名)
+            </label>
+            <CustomSelect
+              options={[
+                {
+                  value: '',
+                  label: `-- 默认主域名 (${domains.find(d => d.is_default)?.domain || domains.find(d => d.type === 'main')?.domain || '主站默认域名'}) --`
+                },
+                ...domains.filter(d => d.status === 1).map((d) => ({
+                  value: String(d.id),
+                  label: `${d.name} (${d.domain}) ${d.is_default ? '[默认主域名]' : ''}`
+                }))
+              ]}
+              value={promotionForm.domainId || ''}
+              onChange={(val) => setPromotionForm({ ...promotionForm, domainId: val })}
+              width="100%"
+            />
           </div>
 
           <div>

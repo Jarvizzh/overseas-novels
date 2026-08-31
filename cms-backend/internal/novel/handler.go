@@ -406,6 +406,8 @@ type CreatePromotionLinkReq struct {
 	GeneratedURL         string `json:"generated_url" binding:"required"`
 	FBPixelID            *int   `json:"fb_pixel_id"`
 	RechargeTemplateID   *int   `json:"recharge_template_id"`
+	DomainID             *int   `json:"domain_id"`
+	Domain               string `json:"domain"`
 	CoinCostPerThousand  *int   `json:"coin_cost_per_thousand"`
 	StartPayChapterIndex *int   `json:"start_pay_chapter_index"`
 }
@@ -428,6 +430,8 @@ func (h *Handler) CreatePromotionLink(c *gin.Context) {
 		GeneratedURL:         req.GeneratedURL,
 		FBPixelID:            req.FBPixelID,
 		RechargeTemplateID:   req.RechargeTemplateID,
+		DomainID:             req.DomainID,
+		Domain:               req.Domain,
 		CoinCostPerThousand:  req.CoinCostPerThousand,
 		StartPayChapterIndex: req.StartPayChapterIndex,
 	}
@@ -449,6 +453,8 @@ type UpdatePromotionLinkReq struct {
 	GeneratedURL         string `json:"generated_url" binding:"required"`
 	FBPixelID            *int   `json:"fb_pixel_id"`
 	RechargeTemplateID   *int   `json:"recharge_template_id"`
+	DomainID             *int   `json:"domain_id"`
+	Domain               string `json:"domain"`
 	CoinCostPerThousand  *int   `json:"coin_cost_per_thousand"`
 	StartPayChapterIndex *int   `json:"start_pay_chapter_index"`
 }
@@ -468,7 +474,7 @@ func (h *Handler) UpdatePromotionLink(c *gin.Context) {
 	}
 
 	ctx := c.Request.Context()
-	err = h.service.UpdatePromotionLink(ctx, id, req.Name, req.ChapterIndex, req.UtmSource, req.UtmCampaign, req.GeneratedURL, req.FBPixelID, req.RechargeTemplateID, req.CoinCostPerThousand, req.StartPayChapterIndex)
+	err = h.service.UpdatePromotionLink(ctx, id, req.Name, req.ChapterIndex, req.UtmSource, req.UtmCampaign, req.GeneratedURL, req.FBPixelID, req.RechargeTemplateID, req.DomainID, req.CoinCostPerThousand, req.StartPayChapterIndex, req.Domain)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return

@@ -40,7 +40,7 @@ type NovelService interface {
 
 	ListPromotionLinks(ctx context.Context) ([]PromotionLink, error)
 	CreatePromotionLink(ctx context.Context, link *PromotionLink) (*PromotionLink, error)
-	UpdatePromotionLink(ctx context.Context, id int, name string, chapterIndex int, source, campaign, url string, pixelID, templateID, coinCost, startPayIndex *int) error
+	UpdatePromotionLink(ctx context.Context, id int, name string, chapterIndex int, source, campaign, url string, pixelID, templateID, domainID, coinCost, startPayIndex *int, domain string) error
 	DeletePromotionLink(ctx context.Context, id int) error
 
 	ListFBPixels(ctx context.Context) ([]FBPixel, error)
@@ -608,8 +608,8 @@ func (s *novelService) CreatePromotionLink(ctx context.Context, link *PromotionL
 	return link, nil
 }
 
-func (s *novelService) UpdatePromotionLink(ctx context.Context, id int, name string, chapterIndex int, source, campaign, url string, pixelID, templateID, coinCost, startPayIndex *int) error {
-	return s.repo.UpdatePromotionLink(ctx, id, name, chapterIndex, source, campaign, url, pixelID, templateID, coinCost, startPayIndex)
+func (s *novelService) UpdatePromotionLink(ctx context.Context, id int, name string, chapterIndex int, source, campaign, url string, pixelID, templateID, domainID, coinCost, startPayIndex *int, domain string) error {
+	return s.repo.UpdatePromotionLink(ctx, id, name, chapterIndex, source, campaign, url, pixelID, templateID, domainID, coinCost, startPayIndex, domain)
 }
 
 func (s *novelService) DeletePromotionLink(ctx context.Context, id int) error {

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
-import { apiRequest } from '../utils/api';
+import { apiRequest, domainApi } from '../utils/api';
+import type { SystemDomain } from '../utils/api';
 import { Book, Plus, ArrowLeft, Upload, Edit, Trash, CheckCircle, HelpCircle, Search, Settings, Link2 } from 'lucide-react';
 import { NovelFormModal, type NovelFormData } from '../components/novels/NovelFormModal';
 import { PromotionLinkModal } from '../components/novels/PromotionLinkModal';
@@ -85,6 +86,7 @@ export default function NovelsTab() {
   }
   const [pixels, setPixels] = useState<FBPixel[]>([]);
   const [templates, setTemplates] = useState<RechargeTemplate[]>([]);
+  const [domains, setDomains] = useState<SystemDomain[]>([]);
   const [promotionForm, setPromotionForm] = useState<{
     name: string;
     novelId: number;
@@ -92,6 +94,7 @@ export default function NovelsTab() {
     chapterIndex: string;
     utmSource: string;
     utmCampaign: string;
+    domainId?: string;
     fbPixelId: string;
     rechargeTemplateId: string;
     coinCostPerThousand: string;
@@ -103,6 +106,7 @@ export default function NovelsTab() {
     chapterIndex: '1',
     utmSource: 'facebook',
     utmCampaign: '',
+    domainId: '',
     fbPixelId: '',
     rechargeTemplateId: '',
     coinCostPerThousand: '',
@@ -213,11 +217,21 @@ export default function NovelsTab() {
     }
   };
 
+  const fetchDomains = async () => {
+    try {
+      const data = await domainApi.getDomains();
+      setDomains(data || []);
+    } catch (err) {
+      console.error("加载域名列表失败:", err);
+    }
+  };
+
   useEffect(() => {
     fetchNovels();
     fetchGlobalConfig();
     fetchPixels();
     fetchTemplates();
+    fetchDomains();
   }, []);
 
   const fetchNovels = async () => {
@@ -377,7 +391,16 @@ export default function NovelsTab() {
   };
 
   const handleGeneratePromotionLink = async () => {
-    const baseUrl = window.location.origin;
+    // 1. 匹配选中的域名或默认主域名
+    const targetDomainObj = domains.find((d) => String(d.id) === promotionForm.domainId);
+    const defaultDomainObj = domains.find((d) => d.is_default) || domains.find((d) => d.type === 'main') || domains[0];
+    const domainHost = targetDomainObj ? targetDomainObj.domain : (defaultDomainObj ? defaultDomainObj.domain : window.location.host);
+
+    let baseUrl = domainHost.startsWith('http://') || domainHost.startsWith('https://')
+      ? domainHost
+      : `https://${domainHost}`;
+    baseUrl = baseUrl.replace(/\/+$/, '');
+
     const params = new URLSearchParams();
     params.set('novel_id', String(promotionForm.novelId));
     if (promotionForm.chapterIndex) {
@@ -418,6 +441,8 @@ export default function NovelsTab() {
         utm_source: promotionForm.utmSource,
         utm_campaign: promotionForm.utmCampaign,
         generated_url: finalUrl,
+        domain_id: targetDomainObj ? targetDomainObj.id : (defaultDomainObj ? defaultDomainObj.id : null),
+        domain: targetDomainObj ? targetDomainObj.domain : (defaultDomainObj ? defaultDomainObj.domain : ''),
         fb_pixel_id: promotionForm.fbPixelId ? parseInt(promotionForm.fbPixelId, 10) : null,
         recharge_template_id: promotionForm.rechargeTemplateId ? parseInt(promotionForm.rechargeTemplateId, 10) : null,
         coin_cost_per_thousand: promotionForm.coinCostPerThousand ? parseInt(promotionForm.coinCostPerThousand, 10) : null,
@@ -453,6 +478,7 @@ export default function NovelsTab() {
         setPromotionForm={setPromotionForm}
         pixels={pixels}
         templates={templates}
+        domains={domains}
         onGenerateLink={handleGeneratePromotionLink}
         generatedLink={generatedLink}
         onCopyLink={handleCopyLink}

@@ -30,7 +30,7 @@ type NovelRepository interface {
 
 	ListPromotionLinks(ctx context.Context) ([]PromotionLink, error)
 	CreatePromotionLink(ctx context.Context, link *PromotionLink) (int, error)
-	UpdatePromotionLink(ctx context.Context, id int, name string, chapterIndex int, source, campaign, url string, pixelID, templateID, coinCost, startPayIndex *int) error
+	UpdatePromotionLink(ctx context.Context, id int, name string, chapterIndex int, source, campaign, url string, pixelID, templateID, domainID, coinCost, startPayIndex *int, domain string) error
 	DeletePromotionLink(ctx context.Context, id int) error
 
 	ListFBPixels(ctx context.Context) ([]FBPixel, error)
@@ -294,9 +294,13 @@ func (r *dbNovelRepository) UpdateSettingTx(ctx context.Context, tx pgx.Tx, key,
 
 func (r *dbNovelRepository) ListPromotionLinks(ctx context.Context) ([]PromotionLink, error) {
 	query := `
-		SELECT id, name, novel_id, novel_title, chapter_index, utm_source, utm_campaign, generated_url, fb_pixel_id, recharge_template_id, coin_cost_per_thousand, start_pay_chapter_index, created_at
-		FROM promotion_links
-		ORDER BY created_at DESC`
+		SELECT pl.id, pl.name, pl.novel_id, pl.novel_title, pl.chapter_index, pl.utm_source, pl.utm_campaign, 
+		       pl.generated_url, pl.fb_pixel_id, pl.recharge_template_id, pl.domain_id, 
+		       COALESCE(sd.domain, pl.domain, '') AS domain, 
+		       pl.coin_cost_per_thousand, pl.start_pay_chapter_index, pl.created_at
+		FROM promotion_links pl
+		LEFT JOIN system_domains sd ON pl.domain_id = sd.id
+		ORDER BY pl.created_at DESC`
 	rows, err := db.DB.Query(ctx, query)
 	if err != nil {
 		return nil, err
@@ -309,6 +313,7 @@ func (r *dbNovelRepository) ListPromotionLinks(ctx context.Context) ([]Promotion
 		err = rows.Scan(
 			&link.ID, &link.Name, &link.NovelID, &link.NovelTitle, &link.ChapterIndex,
 			&link.UtmSource, &link.UtmCampaign, &link.GeneratedURL, &link.FBPixelID, &link.RechargeTemplateID,
+			&link.DomainID, &link.Domain,
 			&link.CoinCostPerThousand, &link.StartPayChapterIndex, &link.CreatedAt,
 		)
 		if err != nil {
@@ -321,20 +326,20 @@ func (r *dbNovelRepository) ListPromotionLinks(ctx context.Context) ([]Promotion
 
 func (r *dbNovelRepository) CreatePromotionLink(ctx context.Context, link *PromotionLink) (int, error) {
 	query := `
-		INSERT INTO promotion_links (name, novel_id, novel_title, chapter_index, utm_source, utm_campaign, generated_url, fb_pixel_id, recharge_template_id, coin_cost_per_thousand, start_pay_chapter_index)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		INSERT INTO promotion_links (name, novel_id, novel_title, chapter_index, utm_source, utm_campaign, generated_url, fb_pixel_id, recharge_template_id, domain_id, domain, coin_cost_per_thousand, start_pay_chapter_index)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 		RETURNING id, created_at`
 	var id int
-	err := db.DB.QueryRow(ctx, query, link.Name, link.NovelID, link.NovelTitle, link.ChapterIndex, link.UtmSource, link.UtmCampaign, link.GeneratedURL, link.FBPixelID, link.RechargeTemplateID, link.CoinCostPerThousand, link.StartPayChapterIndex).Scan(&id, &link.CreatedAt)
+	err := db.DB.QueryRow(ctx, query, link.Name, link.NovelID, link.NovelTitle, link.ChapterIndex, link.UtmSource, link.UtmCampaign, link.GeneratedURL, link.FBPixelID, link.RechargeTemplateID, link.DomainID, link.Domain, link.CoinCostPerThousand, link.StartPayChapterIndex).Scan(&id, &link.CreatedAt)
 	return id, err
 }
 
-func (r *dbNovelRepository) UpdatePromotionLink(ctx context.Context, id int, name string, chapterIndex int, source, campaign, url string, pixelID, templateID, coinCost, startPayIndex *int) error {
+func (r *dbNovelRepository) UpdatePromotionLink(ctx context.Context, id int, name string, chapterIndex int, source, campaign, url string, pixelID, templateID, domainID, coinCost, startPayIndex *int, domain string) error {
 	query := `
 		UPDATE promotion_links
-		SET name = $1, chapter_index = $2, utm_source = $3, utm_campaign = $4, generated_url = $5, fb_pixel_id = $6, recharge_template_id = $7, coin_cost_per_thousand = $8, start_pay_chapter_index = $9
-		WHERE id = $10`
-	_, err := db.DB.Exec(ctx, query, name, chapterIndex, source, campaign, url, pixelID, templateID, coinCost, startPayIndex, id)
+		SET name = $1, chapter_index = $2, utm_source = $3, utm_campaign = $4, generated_url = $5, fb_pixel_id = $6, recharge_template_id = $7, domain_id = $8, domain = $9, coin_cost_per_thousand = $10, start_pay_chapter_index = $11
+		WHERE id = $12`
+	_, err := db.DB.Exec(ctx, query, name, chapterIndex, source, campaign, url, pixelID, templateID, domainID, domain, coinCost, startPayIndex, id)
 	return err
 }
 

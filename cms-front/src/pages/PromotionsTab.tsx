@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { apiRequest } from '../utils/api';
+import { apiRequest, domainApi } from '../utils/api';
+import type { SystemDomain } from '../utils/api';
 import { Trash, Clipboard, Search, Edit2, X } from 'lucide-react';
 import CustomSelect from '../components/CustomSelect';
 
@@ -13,6 +14,8 @@ interface PromotionLink {
   utm_source: string;
   utm_campaign: string;
   generated_url: string;
+  domain_id?: number | null;
+  domain?: string;
   fb_pixel_id?: number | null;
   recharge_template_id?: number | null;
   coin_cost_per_thousand?: number | null;
@@ -36,6 +39,7 @@ export default function PromotionsTab() {
   const [links, setLinks] = useState<PromotionLink[]>([]);
   const [pixels, setPixels] = useState<FBPixel[]>([]);
   const [templates, setTemplates] = useState<RechargeTemplate[]>([]);
+  const [domains, setDomains] = useState<SystemDomain[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
   const [sourceFilter, setSourceFilter] = useState('');
@@ -44,6 +48,7 @@ export default function PromotionsTab() {
     140, // 创建时间
     130, // 推广名称
     140, // 小说书名
+    130, // 投放域名
     90,  // 渠道 (Source)
     110, // 绑定像素
     110, // 绑定模板
@@ -59,6 +64,7 @@ export default function PromotionsTab() {
     { label: '创建时间', key: 'created_at' },
     { label: '推广名称', key: 'name' },
     { label: '小说书名', key: 'novel_title' },
+    { label: '投放域名', key: 'domain' },
     { label: '投放渠道', key: 'utm_source' },
     { label: '绑定像素', key: 'fb_pixel_id' },
     { label: '绑定模板', key: 'recharge_template_id' },
@@ -127,6 +133,7 @@ export default function PromotionsTab() {
     chapterIndex: '1',
     utmSource: 'facebook',
     utmCampaign: '',
+    domainId: '',
     fbPixelId: '',
     rechargeTemplateId: '',
     coinCostPerThousand: '',
@@ -162,10 +169,20 @@ export default function PromotionsTab() {
     }
   };
 
+  const fetchDomains = async () => {
+    try {
+      const data = await domainApi.getDomains();
+      setDomains(data || []);
+    } catch (e) {
+      console.error("加载域名列表失败:", e);
+    }
+  };
+
   useEffect(() => {
     fetchLinks();
     fetchPixels();
     fetchTemplates();
+    fetchDomains();
   }, []);
 
   const handleEditClick = (link: PromotionLink) => {
@@ -175,6 +192,7 @@ export default function PromotionsTab() {
       chapterIndex: link.chapter_index > 0 ? String(link.chapter_index) : '',
       utmSource: link.utm_source || 'facebook',
       utmCampaign: link.utm_campaign || '',
+      domainId: link.domain_id ? String(link.domain_id) : '',
       fbPixelId: link.fb_pixel_id ? String(link.fb_pixel_id) : '',
       rechargeTemplateId: link.recharge_template_id ? String(link.recharge_template_id) : '',
       coinCostPerThousand: link.coin_cost_per_thousand !== null && link.coin_cost_per_thousand !== undefined ? String(link.coin_cost_per_thousand) : '',
@@ -187,7 +205,15 @@ export default function PromotionsTab() {
     e.preventDefault();
     if (!editingLink) return;
 
-    const baseUrl = 'http://localhost:5173';
+    const targetDomainObj = domains.find(d => String(d.id) === editForm.domainId);
+    const defaultDomainObj = domains.find(d => d.is_default) || domains.find(d => d.type === 'main') || domains[0];
+    const domainHost = targetDomainObj ? targetDomainObj.domain : (defaultDomainObj ? defaultDomainObj.domain : window.location.host);
+
+    let baseUrl = domainHost.startsWith('http://') || domainHost.startsWith('https://')
+      ? domainHost
+      : `https://${domainHost}`;
+    baseUrl = baseUrl.replace(/\/+$/, '');
+
     const params = new URLSearchParams();
     params.set('novel_id', String(editingLink.novel_id));
     if (editForm.chapterIndex) {
@@ -228,6 +254,8 @@ export default function PromotionsTab() {
         utm_source: editForm.utmSource,
         utm_campaign: editForm.utmCampaign,
         generated_url: finalUrl,
+        domain_id: targetDomainObj ? targetDomainObj.id : (defaultDomainObj ? defaultDomainObj.id : null),
+        domain: targetDomainObj ? targetDomainObj.domain : (defaultDomainObj ? defaultDomainObj.domain : ''),
         fb_pixel_id: editForm.fbPixelId ? parseInt(editForm.fbPixelId, 10) : null,
         recharge_template_id: editForm.rechargeTemplateId ? parseInt(editForm.rechargeTemplateId, 10) : null,
         coin_cost_per_thousand: editForm.coinCostPerThousand ? parseInt(editForm.coinCostPerThousand, 10) : null,
@@ -382,6 +410,13 @@ export default function PromotionsTab() {
                   <td style={{ padding: '14px 12px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={link.novel_title}>
                     {link.novel_title}
                   </td>
+                  <td style={{ padding: '14px 12px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={link.domain || '主站默认域名'}>
+                    {link.domain ? (
+                      <span className="badge badge-purple" style={{ fontSize: '0.75rem' }}>{link.domain}</span>
+                    ) : (
+                      <span style={{ color: 'hsl(var(--text-muted))', fontSize: '0.8rem' }}>默认主域名</span>
+                    )}
+                  </td>
                   <td style={{ padding: '14px 12px' }}>
                     <span className="badge badge-blue">{link.utm_source}</span>
                   </td>
@@ -510,6 +545,27 @@ export default function PromotionsTab() {
               <div>
                 <label style={{ display: 'block', fontSize: '0.75rem', color: 'hsl(var(--text-secondary))', marginBottom: '4px' }}>推广书籍</label>
                 <input type="text" className="input-field" disabled value={editingLink.novel_title} />
+              </div>
+
+              <div>
+                <label style={{ display: 'block', fontSize: '0.75rem', color: 'hsl(var(--text-secondary))', marginBottom: '4px' }}>
+                  投放落地页域名 (可选，不选则默认主域名)
+                </label>
+                <CustomSelect
+                  options={[
+                    {
+                      value: '',
+                      label: `-- 默认主域名 (${domains.find(d => d.is_default)?.domain || domains.find(d => d.type === 'main')?.domain || '主站默认域名'}) --`
+                    },
+                    ...domains.filter(d => d.status === 1).map((d) => ({
+                      value: String(d.id),
+                      label: `${d.name} (${d.domain}) ${d.is_default ? '[默认主域名]' : ''}`
+                    }))
+                  ]}
+                  value={editForm.domainId}
+                  onChange={(val) => setEditForm({ ...editForm, domainId: val })}
+                  width="100%"
+                />
               </div>
 
               <div>

@@ -189,6 +189,8 @@ CREATE TABLE IF NOT EXISTS promotion_links (
     generated_url TEXT NOT NULL,
     fb_pixel_id INT REFERENCES fb_pixels(id) ON DELETE SET NULL,
     recharge_template_id INT REFERENCES recharge_templates(id) ON DELETE SET NULL,
+    domain_id INT REFERENCES system_domains(id) ON DELETE SET NULL,
+    domain VARCHAR(255) DEFAULT '',
     coin_cost_per_thousand INT DEFAULT NULL,
     start_pay_chapter_index INT DEFAULT NULL,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
@@ -197,6 +199,8 @@ CREATE TABLE IF NOT EXISTS promotion_links (
 ALTER TABLE promotion_links ADD COLUMN IF NOT EXISTS name VARCHAR(255) DEFAULT '';
 ALTER TABLE promotion_links ADD COLUMN IF NOT EXISTS fb_pixel_id INT REFERENCES fb_pixels(id) ON DELETE SET NULL;
 ALTER TABLE promotion_links ADD COLUMN IF NOT EXISTS recharge_template_id INT REFERENCES recharge_templates(id) ON DELETE SET NULL;
+ALTER TABLE promotion_links ADD COLUMN IF NOT EXISTS domain_id INT REFERENCES system_domains(id) ON DELETE SET NULL;
+ALTER TABLE promotion_links ADD COLUMN IF NOT EXISTS domain VARCHAR(255) DEFAULT '';
 ALTER TABLE promotion_links ADD COLUMN IF NOT EXISTS coin_cost_per_thousand INT DEFAULT NULL;
 ALTER TABLE promotion_links ADD COLUMN IF NOT EXISTS start_pay_chapter_index INT DEFAULT NULL;
 

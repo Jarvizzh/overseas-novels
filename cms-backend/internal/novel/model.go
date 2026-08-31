@@ -41,6 +41,8 @@ type PromotionLink struct {
 	GeneratedURL         string    `json:"generated_url"`
 	FBPixelID            *int      `json:"fb_pixel_id"`
 	RechargeTemplateID   *int      `json:"recharge_template_id"`
+	DomainID             *int      `json:"domain_id"`
+	Domain               string    `json:"domain"`
 	CoinCostPerThousand  *int      `json:"coin_cost_per_thousand"`
 	StartPayChapterIndex *int      `json:"start_pay_chapter_index"`
 	CreatedAt            time.Time `json:"created_at"`
