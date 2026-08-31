@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { apiRequest } from '../utils/api';
 import type { AdminUser } from '../utils/api';
-import { Key, User, Activity, Sun, Moon } from 'lucide-react';
+import { Key, User, Sun, Moon } from 'lucide-react';
 
 interface LoginProps {
   onLoginSuccess: (token: string, admin: AdminUser) => void;
@@ -12,7 +12,6 @@ export default function Login({ onLoginSuccess }: LoginProps) {
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
-  const [seedSuccess, setSeedSuccess] = useState('');
 
   const [theme, setTheme] = useState<'light' | 'dark'>(() => {
     return (localStorage.getItem('cms_theme') as 'light' | 'dark') || 'dark';
@@ -33,34 +32,12 @@ export default function Login({ onLoginSuccess }: LoginProps) {
     e.preventDefault();
     setLoading(true);
     setError('');
-    setSeedSuccess('');
 
     try {
       const data = await apiRequest('POST', '/auth/login', { username, password });
       onLoginSuccess(data.token, data.admin);
     } catch (err: any) {
       setError(err.message || '登录失败，请检查您的账号和密码。');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleSeedAdmin = async () => {
-    setLoading(true);
-    setError('');
-    setSeedSuccess('');
-    try {
-      await apiRequest('POST', '/auth/seed', {
-        username: 'admin',
-        password: 'admin123',
-        nickname: '超级管理员',
-        role: 'SuperAdmin'
-      });
-      setSeedSuccess('成功初始化默认管理员账号！请使用：admin / admin123 登录');
-      setUsername('admin');
-      setPassword('admin123');
-    } catch (err: any) {
-      setError(err.message || '初始化失败，管理员账号可能已存在。');
     } finally {
       setLoading(false);
     }
@@ -149,20 +126,6 @@ export default function Login({ onLoginSuccess }: LoginProps) {
           </div>
         )}
 
-        {seedSuccess && (
-          <div style={{
-            backgroundColor: 'rgba(16, 185, 129, 0.1)',
-            border: '1px solid rgba(16, 185, 129, 0.25)',
-            color: '#10b981',
-            padding: '12px',
-            borderRadius: '8px',
-            fontSize: '0.85rem',
-            marginBottom: '20px'
-          }}>
-            {seedSuccess}
-          </div>
-        )}
-
         <form onSubmit={handleSubmit}>
           <div style={{ marginBottom: '18px' }}>
             <label style={{ display: 'block', fontSize: '0.8rem', color: 'hsl(var(--text-secondary))', marginBottom: '6px', fontWeight: 500 }}>
@@ -208,30 +171,11 @@ export default function Login({ onLoginSuccess }: LoginProps) {
             type="submit"
             className="btn-primary"
             disabled={loading}
-            style={{ width: '100%', padding: '12px', marginBottom: '16px' }}
+            style={{ width: '100%', padding: '12px', marginBottom: '0' }}
           >
             {loading ? '正在验证身份...' : '登录管理后台'}
           </button>
         </form>
-
-        <div style={{
-          borderTop: '1px dashed hsl(var(--border))',
-          paddingTop: '20px',
-          textAlign: 'center'
-        }}>
-          <p style={{ color: 'hsl(var(--text-muted))', fontSize: '0.75rem', marginBottom: '10px' }}>
-            首次部署？一键初始化默认超级管理员账号。
-          </p>
-          <button
-            onClick={handleSeedAdmin}
-            className="btn-secondary"
-            disabled={loading}
-            style={{ width: '100%', fontSize: '0.8rem', padding: '8px 12px' }}
-          >
-            <Activity size={14} style={{ marginRight: '6px' }} />
-            初始化默认账号 (admin/admin123)
-          </button>
-        </div>
       </div>
     </div>
   );
