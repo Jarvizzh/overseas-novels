@@ -33,15 +33,23 @@ export async function apiRequest(
   });
 
   if (response.status === 401) {
+    const errorData = await response.json().catch(() => ({}));
+    const errorMsg = errorData.error || '用户名或密码错误';
+
+    // 如果是登录或注册接口本身的 401，不触发全局页面跳转，直接抛出错误供表单展示提示
+    if (path.includes('/auth/login') || path.includes('/auth/register')) {
+      throw new Error(errorMsg);
+    }
+
     localStorage.removeItem('cms_token');
     localStorage.removeItem('cms_admin');
     window.location.href = '/';
-    throw new Error('Unauthorized');
+    throw new Error('登录凭证已失效，请重新登录');
   }
 
   if (!response.ok) {
     const errorData = await response.json().catch(() => ({}));
-    throw new Error(errorData.error || `HTTP error! Status: ${response.status}`);
+    throw new Error(errorData.error || `请求失败 (${response.status})`);
   }
 
   return response.json();

@@ -9,10 +9,10 @@ import (
 )
 
 var (
-	ErrUsernameExists = errors.New("Username already exists")
-	ErrInvalidLogin   = errors.New("Invalid username or password")
-	ErrSuspended      = errors.New("This admin account is suspended")
-	ErrAdminNotFound  = errors.New("Admin not found")
+	ErrUsernameExists = errors.New("用户名已存在")
+	ErrInvalidLogin   = errors.New("用户名或密码错误")
+	ErrSuspended      = errors.New("该管理员账号已被禁用")
+	ErrAdminNotFound  = errors.New("管理员不存在")
 )
 
 type AdminService interface {
