@@ -1,5 +1,5 @@
 import React, { useId, useState } from 'react';
-import { CheckCircle2, FileText, HelpCircle, Upload, X } from 'lucide-react';
+import { AlertCircle, CheckCircle2, FileText, HelpCircle, Upload, X } from 'lucide-react';
 
 export const DEFAULT_CHAPTER_DELIMITER_REGEX = `(?i)(chapter\\s+\\d+|第[一二三四五六七八九十百千万零两\\d]+章)`;
 
@@ -9,12 +9,14 @@ interface ChapterUploadFieldsProps {
   file: File | null;
   onFileChange: (file: File | null) => void;
   fileInputRef?: React.RefObject<HTMLInputElement | null>;
+  uploadBtnRef?: React.RefObject<HTMLButtonElement | null>;
   regex: string;
   onRegexChange: (val: string) => void;
   regexInputRef?: React.RefObject<HTMLInputElement | null>;
   required?: boolean;
   disabled?: boolean;
   isCreateMode?: boolean;
+  error?: string;
 }
 
 function splitFilenameParts(name: string): { stem: string; ext: string } {
@@ -38,17 +40,20 @@ export const ChapterUploadFields: React.FC<ChapterUploadFieldsProps> = ({
   file,
   onFileChange,
   fileInputRef,
+  uploadBtnRef,
   regex,
   onRegexChange,
   regexInputRef,
   required = false,
   disabled = false,
   isCreateMode = false,
+  error = '',
 }) => {
   const [isDragging, setIsDragging] = useState(false);
 
   const fileInputId = useId();
   const hintId = useId();
+  const errorId = useId();
   const regexInputId = useId();
   const guideId = useId();
   const radioName = useId();
@@ -179,7 +184,7 @@ export const ChapterUploadFields: React.FC<ChapterUploadFieldsProps> = ({
             marginBottom: '8px',
           }}
         >
-          选择章节文件 ({expectedExt}){isCreateMode && !required ? '（可选，也可创建后在详情页补传）' : ''}
+          选择章节文件 ({expectedExt}) {required ? <span aria-hidden="true" style={{ color: '#ef4444' }}>*</span> : (isCreateMode ? '（可选，也可创建后在详情页补传）' : '')}
         </label>
 
         <div
@@ -205,11 +210,13 @@ export const ChapterUploadFields: React.FC<ChapterUploadFieldsProps> = ({
             gap: '14px',
             padding: '14px 16px',
             borderRadius: '10px',
-            border: isDragging
-              ? '1px dashed hsl(var(--primary))'
-              : file
-                ? '1px solid hsl(var(--primary) / 0.4)'
-                : '1px dashed hsl(var(--border))',
+            border: error
+              ? '1px dashed #ef4444'
+              : isDragging
+                ? '1px dashed hsl(var(--primary))'
+                : file
+                  ? '1px solid hsl(var(--primary) / 0.4)'
+                  : '1px dashed hsl(var(--border))',
             backgroundColor: isDragging
               ? 'hsl(var(--primary) / 0.06)'
               : 'hsl(var(--bg-surface) / 0.7)',
@@ -224,10 +231,11 @@ export const ChapterUploadFields: React.FC<ChapterUploadFieldsProps> = ({
             type="file"
             className="visually-hidden"
             accept={expectedExt}
-            aria-describedby={`${guideId} ${hintId}`}
+            aria-required={required}
+            aria-invalid={error ? 'true' : 'false'}
+            aria-describedby={error ? `${guideId} ${hintId} ${errorId}` : `${guideId} ${hintId}`}
             disabled={disabled}
             onChange={(e) => handleSelectedFile(e.target.files?.[0])}
-            required={required}
           />
 
           <div
@@ -250,6 +258,7 @@ export const ChapterUploadFields: React.FC<ChapterUploadFieldsProps> = ({
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap', marginBottom: '6px' }}>
               <button
+                ref={uploadBtnRef}
                 type="button"
                 className="btn-secondary"
                 disabled={disabled}
@@ -324,6 +333,18 @@ export const ChapterUploadFields: React.FC<ChapterUploadFieldsProps> = ({
             ) : (
               <p id={hintId} style={{ fontSize: '0.75rem', color: 'hsl(var(--text-muted))', lineHeight: 1.5, margin: 0 }}>
                 点击按钮选择文件，或直接将 UTF-8 编码的 <code>{expectedExt}</code> 文件拖拽到此处
+              </p>
+            )}
+
+            {error && (
+              <p
+                id={errorId}
+                role="status"
+                aria-live="polite"
+                style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '0.78rem', color: '#ef4444', marginTop: '6px' }}
+              >
+                <AlertCircle size={14} aria-hidden="true" />
+                <span>{error}</span>
               </p>
             )}
           </div>

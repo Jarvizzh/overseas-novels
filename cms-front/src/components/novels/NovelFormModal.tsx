@@ -65,6 +65,7 @@ export const NovelFormModal: React.FC<NovelFormModalProps> = ({
 }) => {
   const [uploadingCover, setUploadingCover] = useState(false);
   const [coverError, setCoverError] = useState('');
+  const [chapterFileError, setChapterFileError] = useState('');
   const [genresTouched, setGenresTouched] = useState(false);
   const [genresError, setGenresError] = useState('');
   const [isDragging, setIsDragging] = useState(false);
@@ -74,6 +75,7 @@ export const NovelFormModal: React.FC<NovelFormModalProps> = ({
   const uploadBtnRef = useRef<HTMLButtonElement>(null);
   const genresInputRef = useRef<HTMLInputElement>(null);
   const chapterFileInputRef = useRef<HTMLInputElement>(null);
+  const chapterUploadBtnRef = useRef<HTMLButtonElement>(null);
   const chapterRegexInputRef = useRef<HTMLInputElement>(null);
 
   const modalTitleId = useId();
@@ -94,11 +96,18 @@ export const NovelFormModal: React.FC<NovelFormModalProps> = ({
   useEffect(() => {
     if (!isOpen) return;
     setCoverError('');
+    setChapterFileError('');
     setGenresTouched(false);
     setGenresError('');
     setIsDragging(false);
     setPreviewFailed(false);
   }, [isOpen]);
+
+  useEffect(() => {
+    if (chapterFile) {
+      setChapterFileError('');
+    }
+  }, [chapterFile]);
 
   useEffect(() => {
     setPreviewFailed(false);
@@ -184,6 +193,11 @@ export const NovelFormModal: React.FC<NovelFormModalProps> = ({
       setGenresTouched(true);
       setGenresError(gErr);
       genresInputRef.current?.focus();
+      return;
+    }
+    if (!isEditing && !chapterFile) {
+      setChapterFileError('请先选择或拖拽上传书籍章节文件（支持 .txt 或 .zip）');
+      chapterUploadBtnRef.current?.focus();
       return;
     }
     if (!isEditing && chapterFile && chapterImportType === 'single_txt' && !chapterRegex.trim()) {
@@ -601,7 +615,7 @@ export const NovelFormModal: React.FC<NovelFormModalProps> = ({
                 </fieldset>
               ) : (
                 <div style={{ gridColumn: 'span 2', padding: '10px 12px', borderRadius: '8px', backgroundColor: 'hsl(var(--bg-card))', border: '1px solid hsl(var(--border))', fontSize: '0.8rem', color: 'hsl(var(--text-secondary))' }}>
-                  新建书籍默认保存为 <strong>草稿（未上架）</strong>，不会立即暴露在书城；可在下方直接上传章节，创建完成后返回列表再按需上架发布。
+                  新建书籍默认保存为 <strong>草稿（未上架）</strong>，不会立即暴露在书城；请上传书籍章节后创建并返回列表，核对无误再点击「上架发布」。
                 </div>
               )}
               <div style={{ gridColumn: 'span 2' }}>
@@ -631,7 +645,9 @@ export const NovelFormModal: React.FC<NovelFormModalProps> = ({
                 >
                   <div style={{ fontSize: '0.9rem', fontWeight: 600, color: 'hsl(var(--text-primary))', marginBottom: '12px', display: 'flex', alignItems: 'center', gap: '8px' }}>
                     <Upload size={16} aria-hidden="true" style={{ color: 'hsl(var(--accent-pink))' }} />
-                    <span>书籍章节内容上传（可选）</span>
+                    <span>
+                      书籍章节内容上传 <span aria-hidden="true" style={{ color: '#ef4444' }}>*</span>
+                    </span>
                   </div>
                   <ChapterUploadFields
                     importType={chapterImportType}
@@ -639,12 +655,14 @@ export const NovelFormModal: React.FC<NovelFormModalProps> = ({
                     file={chapterFile}
                     onFileChange={onChapterFileChange}
                     fileInputRef={chapterFileInputRef}
+                    uploadBtnRef={chapterUploadBtnRef}
                     regex={chapterRegex}
                     onRegexChange={onChapterRegexChange}
                     regexInputRef={chapterRegexInputRef}
-                    required={false}
+                    required={true}
                     disabled={isSubmitting}
                     isCreateMode={true}
+                    error={chapterFileError}
                   />
                 </div>
               )}
@@ -694,18 +712,12 @@ export const NovelFormModal: React.FC<NovelFormModalProps> = ({
               {isSubmitting
                 ? isEditing
                   ? '保存中...'
-                  : chapterFile
-                    ? '正在创建并导入章节...'
-                    : '保存中...'
+                  : '正在创建并导入章节...'
                 : isEditing
                   ? '保存修改'
                   : createdDraftId
-                    ? chapterFile
-                      ? '重试导入章节并完成'
-                      : '更新草稿并完成'
-                    : chapterFile
-                      ? '创建书籍并导入章节'
-                      : '保存书籍档案'}
+                    ? '重试导入章节并完成'
+                    : '创建书籍并导入章节'}
             </button>
           </div>
         </form>

@@ -425,6 +425,12 @@ export default function NovelsTab() {
   const handleCreateNovel = async (e: React.FormEvent) => {
     e.preventDefault();
     if (isSubmittingNovel) return;
+    if (!createImportFile) {
+      const msg = '请上传书籍章节文件（支持 .txt 或 .zip）';
+      setCreateModalError(msg);
+      window.showToast?.(msg, 'error');
+      return;
+    }
     setIsSubmittingNovel(true);
     setCreateModalError('');
     let targetNovelId = createdDraftId;
@@ -1169,18 +1175,16 @@ export default function NovelsTab() {
             <>
               <button
                 type="button"
-                aria-expanded={activeGlobalPanel === 'coin'}
-                onClick={() => setActiveGlobalPanel((prev) => (prev === 'coin' ? null : 'coin'))}
-                className={activeGlobalPanel === 'coin' ? 'btn-primary' : 'btn-secondary'}
+                onClick={() => setActiveGlobalPanel('coin')}
+                className="btn-secondary"
                 style={{ display: 'flex', gap: '6px', alignItems: 'center' }}
               >
                 <Settings size={16} aria-hidden="true" /> 全局金币设置 (千字 {globalCoinCost} 币)
               </button>
               <button
                 type="button"
-                aria-expanded={activeGlobalPanel === 'chapter'}
-                onClick={() => setActiveGlobalPanel((prev) => (prev === 'chapter' ? null : 'chapter'))}
-                className={activeGlobalPanel === 'chapter' ? 'btn-primary' : 'btn-secondary'}
+                onClick={() => setActiveGlobalPanel('chapter')}
+                className="btn-secondary"
                 style={{ display: 'flex', gap: '6px', alignItems: 'center' }}
               >
                 <BookOpen size={16} aria-hidden="true" /> 全局章节设置 (第 {globalStartPayChapter} 章起)
@@ -1205,79 +1209,152 @@ export default function NovelsTab() {
 
       {canEditGlobalSettings && activeGlobalPanel && (() => {
         const isCoin = activeGlobalPanel === 'coin';
-        return (
-          <form
-            onSubmit={isCoin ? handleSaveGlobalCoinConfig : handleSaveGlobalChapterConfig}
-            className="glass-panel"
-            style={{ padding: '24px', marginBottom: '24px' }}
+        const modalHeadingId = isCoin ? 'global-coin-modal-title' : 'global-chapter-modal-title';
+        return createPortal(
+          <div
+            style={{
+              position: 'fixed',
+              inset: 0,
+              backgroundColor: 'rgba(15, 23, 42, 0.35)',
+              backdropFilter: 'blur(2.5px)',
+              WebkitBackdropFilter: 'blur(2.5px)',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              zIndex: 10000,
+              padding: '20px',
+              overscrollBehavior: 'contain',
+            }}
           >
-            <h3 style={{ marginBottom: '18px', display: 'flex', alignItems: 'center', gap: '8px' }}>
-              {isCoin ? (
-                <>
-                  <Settings size={18} style={{ color: 'hsl(var(--primary))' }} /> 全局千字金币设置
-                </>
-              ) : (
-                <>
-                  <BookOpen size={18} style={{ color: 'hsl(var(--primary))' }} /> 全局起付章节设置
-                </>
-              )}
-            </h3>
-            <div style={{ maxWidth: '340px', marginBottom: '16px' }}>
-              <label
-                htmlFor={isCoin ? globalCoinInputId : globalChapterInputId}
-                style={{ display: 'block', fontSize: '0.8rem', color: 'hsl(var(--text-secondary))', marginBottom: '6px' }}
-              >
-                {isCoin ? '全局千字收费价格 (金币)' : '全局默认起始付费章节 (从第几章起)'}
-              </label>
-              <input
-                id={isCoin ? globalCoinInputId : globalChapterInputId}
-                type="number"
-                className="input-field"
-                min={isCoin ? 0 : 1}
-                value={isCoin ? globalCoinCost : globalStartPayChapter}
-                onChange={(e) => {
-                  const val = e.target.value === '' ? ('' as any) : Number(e.target.value);
-                  if (isCoin) {
-                    setGlobalCoinCost(val);
-                  } else {
-                    setGlobalStartPayChapter(val);
-                  }
+            <div
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby={modalHeadingId}
+              className="glass-panel animate-fade-in"
+              style={{
+                width: '100%',
+                maxWidth: '500px',
+                backgroundColor: 'hsl(var(--bg-surface))',
+                border: '1px solid hsl(var(--border))',
+                borderRadius: '16px',
+                boxShadow: 'var(--shadow-lg)',
+                overflow: 'hidden',
+              }}
+            >
+              <div
+                style={{
+                  padding: '18px 24px',
+                  borderBottom: '1px solid hsl(var(--border))',
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
                 }}
-                required
-              />
-            </div>
-
-            <div style={{ marginBottom: '18px', display: 'flex', alignItems: 'flex-start', gap: '8px' }}>
-              <input
-                type="checkbox"
-                id={isCoin ? globalCoinApplyAllId : globalChapterApplyAllId}
-                checked={isCoin ? applyCoinCostToAll : applyStartPayToAll}
-                onChange={(e) =>
-                  isCoin
-                    ? setApplyCoinCostToAll(e.target.checked)
-                    : setApplyStartPayToAll(e.target.checked)
-                }
-                style={{ width: '16px', height: '16px', marginTop: '3px', flexShrink: 0, cursor: 'pointer', accentColor: 'hsl(var(--primary))' }}
-              />
-              <label
-                htmlFor={isCoin ? globalCoinApplyAllId : globalChapterApplyAllId}
-                style={{ fontSize: '0.85rem', lineHeight: 1.5, color: 'hsl(var(--text-primary))', cursor: 'pointer' }}
               >
-                {isCoin
-                  ? `同步覆盖所有已有书籍单价（勾选后将重置包括独立定价书籍在内的全部未归档书籍为千字 ${globalCoinCost} 币；不勾选则仅刷新继承全局单价的书籍，不影响任何书的起付章节）`
-                  : `同步覆盖所有已有书籍起付章节（勾选后将把全部未归档书籍统一更新为第 ${globalStartPayChapter} 章起付费；不勾选则仅作为后续新建书籍默认值，不影响千字金币单价）`}
-              </label>
-            </div>
+                <h3 id={modalHeadingId} style={{ fontSize: '1.15rem', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px', margin: 0 }}>
+                  {isCoin ? (
+                    <>
+                      <Settings size={18} style={{ color: 'hsl(var(--primary))' }} aria-hidden="true" /> 全局千字金币设置
+                    </>
+                  ) : (
+                    <>
+                      <BookOpen size={18} style={{ color: 'hsl(var(--primary))' }} aria-hidden="true" /> 全局起付章节设置
+                    </>
+                  )}
+                </h3>
+                <button
+                  type="button"
+                  aria-label="关闭窗口"
+                  disabled={savingGlobalSetting}
+                  onClick={() => setActiveGlobalPanel(null)}
+                  style={{
+                    background: 'transparent',
+                    border: 'none',
+                    padding: '6px',
+                    borderRadius: '8px',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    color: 'hsl(var(--text-secondary))',
+                    cursor: savingGlobalSetting ? 'not-allowed' : 'pointer',
+                    opacity: savingGlobalSetting ? 0.5 : 1,
+                  }}
+                >
+                  <X size={20} aria-hidden="true" />
+                </button>
+              </div>
 
-            <div style={{ display: 'flex', gap: '12px' }}>
-              <button type="submit" className="btn-primary" disabled={savingGlobalSetting} style={{ height: '38px' }}>
-                {savingGlobalSetting ? '保存中...' : isCoin ? '保存全局金币设置' : '保存全局章节设置'}
-              </button>
-              <button type="button" className="btn-secondary" style={{ height: '38px' }} onClick={() => setActiveGlobalPanel(null)}>
-                取消
-              </button>
+              <form onSubmit={isCoin ? handleSaveGlobalCoinConfig : handleSaveGlobalChapterConfig} style={{ margin: 0 }}>
+                <div style={{ padding: '24px' }}>
+                  <div style={{ marginBottom: '18px' }}>
+                    <label
+                      htmlFor={isCoin ? globalCoinInputId : globalChapterInputId}
+                      style={{ display: 'block', fontSize: '0.8rem', color: 'hsl(var(--text-secondary))', marginBottom: '6px' }}
+                    >
+                      {isCoin ? '全局千字收费价格 (金币)' : '全局默认起始付费章节 (从第几章起)'}
+                    </label>
+                    <input
+                      id={isCoin ? globalCoinInputId : globalChapterInputId}
+                      type="number"
+                      className="input-field"
+                      min={isCoin ? 0 : 1}
+                      value={isCoin ? globalCoinCost : globalStartPayChapter}
+                      onChange={(e) => {
+                        const val = e.target.value === '' ? ('' as any) : Number(e.target.value);
+                        if (isCoin) {
+                          setGlobalCoinCost(val);
+                        } else {
+                          setGlobalStartPayChapter(val);
+                        }
+                      }}
+                      required
+                    />
+                  </div>
+
+                  <div style={{ display: 'flex', alignItems: 'flex-start', gap: '8px', padding: '12px', borderRadius: '10px', backgroundColor: 'hsl(var(--bg-card))', border: '1px solid hsl(var(--border))' }}>
+                    <input
+                      type="checkbox"
+                      id={isCoin ? globalCoinApplyAllId : globalChapterApplyAllId}
+                      checked={isCoin ? applyCoinCostToAll : applyStartPayToAll}
+                      onChange={(e) =>
+                        isCoin
+                          ? setApplyCoinCostToAll(e.target.checked)
+                          : setApplyStartPayToAll(e.target.checked)
+                      }
+                      style={{ width: '16px', height: '16px', marginTop: '3px', flexShrink: 0, cursor: 'pointer', accentColor: 'hsl(var(--primary))' }}
+                    />
+                    <label
+                      htmlFor={isCoin ? globalCoinApplyAllId : globalChapterApplyAllId}
+                      style={{ fontSize: '0.82rem', lineHeight: 1.55, color: 'hsl(var(--text-primary))', cursor: 'pointer' }}
+                    >
+                      {isCoin
+                        ? `同步覆盖所有已有书籍单价（勾选后将重置包括独立定价书籍在内的全部未归档书籍为千字 ${globalCoinCost} 币；不勾选则仅刷新继承全局单价的书籍，不影响任何书的起付章节）`
+                        : `同步覆盖所有已有书籍起付章节（勾选后将把全部未归档书籍统一更新为第 ${globalStartPayChapter} 章起付费；不勾选则仅作为后续新建书籍默认值，不影响千字金币单价）`}
+                    </label>
+                  </div>
+                </div>
+
+                <div
+                  style={{
+                    padding: '16px 24px',
+                    borderTop: '1px solid hsl(var(--border))',
+                    display: 'flex',
+                    justifyContent: 'flex-end',
+                    alignItems: 'center',
+                    gap: '12px',
+                    backgroundColor: 'hsl(var(--bg-surface))',
+                  }}
+                >
+                  <button type="button" className="btn-secondary" disabled={savingGlobalSetting} onClick={() => setActiveGlobalPanel(null)}>
+                    取消
+                  </button>
+                  <button type="submit" className="btn-primary" disabled={savingGlobalSetting}>
+                    {savingGlobalSetting ? '保存中...' : isCoin ? '保存全局金币设置' : '保存全局章节设置'}
+                  </button>
+                </div>
+              </form>
             </div>
-          </form>
+          </div>,
+          document.body
         );
       })()}
 
