@@ -15,7 +15,6 @@ function openDB(): Promise<IDBDatabase> {
 
     request.onupgradeneeded = (event) => {
       const db = (event.target as IDBOpenDBRequest).result;
-      // Recreate store cleanly on v2 so legacy unscoped keys cannot leak across accounts
       if (db.objectStoreNames.contains(STORE_NAME)) {
         db.deleteObjectStore(STORE_NAME);
       }
@@ -72,6 +71,23 @@ export const readerCache = {
     }
   },
 
+  async removeCachedChapter(userId: number, novelId: number, chapterIndex: number): Promise<void> {
+    if (!userId) return;
+    try {
+      const db = await openDB();
+      const key = buildKey(userId, novelId, chapterIndex);
+      return new Promise((resolve) => {
+        const tx = db.transaction(STORE_NAME, 'readwrite');
+        const store = tx.objectStore(STORE_NAME);
+        const req = store.delete(key);
+        req.onsuccess = () => resolve();
+        req.onerror = () => resolve();
+      });
+    } catch {
+      // Ignore deletion errors
+    }
+  },
+
   async prefetchChapters(
     userId: number,
     novelId: number,
@@ -79,7 +95,7 @@ export const readerCache = {
     totalCount: number,
     fetchFn: (novelId: number, index: number) => Promise<ChapterContentResponse>
   ): Promise<void> {
-    if (!userId) return;
+    if (!userId || totalCount <= 0) return;
     const prefetchCount = 2;
     for (let i = 1; i <= prefetchCount; i++) {
       const targetIndex = currentIndex + i;

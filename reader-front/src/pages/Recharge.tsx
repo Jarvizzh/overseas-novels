@@ -1,13 +1,16 @@
 import React, { useState, useEffect, useCallback, useRef, useId } from 'react';
-import { ChevronLeft, Crown, Check, Sparkles } from 'lucide-react';
+import { ChevronLeft, Crown, Check, Sparkles, BookOpen } from 'lucide-react';
 import { useToast } from '../context/toastStore';
 import { GoldCoin } from '../components/GoldCoin';
 import { api, type SubscriptionInfo } from '../utils/api';
 import { LegalModal, type LegalModalType } from '../components/LegalModal';
 
 interface RechargeProps {
+  authReady?: boolean;
   userCoins?: number;
-  onAddCoins: (amount: number, reason: string) => void;
+  novelId?: number;
+  novelTitle?: string;
+  onAddCoins: (amount: number, reason: string) => void | Promise<void>;
   onRefreshStatus?: () => Promise<void>;
   onBack: () => void;
   onNavigate?: (pageOrPath: string, params?: Record<string, unknown>) => void;
@@ -25,7 +28,10 @@ function stripPayPalQueryParams(): void {
 }
 
 export const Recharge: React.FC<RechargeProps> = ({
+  authReady = true,
   onAddCoins,
+  novelId,
+  novelTitle,
   onRefreshStatus,
   onBack,
   onNavigate,
@@ -36,6 +42,10 @@ export const Recharge: React.FC<RechargeProps> = ({
   const [paymentStep, setPaymentStep] = useState(0);
   const [showSuccess, setShowSuccess] = useState(false);
   const [successAmount, setSuccessAmount] = useState(0);
+  const [isWholeBookSuccess, setIsWholeBookSuccess] = useState(false);
+  const paymentReturnRef = useRef('');
+  const hasReturnedFromPayPalRef = useRef(false);
+  const pendingReturnPathRef = useRef('');
   const [isVipSuccess, setIsVipSuccess] = useState(false);
   const [vipSuccessTitle, setVipSuccessTitle] = useState('');
   const [activeLegalModal, setActiveLegalModal] = useState<LegalModalType | null>(null);
@@ -80,7 +90,7 @@ export const Recharge: React.FC<RechargeProps> = ({
         api.getSubscriptionStatus().catch(() => null),
       ]);
 
-      const slotList = templateData?.slots || [];
+      const slotList = (templateData?.slots || []).filter((slot) => slot.type !== 'whole_book' || novelId);
       setSlots(slotList);
 
       if (subData?.is_vip) {
@@ -93,18 +103,19 @@ export const Recharge: React.FC<RechargeProps> = ({
 
       if (slotList.length > 0) {
         const subSlot = slotList.find((s) => s.type === 'subscription' || s.type === 'vip');
-        setSelectedPack((prev) => prev ?? (subSlot ? subSlot.id : slotList[0].id));
+        setSelectedPack((prev) => slotList.some((slot) => slot.id === prev) ? prev : (subSlot || slotList[0]).id);
       }
     } catch (err) {
       console.error('Failed to load recharge data:', err);
     } finally {
       setLoadingTemplates(false);
     }
-  }, []);
+  }, [novelId]);
 
   useEffect(() => {
+    if (!authReady) return;
     fetchStatusAndTemplates();
-  }, [fetchStatusAndTemplates]);
+  }, [authReady, fetchStatusAndTemplates]);
 
   const onAddCoinsRef = useRef(onAddCoins);
   useEffect(() => {
@@ -123,84 +134,82 @@ export const Recharge: React.FC<RechargeProps> = ({
 
   // Handle PayPal return while preserving UTM/fbclid params
   useEffect(() => {
+    if (!authReady) return;
     const handlePayPalReturn = async () => {
       const urlParams = new URLSearchParams(window.location.search);
       const paymentStatus = urlParams.get('payment');
       const token = urlParams.get('token');
-      const subscriptionId = urlParams.get('subscription_id') || token;
+      const subscriptionId = urlParams.get('subscription_id');
+
+      const consumePendingReturnPath = () => {
+        try {
+          const saved = sessionStorage.getItem('pending_paypal_recharge');
+          if (saved) {
+            const parsed = JSON.parse(saved);
+            if (typeof parsed.returnContentPath === 'string' && parsed.returnContentPath) {
+              pendingReturnPathRef.current = parsed.returnContentPath;
+            }
+          }
+        } catch {
+          // Ignore parse errors
+        } finally {
+          sessionStorage.removeItem('pending_paypal_recharge');
+        }
+      };
 
       if (paymentStatus === 'cancel') {
+        hasReturnedFromPayPalRef.current = true;
+        consumePendingReturnPath();
         showToastRef.current('PayPal payment was cancelled.', 'info');
-        sessionStorage.removeItem('pending_paypal_recharge');
         stripPayPalQueryParams();
         return;
       }
 
       if (token || subscriptionId) {
+        const paymentId = subscriptionId || token || '';
+        if (paymentReturnRef.current === paymentId) return;
+        paymentReturnRef.current = paymentId;
+        hasReturnedFromPayPalRef.current = true;
+        consumePendingReturnPath();
         setIsProcessing(true);
         setPaymentStep(2);
-
-        let pendingInfo: { type?: string; coins?: number; name?: string; price?: string } | null = null;
         try {
-          const saved = sessionStorage.getItem('pending_paypal_recharge');
-          if (saved) {
-            pendingInfo = JSON.parse(saved);
-          }
-        } catch {
-          // Ignore malformed session storage
-        }
-
-        const hasSubIdParam = !!urlParams.get('subscription_id');
-        const isSubIdPattern = Boolean(
-          (subscriptionId && subscriptionId.startsWith('I-')) || (token && token.startsWith('I-'))
-        );
-        const isSubOrder =
-          pendingInfo?.type === 'subscription' ||
-          pendingInfo?.type === 'vip' ||
-          hasSubIdParam ||
-          isSubIdPattern;
-        const expectedCoins = pendingInfo?.coins || 0;
-
-        try {
-          if (isSubOrder) {
-            const subIdToActivate = subscriptionId || token || '';
-            await api.activateSubscription(subIdToActivate, 'paypal');
-            setIsProcessing(false);
-            setPaymentStep(0);
-            setIsVIP(true);
-            setIsVipSuccess(true);
-            setVipSuccessTitle(pendingInfo?.name || 'StarNovel Unlimited');
-            setShowSuccess(true);
-            sessionStorage.removeItem('pending_paypal_recharge');
-            await fetchStatusAndTemplates();
-            if (onRefreshStatusRef.current) {
-              await onRefreshStatusRef.current();
+          if (subscriptionId || paymentId.startsWith('I-')) {
+            await api.activateSubscription(paymentId, 'paypal');
+            const status = await api.getSubscriptionStatus();
+            const active = status.is_vip && status.subscription?.subscription_id === paymentId;
+            if (active) {
+              setIsVIP(true);
+              setIsVipSuccess(true);
+              setIsWholeBookSuccess(false);
+              setVipSuccessTitle('StarNovel Unlimited');
+              setShowSuccess(true);
+            } else {
+              showToastRef.current('VIP will be available once PayPal confirms payment.', 'info');
             }
+            await fetchStatusAndTemplates();
+            await onRefreshStatusRef.current?.();
           } else {
-            await api.capturePayPalPayment(token!, expectedCoins);
-            setIsProcessing(false);
-            setPaymentStep(0);
-
-            const reason = pendingInfo ? `PayPal Recharge: ${pendingInfo.price} pack` : 'PayPal Recharge Topup';
-            onAddCoinsRef.current(expectedCoins, reason);
-            setSuccessAmount(expectedCoins);
+            const capture = await api.capturePayPalPayment(paymentId);
+            await onAddCoinsRef.current(capture.coins_awarded, 'PayPal purchase');
+            setSuccessAmount(capture.coins_awarded);
             setIsVipSuccess(false);
+            setIsWholeBookSuccess(capture.order_type === 'whole_book');
             setShowSuccess(true);
-            sessionStorage.removeItem('pending_paypal_recharge');
           }
+          stripPayPalQueryParams();
         } catch (err) {
-          setIsProcessing(false);
-          setPaymentStep(0);
-          const msg = err instanceof Error ? err.message : 'Failed to complete PayPal payment capture';
+          const msg = err instanceof Error ? err.message : 'Failed to confirm PayPal payment.';
           showToastRef.current(msg, 'error');
         } finally {
-          stripPayPalQueryParams();
+          setIsProcessing(false);
+          setPaymentStep(0);
         }
       }
     };
 
     handlePayPalReturn();
-  }, [fetchStatusAndTemplates]);
+  }, [authReady, fetchStatusAndTemplates]);
 
   const subscriptionPacks = slots
     .filter((s) => s.type === 'subscription' || s.type === 'vip')
@@ -221,7 +230,7 @@ export const Recharge: React.FC<RechargeProps> = ({
     }));
 
   const coinPacks = slots
-    .filter((s) => s.type === 'single')
+    .filter((s) => s.type === 'single' || (s.type === 'whole_book' && novelId))
     .map((s) => ({
       id: s.id,
       coins: s.coins,
@@ -229,6 +238,7 @@ export const Recharge: React.FC<RechargeProps> = ({
       price: s.price,
       priceCents: s.price_cents,
       total: s.coins + s.bonus,
+      name: s.vip_name,
       type: s.type,
     }));
 
@@ -259,10 +269,11 @@ export const Recharge: React.FC<RechargeProps> = ({
 
       const currentUrl = new URL(window.location.href);
       ['token', 'subscription_id', 'ba_token', 'PayerID', 'payment'].forEach((k) => currentUrl.searchParams.delete(k));
-      const baseQuery = currentUrl.searchParams.toString();
-
-      const returnUrl = `${currentUrl.origin}${currentUrl.pathname}?${baseQuery ? `${baseQuery}&` : ''}payment=success`;
-      const cancelUrl = `${currentUrl.origin}${currentUrl.pathname}?${baseQuery ? `${baseQuery}&` : ''}payment=cancel`;
+      const returnURL = new URL(currentUrl);
+      returnURL.searchParams.set('payment', 'success');
+      currentUrl.searchParams.set('payment', 'cancel');
+      const returnUrl = returnURL.href;
+      const cancelUrl = currentUrl.href;
 
       if (isSub) {
         const resp = await api.createSubscription(tSlot.id, 'paypal', returnUrl, cancelUrl);
@@ -272,8 +283,7 @@ export const Recharge: React.FC<RechargeProps> = ({
           throw new Error('No PayPal subscription URL received');
         }
       } else {
-        const totalCoins = tSlot.coins + tSlot.bonus;
-        const resp = await api.createPayPalOrder(tSlot.price_cents, totalCoins, returnUrl, cancelUrl);
+        const resp = await api.createPayPalOrder(tSlot.id, tSlot.type === 'whole_book' ? novelId : 0, returnUrl, cancelUrl);
         if (resp?.approve_url) {
           window.location.href = resp.approve_url;
         } else {
@@ -291,17 +301,19 @@ export const Recharge: React.FC<RechargeProps> = ({
   const selectedSlot = slots.find((p) => p.id === selectedPack);
 
   const handleReturnToContent = () => {
-    let returnPath = '';
-    try {
-      const saved = sessionStorage.getItem('pending_paypal_recharge');
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (parsed.returnContentPath) {
-          returnPath = parsed.returnContentPath;
+    let returnPath = pendingReturnPathRef.current;
+    if (!returnPath) {
+      try {
+        const saved = sessionStorage.getItem('pending_paypal_recharge');
+        if (saved) {
+          const parsed = JSON.parse(saved);
+          if (parsed.returnContentPath) {
+            returnPath = parsed.returnContentPath;
+          }
         }
+      } catch {
+        // Ignore parse errors
       }
-    } catch {
-      // Ignore parse errors
     }
 
     if (!returnPath) {
@@ -314,6 +326,8 @@ export const Recharge: React.FC<RechargeProps> = ({
       } else {
         window.location.href = returnPath;
       }
+    } else if (novelId && onNavigate) {
+      onNavigate('reader', { id: novelId });
     } else if (onNavigate) {
       onNavigate('shelf');
     } else {
@@ -340,7 +354,18 @@ export const Recharge: React.FC<RechargeProps> = ({
       {/* Top Bar */}
       <header className="detail-top-bar glass-panel">
         <div className="sn-narrow-container" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-          <button type="button" className="header-btn" onClick={handleReturnToContent} aria-label="Go back">
+          <button
+            type="button"
+            className="header-btn"
+            onClick={() => {
+              if (hasReturnedFromPayPalRef.current) {
+                handleReturnToContent();
+              } else {
+                onBack();
+              }
+            }}
+            aria-label="Go back"
+          >
             <ChevronLeft size={20} strokeWidth={1.8} aria-hidden="true" />
           </button>
           <h1 className="header-title">Membership &amp; Coins</h1>
@@ -424,7 +449,7 @@ export const Recharge: React.FC<RechargeProps> = ({
                 </div>
                 <span style={{ color: '#86efac', fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: '5px' }}>
                   <span style={{ width: '6px', height: '6px', borderRadius: '50%', backgroundColor: '#22c55e' }} />
-                  Active
+                  {userSubscription.status === 'CANCELLED' ? 'Auto-renew off' : userSubscription.status === 'CANCEL_PENDING' ? 'Cancellation pending' : 'Active'}
                 </span>
               </div>
             </div>
@@ -513,7 +538,7 @@ export const Recharge: React.FC<RechargeProps> = ({
           {coinPacks.length > 0 && (
             <section style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
-                <h2 className="hot-tags-title" style={{ margin: 0 }}>Or Top Up Coins</h2>
+                <h2 className="hot-tags-title" style={{ margin: 0 }}>Single Purchases</h2>
                 <span style={{ fontSize: '0.6875rem', color: 'var(--text-tertiary)' }}>Never expire</span>
               </div>
 
@@ -528,6 +553,7 @@ export const Recharge: React.FC<RechargeProps> = ({
                       aria-pressed={isSelected}
                       style={{
                         backgroundColor: 'var(--bg-secondary)',
+                        color: 'var(--text-primary)',
                         borderRadius: '14px',
                         padding: '14px 12px',
                         border: isSelected ? '1.5px solid var(--accent-color)' : '1px solid var(--border-color)',
@@ -543,7 +569,20 @@ export const Recharge: React.FC<RechargeProps> = ({
                       }}
                     >
                       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '6px' }}>
-                        {pack.bonus > 0 ? (
+                        {pack.type === 'whole_book' ? (
+                          <span
+                            style={{
+                              backgroundColor: 'var(--accent-light)',
+                              color: 'var(--accent-text)',
+                              fontSize: '0.625rem',
+                              fontWeight: 600,
+                              padding: '2px 7px',
+                              borderRadius: '999px',
+                            }}
+                          >
+                            Full Book
+                          </span>
+                        ) : pack.bonus > 0 ? (
                           <span
                             className="tabular-nums"
                             style={{
@@ -580,17 +619,41 @@ export const Recharge: React.FC<RechargeProps> = ({
                         </span>
                       </div>
 
-                      <div>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                          <GoldCoin size={16} />
-                          <span className="tabular-nums" style={{ fontSize: '1.125rem', fontWeight: 700, color: 'var(--text-primary)' }}>
-                            {pack.coins.toLocaleString()}
+                      {pack.type === 'whole_book' ? (
+                        <div>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                            <BookOpen size={15} strokeWidth={1.9} style={{ color: 'var(--accent-color)', flexShrink: 0 }} aria-hidden="true" />
+                            <span style={{ fontSize: '0.9375rem', fontWeight: 700, color: 'var(--text-primary)', lineHeight: 1.25 }}>
+                              {pack.name || 'Unlock Entire Novel'}
+                            </span>
+                          </div>
+                          <span
+                            style={{
+                              fontSize: '0.6875rem',
+                              color: 'var(--text-tertiary)',
+                              display: 'block',
+                              marginTop: '3px',
+                              overflow: 'hidden',
+                              textOverflow: 'ellipsis',
+                              whiteSpace: 'nowrap',
+                            }}
+                          >
+                            {novelTitle || 'Current Novel'}
                           </span>
                         </div>
-                        <span className="tabular-nums" style={{ fontSize: '0.6875rem', color: 'var(--text-tertiary)', display: 'block', marginTop: '2px' }}>
-                          Total: {pack.total.toLocaleString()} Coins
-                        </span>
-                      </div>
+                      ) : (
+                        <div>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                            <GoldCoin size={16} />
+                            <span className="tabular-nums" style={{ fontSize: '1.125rem', fontWeight: 700, color: 'var(--text-primary)' }}>
+                              {pack.coins.toLocaleString()}
+                            </span>
+                          </div>
+                          <span className="tabular-nums" style={{ fontSize: '0.6875rem', color: 'var(--text-tertiary)', display: 'block', marginTop: '2px' }}>
+                            Total: {pack.total.toLocaleString()} Coins
+                          </span>
+                        </div>
+                      )}
 
                       <div
                         className="tabular-nums"
@@ -797,7 +860,9 @@ export const Recharge: React.FC<RechargeProps> = ({
         <p style={{ fontSize: '0.875rem', color: 'var(--text-secondary)', marginBottom: '18px', lineHeight: 1.5 }}>
           {isVipSuccess
             ? 'You now have unlimited access to every story and chapter across StarNovel.'
-            : 'Your coins have been credited to your wallet. Enjoy reading!'}
+            : isWholeBookSuccess
+              ? 'This novel is now unlocked, including future chapters.'
+              : 'Your coins have been credited to your wallet. Enjoy reading!'}
         </p>
 
         {isVipSuccess ? (
@@ -819,23 +884,44 @@ export const Recharge: React.FC<RechargeProps> = ({
             <span>{vipSuccessTitle} Active</span>
           </div>
         ) : (
-          <div
-            className="tabular-nums"
-            style={{
-              display: 'inline-flex',
-              alignItems: 'center',
-              gap: '6px',
-              backgroundColor: 'var(--accent-light)',
-              color: 'var(--accent-text)',
-              fontWeight: 700,
-              padding: '7px 16px',
-              borderRadius: '999px',
-              margin: '0 auto 20px',
-              fontSize: '0.875rem',
-            }}
-          >
-            <GoldCoin size={15} />
-            <span>+{successAmount.toLocaleString()} Coins Added</span>
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '8px', margin: '0 auto 20px' }}>
+            {isWholeBookSuccess && (
+              <div
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                  backgroundColor: 'var(--accent-light)',
+                  color: 'var(--accent-text)',
+                  fontWeight: 600,
+                  padding: '7px 14px',
+                  borderRadius: '999px',
+                  fontSize: '0.8125rem',
+                }}
+              >
+                <BookOpen size={14} strokeWidth={1.9} aria-hidden="true" />
+                <span>{novelTitle ? `${novelTitle} Unlocked` : 'Full Novel Unlocked'}</span>
+              </div>
+            )}
+            {successAmount > 0 && (
+              <div
+                className="tabular-nums"
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                  backgroundColor: 'var(--accent-light)',
+                  color: 'var(--accent-text)',
+                  fontWeight: 700,
+                  padding: '7px 16px',
+                  borderRadius: '999px',
+                  fontSize: '0.875rem',
+                }}
+              >
+                <GoldCoin size={15} />
+                <span>+{successAmount.toLocaleString()} Coins Added</span>
+              </div>
+            )}
           </div>
         )}
 

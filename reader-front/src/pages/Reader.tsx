@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { ChevronLeft, ChevronRight, List, Lock, BookOpen } from 'lucide-react';
 import { useToast } from '../context/toastStore';
-import { api } from '../utils/api';
+import { api, ApiError } from '../utils/api';
 import type { Novel, Chapter, ChapterContentResponse } from '../utils/api';
 import { ReaderSettings, type ReaderFontFamily, type ReaderLineHeight } from '../components/ReaderSettings';
 import { Drawer } from '../components/Drawer';
@@ -29,6 +29,7 @@ interface ReaderProps {
   onSaveProgress: (bookId: number, chapterIndex: number, scrollOffsetPercentage: number, paragraphIndex?: number) => void;
   unlockedBookChapters: string[];
   onMarkChapterUnlocked: (bookId: number, chapterIndex: number) => void;
+  onUnmarkChapterUnlocked: (bookId: number, chapterIndex: number) => void;
   onUnlockChapter: (bookId: number, chapterIndex: number, price: number) => Promise<boolean>;
   userCoins: number;
 }
@@ -73,6 +74,7 @@ export const Reader: React.FC<ReaderProps> = ({
   onSaveProgress,
   unlockedBookChapters,
   onMarkChapterUnlocked,
+  onUnmarkChapterUnlocked,
   onUnlockChapter,
   userCoins,
 }) => {
@@ -80,6 +82,7 @@ export const Reader: React.FC<ReaderProps> = ({
   const [novel, setNovel] = useState<Novel | null>(null);
   const [chapters, setChapters] = useState<Chapter[]>([]);
   const [chapterDetail, setChapterDetail] = useState<Chapter | null>(null);
+  const [chapterAccessType, setChapterAccessType] = useState<'free' | 'chapter' | 'pass' | null>(null);
   const [isLocked, setIsLocked] = useState<boolean>(false);
   const [chapterPrice, setChapterPrice] = useState<number>(50);
   const [loading, setLoading] = useState(true);
@@ -88,6 +91,12 @@ export const Reader: React.FC<ReaderProps> = ({
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const isTransitioning = useRef(false);
+  const loadSeqRef = useRef(0);
+  const currentActiveRef = useRef({ novelId, chapterIndex: initialChapterIndex });
+
+  useEffect(() => {
+    currentActiveRef.current = { novelId, chapterIndex: currentChIndex };
+  }, [novelId, currentChIndex]);
 
   const readingProgressRef = useRef(readingProgress);
   useEffect(() => {
@@ -113,6 +122,11 @@ export const Reader: React.FC<ReaderProps> = ({
   useEffect(() => {
     onMarkChapterUnlockedRef.current = onMarkChapterUnlocked;
   }, [onMarkChapterUnlocked]);
+
+  const onUnmarkChapterUnlockedRef = useRef(onUnmarkChapterUnlocked);
+  useEffect(() => {
+    onUnmarkChapterUnlockedRef.current = onUnmarkChapterUnlocked;
+  }, [onUnmarkChapterUnlocked]);
 
   const unlockedBookChaptersRef = useRef(unlockedBookChapters);
   useEffect(() => {
@@ -211,12 +225,25 @@ export const Reader: React.FC<ReaderProps> = ({
       const cached = await readerCache.getCachedChapter(uid, nId, cIdx);
 
       // Strategy 1 & 2: Free, VIP, or verified locally unlocked chapters -> Cache-first + SWR
-      if ((isFreeChapter || isLocallyUnlocked || isVipRef.current) && cached && !cached.locked) {
-        api.getChapterContent(nId, cIdx).then((fresh) => {
-          if (fresh && !fresh.locked) {
-            readerCache.setCachedChapter(uid, nId, cIdx, fresh);
-          }
-        }).catch(() => {});
+      if (cached && !cached.locked && (cached.access_type === 'free' ? isFreeChapter : cached.access_type === 'chapter' && isLocallyUnlocked)) {
+        api
+          .getChapterContent(nId, cIdx)
+          .then(async (fresh) => {
+            if (!fresh) return;
+            if (fresh.locked) {
+              // Access expired or revoked on server: purge stale IndexedDB cache & relock if still viewing
+              await readerCache.removeCachedChapter(uid, nId, cIdx);
+              onUnmarkChapterUnlockedRef.current(nId, cIdx);
+              if (currentActiveRef.current.novelId === nId && currentActiveRef.current.chapterIndex === cIdx) {
+                setChapterDetail(fresh.chapter);
+                setIsLocked(true);
+                setChapterPrice(fresh.price ?? 0);
+              }
+            } else {
+              await readerCache.setCachedChapter(uid, nId, cIdx, fresh);
+            }
+          })
+          .catch(() => {});
         return cached;
       }
 
@@ -225,13 +252,23 @@ export const Reader: React.FC<ReaderProps> = ({
         const fresh = await api.getChapterContent(nId, cIdx);
         if (fresh && !fresh.locked) {
           await readerCache.setCachedChapter(uid, nId, cIdx, fresh);
-          if (fresh.chapter?.is_paid && !isVipRef.current) {
+          if (fresh.access_type === 'chapter') {
             onMarkChapterUnlockedRef.current(nId, cIdx);
           }
+        } else if (fresh?.locked) {
+          await readerCache.removeCachedChapter(uid, nId, cIdx);
         }
         return fresh;
       } catch (err) {
-        if (cached && !cached.locked && (isFreeChapter || isLocallyUnlocked || isVipRef.current)) {
+        if (
+          cached &&
+          !cached.locked &&
+          (cached.access_type === 'free'
+            ? isFreeChapter
+            : cached.access_type === 'chapter'
+              ? isLocallyUnlocked
+              : cached.access_type === 'pass' && isVipRef.current)
+        ) {
           return cached;
         }
         throw err;
@@ -243,63 +280,97 @@ export const Reader: React.FC<ReaderProps> = ({
   // 1. Fetch novel metadata & chapters list once auth settles
   useEffect(() => {
     if (!authReady) return;
+    let cancelled = false;
     setNovelError(false);
     setNovel(null);
     setChapters([]);
     setChapterDetail(null);
+    setChapterAccessType(null);
 
     const loadNovelMeta = async () => {
       try {
-        const detail = await api.getNovelDetail(novelId);
+        const [detail, chList] = await Promise.all([
+          api.getNovelDetail(novelId),
+          api.getChaptersList(novelId).catch(() => []),
+        ]);
+        if (cancelled) return;
         if (!detail) {
           setNovelError(true);
           return;
         }
         setNovel(detail);
-        const chList = await api.getChaptersList(novelId);
         setChapters(chList || []);
       } catch (err) {
-        console.error('Failed to load novel metadata:', err);
-        setNovelError(true);
+        if (!cancelled) {
+          console.error('Failed to load novel metadata:', err);
+          setNovelError(true);
+        }
       }
     };
     loadNovelMeta();
+    return () => {
+      cancelled = true;
+    };
   }, [novelId, authReady, userId]);
 
-  // 2. Load specified chapter
+  // Trigger bounded prefetch once chapters list is known
+  useEffect(() => {
+    if (!authReady || !userId || chapters.length === 0) return;
+    readerCache.prefetchChapters(
+      userId,
+      novelId,
+      currentChIndex,
+      chapters.length,
+      (nId, idx) => api.getChapterContent(nId, idx)
+    );
+  }, [authReady, userId, novelId, currentChIndex, chapters.length]);
+
+  // 2. Load specified chapter with sequence guard against rapid clicks
   const loadChapter = useCallback(
     async (targetIdx: number, restoreProgress = false) => {
+      const seq = ++loadSeqRef.current;
       setLoading(true);
+      setChapterAccessType(null);
       isTransitioning.current = true;
       setCurrentChIndex(targetIdx);
 
       try {
         let res = await fetchChapterData(novelId, targetIdx);
+        if (seq !== loadSeqRef.current) return;
 
         if (res.locked && autoUnlockRef.current && userCoinsRef.current >= res.price) {
-          const success = await onUnlockChapterRef.current(novelId, targetIdx, res.price);
-          if (success) {
-            showToast(`Unlocked ${res.chapter.title || `Chapter ${targetIdx + 1}`}`, 'success');
-            res = await api.getChapterContent(novelId, targetIdx);
-            if (!res.locked) {
-              await readerCache.setCachedChapter(userIdRef.current, novelId, targetIdx, res);
+          try {
+            const success = await onUnlockChapterRef.current(novelId, targetIdx, res.price);
+            if (seq !== loadSeqRef.current) return;
+            if (success) {
+              showToast(`Unlocked ${res.chapter.title || `Chapter ${targetIdx + 1}`}`, 'success');
+              res = await api.getChapterContent(novelId, targetIdx);
+              if (seq !== loadSeqRef.current) return;
+              if (!res.locked) {
+                await readerCache.setCachedChapter(userIdRef.current, novelId, targetIdx, res);
+                if (res.access_type === 'chapter') {
+                  onMarkChapterUnlockedRef.current(novelId, targetIdx);
+                }
+              }
+            }
+          } catch (unlockErr) {
+            if (seq !== loadSeqRef.current) return;
+            if (unlockErr instanceof ApiError && unlockErr.status === 409) {
+              res = await api.getChapterContent(novelId, targetIdx);
+              if (seq !== loadSeqRef.current) return;
+              showToast('Chapter price was updated. Please confirm before unlocking.', 'info');
             }
           }
         }
 
+        if (seq !== loadSeqRef.current) return;
         setChapterDetail(res.chapter);
         setIsLocked(res.locked);
         setChapterPrice(res.price ?? 0);
-
-        readerCache.prefetchChapters(
-          userIdRef.current,
-          novelId,
-          targetIdx,
-          chaptersRef.current.length || 100,
-          (nId, idx) => api.getChapterContent(nId, idx)
-        );
+        setChapterAccessType(res.access_type ?? null);
 
         requestAnimationFrame(() => {
+          if (seq !== loadSeqRef.current) return;
           const container = scrollRef.current;
           if (container) {
             if (restoreProgress) {
@@ -320,11 +391,14 @@ export const Reader: React.FC<ReaderProps> = ({
           isTransitioning.current = false;
         });
       } catch (err) {
+        if (seq !== loadSeqRef.current) return;
         console.error('Failed to load chapter content:', err);
         showToast('Failed to load chapter content.', 'error');
         isTransitioning.current = false;
       } finally {
-        setLoading(false);
+        if (seq === loadSeqRef.current) {
+          setLoading(false);
+        }
       }
     },
     [novelId, fetchChapterData, showToast]
@@ -395,27 +469,49 @@ export const Reader: React.FC<ReaderProps> = ({
 
   const handleUnlockNow = async () => {
     if (isUnlocking) return;
+    const unlockSeq = loadSeqRef.current;
     setIsUnlocking(true);
     try {
       if (userCoins >= chapterPrice) {
         const success = await onUnlockChapter(novelId, currentChIndex, chapterPrice);
+        if (unlockSeq !== loadSeqRef.current) return;
         if (success) {
           showToast('Chapter unlocked!', 'success');
           const res = await api.getChapterContent(novelId, currentChIndex);
+          if (unlockSeq !== loadSeqRef.current) return;
           if (!res.locked) {
             await readerCache.setCachedChapter(userId, novelId, currentChIndex, res);
+            if (res.access_type === 'chapter') {
+              onMarkChapterUnlocked(novelId, currentChIndex);
+            }
           }
           setChapterDetail(res.chapter);
           setIsLocked(res.locked);
-        } else {
-          showToast('Failed to unlock chapter. Please try again.', 'error');
+          setChapterPrice(res.price ?? chapterPrice);
+          setChapterAccessType(res.access_type ?? null);
         }
       } else {
-        onNavigate('recharge');
+        onNavigate('recharge', { id: novelId });
       }
     } catch (err) {
-      console.error('Failed to unlock chapter:', err);
-      showToast('Failed to unlock chapter.', 'error');
+      if (unlockSeq !== loadSeqRef.current) return;
+      if (err instanceof ApiError && err.status === 409) {
+        showToast('Chapter price updated. Refreshing price...', 'info');
+        const refreshed = await api.getChapterContent(novelId, currentChIndex).catch(() => null);
+        if (unlockSeq !== loadSeqRef.current) return;
+        if (refreshed) {
+          setChapterDetail(refreshed.chapter);
+          setIsLocked(refreshed.locked);
+          setChapterPrice(refreshed.price ?? chapterPrice);
+          setChapterAccessType(refreshed.access_type ?? null);
+        }
+      } else if (err instanceof ApiError && err.status === 402) {
+        showToast('Insufficient balance. Please top up coins.', 'error');
+        onNavigate('recharge', { id: novelId });
+      } else {
+        const msg = err instanceof Error ? err.message : 'Failed to unlock chapter.';
+        showToast(msg, 'error');
+      }
     } finally {
       setIsUnlocking(false);
     }
@@ -463,7 +559,6 @@ export const Reader: React.FC<ReaderProps> = ({
 
   return (
     <div className={`reader-container reader-theme-${theme} page-container-full`}>
-      {/* Minimal Floating Back Button (fades cleanly when HUD is open) */}
       <button
         type="button"
         className={`reader-floating-back-btn ${showSettings ? 'hud-open' : ''}`}
@@ -473,7 +568,6 @@ export const Reader: React.FC<ReaderProps> = ({
         <ChevronLeft size={19} strokeWidth={1.8} aria-hidden="true" />
       </button>
 
-      {/* Theme-Matched HUD Settings */}
       <ReaderSettings
         visible={showSettings}
         fontSize={fontSize}
@@ -491,7 +585,6 @@ export const Reader: React.FC<ReaderProps> = ({
         onAddToShelf={handleToggleShelf}
       />
 
-      {/* Sidebar Drawer: Table of Contents */}
       <Drawer
         visible={showTOC}
         onClose={() => setShowTOC(false)}
@@ -499,13 +592,15 @@ export const Reader: React.FC<ReaderProps> = ({
       >
         <div className="chapters-list" style={{ padding: '4px 10px' }}>
           {chapters.map((ch, index) => {
-            const isCurrent = index === currentChIndex;
-            const isChPaid = ch.is_paid !== undefined ? ch.is_paid : index >= 2;
-            const isChLocked = !isVip && isChPaid && !unlockedBookChapters.includes(`${novelId}-${index}`);
+            const chIdx = ch.chapter_index ?? index;
+            const isCurrent = chIdx === currentChIndex;
+            const isChPaid = ch.is_paid !== undefined ? ch.is_paid : chIdx >= 2;
+            const hasPassAccess = isVip || chapterAccessType === 'pass' || (isChPaid && ch.price === 0);
+            const isChLocked = !hasPassAccess && isChPaid && !unlockedBookChapters.includes(`${novelId}-${chIdx}`);
             return (
               <button
                 type="button"
-                key={ch.id || index}
+                key={ch.id || chIdx}
                 className="chapter-item-link"
                 style={{
                   backgroundColor: isCurrent ? 'var(--accent-light)' : 'transparent',
@@ -513,7 +608,7 @@ export const Reader: React.FC<ReaderProps> = ({
                   paddingRight: '12px',
                   borderRadius: isCurrent ? '8px' : '0',
                 }}
-                onClick={() => handleChapterSelect(index)}
+                onClick={() => handleChapterSelect(chIdx)}
               >
                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0 }}>
                   <span
@@ -536,7 +631,6 @@ export const Reader: React.FC<ReaderProps> = ({
         </div>
       </Drawer>
 
-      {/* Single Chapter Main Reading Area */}
       <div
         ref={scrollRef}
         className="reader-scroll-area"
@@ -558,14 +652,25 @@ export const Reader: React.FC<ReaderProps> = ({
             <div className="reader-chapter-eyebrow">
               Chapter {currentChIndex + 1} of {totalChaptersCount}
             </div>
-            <h1 className="reader-chapter-title">
-              {currentChapterTitle}
+            <header
+              style={{
+                borderBottom: '1px solid var(--reader-border)',
+                paddingBottom: '16px',
+                marginBottom: '28px',
+              }}
+            >
+              <h1
+                className="reader-chapter-title"
+                style={{ borderBottom: 'none', paddingBottom: 0, marginBottom: 0 }}
+              >
+                {currentChapterTitle}
+              </h1>
               {chapterDetail?.word_count ? (
                 <div className="reader-chapter-meta">
                   {chapterDetail.word_count.toLocaleString()} words
                 </div>
               ) : null}
-            </h1>
+            </header>
 
             {paragraphs.map((paragraph, pIdx) => (
               <p key={pIdx} data-paragraph-index={pIdx} className="reader-text-paragraph">
@@ -573,7 +678,6 @@ export const Reader: React.FC<ReaderProps> = ({
               </p>
             ))}
 
-            {/* Locked Preview Card (stops click propagation so HUD won't toggle) */}
             {isLocked && (
               <div
                 className="reader-paywall-card"
@@ -694,7 +798,6 @@ export const Reader: React.FC<ReaderProps> = ({
               </div>
             )}
 
-            {/* Bottom Chapter Navigation */}
             <div className="reader-bottom-nav-row" onClick={(e) => e.stopPropagation()}>
               <button
                 type="button"

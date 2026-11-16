@@ -5,13 +5,18 @@ import { api } from '../utils/api';
 import { GoldCoin } from '../components/GoldCoin';
 
 interface RewardsProps {
+  authReady?: boolean;
   onAddCoins: (amount: number, reason: string) => void;
 }
 
-export const Rewards: React.FC<RewardsProps> = ({ onAddCoins }) => {
+const DEFAULT_REWARDS = [10, 15, 20, 25, 30, 35, 50];
+
+export const Rewards: React.FC<RewardsProps> = ({ authReady = true, onAddCoins }) => {
   const { showToast } = useToast();
-  const [streak, setStreak] = useState<number>(0);
-  const [lastCheckIn, setLastCheckIn] = useState<string>('');
+  const [rewardsByDay, setRewardsByDay] = useState<number[]>(DEFAULT_REWARDS);
+  const [streakDay, setStreakDay] = useState<number>(0);
+  const [hasCheckedInToday, setHasCheckedInToday] = useState<boolean>(false);
+  const [claiming, setClaiming] = useState<boolean>(false);
   const [loading, setLoading] = useState(true);
   const [showSuccessModal, setShowSuccessModal] = useState<{ visible: boolean; coins: number; message: string }>({
     visible: false,
@@ -22,10 +27,6 @@ export const Rewards: React.FC<RewardsProps> = ({ onAddCoins }) => {
   const dialogRef = useRef<HTMLDialogElement>(null);
   const pressedOutsideRef = useRef(false);
   const modalTitleId = useId();
-
-  const rewardsByDay = [10, 15, 20, 25, 30, 35, 50];
-  const todayStr = new Date().toDateString();
-  const hasCheckedInToday = lastCheckIn === todayStr;
 
   useEffect(() => {
     const dialog = dialogRef.current;
@@ -38,73 +39,54 @@ export const Rewards: React.FC<RewardsProps> = ({ onAddCoins }) => {
   }, [showSuccessModal.visible]);
 
   useEffect(() => {
+    if (!authReady) return;
+    let cancelled = false;
     const fetchCheckInStatus = async () => {
       setLoading(true);
       try {
-        const txs = (await api.getTransactionHistory(1, 20)) || [];
-        const checkinTxs = txs.filter((tx) => tx.biz_type === 'checkin');
-
-        const currentDayStr = new Date().toDateString();
-        const checkedIn = checkinTxs.some((tx) => new Date(tx.date).toDateString() === currentDayStr);
-        setLastCheckIn(checkedIn ? currentDayStr : '');
-
-        let currentStreak = 0;
-        const checkDate = new Date();
-
-        for (let i = 0; i < 7; i++) {
-          const dateStr = checkDate.toDateString();
-          const found = checkinTxs.some((tx) => new Date(tx.date).toDateString() === dateStr);
-          if (found) {
-            currentStreak++;
-            checkDate.setDate(checkDate.getDate() - 1);
-          } else {
-            if (i === 0) {
-              checkDate.setDate(checkDate.getDate() - 1);
-              const yesterdayStr = checkDate.toDateString();
-              const foundYesterday = checkinTxs.some((tx) => new Date(tx.date).toDateString() === yesterdayStr);
-              if (foundYesterday) {
-                continue;
-              }
-            }
-            break;
-          }
+        const state = await api.getCheckInState();
+        if (cancelled) return;
+        setHasCheckedInToday(Boolean(state.checked_in));
+        setStreakDay(state.day || 0);
+        if (Array.isArray(state.rewards) && state.rewards.length > 0) {
+          setRewardsByDay(state.rewards);
         }
-        setStreak(currentStreak === 0 ? 0 : ((currentStreak - 1) % 7) + 1);
       } catch (err) {
-        console.error('Failed to load checkin status:', err);
+        console.error('Failed to load check-in status:', err);
       } finally {
-        setLoading(false);
+        if (!cancelled) setLoading(false);
       }
     };
 
     fetchCheckInStatus();
-  }, []);
+    return () => {
+      cancelled = true;
+    };
+  }, [authReady]);
 
   const handleCheckIn = async () => {
-    const currentDayStr = new Date().toDateString();
-    if (lastCheckIn === currentDayStr) return;
-
-    let nextStreak = streak + 1;
-    if (nextStreak > 7) {
-      nextStreak = 1;
-    }
-
-    const earnedCoins = rewardsByDay[nextStreak - 1];
-
+    if (hasCheckedInToday || claiming) return;
+    setClaiming(true);
     try {
-      await api.dailyCheckIn(nextStreak, earnedCoins);
-      setStreak(nextStreak);
-      setLastCheckIn(currentDayStr);
+      const state = await api.dailyCheckIn();
+      setHasCheckedInToday(Boolean(state.checked_in));
+      setStreakDay(state.day);
+      if (Array.isArray(state.rewards) && state.rewards.length > 0) {
+        setRewardsByDay(state.rewards);
+      }
 
-      onAddCoins(earnedCoins, `Daily Check-in (Day ${nextStreak})`);
+      const earnedCoins = state.coins_awarded || rewardsByDay[(state.day - 1) % rewardsByDay.length] || 0;
+      onAddCoins(earnedCoins, `Daily Check-in (Day ${state.day})`);
       setShowSuccessModal({
         visible: true,
         coins: earnedCoins,
-        message: `Day ${nextStreak} reward claimed. ${earnedCoins} Coins have been added to your wallet.`,
+        message: `Day ${state.day} reward claimed. ${earnedCoins} Coins have been added to your wallet.`,
       });
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Failed to check in today. Please try again.';
       showToast(msg, 'error');
+    } finally {
+      setClaiming(false);
     }
   };
 
@@ -121,6 +103,14 @@ export const Rewards: React.FC<RewardsProps> = ({ onAddCoins }) => {
       </div>
     );
   }
+
+  const cycleLen = rewardsByDay.length || 7;
+  const completedCount = hasCheckedInToday
+    ? streakDay
+    : streakDay >= cycleLen
+      ? 0
+      : streakDay;
+  const nextClaimDay = !hasCheckedInToday ? (streakDay % cycleLen) + 1 : 0;
 
   return (
     <div className="scroll-container animate-fade-in">
@@ -142,7 +132,7 @@ export const Rewards: React.FC<RewardsProps> = ({ onAddCoins }) => {
               </h2>
               <p style={{ fontSize: '0.8125rem', color: 'var(--text-secondary)', marginTop: '4px', lineHeight: 1.5 }}>
                 {hasCheckedInToday
-                  ? `Checked in today · Current streak: ${streak} ${streak === 1 ? 'day' : 'days'}`
+                  ? `Checked in today · Current streak: Day ${streakDay}`
                   : 'Check in daily to earn bonus coins for unlocking chapters.'}
               </p>
             </div>
@@ -164,11 +154,11 @@ export const Rewards: React.FC<RewardsProps> = ({ onAddCoins }) => {
           </div>
 
           {/* 7-Day Streak Grid */}
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, minmax(0, 1fr))', gap: '6px', marginBottom: '22px' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: `repeat(${cycleLen}, minmax(0, 1fr))`, gap: '6px', marginBottom: '22px' }}>
             {rewardsByDay.map((coins, index) => {
               const dayNum = index + 1;
-              const isCompleted = dayNum <= streak;
-              const isCurrent = dayNum === streak + 1 && !hasCheckedInToday;
+              const isCompleted = dayNum <= completedCount;
+              const isCurrent = dayNum === nextClaimDay;
 
               return (
                 <div
@@ -220,7 +210,7 @@ export const Rewards: React.FC<RewardsProps> = ({ onAddCoins }) => {
           <button
             type="button"
             className="btn-cta-primary"
-            disabled={hasCheckedInToday}
+            disabled={hasCheckedInToday || claiming}
             onClick={handleCheckIn}
             style={{ width: '100%', borderRadius: '999px' }}
           >
@@ -229,6 +219,8 @@ export const Rewards: React.FC<RewardsProps> = ({ onAddCoins }) => {
                 <Check size={16} strokeWidth={2.2} aria-hidden="true" />
                 <span>Checked In Today</span>
               </>
+            ) : claiming ? (
+              <span>Claiming...</span>
             ) : (
               <span>Claim Daily Reward</span>
             )}

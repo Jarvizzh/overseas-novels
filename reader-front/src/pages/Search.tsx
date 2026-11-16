@@ -10,6 +10,8 @@ interface SearchProps {
   initialGenre?: string;
 }
 
+const PAGE_SIZE = 50;
+
 function loadSearchHistory(): string[] {
   try {
     const raw = localStorage.getItem('search-history');
@@ -26,7 +28,10 @@ export const Search: React.FC<SearchProps> = ({ novels, onNavigate, initialGenre
   const [selectedGenre, setSelectedGenre] = useState<string>(initialGenre || 'All');
   const [searchHistory, setSearchHistory] = useState<string[]>(loadSearchHistory);
   const [results, setResults] = useState<Novel[]>([]);
+  const [page, setPage] = useState(1);
+  const [hasMore, setHasMore] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
 
   useEffect(() => {
     if (initialGenre) {
@@ -35,25 +40,36 @@ export const Search: React.FC<SearchProps> = ({ novels, onNavigate, initialGenre
   }, [initialGenre]);
 
   useEffect(() => {
+    let cancelled = false;
     const performSearch = async () => {
       setLoading(true);
+      setPage(1);
       try {
         let list: Novel[] = [];
+        let pageFull = false;
         if (query.trim()) {
-          list = (await api.searchNovels(query.trim(), 1, 50)) || [];
+          list = (await api.searchNovels(query.trim(), 1, PAGE_SIZE)) || [];
+          pageFull = list.length >= PAGE_SIZE;
           if (selectedGenre !== 'All') {
             list = list.filter((n) => (n.genres || []).includes(selectedGenre));
           }
         } else if (selectedGenre === 'All') {
-          list = (await api.getNovels({ limit: 50 })) || [];
+          list = (await api.getNovels({ page: 1, limit: PAGE_SIZE })) || [];
+          pageFull = list.length >= PAGE_SIZE;
         } else {
-          list = (await api.getNovels({ genre: selectedGenre, limit: 50 })) || [];
+          list = (await api.getNovels({ genre: selectedGenre, page: 1, limit: PAGE_SIZE })) || [];
+          pageFull = list.length >= PAGE_SIZE;
         }
-        setResults(list);
+        if (!cancelled) {
+          setResults(list);
+          setHasMore(pageFull);
+        }
       } catch (err) {
-        console.error('Search failed:', err);
+        if (!cancelled) {
+          console.error('Search failed:', err);
+        }
       } finally {
-        setLoading(false);
+        if (!cancelled) setLoading(false);
       }
     };
 
@@ -61,8 +77,43 @@ export const Search: React.FC<SearchProps> = ({ novels, onNavigate, initialGenre
       performSearch();
     }, 280);
 
-    return () => clearTimeout(delayDebounce);
+    return () => {
+      cancelled = true;
+      clearTimeout(delayDebounce);
+    };
   }, [query, selectedGenre]);
+
+  const handleLoadMore = async () => {
+    if (loadingMore || !hasMore) return;
+    setLoadingMore(true);
+    const nextPage = page + 1;
+    try {
+      let rawBatch: Novel[] = [];
+      if (query.trim()) {
+        rawBatch = (await api.searchNovels(query.trim(), nextPage, PAGE_SIZE)) || [];
+      } else if (selectedGenre === 'All') {
+        rawBatch = (await api.getNovels({ page: nextPage, limit: PAGE_SIZE })) || [];
+      } else {
+        rawBatch = (await api.getNovels({ genre: selectedGenre, page: nextPage, limit: PAGE_SIZE })) || [];
+      }
+      setHasMore(rawBatch.length >= PAGE_SIZE);
+      const filteredBatch =
+        query.trim() && selectedGenre !== 'All'
+          ? rawBatch.filter((n) => (n.genres || []).includes(selectedGenre))
+          : rawBatch;
+
+      setResults((prev) => {
+        const seen = new Set(prev.map((n) => n.id));
+        const unique = filteredBatch.filter((n) => !seen.has(n.id));
+        return [...prev, ...unique];
+      });
+      setPage(nextPage);
+    } catch (err) {
+      console.error('Failed to load more search results:', err);
+    } finally {
+      setLoadingMore(false);
+    }
+  };
 
   const allGenres = useMemo(() => {
     const base = ['All', 'Fantasy', 'Romance', 'Xianxia', 'CEO', 'Sci-Fi', 'Cozy'];
@@ -228,16 +279,30 @@ export const Search: React.FC<SearchProps> = ({ novels, onNavigate, initialGenre
             <span style={{ fontSize: '0.875rem' }}>Searching catalog...</span>
           </div>
         ) : results.length > 0 ? (
-          <div className="book-horizontal-list">
-            {results.map((novel) => (
-              <BookCard
-                key={novel.id}
-                novel={novel}
-                layout="horizontal"
-                onClick={() => onNavigate('detail', { id: novel.id })}
-              />
-            ))}
-          </div>
+          <>
+            <div className="book-horizontal-list">
+              {results.map((novel) => (
+                <BookCard
+                  key={novel.id}
+                  novel={novel}
+                  layout="horizontal"
+                  onClick={() => onNavigate('detail', { id: novel.id })}
+                />
+              ))}
+            </div>
+            {hasMore && (
+              <div style={{ display: 'flex', justifyContent: 'center', marginTop: '20px' }}>
+                <button
+                  type="button"
+                  className="btn-cta-secondary"
+                  disabled={loadingMore}
+                  onClick={handleLoadMore}
+                >
+                  {loadingMore ? 'Loading...' : 'Load More Results'}
+                </button>
+              </div>
+            )}
+          </>
         ) : (
           <div className="shelf-empty-state">
             <div className="shelf-empty-icon-wrap">

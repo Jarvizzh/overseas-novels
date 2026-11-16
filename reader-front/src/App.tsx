@@ -34,6 +34,8 @@ const TRACKING_KEYS = [
   'promo_id',
 ];
 
+const TX_PAGE_SIZE = 30;
+
 function loadScopedUnlockedChapters(userId: number | null): string[] {
   if (!userId) return [];
   try {
@@ -78,45 +80,44 @@ function AppContent() {
   const location = useLocation();
   const [searchParams] = useSearchParams();
 
-  // Auth & initialization state
   const [user, setUser] = useState<User | null>(null);
   const [authReady, setAuthReady] = useState(false);
 
-  // Catalog state
   const [novels, setNovels] = useState<Novel[]>([]);
   const [latestNovels, setLatestNovels] = useState<Novel[]>([]);
   const [novelsPage, setNovelsPage] = useState(1);
   const [hasMoreNovels, setHasMoreNovels] = useState(false);
   const [loadingMoreNovels, setLoadingMoreNovels] = useState(false);
 
-  // Shelf state
   const [shelfLoading, setShelfLoading] = useState(true);
   const [shelfBookIds, setShelfBookIds] = useState<number[]>([]);
   const [shelfNovelsList, setShelfNovelsList] = useState<Novel[]>([]);
 
-  // Reading progress
   const [readingProgress, setReadingProgress] = useState<{
     [bookId: number]: { chapterIndex: number; scrollOffsetPercentage: number; paragraphIndex?: number };
   }>({});
 
-  // Tri-state Appearance Theme (light | dark | system)
   const [themePreference, setThemePreference] = useState<ThemePreference>(getStoredThemePreference);
   const [systemTheme, setSystemTheme] = useState<'light' | 'dark'>(getSystemTheme);
 
-  // Wallet & VIP state
   const [userCoins, setUserCoins] = useState<number>(0);
   const [chargedCoins, setChargedCoins] = useState<number>(0);
   const [bonusCoins, setBonusCoins] = useState<number>(0);
   const [isVip, setIsVip] = useState<boolean>(false);
   const [subscription, setSubscription] = useState<SubscriptionInfo | null>(null);
 
-  // User-scoped unlocked chapters cache
   const [unlockedBookChapters, setUnlockedBookChapters] = useState<string[]>([]);
   const [transactionHistory, setTransactionHistory] = useState<Transaction[]>([]);
+  const [transactionsPage, setTransactionsPage] = useState(1);
+  const [hasMoreTransactions, setHasMoreTransactions] = useState(false);
+  const [loadingMoreTransactions, setLoadingMoreTransactions] = useState(false);
 
   const syncTimeouts = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+  const guestLoginPromiseRef = useRef<Promise<string | null> | null>(null);
+  const pendingProgressRef = useRef<
+    Record<string, { novel_id: number; chapter_index: number; scroll_offset_percentage: number; updated_at: string }>
+  >({});
 
-  // Sync user-scoped unlocked chapters whenever active user changes
   useEffect(() => {
     if (user?.id) {
       setUnlockedBookChapters(loadScopedUnlockedChapters(user.id));
@@ -125,7 +126,6 @@ function AppContent() {
     }
   }, [user?.id]);
 
-  // Listen for OS color-scheme changes & multi-tab storage sync
   useEffect(() => {
     const mq = window.matchMedia?.('(prefers-color-scheme: dark)');
     const handleSystemChange = (e: MediaQueryListEvent) => {
@@ -155,7 +155,7 @@ function AppContent() {
       const [balance, shelfItems, txs, subStatus] = await Promise.all([
         api.getWalletBalance(),
         api.getShelf().then((res) => res || []),
-        api.getTransactionHistory(1, 30).then((res) => res || []),
+        api.getTransactionHistory(1, TX_PAGE_SIZE).then((res) => res || []),
         api.getSubscriptionStatus().catch(() => null),
       ]);
 
@@ -174,7 +174,10 @@ function AppContent() {
         };
       });
       setReadingProgress(progressMap);
+
       setTransactionHistory(txs);
+      setTransactionsPage(1);
+      setHasMoreTransactions(txs.length >= TX_PAGE_SIZE);
 
       if (subStatus) {
         setIsVip(Boolean(subStatus.is_vip));
@@ -187,21 +190,47 @@ function AppContent() {
     }
   }, []);
 
-  const triggerGuestLogin = useCallback(async (): Promise<string | null> => {
+  const handleLoadMoreTransactions = useCallback(async () => {
+    if (loadingMoreTransactions || !hasMoreTransactions) return;
+    setLoadingMoreTransactions(true);
     try {
-      const res = await api.guestLogin();
-      localStorage.setItem('auth-token', res.token);
-      setUser(res.user);
-      await reloadWalletAndShelf();
-      return res.token;
+      const nextPage = transactionsPage + 1;
+      const batch = (await api.getTransactionHistory(nextPage, TX_PAGE_SIZE)) || [];
+      setTransactionHistory((prev) => {
+        const seen = new Set(prev.map((t) => t.id));
+        const unique = batch.filter((t) => !seen.has(t.id));
+        return [...prev, ...unique];
+      });
+      setTransactionsPage(nextPage);
+      setHasMoreTransactions(batch.length >= TX_PAGE_SIZE);
     } catch (err) {
-      console.error('Guest login failed:', err);
-      setShelfLoading(false);
-      return null;
+      console.error('Failed to load more transactions:', err);
+    } finally {
+      setLoadingMoreTransactions(false);
     }
+  }, [loadingMoreTransactions, hasMoreTransactions, transactionsPage]);
+
+  const triggerGuestLogin = useCallback(async (): Promise<string | null> => {
+    if (!guestLoginPromiseRef.current) {
+      guestLoginPromiseRef.current = (async () => {
+        try {
+          const res = await api.guestLogin();
+          localStorage.setItem('auth-token', res.token);
+          setUser(res.user);
+          await reloadWalletAndShelf();
+          return res.token;
+        } catch (err) {
+          console.error('Guest login failed:', err);
+          setShelfLoading(false);
+          return null;
+        } finally {
+          guestLoginPromiseRef.current = null;
+        }
+      })();
+    }
+    return guestLoginPromiseRef.current;
   }, [reloadWalletAndShelf]);
 
-  // Capture Facebook Ads / UTM tracking parameters on initial load
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const utmSource = params.get('utm_source');
@@ -242,19 +271,22 @@ function AppContent() {
     }
   }, []);
 
-  // Register single-flight 401 refresh handler & initialize session + catalog
   useEffect(() => {
     registerSessionRefreshHandler(triggerGuestLogin);
 
     const initAuth = async () => {
-      const token = localStorage.getItem('auth-token');
-      if (!token) {
+      const tokenBefore = localStorage.getItem('auth-token');
+      if (!tokenBefore) {
         await triggerGuestLogin();
       } else {
         try {
           const u = await api.getProfile();
           setUser(u);
-          await reloadWalletAndShelf();
+          const tokenAfter = localStorage.getItem('auth-token');
+          // Only reload if 401 refresh didn't already execute reloadWalletAndShelf
+          if (tokenAfter === tokenBefore) {
+            await reloadWalletAndShelf();
+          }
         } catch (err) {
           console.error('Auth init failed, fallback to guest:', err);
           await triggerGuestLogin();
@@ -285,21 +317,39 @@ function AppContent() {
     initAuth();
     loadNovels();
 
+    const flushPendingProgress = () => {
+      const pending = Object.values(pendingProgressRef.current);
+      if (pending.length === 0) return;
+      Object.values(syncTimeouts.current).forEach(clearTimeout);
+      syncTimeouts.current = {};
+      pendingProgressRef.current = {};
+      api.syncProgress(pending, { keepalive: true }).catch(() => {});
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') {
+        flushPendingProgress();
+      }
+    };
+
+    window.addEventListener('pagehide', flushPendingProgress);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
     const timeoutsMap = syncTimeouts.current;
     return () => {
       registerSessionRefreshHandler(null);
+      window.removeEventListener('pagehide', flushPendingProgress);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
       Object.values(timeoutsMap).forEach(clearTimeout);
     };
   }, [triggerGuestLogin, reloadWalletAndShelf]);
 
-  // Track last reading content path for smooth post-payment redirect
   useEffect(() => {
     if (location.pathname === '/content' || location.pathname === '/detail') {
       localStorage.setItem('last_read_content_path', `${location.pathname}${location.search}`);
     }
   }, [location.pathname, location.search]);
 
-  // Update page title per route
   useEffect(() => {
     const titleMap: Record<string, string> = {
       '/': 'StarNovel — Curated Fiction & Stories',
@@ -314,7 +364,6 @@ function AppContent() {
     document.title = titleMap[location.pathname] || 'StarNovel';
   }, [location.pathname]);
 
-  // Build URL safely preserving tracking parameters (fixes double-? bug)
   const buildMergedUrl = useCallback(
     (pageOrPath: string, params: Record<string, unknown> | null = null): string => {
       const mergedParams = new URLSearchParams();
@@ -346,6 +395,7 @@ function AppContent() {
         targetPath = '/profile';
       } else if (pageOrPath === 'recharge') {
         targetPath = '/recharge';
+        if (typeof params?.id === 'number') mergedParams.set('novel_id', String(params.id));
       } else if (pageOrPath === 'home') {
         targetPath = '/';
       } else if (pageOrPath.startsWith('/')) {
@@ -413,9 +463,17 @@ function AppContent() {
     async (bookId: number) => {
       const inShelf = shelfBookIds.includes(bookId);
       if (inShelf) {
+        const prevIds = shelfBookIds;
+        const prevList = shelfNovelsList;
         setShelfBookIds((prev) => prev.filter((id) => id !== bookId));
         setShelfNovelsList((list) => list.filter((n) => n.id !== bookId));
-        api.removeFromShelf([bookId]).catch((err) => console.error('Failed to remove from shelf:', err));
+        try {
+          await api.removeFromShelf([bookId]);
+        } catch (err) {
+          console.error('Failed to remove from shelf:', err);
+          setShelfBookIds(prevIds);
+          setShelfNovelsList(prevList);
+        }
         return;
       }
 
@@ -438,7 +496,7 @@ function AppContent() {
         setShelfNovelsList((list) => list.filter((n) => n.id !== bookId));
       }
     },
-    [shelfBookIds, novels, latestNovels]
+    [shelfBookIds, shelfNovelsList, novels, latestNovels]
   );
 
   const handleRemoveMultipleFromShelf = useCallback(async (bookIds: number[]) => {
@@ -458,21 +516,24 @@ function AppContent() {
         [bookId]: { chapterIndex, scrollOffsetPercentage, paragraphIndex },
       }));
 
+      const payload = {
+        novel_id: bookId,
+        chapter_index: chapterIndex,
+        scroll_offset_percentage: scrollOffsetPercentage,
+        updated_at: new Date().toISOString(),
+      };
+      pendingProgressRef.current[bookId] = payload;
+
       if (syncTimeouts.current[bookId]) {
         clearTimeout(syncTimeouts.current[bookId]);
       }
 
       syncTimeouts.current[bookId] = setTimeout(async () => {
+        const latest = pendingProgressRef.current[bookId] || payload;
+        delete pendingProgressRef.current[bookId];
+        delete syncTimeouts.current[bookId];
         try {
-          await api.syncProgress([
-            {
-              novel_id: bookId,
-              chapter_index: chapterIndex,
-              scroll_offset_percentage: scrollOffsetPercentage,
-              updated_at: new Date().toISOString(),
-            },
-          ]);
-          delete syncTimeouts.current[bookId];
+          await api.syncProgress([latest]);
         } catch (err) {
           console.error('Reading progress sync failed:', err);
         }
@@ -501,19 +562,26 @@ function AppContent() {
     [user?.id]
   );
 
-  const handleUnlockChapter = useCallback(
-    async (bookId: number, chapterIndex: number, _price: number): Promise<boolean> => {
-      try {
-        await api.unlockChapter(bookId, chapterIndex);
-        markChapterUnlocked(bookId, chapterIndex);
-        await reloadWalletAndShelf();
-        return true;
-      } catch (err) {
-        console.error('Failed to unlock chapter:', err);
-        return false;
-      }
+  const unmarkChapterUnlocked = useCallback(
+    (bookId: number, chapterIndex: number) => {
+      const key = `${bookId}-${chapterIndex}`;
+      setUnlockedBookChapters((prev) => {
+        if (!prev.includes(key)) return prev;
+        const next = prev.filter((k) => k !== key);
+        saveScopedUnlockedChapters(user?.id ?? null, next);
+        return next;
+      });
     },
-    [markChapterUnlocked, reloadWalletAndShelf]
+    [user?.id]
+  );
+
+  const handleUnlockChapter = useCallback(
+    async (bookId: number, chapterIndex: number, price: number): Promise<boolean> => {
+      await api.unlockChapter(bookId, chapterIndex, price);
+      await reloadWalletAndShelf();
+      return true;
+    },
+    [reloadWalletAndShelf]
   );
 
   const getActiveTab = (): NavTabType | null => {
@@ -604,7 +672,7 @@ function AppContent() {
               />
             }
           />
-          <Route path="/rewards" element={<Rewards onAddCoins={handleAddCoins} />} />
+          <Route path="/rewards" element={<Rewards authReady={authReady} onAddCoins={handleAddCoins} />} />
           <Route
             path="/profile"
             element={
@@ -617,6 +685,9 @@ function AppContent() {
                 isVip={isVip}
                 subscription={subscription}
                 transactionHistory={transactionHistory}
+                hasMoreTransactions={hasMoreTransactions}
+                loadingMoreTransactions={loadingMoreTransactions}
+                onLoadMoreTransactions={handleLoadMoreTransactions}
                 currentUser={user}
                 themePreference={themePreference}
                 systemTheme={systemTheme}
@@ -640,6 +711,7 @@ function AppContent() {
                   setIsVip(false);
                   setSubscription(null);
                   setTransactionHistory([]);
+                  setHasMoreTransactions(false);
                   setUnlockedBookChapters([]);
                   setShelfLoading(true);
                   triggerGuestLogin();
@@ -652,6 +724,7 @@ function AppContent() {
             path="/detail"
             element={
               <Detail
+                authReady={authReady}
                 novelId={detailNovelId}
                 novels={novels}
                 onNavigate={navigateTo}
@@ -680,6 +753,7 @@ function AppContent() {
                 onSaveProgress={handleSaveProgress}
                 unlockedBookChapters={unlockedBookChapters}
                 onMarkChapterUnlocked={markChapterUnlocked}
+                onUnmarkChapterUnlocked={unmarkChapterUnlocked}
                 onUnlockChapter={handleUnlockChapter}
                 userCoins={userCoins}
               />
@@ -689,6 +763,12 @@ function AppContent() {
             path="/recharge"
             element={
               <Recharge
+                authReady={authReady}
+                novelId={readerNovelId}
+                novelTitle={
+                  novels.find((book) => book.id === readerNovelId)?.title ||
+                  shelfNovelsList.find((book) => book.id === readerNovelId)?.title
+                }
                 userCoins={userCoins}
                 onAddCoins={handleAddCoins}
                 onRefreshStatus={reloadWalletAndShelf}

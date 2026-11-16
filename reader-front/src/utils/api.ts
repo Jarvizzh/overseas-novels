@@ -1,5 +1,14 @@
 const BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8080/api/v1';
 
+export class ApiError extends Error {
+  status: number;
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+  }
+}
+
 type SessionRefreshHandler = () => Promise<string | null>;
 
 let sessionRefreshHandler: SessionRefreshHandler | null = null;
@@ -84,7 +93,7 @@ async function request<T>(endpoint: string, options: RequestInit = {}, retried =
 
   if (!response.ok) {
     const errorBody = await response.json().catch(() => ({}));
-    throw new Error(errorBody.error || `HTTP error! Status: ${response.status}`);
+    throw new ApiError(errorBody.error || `HTTP error! Status: ${response.status}`, response.status);
   }
 
   if (response.status === 204) {
@@ -163,6 +172,14 @@ export interface ChapterContentResponse {
   chapter: Chapter;
   locked: boolean;
   price: number;
+  access_type?: 'free' | 'chapter' | 'pass';
+}
+
+export interface CheckInState {
+  checked_in: boolean;
+  day: number;
+  coins_awarded: number;
+  rewards: number[];
 }
 
 export interface SubscriptionInfo {
@@ -254,9 +271,13 @@ export const api = {
       body: JSON.stringify({ novel_ids: novelIds }),
     }),
 
-  syncProgress: (updates: Array<{ novel_id: number; chapter_index: number; scroll_offset_percentage: number; updated_at: string }>) =>
+  syncProgress: (
+    updates: Array<{ novel_id: number; chapter_index: number; scroll_offset_percentage: number; updated_at: string }>,
+    options: { keepalive?: boolean } = {}
+  ) =>
     request<{ message: string }>('/shelf/sync', {
       method: 'POST',
+      keepalive: options.keepalive,
       body: JSON.stringify({ progress_updates: updates }),
     }),
 
@@ -267,10 +288,10 @@ export const api = {
   getTransactionHistory: (page: number = 1, limit: number = 20) =>
     request<Transaction[]>(`/wallet/history?page=${page}&limit=${limit}`),
 
-  unlockChapter: (novelId: number, chapterIndex: number) =>
+  unlockChapter: (novelId: number, chapterIndex: number, price: number) =>
     request<{ message: string }>('/wallet/unlock', {
       method: 'POST',
-      body: JSON.stringify({ novel_id: novelId, chapter_index: chapterIndex }),
+      body: JSON.stringify({ novel_id: novelId, chapter_index: chapterIndex, price }),
     }),
 
   initiateCheckout: (amountCents: number, coinsAmount: number) =>
@@ -285,21 +306,21 @@ export const api = {
       body: JSON.stringify({ amount_cents: amountCents, coins_amount: coinsAmount }),
     }),
 
-  createPayPalOrder: (amountCents: number, coinsAmount: number, returnUrl?: string, cancelUrl?: string) =>
+  createPayPalOrder: (slotId: number, novelId: number = 0, returnUrl?: string, cancelUrl?: string) =>
     request<{ order_id: string; approve_url: string }>('/wallet/recharge/paypal/create-order', {
       method: 'POST',
       body: JSON.stringify({
-        amount_cents: amountCents,
-        coins_amount: coinsAmount,
+        slot_id: slotId,
+        novel_id: novelId,
         return_url: returnUrl,
         cancel_url: cancelUrl,
       }),
     }),
 
-  capturePayPalPayment: (orderId: string, coinsAmount: number) =>
-    request<{ message: string }>('/wallet/recharge/paypal/capture', {
+  capturePayPalPayment: (orderId: string) =>
+    request<{ coins_awarded: number; order_type: string }>('/wallet/recharge/paypal/capture', {
       method: 'POST',
-      body: JSON.stringify({ order_id: orderId, coins_amount: coinsAmount }),
+      body: JSON.stringify({ order_id: orderId }),
     }),
 
   getRechargeTemplates: () =>
@@ -355,10 +376,12 @@ export const api = {
       }),
     }),
 
-  dailyCheckIn: (day: number, coins: number) =>
-    request<{ message: string; coins_awarded: number }>('/wallet/rewards/checkin', {
+  getCheckInState: () =>
+    request<CheckInState>('/wallet/rewards/checkin'),
+
+  dailyCheckIn: () =>
+    request<CheckInState>('/wallet/rewards/checkin', {
       method: 'POST',
-      body: JSON.stringify({ day, coins }),
     }),
 
   submitFeedback: (email: string, content: string, subject: string = '') =>

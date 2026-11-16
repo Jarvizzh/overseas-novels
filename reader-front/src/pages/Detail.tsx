@@ -4,6 +4,7 @@ import { api } from '../utils/api';
 import type { Novel, Chapter } from '../utils/api';
 
 interface DetailProps {
+  authReady?: boolean;
   novelId: number;
   novels?: Novel[];
   onNavigate: (page: string, params?: Record<string, unknown>) => void;
@@ -19,6 +20,7 @@ interface DetailProps {
 }
 
 export const Detail: React.FC<DetailProps> = ({
+  authReady = true,
   novelId,
   onNavigate,
   onBack,
@@ -35,21 +37,33 @@ export const Detail: React.FC<DetailProps> = ({
   const [isDescendingOrder, setIsDescendingOrder] = useState(false);
 
   useEffect(() => {
+    if (!authReady) return;
+    let cancelled = false;
     const loadNovelDetails = async () => {
       setLoading(true);
+      setNovel(null);
+      setChapters([]);
       try {
-        const detail = await api.getNovelDetail(novelId);
+        const [detail, chList] = await Promise.all([
+          api.getNovelDetail(novelId),
+          api.getChaptersList(novelId).catch(() => []),
+        ]);
+        if (cancelled) return;
         setNovel(detail);
-        const chList = await api.getChaptersList(novelId);
         setChapters(chList || []);
       } catch (err) {
-        console.error('Failed to load novel detail or chapters list:', err);
+        if (!cancelled) {
+          console.error('Failed to load novel detail or chapters list:', err);
+        }
       } finally {
-        setLoading(false);
+        if (!cancelled) setLoading(false);
       }
     };
     loadNovelDetails();
-  }, [novelId]);
+    return () => {
+      cancelled = true;
+    };
+  }, [authReady, novelId]);
 
   if (loading) {
     return (
@@ -290,7 +304,8 @@ export const Detail: React.FC<DetailProps> = ({
 
                 <div className="chapters-list">
                   {sortedChapters.map((ch, index) => {
-                    const chIndex = isDescendingOrder ? chapters.length - 1 - index : index;
+                    const fallbackIndex = isDescendingOrder ? chapters.length - 1 - index : index;
+                    const chIndex = ch.chapter_index ?? fallbackIndex;
                     const isRead = progress !== undefined && chIndex <= progress.chapterIndex;
                     return (
                       <button

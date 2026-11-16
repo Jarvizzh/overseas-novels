@@ -16,6 +16,9 @@ interface ProfileProps {
   isVip: boolean;
   subscription: SubscriptionInfo | null;
   transactionHistory: Transaction[];
+  hasMoreTransactions?: boolean;
+  loadingMoreTransactions?: boolean;
+  onLoadMoreTransactions?: () => void;
   currentUser: User | null;
   themePreference: ThemePreference;
   systemTheme: 'light' | 'dark';
@@ -33,6 +36,9 @@ export const Profile: React.FC<ProfileProps> = ({
   isVip,
   subscription,
   transactionHistory,
+  hasMoreTransactions = false,
+  loadingMoreTransactions = false,
+  onLoadMoreTransactions,
   currentUser,
   themePreference,
   systemTheme,
@@ -72,6 +78,14 @@ export const Profile: React.FC<ProfileProps> = ({
 
   const isGuest = !currentUser || !currentUser.email;
 
+  const closeAuthModal = () => {
+    setAuthMode('none');
+    setAuthError(null);
+    setEmail('');
+    setPassword('');
+    setNickname('');
+  };
+
   const handleAuthSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setAuthError(null);
@@ -82,7 +96,7 @@ export const Profile: React.FC<ProfileProps> = ({
         const res = await api.login({ email, password });
         onLoginSuccess(res.token, res.user);
         showToast('Welcome back!', 'success');
-        setAuthMode('none');
+        closeAuthModal();
       } else if (authMode === 'signup') {
         if (isGuest) {
           const res = await api.bindEmail({ email, password, nickname });
@@ -93,11 +107,8 @@ export const Profile: React.FC<ProfileProps> = ({
           onLoginSuccess(res.token, res.user);
           showToast('Account created successfully!', 'success');
         }
-        setAuthMode('none');
+        closeAuthModal();
       }
-      setEmail('');
-      setPassword('');
-      setNickname('');
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Authentication failed. Please check your credentials.';
       setAuthError(msg);
@@ -319,41 +330,55 @@ export const Profile: React.FC<ProfileProps> = ({
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
             {transactionHistory.length > 0 ? (
-              transactionHistory.map((item) => (
-                <div
-                  key={item.id}
-                  style={{
-                    display: 'flex',
-                    justifyContent: 'space-between',
-                    alignItems: 'center',
-                    gap: '12px',
-                    padding: '14px 16px',
-                    backgroundColor: 'var(--bg-secondary)',
-                    borderRadius: '12px',
-                    border: '1px solid var(--border-color)',
-                  }}
-                >
-                  <div style={{ minWidth: 0 }}>
-                    <div style={{ fontSize: '0.875rem', fontWeight: 600, color: 'var(--text-primary)' }}>
-                      {item.desc}
-                    </div>
-                    <span style={{ fontSize: '0.6875rem', color: 'var(--text-tertiary)', marginTop: '3px', display: 'block' }}>
-                      {new Date(item.date).toLocaleString()}
-                    </span>
-                  </div>
-                  <span
-                    className="tabular-nums"
+              <>
+                {transactionHistory.map((item) => (
+                  <div
+                    key={item.id}
                     style={{
-                      fontSize: '0.9375rem',
-                      fontWeight: 700,
-                      color: item.type === 'credit' ? '#16a34a' : '#dc2626',
-                      flexShrink: 0,
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      alignItems: 'center',
+                      gap: '12px',
+                      padding: '14px 16px',
+                      backgroundColor: 'var(--bg-secondary)',
+                      borderRadius: '12px',
+                      border: '1px solid var(--border-color)',
                     }}
                   >
-                    {item.type === 'credit' ? '+' : '-'}{item.amount.toLocaleString()}
-                  </span>
-                </div>
-              ))
+                    <div style={{ minWidth: 0 }}>
+                      <div style={{ fontSize: '0.875rem', fontWeight: 600, color: 'var(--text-primary)' }}>
+                        {item.desc}
+                      </div>
+                      <span style={{ fontSize: '0.6875rem', color: 'var(--text-tertiary)', marginTop: '3px', display: 'block' }}>
+                        {new Date(item.date).toLocaleString()}
+                      </span>
+                    </div>
+                    <span
+                      className="tabular-nums"
+                      style={{
+                        fontSize: '0.9375rem',
+                        fontWeight: 700,
+                        color: item.type === 'credit' ? '#16a34a' : '#dc2626',
+                        flexShrink: 0,
+                      }}
+                    >
+                      {item.type === 'credit' ? '+' : '-'}{item.amount.toLocaleString()}
+                    </span>
+                  </div>
+                ))}
+                {hasMoreTransactions && onLoadMoreTransactions && (
+                  <div style={{ display: 'flex', justifyContent: 'center', marginTop: '8px' }}>
+                    <button
+                      type="button"
+                      className="btn-cta-secondary"
+                      disabled={loadingMoreTransactions}
+                      onClick={onLoadMoreTransactions}
+                    >
+                      {loadingMoreTransactions ? 'Loading...' : 'Load More History'}
+                    </button>
+                  </div>
+                )}
+              </>
             ) : (
               <div className="shelf-empty-state">
                 <div className="shelf-empty-icon-wrap">
@@ -376,8 +401,7 @@ export const Profile: React.FC<ProfileProps> = ({
         aria-labelledby={authTitleId}
         onCancel={(e) => {
           e.preventDefault();
-          setAuthMode('none');
-          setAuthError(null);
+          closeAuthModal();
         }}
         onPointerDown={(e) => {
           if (authDialogRef.current) {
@@ -386,8 +410,7 @@ export const Profile: React.FC<ProfileProps> = ({
         }}
         onPointerUp={(e) => {
           if (authDialogRef.current && pressedOutsideRef.current && isPointerOutside(e, authDialogRef.current)) {
-            setAuthMode('none');
-            setAuthError(null);
+            closeAuthModal();
           }
           pressedOutsideRef.current = false;
         }}
@@ -400,10 +423,7 @@ export const Profile: React.FC<ProfileProps> = ({
           <button
             type="button"
             className="header-btn"
-            onClick={() => {
-              setAuthMode('none');
-              setAuthError(null);
-            }}
+            onClick={closeAuthModal}
             aria-label="Close dialog"
           >
             <X size={18} strokeWidth={1.8} aria-hidden="true" />
