@@ -25,6 +25,8 @@ type Repository interface {
 	CompletePayPalRefund(context.Context, string, string, int64, string) error
 	enqueuePayPalEvent(context.Context, *payment.WebhookEventResult) error
 	enqueuePayPalCancellation(context.Context, string, int64, string) error
+	savePayPalBillingSnapshot(context.Context, *payment.SubscriptionDetails) error
+	getPayPalBillingSnapshot(context.Context, string, time.Time, string, int64) (time.Time, error)
 	GetWallet(ctx context.Context, userID int64) (*model.Wallet, error)
 	GetTransactions(ctx context.Context, userID int64, limit, offset int) ([]model.Transaction, error)
 	UnlockChapterTx(ctx context.Context, userID int64, novelID int64, chapterIndex int, price int, chapterTitle string) error
@@ -39,11 +41,16 @@ type Repository interface {
 	GetProviderPlan(ctx context.Context, provider string, slotID int) (*model.PaymentProviderPlan, error)
 	SaveProviderPlan(ctx context.Context, plan *model.PaymentProviderPlan) error
 	UpsertUserSubscription(ctx context.Context, sub *model.UserSubscription) error
+	reserveSubscriptionIntent(context.Context, subscriptionIntent) (*subscriptionIntent, error)
+	releaseSubscriptionIntent(context.Context, string)
+	submitSubscriptionIntent(context.Context, string, string) error
+	finishSubscriptionIntent(context.Context, *subscriptionIntent, *payment.SubscriptionResult) error
 	GetActiveSubscriptionByUserID(ctx context.Context, userID int64) (*model.UserSubscription, error)
 	GetSubscriptionByID(ctx context.Context, subID string) (*model.UserSubscription, error)
 	UpdateUserSubscriptionStatus(ctx context.Context, subID string, status string) error
 	RecordSubscriptionRenewalOrderTx(ctx context.Context, sub *model.UserSubscription, externalRefID string, amountCents int64, currency string, paidAt, periodEnd time.Time, providerStatus string, tpOrder *model.ThirdPartyPaymentOrder) (bool, error)
 	GetCheckoutTemplate(context.Context, int64) (int, error)
+	WholeBookAvailable(context.Context, int64, int, int64) (bool, error)
 	CreateCheckout(context.Context, int64, *model.RechargeSlot, int64, checkoutAttribution) (string, error)
 	BindCheckout(context.Context, string, string) error
 	findCheckout(context.Context, string) (*checkoutOrder, error)
@@ -479,10 +486,10 @@ func (r *dbRepository) RecordSubscriptionRenewalOrderTx(
 	var orderID int64
 	err = tx.QueryRow(ctx, `INSERT INTO recharge_orders
 		(user_id, external_ref_id, amount_cents,currency,coins,bonus_coins_credited,payment_method,status,
-		paid_at, order_type, subscription_id, recharge_slot_id, recharge_template_id, fulfilled_at, paid_period_end,
+		paid_at, order_type, subscription_id, recharge_slot_id, recharge_template_id, fulfilled_at, paid_period_start, paid_period_end,
 		utm_source, utm_campaign, promotion_link_id, novel_id, reconciliation_note, paypal_refund_reported)
 		SELECT u.id,$2,$3,$4,0,0,$5,'Success',$6,'subscription',$7,$8,
-			(SELECT id FROM recharge_templates WHERE id=$9),CASE WHEN $10::timestamptz IS NOT NULL THEN now() END,$10,u.utm_source,u.utm_campaign,p.id,p.novel_id,
+			(SELECT id FROM recharge_templates WHERE id=$9),CASE WHEN $10::timestamptz IS NOT NULL THEN now() END,CASE WHEN $10::timestamptz IS NOT NULL THEN $6::timestamptz END,$10,u.utm_source,u.utm_campaign,p.id,p.novel_id,
  CASE WHEN $11 THEN 'PayPal reports refunded sale; match refund ID'
  WHEN $10::timestamptz IS NULL THEN 'PayPal settled amount verified; billing period needs review' END,$11
 		FROM users u LEFT JOIN LATERAL (
@@ -491,6 +498,7 @@ func (r *dbRepository) RecordSubscriptionRenewalOrderTx(
 		) p ON TRUE WHERE u.id=$1
 		ON CONFLICT(external_ref_id) DO UPDATE SET
 			paid_period_end=COALESCE(EXCLUDED.paid_period_end,recharge_orders.paid_period_end),
+ paid_period_start=COALESCE(EXCLUDED.paid_period_start,recharge_orders.paid_period_start),
 			fulfilled_at=COALESCE(recharge_orders.fulfilled_at,EXCLUDED.fulfilled_at),
 			paypal_refund_reported=EXCLUDED.paypal_refund_reported,
 			reconciliation_note=EXCLUDED.reconciliation_note
@@ -558,10 +566,10 @@ func (r *dbRepository) RecordSubscriptionRenewalOrderTx(
 
 	_, err = tx.Exec(ctx, `UPDATE user_subscriptions SET
 		status=CASE WHEN status IN ('CANCELLED','CANCEL_PENDING') THEN status ELSE $4 END,
-		last_payment_time=$2, current_period_end=GREATEST(current_period_end,$3),
-		next_billing_time=CASE WHEN status IN ('CANCELLED','CANCEL_PENDING') OR $4 <> 'ACTIVE' THEN NULL ELSE $3 END,
+		last_payment_time=GREATEST(last_payment_time,$2), current_period_end=GREATEST(current_period_end,$3),
+		next_billing_time=CASE WHEN status IN ('CANCELLED','CANCEL_PENDING') OR $4 <> 'ACTIVE' THEN NULL ELSE GREATEST(next_billing_time,$3) END,
 		updated_at=now()
-		WHERE subscription_id=$1 AND (last_payment_time IS NULL OR last_payment_time < $2)`,
+		WHERE subscription_id=$1`,
 		sub.SubscriptionID, paidAt, periodEnd, providerStatus)
 	if err != nil {
 		return false, err
@@ -583,36 +591,25 @@ func (r *dbRepository) CompletePayPalRefund(ctx context.Context, refundID, captu
 	}
 
 	var orderID int64
-	var status string
-	err = tx.QueryRow(ctx, `SELECT o.id,o.status FROM recharge_orders o
+	var status, observedCapture string
+	err = tx.QueryRow(ctx, `SELECT o.id,o.status,p.capture_id FROM recharge_orders o
+		JOIN third_party_payment_orders p ON p.order_id=o.id AND p.payment_provider='paypal'
 		LEFT JOIN payment_refunds r ON r.order_id=o.id
-		WHERE o.payment_method='paypal' AND o.amount_cents=$3 AND o.currency=$4
-		AND (r.provider_refund_id=$1 OR ((r.provider_refund_id IS NULL OR r.status='Failed') AND $2 <> '' AND EXISTS (
-			SELECT 1 FROM third_party_payment_orders p WHERE p.order_id=o.id AND p.payment_provider='paypal'
-			AND p.capture_id=$2 AND (p.status='VERIFIED' OR (o.status='RefundPending' AND p.status='COMPLETED')))))
-		ORDER BY o.id LIMIT 1 FOR UPDATE OF o`, refundID, captureID, amount, currency).Scan(&orderID, &status)
+		WHERE o.payment_method='paypal' AND $3>0 AND o.amount_cents >= $3 AND o.currency=$4
+		AND (($2<>'' AND p.capture_id=$2 AND p.status='VERIFIED') OR
+			(r.provider_refund_id=$1 AND ($2='' OR p.capture_id=$2) AND p.status IN ('VERIFIED','COMPLETED')) OR
+			($2<>'' AND p.capture_id=$2 AND o.status='RefundPending' AND p.status='COMPLETED'))
+		ORDER BY p.id DESC LIMIT 1`, refundID, captureID, amount, currency).Scan(&orderID, &status, &observedCapture)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return errRefundUnmatched
 	}
 	if err != nil {
 		return err
 	}
-	if status == "Success" || status == "Paid" {
-		_, err = tx.Exec(ctx, `INSERT INTO payment_refunds(order_id,request_id,provider_refund_id)
-			VALUES($1,gen_random_uuid(),$2) ON CONFLICT(order_id) DO UPDATE SET provider_refund_id=EXCLUDED.provider_refund_id,
-			status='Pending' WHERE payment_refunds.status='Failed'`, orderID, refundID)
-		if err != nil {
-			return err
-		}
-		_, err = tx.Exec(ctx, `UPDATE recharge_orders SET status='RefundPending',updated_at=now() WHERE id=$1`, orderID)
-		if err != nil {
-			return err
-		}
-	}
 	if status == "Pending" {
-		return ErrCheckoutUnavailable
+		return errRefundUnmatched
 	}
-	_, err = tx.Exec(ctx, `SELECT complete_paypal_refund($1,$2)`, orderID, refundID)
+	_, err = tx.Exec(ctx, `SELECT settle_paypal_refund_item($1,$2,$3,$4,$5)`, orderID, refundID, observedCapture, amount, currency)
 	if err != nil {
 		return err
 	}
@@ -624,4 +621,10 @@ func (r *dbRepository) enqueuePayPalCancellation(ctx context.Context, id string,
 		cancel_reason=COALESCE(cancel_reason,NULLIF($3,'')),cancel_next_attempt_at=COALESCE(cancel_next_attempt_at,now()),updated_at=now()
 		WHERE subscription_id=$1 AND user_id=$2 AND status NOT IN ('CANCELLED','EXPIRED')`, id, userID, reason)
 	return err
+}
+
+func (r *dbRepository) WholeBookAvailable(ctx context.Context, userID int64, templateID int, novelID int64) (bool, error) {
+	var allowed bool
+	err := db.DB.QueryRow(ctx, `SELECT whole_book_offer_available($1,$2,$3)`, userID, templateID, novelID).Scan(&allowed)
+	return allowed, err
 }

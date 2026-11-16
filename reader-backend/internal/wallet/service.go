@@ -39,7 +39,7 @@ type Service interface {
 	ProcessSubscriptionWebhook(ctx context.Context, providerName string, payload []byte, headers map[string]string) error
 	ProcessStripeWebhook(ctx context.Context, payload []byte, sigHeader string, webhookSecret string) error
 	CheckIn(context.Context, int64, bool) (*CheckInState, error)
-	GetRechargeTemplates(ctx context.Context, userID int64) (*model.RechargeTemplate, error)
+	GetRechargeTemplates(ctx context.Context, userID int64, novelID int64) (*model.RechargeTemplate, error)
 }
 
 type service struct {
@@ -216,6 +216,12 @@ func (s *service) completePayPalOrder(ctx context.Context, userID int64, orderID
 	if userID != 0 && order.userID != userID {
 		return nil, ErrCheckoutUnavailable
 	}
+	if order.status != "Refunded" && order.orderType == "whole_book" && (order.novelID <= 0 || (order.checkoutID == "" && !order.legacyBookProven)) {
+		if err := s.repo.flagCheckoutForReview(ctx, order.id, "Independent historical whole-book purchase evidence is required"); err != nil {
+			return nil, err
+		}
+		return nil, ErrCheckoutUnavailable
+	}
 	switch order.status {
 	case "Success", "Paid":
 		if !order.needsHistoricalBookVerification() {
@@ -225,12 +231,6 @@ func (s *service) completePayPalOrder(ctx context.Context, userID int64, orderID
 	case "Refunded":
 		return nil, ErrPaymentRefunded
 	default:
-		return nil, ErrCheckoutUnavailable
-	}
-	if order.orderType == "whole_book" && order.novelID <= 0 {
-		if err := s.repo.flagCheckoutForReview(ctx, order.id, "Missing original whole-book target"); err != nil {
-			return nil, err
-		}
 		return nil, ErrCheckoutUnavailable
 	}
 	capture, err := s.paypalClient.GetCapture(ctx, orderID)
@@ -304,7 +304,7 @@ func (s *service) CheckIn(ctx context.Context, userID int64, claim bool) (*Check
 	return s.repo.CheckIn(ctx, userID, claim)
 }
 
-func (s *service) GetRechargeTemplates(ctx context.Context, userID int64) (*model.RechargeTemplate, error) {
+func (s *service) GetRechargeTemplates(ctx context.Context, userID int64, novelID int64) (*model.RechargeTemplate, error) {
 	templateID, err := s.repo.GetCheckoutTemplate(ctx, userID)
 	if err != nil {
 		return nil, err
@@ -324,7 +324,16 @@ func (s *service) GetRechargeTemplates(ctx context.Context, userID int64) (*mode
 	if err != nil {
 		return nil, err
 	}
-	t.Slots = slots
+	canBuyBook, err := s.repo.WholeBookAvailable(ctx, userID, templateID, novelID)
+	if err != nil {
+		return nil, err
+	}
+	t.Slots = make([]model.RechargeSlot, 0, len(slots))
+	for _, slot := range slots {
+		if slot.Type != "whole_book" || canBuyBook {
+			t.Slots = append(t.Slots, slot)
+		}
+	}
 
 	return t, nil
 }
@@ -337,6 +346,8 @@ func (s *service) CreateSubscription(
 	returnURL, cancelURL string,
 	fbp, fbc, pixelID, ip, ua, sourceURL, country string,
 ) (*payment.SubscriptionResult, error) {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
 	if providerName == "" {
 		providerName = payment.ProviderPayPal
 	}
@@ -372,79 +383,74 @@ func (s *service) CreateSubscription(
 	default:
 		return nil, ErrCheckoutUnavailable
 	}
-	existingPlan, err := s.repo.GetProviderPlan(ctx, providerName, slot.ID)
+	intent, err := s.repo.reserveSubscriptionIntent(ctx, subscriptionIntent{userID: userID, slotID: slot.ID,
+		templateID: slot.TemplateID, priceCents: slot.PriceCents, cycle: cycleStr, returnURL: returnURL, cancelURL: cancelURL})
 	if err != nil {
 		return nil, err
 	}
-	var planID string
-	if existingPlan != nil && existingPlan.ExternalPlanID != "" && existingPlan.PriceCents == slot.PriceCents && existingPlan.Cycle == cycleStr && existingPlan.Currency == "USD" {
-		planID = existingPlan.ExternalPlanID
-	} else {
-		planName := slot.VipName
-		if planName == "" {
-			planName = "Star Novel VIP " + strings.Title(cycleStr)
-		}
-		desc := slot.VipDesc
-		if desc == "" {
-			desc = "Unlimited reading access for VIP members"
-		}
-		newPlanID, errPlan := provider.CreatePlan(ctx, payment.CreateSubscriptionPlanParam{
-			PlanName:    planName,
-			Description: desc,
-			Cycle:       payment.SubscriptionCycle(cycleStr),
-			PriceCents:  int64(slot.PriceCents),
-			Currency:    "USD",
-		})
-		if errPlan != nil {
-			return nil, fmt.Errorf("failed to create subscription plan with %s: %w", providerName, errPlan)
-		}
-		planID = newPlanID
-		err = s.repo.SaveProviderPlan(ctx, &model.PaymentProviderPlan{
-			Provider:       providerName,
-			SlotID:         slot.ID,
-			Cycle:          cycleStr,
-			PriceCents:     slot.PriceCents,
-			Currency:       "USD",
-			ExternalPlanID: planID,
-			Status:         "ACTIVE",
-		})
+	if intent.approvalURL != "" {
+		return &payment.SubscriptionResult{SubscriptionID: intent.subscriptionID, ApproveURL: intent.approvalURL, Status: "APPROVAL_PENDING"}, nil
+	}
+	defer func() {
+		releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+		defer cancel()
+		s.repo.releaseSubscriptionIntent(releaseCtx, intent.id)
+	}()
+	if intent.planID == "" {
+		existingPlan, err := s.repo.GetProviderPlan(ctx, providerName, intent.slotID)
 		if err != nil {
 			return nil, err
 		}
-	}
+		var planID string
+		if existingPlan != nil && existingPlan.ExternalPlanID != "" && existingPlan.PriceCents == intent.priceCents && existingPlan.Cycle == intent.cycle && existingPlan.Currency == "USD" {
+			planID = existingPlan.ExternalPlanID
+		} else {
+			planName := slot.VipName
+			if planName == "" {
+				planName = "Star Novel VIP " + strings.Title(intent.cycle)
+			}
+			desc := slot.VipDesc
+			if desc == "" {
+				desc = "Unlimited reading access for VIP members"
+			}
+			newPlanID, errPlan := provider.CreatePlan(ctx, payment.CreateSubscriptionPlanParam{
+				PlanName:    planName,
+				Description: desc,
+				Cycle:       payment.SubscriptionCycle(intent.cycle),
+				PriceCents:  int64(intent.priceCents),
+				Currency:    "USD",
+			})
+			if errPlan != nil {
+				return nil, fmt.Errorf("failed to create subscription plan with %s: %w", providerName, errPlan)
+			}
+			planID = newPlanID
+			err = s.repo.SaveProviderPlan(ctx, &model.PaymentProviderPlan{
+				Provider:       providerName,
+				SlotID:         intent.slotID,
+				Cycle:          intent.cycle,
+				PriceCents:     intent.priceCents,
+				Currency:       "USD",
+				ExternalPlanID: planID,
+				Status:         "ACTIVE",
+			})
+			if err != nil {
+				return nil, err
+			}
+		}
 
-	customID := fmt.Sprintf("%d:%d:%s", userID, slot.ID, cycleStr)
+		intent.planID = planID
+	}
+	if err := s.repo.submitSubscriptionIntent(ctx, intent.id, intent.planID); err != nil {
+		return nil, err
+	}
 	result, err := provider.CreateSubscription(ctx, payment.CreateSubscriptionParam{
-		UserID:     userID,
-		PlanID:     planID,
-		SlotID:     slot.ID,
-		PriceCents: int64(slot.PriceCents),
-		Currency:   "USD",
-		CustomID:   customID,
-		ReturnURL:  returnURL,
-		CancelURL:  cancelURL,
+		RequestID: intent.id, UserID: userID, PlanID: intent.planID, SlotID: intent.slotID, PriceCents: int64(intent.priceCents),
+		Currency: "USD", CustomID: intent.id, ReturnURL: intent.returnURL, CancelURL: intent.cancelURL,
 	})
 	if err != nil {
 		return nil, err
 	}
-
-	// Pre-record pending subscription in database
-	now := time.Now()
-	sub := &model.UserSubscription{
-		UserID:             userID,
-		SubscriptionID:     result.SubscriptionID,
-		PlanID:             planID,
-		SlotID:             slot.ID,
-		TemplateID:         slot.TemplateID,
-		Status:             "PENDING",
-		Cycle:              cycleStr,
-		PriceCents:         slot.PriceCents,
-		Currency:           "USD",
-		PaymentMethod:      providerName,
-		CurrentPeriodStart: &now,
-		RawPayload:         "{}",
-	}
-	if err := s.repo.UpsertUserSubscription(ctx, sub); err != nil {
+	if err := s.repo.finishSubscriptionIntent(ctx, intent, result); err != nil {
 		return nil, err
 	}
 
@@ -632,6 +638,18 @@ func (s *service) recordPayPalSubscriptionTransaction(ctx context.Context, sub *
 		details.LastPaymentCents == amount && details.LastPaymentCurrency == sub.Currency &&
 		amount >= int64(sub.PriceCents) && details.CurrentPeriodEnd != nil && details.CurrentPeriodEnd.After(transaction.Time) {
 		periodEnd = *details.CurrentPeriodEnd
+	}
+
+	if periodEnd.IsZero() && transaction.Status == "COMPLETED" {
+		periodEnd, err = s.repo.getPayPalBillingSnapshot(ctx, sub.SubscriptionID, transaction.Time, sub.Currency, amount)
+		if err != nil {
+			return err
+		}
+		if periodEnd.IsZero() && details.Status == "CANCELLED" && details.CurrentPeriodStart != nil &&
+			details.LastPaymentTime != nil && transaction.Time.Sub(*details.LastPaymentTime).Abs() <= time.Minute &&
+			details.LastPaymentCents == amount && details.LastPaymentCurrency == sub.Currency && amount == int64(sub.PriceCents) {
+			periodEnd = regularPayPalPeriodEnd(sub, *details.CurrentPeriodStart, transaction.Time)
+		}
 	}
 
 	raw, err := json.Marshal(transaction)

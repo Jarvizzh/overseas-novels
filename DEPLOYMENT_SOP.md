@@ -113,6 +113,39 @@ flowchart TD
 
    部署新版支付前，先执行共用数据库 schema，再配套更新 CMS、Reader API 与 Reader H5。为 Reader 设置当前 PayPal 应用对应的 `PAYPAL_WEBHOOK_ID`（若用 Linux 配置生成脚本，则设置 `payment.paypal_webhook_id`）。注册订单批准、扣款完成、支付和订阅状态、退款完成的通知。Stripe 接口当前返回停用。CMS 必须配置独立的 `CMS_JWT_SECRET`（Linux 配置生成脚本读取 `cms.jwt_secret`），切换后 CMS 管理员需重新登录。 完成迁移后，可从 CMS 订单接口的 `reconciliation_note` 定位待核对的历史订单或账期。核实存量 PayPal 交易和退款凭证后再补发权益。
 
+
+   支付修复升级还需确认以下事项。
+
+   - CMS 的生产示例使用 `CMS_JWT_SECRET`。复制示例后，用 `openssl rand -hex 32` 生成独立密钥并填写实际配置。生产启动会拒绝占位值和开发默认值。
+   - `paypal_refund_items` 按真实退款 ID 保存已验证的退款明细，累计退满原扣款后冲销金币与权益。已有 inbox 中的退款记录会迁入明细表，退款差额继续保存在 `payment_refunds`。
+   - 新订阅会先持久化账号级创建意图。相同请求恢复原审批链接，存在有效渠道订阅时返回冲突。更换套餐需先确认旧订阅已在渠道取消或到期。渠道已收到请求但本地未取得结果且超过 24 小时的意图，需要按渠道账单核对后处理。
+   - 取消前保存渠道确认的账期快照。外部取消后，金额、币种和周期锚点均匹配的普通扣款可恢复已付周期，无法确认的补扣继续显示 `reconciliation_note`。
+   - 历史整本订单必须在 `legacy_whole_book_proofs` 中有独立的原商品类型与小说证据。审核人需记录 `order_id`、`novel_id`、原始证据定位 `evidence_reference` 和审核管理员 `verified_by`。证据中的小说必须与订单保存的原目标一致，目标缺失或错误时须依据原始商品凭证修正后再登记。核实渠道收款后仅补齐权益，已入账金币保留原账。此前已回填的历史整本权益也会检查此证据，缺少证据的订单需人工核对。
+
+   上线前执行以下只读查询，核对历史重复订阅与缺少整本证据的订单，并保存核对结果。重复订阅需分别核查渠道状态和用户权益后处理。
+
+   ```sql
+   SELECT user_id, count(*) AS subscription_count,
+          array_agg(subscription_id ORDER BY id) AS subscription_ids
+   FROM user_subscriptions
+   WHERE payment_method='paypal'
+     AND status NOT IN ('CANCELLED','EXPIRED')
+     AND subscription_id NOT LIKE 'I-MOCK%'
+   GROUP BY user_id HAVING count(*)>1;
+
+   SELECT o.id, o.user_id, o.external_ref_id, o.novel_id, o.status, o.reconciliation_note
+   FROM recharge_orders o
+   WHERE o.payment_method='paypal' AND o.order_type='whole_book'
+     AND o.checkout_id IS NULL AND o.status IN ('Pending','Success','Paid')
+     AND NOT EXISTS (SELECT 1 FROM legacy_whole_book_proofs p
+                     WHERE p.order_id=o.id AND p.novel_id=o.novel_id)
+   ORDER BY o.id;
+
+   SELECT user_id, intent_id, slot_id, plan_id, subscription_id, submitted_at
+   FROM paypal_subscription_intents
+   WHERE subscription_id IS NULL AND submitted_at < now()-interval '24 hours';
+   ```
+
 ### 3.2 自建 Redis 生产配置
 修改 Redis 所在机器的 `/etc/redis/redis.conf`：
 ```ini

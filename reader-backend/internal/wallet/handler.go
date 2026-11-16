@@ -268,7 +268,16 @@ func (h *Handler) checkIn(c *gin.Context, claim bool) {
 
 func (h *Handler) GetRechargeTemplates(c *gin.Context) {
 	ctx := c.Request.Context()
-	slots, err := h.service.GetRechargeTemplates(ctx, c.GetInt64("user_id"))
+	var novelID int64
+	if raw := c.Query("novel_id"); raw != "" {
+		var err error
+		novelID, err = strconv.ParseInt(raw, 10, 64)
+		if err != nil || novelID <= 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid novel ID"})
+			return
+		}
+	}
+	slots, err := h.service.GetRechargeTemplates(ctx, c.GetInt64("user_id"), novelID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to query template slots: " + err.Error()})
 		return
@@ -310,6 +319,10 @@ func (h *Handler) CreateSubscription(c *gin.Context) {
 	}
 
 	res, err := h.service.CreateSubscription(ctx, userID, provider, req.SlotID, req.ReturnURL, req.CancelURL, fbp, fbc, pixelID, ip, ua, sourceURL, country)
+	if errors.Is(err, ErrSubscriptionConflict) || errors.Is(err, ErrSubscriptionPending) || errors.Is(err, ErrSubscriptionReview) || errors.Is(err, ErrCheckoutUnavailable) {
+		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+		return
+	}
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create subscription: " + err.Error()})
 		return

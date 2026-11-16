@@ -16,17 +16,18 @@ import (
 var ErrCheckoutUnavailable = errors.New("checkout order or package unavailable")
 
 type checkoutOrder struct {
-	id         int64
-	userID     int64
-	checkoutID string
-	status     string
-	orderType  string
-	amount     int64
-	currency   string
-	coins      int
-	bonus      int
-	novelID    int64
-	fulfilled  bool
+	id               int64
+	userID           int64
+	checkoutID       string
+	status           string
+	orderType        string
+	amount           int64
+	currency         string
+	coins            int
+	bonus            int
+	novelID          int64
+	fulfilled        bool
+	legacyBookProven bool
 }
 
 type checkoutAttribution struct {
@@ -75,8 +76,7 @@ func (r *dbRepository) CreateCheckout(ctx context.Context, userID int64, slot *m
 			ORDER BY id DESC LIMIT 1) p ON TRUE
 		WHERE u.id = $9
 		AND $7 = COALESCE(p.recharge_template_id,(SELECT id FROM recharge_templates ORDER BY is_default DESC NULLS LAST,id LIMIT 1))
-		AND ($5::varchar <> 'whole_book' OR ($8 > 0 AND (
-			p.novel_id=$8 OR (p.id IS NULL AND EXISTS(SELECT 1 FROM recharge_templates WHERE id=$7 AND is_default)))))
+		AND ($5::varchar <> 'whole_book' OR whole_book_offer_available(u.id,$7,$8))
 		AND EXISTS(SELECT 1 FROM recharge_slots WHERE id=$6 AND template_id=$7 AND type=$5::varchar
 			AND price_cents=$2 AND bonus=$4 AND ($5::varchar='whole_book' OR coins=$3))
 		RETURNING id`,
@@ -97,7 +97,8 @@ func (r *dbRepository) BindCheckout(ctx context.Context, checkoutID, orderID str
 }
 
 const checkoutSelect = `SELECT id, user_id, COALESCE(checkout_id::text, ''), status, order_type,
-	amount_cents, currency, coins, bonus_coins_credited, COALESCE(novel_id,0), fulfilled_at IS NOT NULL FROM recharge_orders
+	amount_cents, currency, coins, bonus_coins_credited, COALESCE(novel_id,0), fulfilled_at IS NOT NULL, EXISTS(SELECT 1 FROM legacy_whole_book_proofs b
+ WHERE b.order_id=recharge_orders.id AND b.novel_id=recharge_orders.novel_id) FROM recharge_orders
 	WHERE external_ref_id=$1 AND payment_method='paypal' AND order_type IN ('single', 'whole_book')`
 
 func (r *dbRepository) findCheckout(ctx context.Context, orderID string) (*checkoutOrder, error) {
@@ -106,7 +107,7 @@ func (r *dbRepository) findCheckout(ctx context.Context, orderID string) (*check
 
 func scanCheckout(row pgx.Row) (*checkoutOrder, error) {
 	var o checkoutOrder
-	err := row.Scan(&o.id, &o.userID, &o.checkoutID, &o.status, &o.orderType, &o.amount, &o.currency, &o.coins, &o.bonus, &o.novelID, &o.fulfilled)
+	err := row.Scan(&o.id, &o.userID, &o.checkoutID, &o.status, &o.orderType, &o.amount, &o.currency, &o.coins, &o.bonus, &o.novelID, &o.fulfilled, &o.legacyBookProven)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrCheckoutUnavailable
 	}
@@ -130,6 +131,9 @@ func (r *dbRepository) settleCheckout(ctx context.Context, orderID string, captu
 	if err != nil {
 		return nil, err
 	}
+	if o.orderType == "whole_book" && (o.novelID <= 0 || (o.checkoutID == "" && !o.legacyBookProven)) {
+		return nil, ErrCheckoutUnavailable
+	}
 	result := &CheckoutResult{Coins: o.coins + o.bonus, OrderType: o.orderType}
 	historicalBook := o.needsHistoricalBookVerification()
 	if (o.status == "Success" || o.status == "Paid") && !historicalBook {
@@ -151,19 +155,19 @@ func (r *dbRepository) settleCheckout(ctx context.Context, orderID string, captu
 		if tag.RowsAffected() != 1 {
 			return nil, ErrCheckoutUnavailable
 		}
-		var refundID string
-		err = tx.QueryRow(ctx, `SELECT refund_id FROM paypal_event_inbox WHERE event_type='refund_completed'
-			AND capture_id=$1 AND amount_cents=$2 AND currency=$3 LIMIT 1`, capture.CaptureID, cents, o.currency).Scan(&refundID)
-		if err == nil {
-			// Publish the verified receipt so the normal refund path can reverse historical coins.
+		var refundedCents int64
+		err = tx.QueryRow(ctx, `SELECT COALESCE(sum(amount_cents),0) FROM paypal_refund_items
+ WHERE capture_id=$1 AND currency=$2`, capture.CaptureID, o.currency).Scan(&refundedCents)
+		if err != nil {
+			return nil, err
+		}
+		if refundedCents >= cents {
 			if err := tx.Commit(ctx); err != nil {
 				return nil, err
 			}
 			return nil, errRefundUnmatched
 		}
-		if !errors.Is(err, pgx.ErrNoRows) {
-			return nil, err
-		}
+
 		if capture.Status != "COMPLETED" {
 			return nil, errRefundUnmatched
 		}
@@ -242,7 +246,7 @@ func (o *checkoutOrder) matchesPayPalOrder(capture *payment.PayPalCaptureResult,
 	if capture == nil || capture.OrderID != orderID || !o.matchesCapture(capture.CustomID) || capture.CurrencyCode != o.currency {
 		return false
 	}
-	if o.orderType == "whole_book" && o.novelID <= 0 {
+	if o.orderType == "whole_book" && (o.novelID <= 0 || (o.checkoutID == "" && !o.legacyBookProven)) {
 		return false
 	}
 	cents, err := payment.ParseCents(capture.GrossAmount)
@@ -251,6 +255,6 @@ func (o *checkoutOrder) matchesPayPalOrder(capture *payment.PayPalCaptureResult,
 
 func (r *dbRepository) flagCheckoutForReview(ctx context.Context, id int64, reason string) error {
 	_, err := db.DB.Exec(ctx, `UPDATE recharge_orders SET reconciliation_note=$2 WHERE id=$1
-		AND (status='Pending' OR (order_type='whole_book' AND fulfilled_at IS NULL AND status IN ('Success','Paid')))`, id, reason)
+		AND (status='Pending' OR (order_type='whole_book' AND status IN ('Success','Paid') AND (fulfilled_at IS NULL OR checkout_id IS NULL)))`, id, reason)
 	return err
 }

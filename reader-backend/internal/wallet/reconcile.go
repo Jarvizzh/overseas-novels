@@ -112,6 +112,10 @@ func (s *service) confirmPayPalCancellation(ctx context.Context, id, reason stri
 	if details.SubscriptionID != id {
 		return errors.New("unexpected subscription ID")
 	}
+	if err := s.repo.savePayPalBillingSnapshot(ctx, details); err != nil {
+		return err
+	}
+
 	switch details.Status {
 	case "CANCELLED", "EXPIRED":
 		return s.repo.UpdateUserSubscriptionStatus(ctx, id, details.Status)

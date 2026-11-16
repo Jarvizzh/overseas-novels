@@ -505,6 +505,7 @@ CREATE INDEX IF NOT EXISTS idx_tp_payment_capture_id ON third_party_payment_orde
 -- Payment checkout snapshots and verified fulfillment.
 ALTER TABLE recharge_orders ADD COLUMN IF NOT EXISTS checkout_id UUID;
 ALTER TABLE recharge_orders ADD COLUMN IF NOT EXISTS fulfilled_at TIMESTAMPTZ;
+ALTER TABLE recharge_orders ADD COLUMN IF NOT EXISTS paid_period_start TIMESTAMPTZ;
 ALTER TABLE recharge_orders ADD COLUMN IF NOT EXISTS paid_period_end TIMESTAMPTZ;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_recharge_checkout_id ON recharge_orders(checkout_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_paypal_verified_capture
@@ -531,6 +532,32 @@ CREATE TABLE IF NOT EXISTS payment_refunds (
 );
 
 ALTER TABLE recharge_orders ADD COLUMN IF NOT EXISTS paypal_refund_reported BOOLEAN NOT NULL DEFAULT false;
+
+ALTER TABLE payment_refunds ADD COLUMN IF NOT EXISTS prior_order_status VARCHAR(20) NOT NULL DEFAULT 'Success';
+ALTER TABLE payment_refunds ADD COLUMN IF NOT EXISTS requested_amount_cents INT;
+ALTER TABLE payment_refunds ADD COLUMN IF NOT EXISTS channel_lookup_only BOOLEAN NOT NULL DEFAULT false;
+
+CREATE TABLE IF NOT EXISTS paypal_refund_items (
+    refund_id TEXT PRIMARY KEY,
+    capture_id TEXT NOT NULL CHECK (capture_id <> ''),
+    currency VARCHAR(3) NOT NULL,
+    amount_cents BIGINT NOT NULL CHECK (amount_cents > 0),
+    recorded_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_paypal_refund_capture ON paypal_refund_items(capture_id,currency);
+
+CREATE OR REPLACE FUNCTION save_paypal_refund_item(refund_ref TEXT, capture_ref TEXT, cents BIGINT, currency_code TEXT)
+RETURNS VOID LANGUAGE plpgsql AS $$
+BEGIN
+    IF refund_ref = '' THEN RAISE EXCEPTION 'Missing PayPal refund ID'; END IF;
+    INSERT INTO paypal_refund_items(refund_id,capture_id,amount_cents,currency)
+        VALUES(refund_ref,capture_ref,cents,currency_code) ON CONFLICT(refund_id) DO NOTHING;
+    IF NOT EXISTS(SELECT 1 FROM paypal_refund_items
+        WHERE refund_id=refund_ref AND capture_id=capture_ref AND amount_cents=cents AND currency=currency_code) THEN
+        RAISE EXCEPTION 'Conflicting PayPal refund evidence';
+    END IF;
+END;
+$$;
 
 -- Called after confirming a full channel refund. The order, wallet and audit
 -- entries commit together, including when a provider or admin retries.
@@ -573,6 +600,7 @@ BEGIN
         updated_at=now() WHERE order_id=target_order;
     UPDATE recharge_orders SET status='Refunded', updated_at=now() WHERE id=target_order;
     IF purchase.subscription_id IS NOT NULL AND purchase.paid_period_end IS NOT NULL THEN
+        PERFORM 1 FROM user_subscriptions WHERE subscription_id=purchase.subscription_id FOR UPDATE;
         UPDATE user_subscriptions SET current_period_end = (
             SELECT max(paid_period_end) FROM recharge_orders
             WHERE subscription_id = purchase.subscription_id AND status IN ('Success','Paid','RefundPending')
@@ -583,12 +611,41 @@ BEGIN
 END;
 $$;
 
+-- Both the CMS response and webhook use this operation after verifying a refund.
+CREATE OR REPLACE FUNCTION settle_paypal_refund_item(target_order BIGINT, refund_ref TEXT, capture_ref TEXT, cents BIGINT, currency_code TEXT)
+RETURNS BOOLEAN LANGUAGE plpgsql AS $$
+DECLARE
+    purchase recharge_orders%ROWTYPE;
+    refunded NUMERIC;
+BEGIN
+    PERFORM pg_advisory_xact_lock(hashtextextended('paypal-capture:' || capture_ref,0));
+    SELECT * INTO STRICT purchase FROM recharge_orders WHERE id=target_order FOR UPDATE;
+    IF purchase.payment_method <> 'paypal' OR purchase.currency <> currency_code
+        OR purchase.status NOT IN ('Success','Paid','RefundPending','Refunded') THEN
+        RAISE EXCEPTION 'Invalid PayPal refund target';
+    END IF;
+    PERFORM save_paypal_refund_item(refund_ref,capture_ref,cents,currency_code);
+    IF purchase.status='Refunded' THEN RETURN true; END IF;
+    SELECT SUM(amount_cents) INTO refunded FROM paypal_refund_items
+        WHERE capture_id=capture_ref AND currency=currency_code;
+    IF refunded < purchase.amount_cents THEN RETURN false; END IF;
+    IF refunded <> purchase.amount_cents THEN RAISE EXCEPTION 'PayPal refund total differs from order'; END IF;
+
+    INSERT INTO payment_refunds(order_id,request_id,provider_refund_id,status,prior_order_status)
+        VALUES(target_order,gen_random_uuid(),refund_ref,'Pending',purchase.status)
+        ON CONFLICT (order_id) DO UPDATE SET provider_refund_id=EXCLUDED.provider_refund_id,status='Pending'
+        WHERE payment_refunds.status IN ('Pending','Failed');
+    UPDATE recharge_orders SET status='RefundPending',updated_at=now() WHERE id=target_order;
+    PERFORM complete_paypal_refund(target_order,refund_ref);
+    RETURN true;
+END;
+$$;
+
 ALTER TABLE recharge_orders ADD COLUMN IF NOT EXISTS reconciliation_at TIMESTAMPTZ;
 CREATE INDEX IF NOT EXISTS idx_paypal_pending_reconciliation
 ON recharge_orders(COALESCE(reconciliation_at, created_at))
 WHERE payment_method='paypal' AND status='Pending' AND external_ref_id IS NOT NULL AND checkout_id IS NOT NULL;
 
-ALTER TABLE payment_refunds ADD COLUMN IF NOT EXISTS prior_order_status VARCHAR(20) NOT NULL DEFAULT 'Success';
 CREATE TABLE IF NOT EXISTS payment_refund_failures (
     request_id UUID PRIMARY KEY,
     order_id BIGINT NOT NULL REFERENCES recharge_orders(id) ON DELETE CASCADE,
@@ -616,6 +673,13 @@ CREATE INDEX IF NOT EXISTS idx_paypal_inbox_due ON paypal_event_inbox(next_attem
 CREATE INDEX IF NOT EXISTS idx_paypal_inbox_refund_capture ON paypal_event_inbox(capture_id,amount_cents,currency)
     WHERE event_type='refund_completed';
 
+-- Restore completed refund evidence kept in the durable inbox before this ledger was added.
+INSERT INTO paypal_refund_items(refund_id,capture_id,currency,amount_cents)
+SELECT DISTINCT ON (refund_id) refund_id,capture_id,currency,amount_cents
+FROM paypal_event_inbox WHERE event_type='refund_completed' AND refund_id<>'' AND capture_id<>''
+    AND length(currency)=3 AND amount_cents>0
+ORDER BY refund_id,event_id ON CONFLICT(refund_id) DO NOTHING;
+
 ALTER TABLE recharge_orders ADD COLUMN IF NOT EXISTS reconciliation_note TEXT;
 ALTER TABLE user_subscriptions ADD COLUMN IF NOT EXISTS paypal_transaction_cursor TIMESTAMPTZ;
 ALTER TABLE user_subscriptions ADD COLUMN IF NOT EXISTS paypal_next_check_at TIMESTAMPTZ;
@@ -628,3 +692,53 @@ CREATE INDEX IF NOT EXISTS idx_paypal_cancel_due ON user_subscriptions(cancel_ne
     WHERE payment_method='paypal' AND status='CANCEL_PENDING';
 CREATE INDEX IF NOT EXISTS idx_paypal_subscription_due ON user_subscriptions(paypal_next_check_at,id)
     WHERE payment_method='paypal';
+
+CREATE TABLE IF NOT EXISTS paypal_subscription_billing_snapshots (
+    subscription_id VARCHAR(100) NOT NULL REFERENCES user_subscriptions(subscription_id) ON DELETE CASCADE,
+    paid_at TIMESTAMPTZ NOT NULL,
+    currency VARCHAR(3) NOT NULL,
+    amount_cents BIGINT NOT NULL CHECK(amount_cents>0),
+    paid_period_end TIMESTAMPTZ NOT NULL CHECK(paid_period_end>paid_at),
+    PRIMARY KEY(subscription_id,paid_at,currency,amount_cents)
+);
+
+-- A historical receipt is insufficient to prove which product was sold.
+CREATE TABLE IF NOT EXISTS legacy_whole_book_proofs (
+    order_id BIGINT PRIMARY KEY REFERENCES recharge_orders(id) ON DELETE CASCADE,
+    novel_id INT NOT NULL REFERENCES novels(id) ON DELETE CASCADE,
+    evidence_reference TEXT NOT NULL CHECK(length(btrim(evidence_reference))>0),
+    verified_by VARCHAR(36) NOT NULL REFERENCES admins(id),
+    verified_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS paypal_subscription_intents (
+    user_id BIGINT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    intent_id UUID NOT NULL UNIQUE,
+    slot_id INT NOT NULL,
+    template_id INT NOT NULL,
+    cycle TEXT NOT NULL,
+    price_cents INT NOT NULL CHECK(price_cents>0),
+    return_url TEXT NOT NULL,
+    cancel_url TEXT NOT NULL,
+    plan_id TEXT,
+    subscription_id TEXT UNIQUE,
+    approval_url TEXT,
+    lease_until TIMESTAMPTZ,
+    submitted_at TIMESTAMPTZ
+);
+
+-- Both the offer list and checkout use this rule for the current novel.
+CREATE OR REPLACE FUNCTION whole_book_offer_available(p_user_id BIGINT,p_template_id INTEGER,p_novel_id BIGINT)
+RETURNS BOOLEAN LANGUAGE sql STABLE AS $$
+ SELECT EXISTS(
+  SELECT 1 FROM users u
+  LEFT JOIN LATERAL(SELECT id,novel_id,recharge_template_id FROM promotion_links
+   WHERE utm_source=u.utm_source AND utm_campaign=u.utm_campaign
+   AND u.utm_source<>'' AND u.utm_campaign<>'' AND recharge_template_id IS NOT NULL
+   ORDER BY id DESC LIMIT 1) p ON TRUE
+  WHERE u.id=p_user_id AND p_novel_id>0
+  AND EXISTS(SELECT 1 FROM novels WHERE id=p_novel_id AND status<>'archived' AND publish_status='published')
+  AND p_template_id=COALESCE(p.recharge_template_id,(SELECT id FROM recharge_templates ORDER BY is_default DESC NULLS LAST,id LIMIT 1))
+  AND (p.novel_id=p_novel_id OR (p.id IS NULL AND EXISTS(SELECT 1 FROM recharge_templates WHERE id=p_template_id AND is_default)))
+ )
+$$;

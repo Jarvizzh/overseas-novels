@@ -679,6 +679,7 @@ func (p *PayPalClient) CreateSubscription(ctx context.Context, param CreateSubsc
 	}
 
 	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("PayPal-Request-Id", param.RequestID)
 	req.Header.Set("Content-Type", "application/json")
 
 	client := &http.Client{Timeout: 15 * time.Second}

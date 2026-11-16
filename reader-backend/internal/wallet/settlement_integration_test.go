@@ -43,7 +43,7 @@ func TestPaymentSettlementIntegration(t *testing.T) {
 	exec(string(schema))
 	exec(string(schema)) // Re-running the shared migration must be safe.
 	exec(`INSERT INTO users(id,utm_source,utm_campaign) VALUES (101,'source','campaign'),(102,'','')`)
-	exec(`INSERT INTO novels(id,title,author) VALUES(101,'Test novel','Test author')`)
+	exec(`INSERT INTO novels(id,title,author,publish_status) VALUES(101,'Test novel','Test author','published')`)
 	exec(`INSERT INTO recharge_templates(id,name,is_default) VALUES (101,'Test',true)`)
 	exec(`INSERT INTO recharge_slots(id,template_id,slot_index,type,coins,bonus,price,price_cents)
 		VALUES(101,101,1,'whole_book',0,7,'$9.99',999)`)
@@ -243,6 +243,20 @@ func TestPaymentSettlementIntegration(t *testing.T) {
 			SELECT id,'paypal','legacy-book','legacy-capture','USD',9.99,'COMPLETED' FROM recharge_orders WHERE external_ref_id='legacy-book'`)
 		receipt := &payment.PayPalCaptureResult{OrderID: "legacy-book", CaptureID: "legacy-capture", Status: "COMPLETED",
 			CustomID: "102:20", CurrencyCode: "USD", GrossAmount: "9.99", RawPayload: "{}"}
+		if _, err := r.settleCheckout(ctx, receipt.OrderID, receipt); !errors.Is(err, ErrCheckoutUnavailable) {
+			t.Fatalf("unproven legacy product granted: %v", err)
+		}
+		exec(`UPDATE recharge_orders SET fulfilled_at=now() WHERE external_ref_id='legacy-book'`)
+		if hasBook, err := n.HasWholeBook(ctx, 102, 101); err != nil || hasBook {
+			t.Fatalf("unproven earlier backfill has access: %t %v", hasBook, err)
+		}
+		if _, err := checkoutService.CapturePayPalPayment(ctx, 102, receipt.OrderID); !errors.Is(err, ErrCheckoutUnavailable) {
+			t.Fatalf("unproven earlier backfill bypassed service: %v", err)
+		}
+		exec(`UPDATE recharge_orders SET fulfilled_at=NULL WHERE external_ref_id='legacy-book'`)
+		exec(`INSERT INTO admins(id,username,password_hash,role,status) VALUES('legacy-auditor','legacy-auditor','none','Finance',1)`)
+		exec(`INSERT INTO legacy_whole_book_proofs(order_id,novel_id,evidence_reference,verified_by)
+            SELECT id,101,'archived merchant item record #1','legacy-auditor' FROM recharge_orders WHERE external_ref_id='legacy-book'`)
 		if _, err := r.settleCheckout(ctx, receipt.OrderID, receipt); err != nil {
 			t.Fatal(err)
 		}
@@ -257,7 +271,7 @@ func TestPaymentSettlementIntegration(t *testing.T) {
 	})
 
 	t.Run("whole-book promotion only sells its associated title", func(t *testing.T) {
-		exec(`INSERT INTO novels(id,title,author) VALUES(102,'Other novel','Test author')`)
+		exec(`INSERT INTO novels(id,title,author,publish_status) VALUES(102,'Other novel','Test author','published')`)
 		exec(`INSERT INTO promotion_links(novel_id,novel_title,generated_url,utm_source,utm_campaign,recharge_template_id)
 			VALUES(101,'Test novel','https://example.invalid','source','campaign',101)`)
 		slot, err := r.GetRechargeSlotByID(ctx, 101)
@@ -270,6 +284,20 @@ func TestPaymentSettlementIntegration(t *testing.T) {
 		if _, err := r.CreateCheckout(ctx, 101, slot, 101, checkoutAttribution{}); err != nil {
 			t.Fatal(err)
 		}
+		for _, target := range []int64{0, 101, 102} {
+			offer, err := checkoutService.GetRechargeTemplates(ctx, 101, target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			expected := 0
+			if target == 101 {
+				expected = 1
+			}
+			if len(offer.Slots) != expected {
+				t.Fatalf("offer visibility for novel %d: %+v", target, offer.Slots)
+			}
+		}
+
 	})
 
 	t.Run("due cancellation claims do not starve the sixth request", func(t *testing.T) {
@@ -284,6 +312,199 @@ func TestPaymentSettlementIntegration(t *testing.T) {
 		second, err := claimPayPalCancellations(ctx)
 		if err != nil || len(second) != 1 {
 			t.Fatalf("next claim: %+v %v", second, err)
+		}
+	})
+
+	t.Run("partial refund totals are capture scoped and replay safe", func(t *testing.T) {
+		exec(`INSERT INTO users(id) VALUES(191)`)
+		exec(`INSERT INTO wallets(user_id,charged_coins,bonus_coins) VALUES(191,100,10)`)
+		exec(`INSERT INTO recharge_orders(user_id,external_ref_id,amount_cents,payment_method,status,coins,bonus_coins_credited)
+   VALUES(191,'partial-order',999,'paypal','Success',100,10)`)
+		exec(`INSERT INTO third_party_payment_orders(order_id,payment_provider,capture_id,currency,gross_amount,status)
+   SELECT id,'paypal','partial-capture','USD',9.99,'VERIFIED' FROM recharge_orders WHERE external_ref_id='partial-order'`)
+		for range 2 {
+			if err := r.CompletePayPalRefund(ctx, "partial-a", "partial-capture", 400, "USD"); err != nil {
+				t.Fatal(err)
+			}
+		}
+		wallet, err := r.GetWallet(ctx, 191)
+		if err != nil || wallet.ChargedCoins != 100 {
+			t.Fatalf("partial refund debited wallet: %+v %v", wallet, err)
+		}
+		for range 2 {
+			if err := r.CompletePayPalRefund(ctx, "partial-b", "partial-capture", 599, "USD"); err != nil {
+				t.Fatal(err)
+			}
+		}
+		wallet, err = r.GetWallet(ctx, 191)
+		if err != nil || wallet.ChargedCoins != 0 || wallet.BonusCoins != 0 {
+			t.Fatalf("full cumulative refund: %+v %v", wallet, err)
+		}
+		var count int
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM transactions WHERE user_id=191 AND biz_type='refund'`).Scan(&count); err != nil || count != 1 {
+			t.Fatalf("duplicate refund debit: %d %v", count, err)
+		}
+	})
+	t.Run("account subscription intent serializes checkout and preserves snapshot", func(t *testing.T) {
+		exec(`INSERT INTO users(id) VALUES(192)`)
+		proposed := subscriptionIntent{userID: 192, slotID: 101, templateID: 101, priceCents: 999, cycle: "month", returnURL: "https://example.invalid/return", cancelURL: "https://example.invalid/cancel"}
+		first, err := r.reserveSubscriptionIntent(ctx, proposed)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := r.reserveSubscriptionIntent(ctx, proposed); !errors.Is(err, ErrSubscriptionPending) {
+			t.Fatalf("concurrent checkout: %v", err)
+		}
+		different := proposed
+		different.slotID = 102
+		if _, err := r.reserveSubscriptionIntent(ctx, different); !errors.Is(err, ErrSubscriptionConflict) {
+			t.Fatalf("conflicting package: %v", err)
+		}
+		r.releaseSubscriptionIntent(ctx, first.id)
+		proposed.priceCents = 1999
+		retry, err := r.reserveSubscriptionIntent(ctx, proposed)
+		if err != nil || retry.id != first.id || retry.priceCents != 999 {
+			t.Fatalf("retry lost payment snapshot: %+v %v", retry, err)
+		}
+		retry.planID = "test-plan"
+		if err := r.submitSubscriptionIntent(ctx, retry.id, retry.planID); err != nil {
+			t.Fatal(err)
+		}
+		if err := r.finishSubscriptionIntent(ctx, retry, &payment.SubscriptionResult{SubscriptionID: "I-INTENT", ApproveURL: "https://example.invalid/approval"}); err != nil {
+			t.Fatal(err)
+		}
+		resumed, err := r.reserveSubscriptionIntent(ctx, proposed)
+		if err != nil || resumed.subscriptionID != "I-INTENT" || resumed.approvalURL == "" {
+			t.Fatalf("approval link not reused: %+v %v", resumed, err)
+		}
+		exec(`UPDATE user_subscriptions SET status='ACTIVE' WHERE subscription_id='I-INTENT'`)
+		if _, err := r.reserveSubscriptionIntent(ctx, proposed); !errors.Is(err, ErrSubscriptionConflict) {
+			t.Fatalf("active duplicate: %v", err)
+		}
+		exec(`UPDATE user_subscriptions SET status='CANCELLED' WHERE subscription_id='I-INTENT'`)
+		replacement, err := r.reserveSubscriptionIntent(ctx, proposed)
+		if err != nil || replacement.id == first.id {
+			t.Fatalf("cancelled subscription could not switch: %+v %v", replacement, err)
+		}
+	})
+	t.Run("paid boundary snapshot survives external cancellation", func(t *testing.T) {
+		paidAt := time.Now().UTC().Truncate(time.Second)
+		end := paidAt.AddDate(0, 1, 0)
+		exec(`INSERT INTO user_subscriptions(user_id,subscription_id,payment_method,status) VALUES(192,'I-SNAPSHOT','paypal','CANCELLED')`)
+		d := &payment.SubscriptionDetails{SubscriptionID: "I-SNAPSHOT", LastPaymentTime: &paidAt, CurrentPeriodEnd: &end, LastPaymentCents: 999, LastPaymentCurrency: "USD"}
+		if err := r.savePayPalBillingSnapshot(ctx, d); err != nil {
+			t.Fatal(err)
+		}
+		found, err := r.getPayPalBillingSnapshot(ctx, d.SubscriptionID, paidAt, "USD", 999)
+		if err != nil || !found.Equal(end) {
+			t.Fatalf("saved paid boundary: %v %v", found, err)
+		}
+		sub, err := r.GetSubscriptionByID(ctx, d.SubscriptionID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sub.PriceCents = 999
+		sub.Currency = "USD"
+		transaction := payment.PayPalSubscriptionTransaction{ID: "snapshot-sale", Status: "COMPLETED", Time: paidAt}
+		transaction.Amount.Gross.Value = "9.99"
+		transaction.Amount.Gross.Currency = "USD"
+		service := NewService(r, n, nil, nil, nil).(*service)
+		if err := service.recordPayPalSubscriptionTransaction(ctx, sub, &payment.SubscriptionDetails{Status: "CANCELLED"}, transaction); err != nil {
+			t.Fatal(err)
+		}
+		var stored time.Time
+		if err := pool.QueryRow(ctx, `SELECT paid_period_end FROM recharge_orders WHERE external_ref_id='snapshot-sale'`).Scan(&stored); err != nil || !stored.Equal(end) {
+			t.Fatalf("cancelled payment missed saved period: %v %v", stored, err)
+		}
+
+	})
+
+	t.Run("concurrent subscription refunds recompute after acquiring the same lock", func(t *testing.T) {
+		exec(`INSERT INTO users(id) VALUES(193)`)
+		exec(`INSERT INTO user_subscriptions(user_id,subscription_id,status,payment_method,last_payment_time,current_period_end)
+   VALUES(193,'I-CONCURRENT','ACTIVE','paypal',now(),now()+interval '2 hours')`)
+		exec(`INSERT INTO recharge_orders(user_id,external_ref_id,amount_cents,payment_method,status,order_type,subscription_id,paid_at,paid_period_start,paid_period_end)
+   VALUES(193,'concurrent-old',999,'paypal','RefundPending','subscription','I-CONCURRENT',now()-interval '2 hours',now()-interval '2 hours',now()+interval '1 hour'),
+   (193,'concurrent-new',999,'paypal','RefundPending','subscription','I-CONCURRENT',now()-interval '1 hour',now()-interval '1 hour',now()+interval '2 hours')`)
+		exec(`INSERT INTO payment_refunds(order_id,request_id) SELECT id,gen_random_uuid() FROM recharge_orders WHERE subscription_id='I-CONCURRENT'`)
+		newest, err := pool.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer newest.Rollback(context.WithoutCancel(ctx))
+		if _, err = newest.Exec(ctx, `SELECT complete_paypal_refund(id,'concurrent-new-refund') FROM recharge_orders WHERE external_ref_id='concurrent-new'`); err != nil {
+			t.Fatal(err)
+		}
+		older := make(chan error, 1)
+		go func() {
+			_, err := pool.Exec(ctx, `/* concurrent-older-refund */ SELECT complete_paypal_refund(id,'concurrent-old-refund') FROM recharge_orders WHERE external_ref_id='concurrent-old'`)
+			older <- err
+		}()
+		ticker := time.NewTicker(10 * time.Millisecond)
+		defer ticker.Stop()
+		deadline := time.After(3 * time.Second)
+		blocked := false
+		for !blocked {
+			select {
+			case err := <-older:
+				t.Fatalf("refund bypassed subscription lock: %v", err)
+			case <-deadline:
+				t.Fatal("older refund did not reach subscription lock")
+			case <-ticker.C:
+				if err := pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE query LIKE '/* concurrent-older-refund */%' AND wait_event_type='Lock')`).Scan(&blocked); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		if err := newest.Commit(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if err := <-older; err != nil {
+			t.Fatal(err)
+		}
+		var cleared bool
+		if err := pool.QueryRow(ctx, `SELECT current_period_end IS NULL FROM user_subscriptions WHERE subscription_id='I-CONCURRENT'`).Scan(&cleared); err != nil || !cleared {
+			t.Fatalf("stale paid summary survived: %t %v", cleared, err)
+		}
+		active, err := n.HasActiveSubscription(ctx, 193)
+		if err != nil || active {
+			t.Fatalf("refunded periods still grant VIP: %t %v", active, err)
+		}
+	})
+	t.Run("a later paid period does not grant VIP across a refund gap", func(t *testing.T) {
+		exec(`INSERT INTO users(id) VALUES(194)`)
+		exec(`INSERT INTO user_subscriptions(user_id,subscription_id,status,payment_method,last_payment_time,current_period_end)
+   VALUES(194,'I-GAP','ACTIVE','paypal',now()-interval '2 hours',now()+interval '2 hours')`)
+		exec(`INSERT INTO recharge_orders(user_id,external_ref_id,amount_cents,payment_method,status,order_type,subscription_id,paid_at,paid_period_start,paid_period_end)
+   VALUES(194,'gap-old',999,'paypal','Refunded','subscription','I-GAP',now()-interval '2 hours',now()-interval '2 hours',now()+interval '1 hour'),
+   (194,'gap-future',999,'paypal','Success','subscription','I-GAP',now()+interval '1 hour',now()+interval '1 hour',now()+interval '2 hours')`)
+		active, err := n.HasActiveSubscription(ctx, 194)
+		if err != nil || active {
+			t.Fatalf("future payment bridged a refunded period: %t %v", active, err)
+		}
+	})
+	t.Run("cancelled first payment grants its proven period", func(t *testing.T) {
+		exec(`INSERT INTO users(id) VALUES(195)`)
+		sub := &model.UserSubscription{UserID: 195, SubscriptionID: "I-CANCEL-FIRST", PlanID: "P-TEST", Status: "CANCELLED", Cycle: "month", PriceCents: 999, Currency: "USD", PaymentMethod: "paypal"}
+		if err := r.UpsertUserSubscription(ctx, sub); err != nil {
+			t.Fatal(err)
+		}
+		paidAt := time.Now().UTC().Truncate(time.Second)
+		details := &payment.SubscriptionDetails{Status: "CANCELLED", CurrentPeriodStart: &paidAt, LastPaymentTime: &paidAt, LastPaymentCents: 999, LastPaymentCurrency: "USD"}
+		transaction := payment.PayPalSubscriptionTransaction{ID: "cancel-first-sale", Status: "COMPLETED", Time: paidAt}
+		transaction.Amount.Gross.Value = "9.99"
+		transaction.Amount.Gross.Currency = "USD"
+		service := NewService(r, n, nil, nil, nil).(*service)
+		if err := service.recordPayPalSubscriptionTransaction(ctx, sub, details, transaction); err != nil {
+			t.Fatal(err)
+		}
+		active, err := n.HasActiveSubscription(ctx, 195)
+		if err != nil || !active {
+			t.Fatalf("verified cancelled payment lost VIP: %t %v", active, err)
+		}
+		var status string
+		if err := pool.QueryRow(ctx, `SELECT status FROM user_subscriptions WHERE subscription_id='I-CANCEL-FIRST'`).Scan(&status); err != nil || status != "CANCELLED" {
+			t.Fatalf("cancellation overwritten: %s %v", status, err)
 		}
 	})
 

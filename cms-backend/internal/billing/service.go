@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+
+	"github.com/jackc/pgx/v5"
 )
 
 var (
@@ -25,10 +27,10 @@ type BillingService interface {
 	RefundOrder(ctx context.Context, orderID, adminID string) error
 
 	ListRechargeTemplates(ctx context.Context) ([]RechargeTemplate, error)
-	CreateRechargeTemplate(ctx context.Context, name string, isDefault bool, slots []RechargeSlot) (int, error)
-	UpdateRechargeTemplate(ctx context.Context, id int, name string, isDefault bool, slots []RechargeSlot) error
-	DeleteRechargeTemplate(ctx context.Context, id int) error
-	SetDefaultRechargeTemplate(ctx context.Context, id int) error
+	CreateRechargeTemplate(ctx context.Context, adminID string, name string, isDefault bool, slots []RechargeSlot) (int, error)
+	UpdateRechargeTemplate(ctx context.Context, adminID string, id int, name string, isDefault bool, slots []RechargeSlot) error
+	DeleteRechargeTemplate(ctx context.Context, adminID string, id int) error
+	SetDefaultRechargeTemplate(ctx context.Context, adminID string, id int) error
 }
 
 type billingService struct {
@@ -136,7 +138,7 @@ func (s *billingService) ListRechargeTemplates(ctx context.Context) ([]RechargeT
 	return templates, nil
 }
 
-func (s *billingService) CreateRechargeTemplate(ctx context.Context, name string, isDefault bool, slots []RechargeSlot) (int, error) {
+func (s *billingService) CreateRechargeTemplate(ctx context.Context, adminID string, name string, isDefault bool, slots []RechargeSlot) (int, error) {
 	if len(slots) < 4 || len(slots) > 8 {
 		return 0, ErrTemplateSlotCountInvalid
 	}
@@ -147,11 +149,16 @@ func (s *billingService) CreateRechargeTemplate(ctx context.Context, name string
 		}
 	}
 
-	tx, err := s.repo.BeginTx(ctx)
+	tx, err := s.beginTemplateChange(ctx, adminID)
 	if err != nil {
 		return 0, err
 	}
-	defer tx.Rollback(ctx)
+	defer tx.Rollback(context.WithoutCancel(ctx))
+
+	before, err := templateSnapshot(ctx, tx, 0)
+	if err != nil {
+		return 0, err
+	}
 
 	if isDefault {
 		err = s.repo.ClearDefaultTemplatesTx(ctx, tx)
@@ -172,6 +179,9 @@ func (s *billingService) CreateRechargeTemplate(ctx context.Context, name string
 		}
 	}
 
+	if err := s.auditTemplateChange(ctx, tx, adminID, "create_recharge_template", templateID, before); err != nil {
+		return 0, err
+	}
 	err = tx.Commit(ctx)
 	if err != nil {
 		return 0, err
@@ -180,7 +190,7 @@ func (s *billingService) CreateRechargeTemplate(ctx context.Context, name string
 	return templateID, nil
 }
 
-func (s *billingService) UpdateRechargeTemplate(ctx context.Context, id int, name string, isDefault bool, slots []RechargeSlot) error {
+func (s *billingService) UpdateRechargeTemplate(ctx context.Context, adminID string, id int, name string, isDefault bool, slots []RechargeSlot) error {
 	if len(slots) < 4 || len(slots) > 8 {
 		return ErrTemplateSlotCountInvalid
 	}
@@ -191,11 +201,16 @@ func (s *billingService) UpdateRechargeTemplate(ctx context.Context, id int, nam
 		}
 	}
 
-	tx, err := s.repo.BeginTx(ctx)
+	tx, err := s.beginTemplateChange(ctx, adminID)
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback(ctx)
+	defer tx.Rollback(context.WithoutCancel(ctx))
+
+	before, err := templateSnapshot(ctx, tx, id)
+	if err != nil {
+		return err
+	}
 
 	if isDefault {
 		err = s.repo.ClearDefaultTemplatesTx(ctx, tx)
@@ -224,35 +239,53 @@ func (s *billingService) UpdateRechargeTemplate(ctx context.Context, id int, nam
 		}
 	}
 
+	if err := s.auditTemplateChange(ctx, tx, adminID, "update_recharge_template", id, before); err != nil {
+		return err
+	}
 	return tx.Commit(ctx)
 }
 
-func (s *billingService) DeleteRechargeTemplate(ctx context.Context, id int) error {
-	isDefault, err := s.repo.GetTemplateIsDefault(ctx, id)
+func (s *billingService) DeleteRechargeTemplate(ctx context.Context, adminID string, id int) error {
+	tx, err := s.beginTemplateChange(ctx, adminID)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(context.WithoutCancel(ctx))
+	var isDefault bool
+	err = tx.QueryRow(ctx, "SELECT is_default FROM recharge_templates WHERE id=$1 FOR UPDATE", id).Scan(&isDefault)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrTemplateNotFound
+	}
 	if err != nil {
 		return err
 	}
 	if isDefault {
 		return ErrDefaultTemplateNotDelete
 	}
-
-	affected, err := s.repo.DeleteRechargeTemplate(ctx, id)
+	before, err := templateSnapshot(ctx, tx, id)
 	if err != nil {
 		return err
 	}
-	if affected == 0 {
-		return ErrTemplateNotFound
+	if _, err := tx.Exec(ctx, "DELETE FROM recharge_templates WHERE id=$1", id); err != nil {
+		return err
 	}
-	return nil
+	if err := s.auditTemplateChange(ctx, tx, adminID, "delete_recharge_template", id, before); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
-func (s *billingService) SetDefaultRechargeTemplate(ctx context.Context, id int) error {
-	tx, err := s.repo.BeginTx(ctx)
+func (s *billingService) SetDefaultRechargeTemplate(ctx context.Context, adminID string, id int) error {
+	tx, err := s.beginTemplateChange(ctx, adminID)
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback(ctx)
+	defer tx.Rollback(context.WithoutCancel(ctx))
 
+	before, err := templateSnapshot(ctx, tx, id)
+	if err != nil {
+		return err
+	}
 	err = s.repo.ClearDefaultTemplatesTx(ctx, tx)
 	if err != nil {
 		return err
@@ -266,6 +299,9 @@ func (s *billingService) SetDefaultRechargeTemplate(ctx context.Context, id int)
 		return ErrTemplateNotFound
 	}
 
+	if err := s.auditTemplateChange(ctx, tx, adminID, "set_default_recharge_template", id, before); err != nil {
+		return err
+	}
 	return tx.Commit(ctx)
 }
 

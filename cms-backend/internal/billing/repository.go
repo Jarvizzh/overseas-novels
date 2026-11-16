@@ -21,7 +21,6 @@ type BillingRepository interface {
 
 	ListRechargeTemplates(ctx context.Context) ([]RechargeTemplate, error)
 	GetRechargeSlots(ctx context.Context, templateID int) ([]RechargeSlot, error)
-	GetTemplateIsDefault(ctx context.Context, templateID int) (bool, error)
 
 	ClearDefaultTemplatesTx(ctx context.Context, tx pgx.Tx) error
 	CreateRechargeTemplateTx(ctx context.Context, tx pgx.Tx, name string, isDefault bool) (int, error)
@@ -30,8 +29,6 @@ type BillingRepository interface {
 	UpdateRechargeTemplateTx(ctx context.Context, tx pgx.Tx, id int, name string, isDefault bool) (int64, error)
 	SetDefaultTemplateOnlyTx(ctx context.Context, tx pgx.Tx, id int) (int64, error)
 	DeleteRechargeSlotsTx(ctx context.Context, tx pgx.Tx, templateID int) error
-
-	DeleteRechargeTemplate(ctx context.Context, id int) (int64, error)
 }
 
 type dbBillingRepository struct{}
@@ -197,14 +194,7 @@ func (r *dbBillingRepository) GetRechargeSlots(ctx context.Context, templateID i
 	return slots, nil
 }
 
-func (r *dbBillingRepository) GetTemplateIsDefault(ctx context.Context, templateID int) (bool, error) {
-	var isDefault bool
-	err := db.DB.QueryRow(ctx, "SELECT is_default FROM recharge_templates WHERE id = $1", templateID).Scan(&isDefault)
-	return isDefault, err
-}
-
 func (r *dbBillingRepository) ClearDefaultTemplatesTx(ctx context.Context, tx pgx.Tx) error {
-	_, _ = tx.Exec(ctx, "SELECT id FROM recharge_templates FOR UPDATE")
 	_, err := tx.Exec(ctx, "UPDATE recharge_templates SET is_default = FALSE")
 	return err
 }
@@ -246,14 +236,6 @@ func (r *dbBillingRepository) DeleteRechargeSlotsTx(ctx context.Context, tx pgx.
 
 func (r *dbBillingRepository) SetDefaultTemplateOnlyTx(ctx context.Context, tx pgx.Tx, id int) (int64, error) {
 	tag, err := tx.Exec(ctx, "UPDATE recharge_templates SET is_default = TRUE, updated_at = CURRENT_TIMESTAMP WHERE id = $1", id)
-	if err != nil {
-		return 0, err
-	}
-	return tag.RowsAffected(), nil
-}
-
-func (r *dbBillingRepository) DeleteRechargeTemplate(ctx context.Context, id int) (int64, error) {
-	tag, err := db.DB.Exec(ctx, "DELETE FROM recharge_templates WHERE id = $1", id)
 	if err != nil {
 		return 0, err
 	}

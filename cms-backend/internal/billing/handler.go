@@ -30,10 +30,10 @@ func (h *Handler) RegisterRoutes(rg *gin.RouterGroup) {
 	templates := rg.Group("/recharge-templates", auth.AuthMiddleware())
 	{
 		templates.GET("", h.ListRechargeTemplates)
-		templates.POST("", h.CreateRechargeTemplate)
-		templates.PUT("/:id", h.UpdateRechargeTemplate)
-		templates.DELETE("/:id", h.DeleteRechargeTemplate)
-		templates.POST("/:id/set-default", h.SetDefaultRechargeTemplate)
+		templates.POST("", auth.RoleMiddleware("SuperAdmin", "Finance"), h.CreateRechargeTemplate)
+		templates.PUT("/:id", auth.RoleMiddleware("SuperAdmin", "Finance"), h.UpdateRechargeTemplate)
+		templates.DELETE("/:id", auth.RoleMiddleware("SuperAdmin", "Finance"), h.DeleteRechargeTemplate)
+		templates.POST("/:id/set-default", auth.RoleMiddleware("SuperAdmin", "Finance"), h.SetDefaultRechargeTemplate)
 	}
 }
 
@@ -180,8 +180,12 @@ func (h *Handler) CreateRechargeTemplate(c *gin.Context) {
 	}
 
 	ctx := c.Request.Context()
-	templateID, err := h.service.CreateRechargeTemplate(ctx, req.Name, req.IsDefault, slots)
+	templateID, err := h.service.CreateRechargeTemplate(ctx, c.GetString("admin_id"), req.Name, req.IsDefault, slots)
 	if err != nil {
+		if errors.Is(err, ErrRefundForbidden) {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Financial permission required"})
+			return
+		}
 		if errors.Is(err, ErrTemplateSlotCountInvalid) || errors.Is(err, ErrTemplateSlotBonusTooHigh) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
@@ -223,9 +227,12 @@ func (h *Handler) UpdateRechargeTemplate(c *gin.Context) {
 	}
 
 	ctx := c.Request.Context()
-	err = h.service.UpdateRechargeTemplate(ctx, id, req.Name, req.IsDefault, slots)
+	err = h.service.UpdateRechargeTemplate(ctx, c.GetString("admin_id"), id, req.Name, req.IsDefault, slots)
 	if err != nil {
-
+		if errors.Is(err, ErrRefundForbidden) {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Financial permission required"})
+			return
+		}
 		if errors.Is(err, ErrTemplateSlotCountInvalid) || errors.Is(err, ErrTemplateSlotBonusTooHigh) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
@@ -249,8 +256,12 @@ func (h *Handler) DeleteRechargeTemplate(c *gin.Context) {
 	}
 
 	ctx := c.Request.Context()
-	err = h.service.DeleteRechargeTemplate(ctx, id)
+	err = h.service.DeleteRechargeTemplate(ctx, c.GetString("admin_id"), id)
 	if err != nil {
+		if errors.Is(err, ErrRefundForbidden) {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Financial permission required"})
+			return
+		}
 		if errors.Is(err, ErrDefaultTemplateNotDelete) || errors.Is(err, ErrTemplateNotFound) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
@@ -270,8 +281,12 @@ func (h *Handler) SetDefaultRechargeTemplate(c *gin.Context) {
 	}
 
 	ctx := c.Request.Context()
-	err = h.service.SetDefaultRechargeTemplate(ctx, id)
+	err = h.service.SetDefaultRechargeTemplate(ctx, c.GetString("admin_id"), id)
 	if err != nil {
+		if errors.Is(err, ErrRefundForbidden) {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Financial permission required"})
+			return
+		}
 		if errors.Is(err, ErrTemplateNotFound) {
 			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
 			return

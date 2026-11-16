@@ -23,9 +23,17 @@ type Repository interface {
 
 type dbRepository struct{}
 
-const PaidSubscriptionPredicate = `status IN ('ACTIVE','CANCELLED','CANCEL_PENDING') AND current_period_end > now() AND last_payment_time IS NOT NULL AND subscription_id NOT LIKE 'I-MOCK%'`
+const PaidSubscriptionPredicate = `status IN ('ACTIVE','CANCELLED','CANCEL_PENDING') AND current_period_end > now() AND last_payment_time IS NOT NULL AND subscription_id NOT LIKE 'I-MOCK%'
+ AND (
+  NOT EXISTS(SELECT 1 FROM recharge_orders paid WHERE paid.subscription_id=user_subscriptions.subscription_id AND paid.paid_period_end IS NOT NULL)
+  OR EXISTS(SELECT 1 FROM recharge_orders paid WHERE paid.subscription_id=user_subscriptions.subscription_id
+   AND paid.status IN ('Success','Paid','RefundPending') AND NOT paid.paypal_refund_reported
+   AND COALESCE(paid.paid_period_start,paid.paid_at)<=now() AND paid.paid_period_end>now())
+ )`
 
-const WholeBookEntitlementPredicate = `order_type='whole_book' AND status IN ('Success','RefundPending') AND fulfilled_at IS NOT NULL`
+const WholeBookEntitlementPredicate = `order_type='whole_book' AND status IN ('Success','Paid','RefundPending') AND fulfilled_at IS NOT NULL
+ AND (checkout_id IS NOT NULL OR EXISTS(SELECT 1 FROM legacy_whole_book_proofs proof
+  WHERE proof.order_id=recharge_orders.id AND proof.novel_id=recharge_orders.novel_id))`
 
 func (r *dbRepository) HasWholeBook(ctx context.Context, userID, novelID int64) (bool, error) {
 	var ok bool

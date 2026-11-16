@@ -46,7 +46,7 @@ func LoadConfig() {
 
 	adminJWTSecret := strings.TrimSpace(os.Getenv("CMS_JWT_SECRET"))
 	if os.Getenv("GIN_MODE") == "release" {
-		if len(adminJWTSecret) < 32 || adminJWTSecret == strings.TrimSpace(os.Getenv("JWT_SECRET")) {
+		if !validAdminJWTSecret(adminJWTSecret, os.Getenv("JWT_SECRET")) {
 			log.Fatal("CMS_JWT_SECRET must be distinct from Reader JWT_SECRET and at least 32 characters")
 		}
 	} else if adminJWTSecret == "" {
@@ -140,4 +140,13 @@ func getEnvInt64(key string, fallback int64) int64 {
 		return fallback
 	}
 	return parsed
+}
+
+func validAdminJWTSecret(secret, readerSecret string) bool {
+	secret = strings.TrimSpace(secret)
+	lower := strings.ToLower(secret)
+	return len(secret) >= 32 && secret != strings.TrimSpace(readerSecret) &&
+		!strings.Contains(lower, "change_me") && !strings.Contains(lower, "changeme") &&
+		!strings.Contains(lower, "random_string") && !strings.Contains(lower, "development-only") &&
+		!strings.HasPrefix(secret, "<")
 }

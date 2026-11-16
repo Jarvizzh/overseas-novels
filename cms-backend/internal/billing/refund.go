@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 	"net/http"
 	"net/url"
 	"os"
@@ -27,13 +28,14 @@ var (
 )
 
 type refundRequest struct {
-	orderID   int64
-	amount    int
-	currency  string
-	capture   string
-	orderType string
-	requestID string
-	refundID  string
+	orderID    int64
+	amount     int
+	currency   string
+	capture    string
+	orderType  string
+	requestID  string
+	refundID   string
+	lookupOnly bool
 }
 
 func (s *billingService) RefundOrder(ctx context.Context, orderID, adminID string) error {
@@ -50,6 +52,23 @@ func (s *billingService) RefundOrder(ctx context.Context, orderID, adminID strin
 func (s *billingService) submitPayPalRefund(ctx context.Context, request *refundRequest) error {
 	result, err := refundThroughPayPal(ctx, request)
 	if err != nil {
+		var rejection *paypalHTTPError
+		if errors.As(err, &rejection) {
+			switch rejection.issue {
+			case "REFUND_TIME_LIMIT_EXCEEDED", "REFUND_TIME_LIMIT_EXCEEDED_FOR_CAPTURE":
+				if rejection.refundPost {
+					if err := s.failPayPalRefund(ctx, request, &paypalRefundResult{Status: rejection.issue}); err != nil {
+						return err
+					}
+					return ErrRefundFailed
+				}
+			case "CAPTURED_AMOUNT_FULLY_REFUNDED", "REFUND_AMOUNT_EXCEEDED":
+				if _, err := db.DB.Exec(ctx, `UPDATE payment_refunds SET channel_lookup_only=true
+					WHERE order_id=$1 AND request_id=$2 AND status='Pending'`, request.orderID, request.requestID); err != nil {
+					return err
+				}
+			}
+		}
 		return fmt.Errorf("%w: %v", ErrRefundPending, err)
 	}
 	if result.ID == "" {
@@ -75,10 +94,15 @@ func (s *billingService) submitPayPalRefund(ctx context.Context, request *refund
 	if !strings.EqualFold(result.Status, "completed") {
 		return ErrRefundPending
 	}
-	if result.Currency != request.currency || result.Amount != fmt.Sprintf("%d.%02d", request.amount/100, request.amount%100) {
+	if result.Currency != request.currency || !matchesRefundAmount(result.Amount, request.amount) {
 		return errors.New("PayPal returned a refund amount that differs from the order")
 	}
-	_, err = db.DB.Exec(ctx, `SELECT complete_paypal_refund($1,$2)`, request.orderID, result.ID)
+	var completed bool
+	err = db.DB.QueryRow(ctx, `SELECT settle_paypal_refund_item($1,$2,$3,$4,$5)`,
+		request.orderID, result.ID, request.capture, request.amount, request.currency).Scan(&completed)
+	if err == nil && !completed {
+		return ErrRefundPending
+	}
 	return err
 }
 
@@ -89,17 +113,8 @@ func (s *billingService) beginPayPalRefund(ctx context.Context, id string, admin
 	}
 	defer tx.Rollback(context.WithoutCancel(ctx))
 	if adminID != nil {
-		var role string
-		var status int
-		err := tx.QueryRow(ctx, `SELECT role, status FROM admins WHERE id=$1 FOR SHARE`, *adminID).Scan(&role, &status)
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, ErrRefundForbidden
-		}
-		if err != nil {
+		if err := requireFinancialAdmin(ctx, tx, *adminID); err != nil {
 			return nil, err
-		}
-		if status != 1 || (role != "Finance" && role != "SuperAdmin") {
-			return nil, ErrRefundForbidden
 		}
 	}
 
@@ -139,8 +154,8 @@ func (s *billingService) beginPayPalRefund(ctx context.Context, id string, admin
 		return nil, err
 	}
 	if o.Status == "RefundPending" {
-		err = tx.QueryRow(ctx, `SELECT request_id::text,COALESCE(provider_refund_id,'')
-			FROM payment_refunds WHERE order_id=$1 AND status='Pending'`, o.ID).Scan(&request.requestID, &request.refundID)
+		err = tx.QueryRow(ctx, `SELECT request_id::text,COALESCE(provider_refund_id,''),COALESCE(requested_amount_cents,$2),channel_lookup_only
+			FROM payment_refunds WHERE order_id=$1 AND status='Pending'`, o.ID, o.AmountCents).Scan(&request.requestID, &request.refundID, &request.amount, &request.lookupOnly)
 		if err != nil {
 			return nil, err
 		}
@@ -150,12 +165,22 @@ func (s *billingService) beginPayPalRefund(ctx context.Context, id string, admin
 	if adminID == nil {
 		return nil, nil
 	}
+	err = tx.QueryRow(ctx, `SELECT $1::int-COALESCE(sum(amount_cents),0) FROM paypal_refund_items
+		WHERE capture_id=$2 AND currency=$3`, o.AmountCents, request.capture, request.currency).Scan(&request.amount)
+	if err != nil {
+		return nil, err
+	}
+	if request.amount <= 0 {
+		return nil, ErrRefundPending
+	}
+
 	request.requestID = uuid.NewString()
-	tag, err := tx.Exec(ctx, `INSERT INTO payment_refunds(order_id,request_id,admin_id,prior_order_status)
-		VALUES($1,$2,$3,$4) ON CONFLICT(order_id) DO UPDATE SET request_id=EXCLUDED.request_id,
+	tag, err := tx.Exec(ctx, `INSERT INTO payment_refunds(order_id,request_id,admin_id,prior_order_status,requested_amount_cents)
+		VALUES($1,$2,$3,$4,$5) ON CONFLICT(order_id) DO UPDATE SET request_id=EXCLUDED.request_id,
 		admin_id=EXCLUDED.admin_id,prior_order_status=EXCLUDED.prior_order_status,provider_refund_id=NULL,
-		status='Pending',updated_at=now() WHERE payment_refunds.status='Failed'`,
-		o.ID, request.requestID, *adminID, o.Status)
+		requested_amount_cents=EXCLUDED.requested_amount_cents,channel_lookup_only=false,
+ status='Pending',updated_at=now() WHERE payment_refunds.status='Failed'`,
+		o.ID, request.requestID, *adminID, o.Status, request.amount)
 	if err != nil {
 		return nil, err
 	}
@@ -251,6 +276,8 @@ func refundThroughPayPal(ctx context.Context, request *refundRequest) (*paypalRe
 	var content io.Reader
 	if request.refundID != "" {
 		method, path = http.MethodGet, refundPath+url.PathEscape(request.refundID)
+	} else if request.lookupOnly {
+		method, path = http.MethodGet, strings.TrimSuffix(path, "/refund")
 	} else {
 		data, err := json.Marshal(body)
 		if err != nil {
@@ -277,7 +304,16 @@ func refundThroughPayPal(ctx context.Context, request *refundRequest) (*paypalRe
 		} `json:"amount"`
 	}
 	if err := readPayPalResponse(client, req, &response); err != nil {
+		var failure *paypalHTTPError
+		if errors.As(err, &failure) {
+			failure.refundPost = method == http.MethodPost
+		}
 		return nil, err
+	}
+	if request.lookupOnly && request.refundID == "" {
+		// A capture can report refunded without identifying each refund.
+		// The refund notifications or independently reconciled items close the order.
+		return nil, errors.New("PayPal capture checked; awaiting individual refund evidence")
 	}
 	if request.orderType == "subscription" {
 		return &paypalRefundResult{response.ID, response.State, response.Amount.Currency, response.Amount.Total}, nil
@@ -292,7 +328,18 @@ func readPayPalResponse(client *http.Client, req *http.Request, target any) erro
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return errors.New("PayPal returned HTTP " + strconv.Itoa(resp.StatusCode))
+		var failure struct {
+			Name    string `json:"name"`
+			Details []struct {
+				Issue string `json:"issue"`
+			} `json:"details"`
+		}
+		_ = json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&failure)
+		issue := failure.Name
+		if len(failure.Details) > 0 && failure.Details[0].Issue != "" {
+			issue = failure.Details[0].Issue
+		}
+		return &paypalHTTPError{status: resp.StatusCode, issue: issue}
 	}
 	return json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(target)
 }
@@ -358,7 +405,7 @@ func (s *billingService) failPayPalRefund(ctx context.Context, request *refundRe
 		return nil
 	}
 	var priorStatus string
-	err = tx.QueryRow(ctx, `UPDATE payment_refunds SET status='Failed',provider_refund_id=$3,updated_at=now()
+	err = tx.QueryRow(ctx, `UPDATE payment_refunds SET status='Failed',provider_refund_id=COALESCE(NULLIF($3,''),provider_refund_id),updated_at=now()
 		WHERE order_id=$1 AND request_id=$2 AND status='Pending'
 		AND (provider_refund_id IS NULL OR provider_refund_id=$3)
 		RETURNING prior_order_status`, request.orderID, request.requestID, result.ID).Scan(&priorStatus)
@@ -369,7 +416,7 @@ func (s *billingService) failPayPalRefund(ctx context.Context, request *refundRe
 		return err
 	}
 	_, err = tx.Exec(ctx, `INSERT INTO payment_refund_failures(request_id,order_id,provider_refund_id,provider_status,admin_id)
-		SELECT request_id,order_id,provider_refund_id,$2,admin_id FROM payment_refunds WHERE order_id=$1`,
+		SELECT request_id,order_id,COALESCE(provider_refund_id,''),$2,admin_id FROM payment_refunds WHERE order_id=$1`,
 		request.orderID, result.Status)
 	if err != nil {
 		return err
@@ -378,4 +425,22 @@ func (s *billingService) failPayPalRefund(ctx context.Context, request *refundRe
 		return err
 	}
 	return tx.Commit(ctx)
+}
+
+type paypalHTTPError struct {
+	status     int
+	issue      string
+	refundPost bool
+}
+
+func (e *paypalHTTPError) Error() string {
+	return fmt.Sprintf("PayPal HTTP %d (%s)", e.status, e.issue)
+}
+
+func matchesRefundAmount(amount string, cents int) bool {
+	if strings.Trim(amount, "0123456789.") != "" {
+		return false
+	}
+	actual, ok := new(big.Rat).SetString(amount)
+	return ok && actual.Cmp(big.NewRat(int64(cents), 100)) == 0
 }

@@ -29,6 +29,7 @@ type CreateSubscriptionPlanParam struct {
 }
 
 type CreateSubscriptionParam struct {
+	RequestID  string
 	UserID     int64
 	PlanID     string
 	SlotID     int

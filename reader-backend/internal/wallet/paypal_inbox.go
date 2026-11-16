@@ -33,7 +33,12 @@ func (r *dbRepository) enqueuePayPalEvent(ctx context.Context, event *payment.We
 		if err := lockPayPalCapture(ctx, tx, event.CaptureID); err != nil {
 			return err
 		}
+		if _, err := tx.Exec(ctx, `SELECT save_paypal_refund_item($1,$2,$3,$4)`,
+			event.ExternalRefID, event.CaptureID, event.AmountCents, event.Currency); err != nil {
+			return err
+		}
 	}
+
 	_, err = tx.Exec(ctx, `INSERT INTO paypal_event_inbox
 		(event_id,event_type,capture_id,refund_id,amount_cents,currency,event)
 		SELECT $1,$2,$3,$4,$5,$6,$7::jsonb
@@ -49,14 +54,17 @@ func (r *dbRepository) enqueuePayPalEvent(ctx context.Context, event *payment.We
 // Applies a previously verified full refund before any coins or entitlement are granted.
 func applyRefundBeforeFulfillment(ctx context.Context, tx pgx.Tx, orderID int64, captureID string, amount int64, currency string) (bool, error) {
 	var refundID string
-	err := tx.QueryRow(ctx, `SELECT refund_id FROM paypal_event_inbox
-		WHERE event_type='refund_completed' AND capture_id=$1 AND amount_cents=$2 AND currency=$3 AND refund_id<>''
-		ORDER BY event_id LIMIT 1`, captureID, amount, currency).Scan(&refundID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return false, nil
-	}
+	var refunded int64
+	err := tx.QueryRow(ctx, `SELECT COALESCE(max(refund_id),''),COALESCE(sum(amount_cents),0)
+ FROM paypal_refund_items WHERE capture_id=$1 AND currency=$2`, captureID, currency).Scan(&refundID, &refunded)
 	if err != nil {
 		return false, err
+	}
+	if refunded < amount {
+		return false, nil
+	}
+	if refunded != amount {
+		return false, errors.New("PayPal refund total differs from original payment")
 	}
 	_, err = tx.Exec(ctx, `INSERT INTO payment_refunds (order_id,request_id,provider_refund_id,status)
 		VALUES($1,gen_random_uuid(),$2,'Completed')`, orderID, refundID)
