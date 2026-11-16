@@ -559,14 +559,27 @@ export const Reader: React.FC<ReaderProps> = ({
 
   return (
     <div className={`reader-container reader-theme-${theme} page-container-full`}>
-      <button
-        type="button"
-        className={`reader-floating-back-btn ${showSettings ? 'hud-open' : ''}`}
-        onClick={() => onNavigate('detail', { id: novelId })}
-        aria-label="Back to book details"
-      >
-        <ChevronLeft size={19} strokeWidth={1.8} aria-hidden="true" />
-      </button>
+      <header className="reader-chrome-bar">
+        <div className="reader-chrome-inner">
+          <button
+            type="button"
+            className="reader-hud-btn"
+            onClick={() => onNavigate('detail', { id: novelId })}
+            aria-label="Back to book details"
+          >
+            <ChevronLeft size={20} strokeWidth={1.8} aria-hidden="true" />
+          </button>
+          <span className="reader-chrome-title">{novel.title}</span>
+          <button
+            type="button"
+            className="reader-hud-btn"
+            onClick={() => setShowTOC(true)}
+            aria-label="Table of Contents"
+          >
+            <List size={18} strokeWidth={1.8} aria-hidden="true" />
+          </button>
+        </div>
+      </header>
 
       <ReaderSettings
         visible={showSettings}

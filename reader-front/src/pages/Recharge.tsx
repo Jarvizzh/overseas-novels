@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback, useRef, useId } from 'react';
 import { ChevronLeft, Crown, Check, Sparkles, BookOpen } from 'lucide-react';
 import { useToast } from '../context/toastStore';
 import { GoldCoin } from '../components/GoldCoin';
-import { api, type SubscriptionInfo } from '../utils/api';
+import { api, ApiError, type SubscriptionInfo } from '../utils/api';
 import { LegalModal, type LegalModalType } from '../components/LegalModal';
 
 interface RechargeProps {
@@ -68,6 +68,8 @@ export const Recharge: React.FC<RechargeProps> = ({
     price_cents: number;
   }>>([]);
   const [loadingTemplates, setLoadingTemplates] = useState(true);
+  const [offersNovelId, setOffersNovelId] = useState<number | undefined | null>(null);
+  const offersRequestRef = useRef<AbortController | null>(null);
 
   const successDialogRef = useRef<HTMLDialogElement>(null);
   const pressedOutsideRef = useRef(false);
@@ -81,16 +83,22 @@ export const Recharge: React.FC<RechargeProps> = ({
     } else if (!showSuccess && dialog.open) {
       dialog.close();
     }
-  }, [showSuccess]);
+  }, [showSuccess, loadingTemplates, offersNovelId, novelId]);
 
   const fetchStatusAndTemplates = useCallback(async () => {
+    offersRequestRef.current?.abort();
+    const controller = new AbortController();
+    offersRequestRef.current = controller;
+    setLoadingTemplates(true);
     try {
       const [templateData, subData] = await Promise.all([
-        api.getRechargeTemplates().catch(() => null),
-        api.getSubscriptionStatus().catch(() => null),
+        api.getRechargeTemplates(novelId, controller.signal),
+        api.getSubscriptionStatus(controller.signal).catch(() => null),
       ]);
 
-      const slotList = (templateData?.slots || []).filter((slot) => slot.type !== 'whole_book' || novelId);
+      if (controller.signal.aborted) return;
+      const slotList = templateData.slots || [];
+      setOffersNovelId(novelId);
       setSlots(slotList);
 
       if (subData?.is_vip) {
@@ -101,20 +109,26 @@ export const Recharge: React.FC<RechargeProps> = ({
         setUserSubscription(null);
       }
 
+      if (slotList.length === 0) setSelectedPack(null);
       if (slotList.length > 0) {
         const subSlot = slotList.find((s) => s.type === 'subscription' || s.type === 'vip');
         setSelectedPack((prev) => slotList.some((slot) => slot.id === prev) ? prev : (subSlot || slotList[0]).id);
       }
     } catch (err) {
+      if (controller.signal.aborted) return;
+      setSlots([]);
+      setSelectedPack(null);
+      setOffersNovelId(novelId);
       console.error('Failed to load recharge data:', err);
     } finally {
-      setLoadingTemplates(false);
+      if (!controller.signal.aborted) setLoadingTemplates(false);
     }
   }, [novelId]);
 
   useEffect(() => {
     if (!authReady) return;
-    fetchStatusAndTemplates();
+    void fetchStatusAndTemplates();
+    return () => offersRequestRef.current?.abort();
   }, [authReady, fetchStatusAndTemplates]);
 
   const onAddCoinsRef = useRef(onAddCoins);
@@ -243,7 +257,7 @@ export const Recharge: React.FC<RechargeProps> = ({
     }));
 
   const handlePurchase = async () => {
-    if (selectedPack === null) return;
+    if (selectedPack === null || isProcessing || loadingTemplates || offersNovelId !== novelId) return;
     const tSlot = slots.find((p) => p.id === selectedPack);
     if (!tSlot) return;
 
@@ -293,6 +307,9 @@ export const Recharge: React.FC<RechargeProps> = ({
     } catch (err) {
       setIsProcessing(false);
       setPaymentStep(0);
+      if (err instanceof ApiError && [400, 404, 409].includes(err.status)) {
+        await fetchStatusAndTemplates();
+      }
       const msg = err instanceof Error ? err.message : 'Failed to initiate PayPal checkout. Please try again.';
       showToast(msg, 'error');
     }
@@ -340,7 +357,7 @@ export const Recharge: React.FC<RechargeProps> = ({
     return e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom;
   };
 
-  if (loadingTemplates) {
+  if (loadingTemplates || offersNovelId !== novelId) {
     return (
       <div className="page-container-full" style={{ alignItems: 'center', justifyContent: 'center', gap: '12px', color: 'var(--text-secondary)' }}>
         <div className="sn-spinner" />

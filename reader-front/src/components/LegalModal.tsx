@@ -148,8 +148,9 @@ export const LegalModal: React.FC<LegalModalProps> = ({
       <div
         className="scroll-container-no-pad"
         style={{
-          flex: 1,
+          flex: '1 1 auto',
           minHeight: 0,
+          overflowY: 'auto',
           paddingRight: '4px',
           fontSize: '0.8125rem',
           color: 'var(--text-secondary)',

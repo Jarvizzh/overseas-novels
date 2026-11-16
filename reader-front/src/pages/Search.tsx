@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { Search as SearchIcon, X, TrendingUp, Clock } from 'lucide-react';
+import { Search as SearchIcon, X, Clock } from 'lucide-react';
 import { api } from '../utils/api';
 import type { Novel } from '../utils/api';
 import { BookCard } from '../components/BookCard';
@@ -122,13 +122,6 @@ export const Search: React.FC<SearchProps> = ({ novels, onNavigate, initialGenre
     return Array.from(dynamicGenres);
   }, [novels]);
 
-  const trendingTerms = useMemo(() => {
-    if (novels.length > 0) {
-      return novels.slice(0, 4).map((n) => n.title);
-    }
-    return ['Romance', 'Fantasy', 'Billionaire', 'Sci-Fi'];
-  }, [novels]);
-
   const handleSearchSubmit = (searchTerm: string) => {
     const trimmed = searchTerm.trim();
     if (!trimmed) return;
@@ -208,59 +201,40 @@ export const Search: React.FC<SearchProps> = ({ novels, onNavigate, initialGenre
           ))}
         </div>
 
-        {/* Discovery Tags & Recent History when query is empty */}
-        {!query.trim() && (
-          <>
-            <h2 className="hot-tags-title">Trending Searches</h2>
+        {/* Recent History when query is empty */}
+        {!query.trim() && searchHistory.length > 0 && (
+          <div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
+              <h2 className="hot-tags-title" style={{ margin: 0 }}>Recent Searches</h2>
+              <button
+                type="button"
+                onClick={clearHistory}
+                style={{
+                  background: 'transparent',
+                  border: 'none',
+                  color: 'var(--accent-text)',
+                  fontSize: '0.75rem',
+                  fontWeight: 600,
+                  cursor: 'pointer',
+                }}
+              >
+                Clear All
+              </button>
+            </div>
             <div className="tag-cloud">
-              {trendingTerms.map((term) => (
+              {searchHistory.map((hist) => (
                 <button
-                  key={term}
+                  key={hist}
                   type="button"
                   className="tag-pill"
-                  onClick={() => handleSearchSubmit(term)}
+                  onClick={() => setQuery(hist)}
                 >
-                  <TrendingUp size={12} strokeWidth={2} style={{ color: 'var(--accent-text)' }} aria-hidden="true" />
-                  <span>{term}</span>
+                  <Clock size={12} strokeWidth={1.8} aria-hidden="true" />
+                  <span>{hist}</span>
                 </button>
               ))}
             </div>
-
-            {searchHistory.length > 0 && (
-              <div>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
-                  <h2 className="hot-tags-title" style={{ margin: 0 }}>Recent Searches</h2>
-                  <button
-                    type="button"
-                    onClick={clearHistory}
-                    style={{
-                      background: 'transparent',
-                      border: 'none',
-                      color: 'var(--accent-text)',
-                      fontSize: '0.75rem',
-                      fontWeight: 600,
-                      cursor: 'pointer',
-                    }}
-                  >
-                    Clear All
-                  </button>
-                </div>
-                <div className="tag-cloud">
-                  {searchHistory.map((hist) => (
-                    <button
-                      key={hist}
-                      type="button"
-                      className="tag-pill"
-                      onClick={() => setQuery(hist)}
-                    >
-                      <Clock size={12} strokeWidth={1.8} aria-hidden="true" />
-                      <span>{hist}</span>
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
-          </>
+          </div>
         )}
 
         {/* Results Header */}

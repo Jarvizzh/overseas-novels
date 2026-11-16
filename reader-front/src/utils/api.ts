@@ -323,7 +323,7 @@ export const api = {
       body: JSON.stringify({ order_id: orderId }),
     }),
 
-  getRechargeTemplates: () =>
+  getRechargeTemplates: (novelId?: number, signal?: AbortSignal) =>
     request<{
       id: number;
       name: string;
@@ -342,7 +342,7 @@ export const api = {
         price: string;
         price_cents: number;
       }>;
-    }>('/wallet/recharge/templates'),
+    }>(`/wallet/recharge/templates${novelId ? `?${new URLSearchParams({ novel_id: String(novelId) })}` : ''}`, { signal }),
 
   createSubscription: (slotId: number, paymentMethod: string = 'paypal', returnUrl?: string, cancelUrl?: string) =>
     request<{ subscription_id: string; approve_url: string; status: string }>('/wallet/recharge/subscription/create', {
@@ -364,8 +364,8 @@ export const api = {
       }),
     }),
 
-  getSubscriptionStatus: () =>
-    request<SubscriptionStatusResponse>('/wallet/subscription/status'),
+  getSubscriptionStatus: (signal?: AbortSignal) =>
+    request<SubscriptionStatusResponse>('/wallet/subscription/status', { signal }),
 
   cancelSubscription: (subscriptionId: string, reason: string = 'User requested cancellation') =>
     request<{ message: string }>('/wallet/subscription/cancel', {
