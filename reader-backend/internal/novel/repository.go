@@ -17,10 +17,32 @@ type Repository interface {
 	GetChapter(ctx context.Context, novelID int64, chapterIndex int) (*model.Chapter, error)
 	GetUnlockedChapterIndices(ctx context.Context, userID, novelID int64) ([]int, error)
 	HasActiveSubscription(ctx context.Context, userID int64) (bool, error)
+	HasWholeBook(context.Context, int64, int64) (bool, error)
 	GetEffectivePricingRule(ctx context.Context, userID int64, novelID int64, promoID int, utmSource, utmCampaign string) (int, int, error)
 }
 
 type dbRepository struct{}
+
+const PaidSubscriptionPredicate = `status IN ('ACTIVE','CANCELLED','CANCEL_PENDING') AND current_period_end > now() AND last_payment_time IS NOT NULL AND subscription_id NOT LIKE 'I-MOCK%'`
+
+const WholeBookEntitlementPredicate = `order_type='whole_book' AND status IN ('Success','RefundPending') AND fulfilled_at IS NOT NULL`
+
+func (r *dbRepository) HasWholeBook(ctx context.Context, userID, novelID int64) (bool, error) {
+	var ok bool
+	err := db.DB.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM recharge_orders WHERE user_id=$1 AND novel_id=$2 AND `+WholeBookEntitlementPredicate+`)`, userID, novelID).Scan(&ok)
+	return ok, err
+}
+
+func HasReadingPass(ctx context.Context, repo Repository, userID, novelID int64) (bool, error) {
+	if userID <= 0 {
+		return false, nil
+	}
+	vip, err := repo.HasActiveSubscription(ctx, userID)
+	if vip || err != nil {
+		return vip, err
+	}
+	return repo.HasWholeBook(ctx, userID, novelID)
+}
 
 func NewDBRepository() Repository {
 	return &dbRepository{}
@@ -225,7 +247,7 @@ func (r *dbRepository) HasActiveSubscription(ctx context.Context, userID int64) 
 	query := `
 		SELECT EXISTS(
 			SELECT 1 FROM user_subscriptions 
-			WHERE user_id = $1 AND status = 'ACTIVE' AND (current_period_end IS NULL OR current_period_end > CURRENT_TIMESTAMP)
+			WHERE user_id = $1 AND ` + PaidSubscriptionPredicate + `
 		)`
 	err := db.DB.QueryRow(ctx, query, userID).Scan(&exists)
 	if err != nil {
@@ -235,51 +257,25 @@ func (r *dbRepository) HasActiveSubscription(ctx context.Context, userID int64) 
 }
 
 func (r *dbRepository) GetEffectivePricingRule(ctx context.Context, userID int64, novelID int64, promoID int, utmSource, utmCampaign string) (int, int, error) {
-	// 1. Try finding promotion link
-	var promoStartPay, promoCost *int
-	if promoID > 0 {
-		_ = db.DB.QueryRow(ctx, "SELECT start_pay_chapter_index, coin_cost_per_thousand FROM promotion_links WHERE id = $1 AND (novel_id = $2 OR novel_id = 0)", promoID, novelID).Scan(&promoStartPay, &promoCost)
+	var start, cost int
+	err := db.DB.QueryRow(ctx, `
+		SELECT COALESCE(NULLIF(pl.start_pay_chapter_index, 0), NULLIF(n.start_pay_chapter_index, 0),
+			(SELECT value::int FROM system_configs WHERE key = 'global_start_pay_chapter_index'), 3),
+		       COALESCE(NULLIF(pl.coin_cost_per_thousand, 0), NULLIF(n.coin_cost_per_thousand, 0),
+			(SELECT value::int FROM system_configs WHERE key = 'global_coin_cost_per_thousand'), 500)
+		FROM novels n
+		LEFT JOIN LATERAL (
+			SELECT p.start_pay_chapter_index, p.coin_cost_per_thousand
+			FROM users u JOIN promotion_links p ON p.utm_source = u.utm_source AND p.utm_campaign = u.utm_campaign
+			WHERE u.id = $1 AND p.novel_id = n.id AND u.utm_source <> '' AND u.utm_campaign <> ''
+			ORDER BY p.id DESC LIMIT 1
+		) pl ON TRUE
+		WHERE n.id = $2 AND n.status <> 'archived' AND n.publish_status = 'published'`, userID, novelID).Scan(&start, &cost)
+	if err != nil {
+		return 0, 0, err
 	}
-	if (promoStartPay == nil && promoCost == nil) && utmSource != "" && utmCampaign != "" {
-		_ = db.DB.QueryRow(ctx, "SELECT start_pay_chapter_index, coin_cost_per_thousand FROM promotion_links WHERE utm_source = $1 AND utm_campaign = $2 AND (novel_id = $3 OR novel_id = 0) ORDER BY id DESC LIMIT 1", utmSource, utmCampaign, novelID).Scan(&promoStartPay, &promoCost)
+	if start <= 0 || cost < 0 {
+		return 0, 0, fmt.Errorf("invalid chapter pricing configuration")
 	}
-	if (promoStartPay == nil && promoCost == nil) && userID > 0 {
-		_ = db.DB.QueryRow(ctx, "SELECT pl.start_pay_chapter_index, pl.coin_cost_per_thousand FROM users u JOIN promotion_links pl ON (u.utm_source = pl.utm_source AND u.utm_campaign = pl.utm_campaign) WHERE u.id = $1 AND u.utm_source IS NOT NULL AND u.utm_source != '' AND (pl.novel_id = $2 OR pl.novel_id = 0) ORDER BY pl.id DESC LIMIT 1", userID, novelID).Scan(&promoStartPay, &promoCost)
-	}
-
-	// 2. Fetch novel settings
-	var novelStartPay, novelCost *int
-	_ = db.DB.QueryRow(ctx, "SELECT start_pay_chapter_index, coin_cost_per_thousand FROM novels WHERE id = $1 AND status != 'archived' AND publish_status = 'published'", novelID).Scan(&novelStartPay, &novelCost)
-
-	// 3. Fetch global settings
-	globalStartPay := 3
-	globalCost := 500
-	var gStartStr, gCostStr string
-	_ = db.DB.QueryRow(ctx, "SELECT value FROM system_configs WHERE key = 'global_start_pay_chapter_index'").Scan(&gStartStr)
-	if gStartStr != "" {
-		_, _ = fmt.Sscanf(gStartStr, "%d", &globalStartPay)
-	}
-	_ = db.DB.QueryRow(ctx, "SELECT value FROM system_configs WHERE key = 'global_coin_cost_per_thousand'").Scan(&gCostStr)
-	if gCostStr != "" {
-		_, _ = fmt.Sscanf(gCostStr, "%d", &globalCost)
-	}
-
-	// 4. Cascading Priority: Promotion Link > Single Novel > Global Config
-	effectiveStartPay := globalStartPay
-	if novelStartPay != nil && *novelStartPay > 0 {
-		effectiveStartPay = *novelStartPay
-	}
-	if promoStartPay != nil && *promoStartPay > 0 {
-		effectiveStartPay = *promoStartPay
-	}
-
-	effectiveCost := globalCost
-	if novelCost != nil && *novelCost > 0 {
-		effectiveCost = *novelCost
-	}
-	if promoCost != nil && *promoCost > 0 {
-		effectiveCost = *promoCost
-	}
-
-	return effectiveStartPay, effectiveCost, nil
+	return start, cost, nil
 }

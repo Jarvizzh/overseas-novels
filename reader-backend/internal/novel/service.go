@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"strings"
 
 	"golang.org/x/sync/singleflight"
@@ -30,9 +31,10 @@ func CalculateChapterPrice(wordCount, effectiveCost int) int {
 }
 
 type ChapterReadResult struct {
-	Chapter *model.Chapter `json:"chapter"`
-	Locked  bool           `json:"locked"`
-	Price   int            `json:"price"`
+	Chapter    *model.Chapter `json:"chapter"`
+	Locked     bool           `json:"locked"`
+	Price      int            `json:"price"`
+	AccessType string         `json:"access_type,omitempty"`
 }
 
 type Service interface {
@@ -168,13 +170,21 @@ func (s *service) GetChaptersList(ctx context.Context, userID int64, novelID int
 		}
 	}
 
-	effectiveStartPay, effectiveCost, _ := s.repo.GetEffectivePricingRule(ctx, userID, novelID, promoID, utmSource, utmCampaign)
+	effectiveStartPay, effectiveCost, err := s.repo.GetEffectivePricingRule(ctx, userID, novelID, promoID, utmSource, utmCampaign)
+	if err != nil {
+		return nil, err
+	}
+
+	hasPass, err := HasReadingPass(ctx, s.repo, userID, novelID)
+	if err != nil {
+		return nil, err
+	}
 
 	resultList := make([]model.Chapter, len(list))
 	for i, ch := range list {
-		isPaid := (ch.ChapterIndex >= (effectiveStartPay - 1))
+		isPaid := ch.ChapterIndex >= effectiveStartPay-1
 		price := 0
-		if isPaid {
+		if isPaid && !hasPass {
 			price = CalculateChapterPrice(ch.WordCount, effectiveCost)
 		}
 		ch.IsPaid = isPaid
@@ -203,7 +213,7 @@ func (s *service) GetChapterContent(ctx context.Context, userID int64, novelID i
 			}
 			chDB, errDB := s.repo.GetChapter(ctx, novelID, chapterIndex)
 			if errDB != nil || chDB == nil {
-				return chDB, errDB
+				return nil, errDB
 			}
 
 			// If storage is provided and (chDB.Content is empty or storage is OSS), load content from storage
@@ -226,7 +236,10 @@ func (s *service) GetChapterContent(ctx context.Context, userID int64, novelID i
 		ch = val.(*model.Chapter)
 	}
 
-	effectiveStartPay, effectiveCost, _ := s.repo.GetEffectivePricingRule(ctx, userID, novelID, promoID, utmSource, utmCampaign)
+	effectiveStartPay, effectiveCost, err := s.repo.GetEffectivePricingRule(ctx, userID, novelID, promoID, utmSource, utmCampaign)
+	if err != nil {
+		return nil, err
+	}
 
 	isPaid := (ch.ChapterIndex >= (effectiveStartPay - 1))
 	price := 0
@@ -244,6 +257,7 @@ func (s *service) GetChapterContent(ctx context.Context, userID int64, novelID i
 		clone.Price = 0
 		result.Chapter = &clone
 		result.Locked = false
+		result.AccessType = "free"
 		return result, nil
 	}
 
@@ -257,15 +271,20 @@ func (s *service) GetChapterContent(ctx context.Context, userID int64, novelID i
 	}
 
 	// VIP Subscription Check: Members with active subscription have unlimited free reading access to all content
-	if isVIP, errVIP := s.repo.HasActiveSubscription(ctx, userID); errVIP == nil && isVIP {
+	hasPass, err := HasReadingPass(ctx, s.repo, userID, novelID)
+	if err != nil {
+		return nil, err
+	}
+	if hasPass {
 		clone := *ch
 		clone.IsPaid = true
 		clone.Price = price
 		result.Chapter = &clone
 		result.Locked = false
+		result.AccessType = "pass"
+		result.Price = 0
 		return result, nil
 	}
-
 
 	unlocked, err := s.cache.IsChapterUnlocked(ctx, userID, novelID, chapterIndex)
 	if err == nil && unlocked {
@@ -274,40 +293,34 @@ func (s *service) GetChapterContent(ctx context.Context, userID int64, novelID i
 		clone.Price = price
 		result.Chapter = &clone
 		result.Locked = false
+		result.AccessType = "chapter"
 		return result, nil
 	}
 
 	sfUnlockKey := fmt.Sprintf("sf:unlock:%d:%d", userID, novelID)
 	valUnlock, errUnlock, _ := s.sf.Do(sfUnlockKey, func() (interface{}, error) {
-		if cachedUnlocked, errCache := s.cache.IsChapterUnlocked(ctx, userID, novelID, chapterIndex); errCache == nil && cachedUnlocked {
-			return true, nil
-		}
-		indices, errDB := s.repo.GetUnlockedChapterIndices(ctx, userID, novelID)
-		if errDB != nil {
-			return false, errDB
+		indices, err := s.repo.GetUnlockedChapterIndices(ctx, userID, novelID)
+		if err != nil {
+			return nil, err
 		}
 		if len(indices) > 0 {
 			_ = s.cache.SetUnlockedChaptersBatch(ctx, userID, novelID, indices)
 		}
-		for _, idx := range indices {
-			if idx == chapterIndex {
-				return true, nil
-			}
-		}
-		return false, nil
+		return indices, nil
 	})
 
 	if errUnlock != nil {
 		return nil, errUnlock
 	}
 
-	dbUnlocked := valUnlock.(bool)
+	dbUnlocked := slices.Contains(valUnlock.([]int), chapterIndex)
 	if dbUnlocked {
 		clone := *ch
 		clone.IsPaid = true
 		clone.Price = price
 		result.Chapter = &clone
 		result.Locked = false
+		result.AccessType = "chapter"
 	} else {
 		preview := getLockedPreview(ch)
 		preview.IsPaid = true

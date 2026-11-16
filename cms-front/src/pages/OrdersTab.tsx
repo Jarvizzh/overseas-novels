@@ -7,6 +7,7 @@ import { ThirdPartyPaymentModal, type ThirdPartyPaymentDetail } from '../compone
 const statusFilterOptions = [
   { value: '', label: '所有订单状态' },
   { value: 'Success', label: '交易成功 (Paid)' },
+  { value: 'RefundPending', label: '退款处理中' },
   { value: 'Refunded', label: '已退款 (Refunded)' },
   { value: 'Pending', label: '待付款 (Pending)' },
   { value: 'Failed', label: '支付失败 (Failed)' }
@@ -278,11 +279,12 @@ export default function OrdersTab() {
                   <td style={{ padding: '14px 16px' }}>
                     <span className={`badge ${o.status === 'Success' || o.status === 'Paid' ? 'badge-green' :
                       o.status === 'Refunded' ? 'badge-red' :
-                        o.status === 'Pending' ? 'badge-orange' : 'badge-gray'
+                        o.status === 'Pending' || o.status === 'RefundPending' ? 'badge-orange' : 'badge-gray'
                       }`} style={{ fontSize: '0.7rem' }}>
                       {o.status === 'Success' || o.status === 'Paid' ? '支付成功' :
                         o.status === 'Refunded' ? '已退款' :
-                          o.status === 'Pending' ? '待付款' : o.status}
+                          o.status === 'RefundPending' ? '退款处理中' :
+                            o.status === 'Pending' ? '待付款' : o.status}
                     </span>
                   </td>
                   <td style={{ padding: '14px 16px', textAlign: 'center' }}>

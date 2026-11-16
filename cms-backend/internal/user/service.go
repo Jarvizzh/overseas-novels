@@ -97,12 +97,14 @@ func (s *userService) ListUsers(ctx context.Context, page, pageSize int, search,
 			COALESCE((
 				SELECT EXISTS(
 					SELECT 1 FROM user_subscriptions us 
-					WHERE us.user_id = u.id AND us.status = 'ACTIVE' AND us.current_period_end > CURRENT_TIMESTAMP
+					WHERE us.user_id = u.id AND us.status IN ('ACTIVE','CANCELLED','CANCEL_PENDING') AND us.current_period_end > CURRENT_TIMESTAMP
+					AND us.last_payment_time IS NOT NULL AND us.subscription_id NOT LIKE 'I-MOCK%%'
 				)
 			), false) AS is_vip,
 			COALESCE((
 				SELECT us.cycle FROM user_subscriptions us 
-				WHERE us.user_id = u.id AND us.status = 'ACTIVE' AND us.current_period_end > CURRENT_TIMESTAMP
+				WHERE us.user_id = u.id AND us.status IN ('ACTIVE','CANCELLED','CANCEL_PENDING') AND us.current_period_end > CURRENT_TIMESTAMP
+					AND us.last_payment_time IS NOT NULL AND us.subscription_id NOT LIKE 'I-MOCK%%'
 				ORDER BY us.current_period_end DESC LIMIT 1
 			), '') AS vip_cycle,
 			(

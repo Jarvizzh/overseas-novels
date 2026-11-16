@@ -15,8 +15,6 @@ type BillingRepository interface {
 
 	GetOrderForUpdateTx(ctx context.Context, tx pgx.Tx, orderID string) (*Order, error)
 	UpdateOrderStatusTx(ctx context.Context, tx pgx.Tx, orderID, status string) error
-	DeductWalletBalanceTx(ctx context.Context, tx pgx.Tx, userID string, chargedAmt, bonusAmt int) error
-	InsertTransactionRecordTx(ctx context.Context, tx pgx.Tx, id, userID, txType, bizType string, amount, chargedAmt, bonusAmt int, desc string) error
 	InsertAdminAuditLogTx(ctx context.Context, tx pgx.Tx, adminID, action, targetID, beforeData, afterData string) error
 
 	GetThirdPartyPaymentDetails(ctx context.Context, orderID int64) (*ThirdPartyPaymentOrder, error)
@@ -66,7 +64,7 @@ func (r *dbBillingRepository) ListOrders(ctx context.Context, selectQuery string
 			&o.ID, &o.UserID, &o.ExternalRefID, &o.AmountCents, &o.Currency,
 			&o.Coins, &o.BonusCoinsCredited, &o.PaymentMethod,
 			&o.Status, &o.UtmSource, &o.UtmCampaign, &o.PaidAt, &o.OrderType,
-			&o.PromotionLinkID, &o.NovelID, &o.CreatedAt, &o.UpdatedAt,
+			&o.PromotionLinkID, &o.NovelID, &o.CreatedAt, &o.UpdatedAt, &o.ReconciliationNote,
 		)
 		if err != nil {
 			return nil, err
@@ -83,12 +81,12 @@ func (r *dbBillingRepository) GetOrderForUpdateTx(ctx context.Context, tx pgx.Tx
 	}
 
 	query := `
-		SELECT user_id, status, coins, bonus_coins_credited
+		SELECT user_id, status, coins, bonus_coins_credited, amount_cents, currency, payment_method, order_type, COALESCE(external_ref_id,'')
 		FROM recharge_orders
 		WHERE id = $1 FOR UPDATE`
 	var o Order
 	o.ID = orderIDVal
-	err = tx.QueryRow(ctx, query, orderIDVal).Scan(&o.UserID, &o.Status, &o.Coins, &o.BonusCoinsCredited)
+	err = tx.QueryRow(ctx, query, orderIDVal).Scan(&o.UserID, &o.Status, &o.Coins, &o.BonusCoinsCredited, &o.AmountCents, &o.Currency, &o.PaymentMethod, &o.OrderType, &o.ExternalRefID)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return nil, nil
@@ -109,25 +107,6 @@ func (r *dbBillingRepository) UpdateOrderStatusTx(ctx context.Context, tx pgx.Tx
 		SET status = $1, updated_at = CURRENT_TIMESTAMP
 		WHERE id = $2`
 	_, err = tx.Exec(ctx, query, status, orderIDVal)
-	return err
-}
-
-func (r *dbBillingRepository) DeductWalletBalanceTx(ctx context.Context, tx pgx.Tx, userID string, chargedAmt, bonusAmt int) error {
-	query := `
-		UPDATE wallets
-		SET charged_coins = GREATEST(0, charged_coins - $1), 
-		    bonus_coins = GREATEST(0, bonus_coins - $2), 
-		    updated_at = CURRENT_TIMESTAMP
-		WHERE user_id = $3`
-	_, err := tx.Exec(ctx, query, chargedAmt, bonusAmt, userID)
-	return err
-}
-
-func (r *dbBillingRepository) InsertTransactionRecordTx(ctx context.Context, tx pgx.Tx, id, userID, txType, bizType string, amount, chargedAmt, bonusAmt int, desc string) error {
-	query := `
-		INSERT INTO transactions (id, user_id, type, biz_type, amount, charged_amount, bonus_amount, description)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`
-	_, err := tx.Exec(ctx, query, id, userID, txType, bizType, amount, chargedAmt, bonusAmt, desc)
 	return err
 }
 
@@ -247,7 +226,6 @@ func (r *dbBillingRepository) CreateRechargeSlotTx(ctx context.Context, tx pgx.T
 	_, err := tx.Exec(ctx, query, templateID, index, slotType, coins, bonus, duration, cycle, vipName, vipDesc, price, priceCents)
 	return err
 }
-
 
 func (r *dbBillingRepository) UpdateRechargeTemplateTx(ctx context.Context, tx pgx.Tx, id int, name string, isDefault bool) (int64, error) {
 	query := `

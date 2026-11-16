@@ -501,3 +501,130 @@ CREATE TABLE IF NOT EXISTS third_party_payment_orders (
 CREATE INDEX IF NOT EXISTS idx_tp_payment_order_id ON third_party_payment_orders(order_id);
 CREATE INDEX IF NOT EXISTS idx_tp_payment_ext_id ON third_party_payment_orders(external_order_id);
 CREATE INDEX IF NOT EXISTS idx_tp_payment_capture_id ON third_party_payment_orders(capture_id);
+
+-- Payment checkout snapshots and verified fulfillment.
+ALTER TABLE recharge_orders ADD COLUMN IF NOT EXISTS checkout_id UUID;
+ALTER TABLE recharge_orders ADD COLUMN IF NOT EXISTS fulfilled_at TIMESTAMPTZ;
+ALTER TABLE recharge_orders ADD COLUMN IF NOT EXISTS paid_period_end TIMESTAMPTZ;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_recharge_checkout_id ON recharge_orders(checkout_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_paypal_verified_capture
+ON third_party_payment_orders(capture_id)
+WHERE payment_provider = 'paypal' AND status = 'VERIFIED';
+CREATE INDEX IF NOT EXISTS idx_whole_book_entitlement
+ON recharge_orders(user_id, novel_id)
+WHERE order_type = 'whole_book' AND status IN ('Success','RefundPending') AND fulfilled_at IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS paypal_processed_events (
+    id TEXT PRIMARY KEY,
+    processed_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS payment_refunds (
+    order_id BIGINT PRIMARY KEY REFERENCES recharge_orders(id) ON DELETE CASCADE,
+    request_id UUID NOT NULL UNIQUE,
+    provider_refund_id VARCHAR(100) UNIQUE,
+    status VARCHAR(20) NOT NULL DEFAULT 'Pending',
+    admin_id VARCHAR(100),
+    charged_coin_shortfall INT NOT NULL DEFAULT 0,
+    bonus_coin_shortfall INT NOT NULL DEFAULT 0,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+ALTER TABLE recharge_orders ADD COLUMN IF NOT EXISTS paypal_refund_reported BOOLEAN NOT NULL DEFAULT false;
+
+-- Called after confirming a full channel refund. The order, wallet and audit
+-- entries commit together, including when a provider or admin retries.
+CREATE OR REPLACE FUNCTION complete_paypal_refund(target_order BIGINT, provider_refund TEXT)
+RETURNS VOID LANGUAGE plpgsql AS $$
+DECLARE
+    purchase recharge_orders%ROWTYPE;
+    refund payment_refunds%ROWTYPE;
+    charged_balance INT;
+    bonus_balance INT;
+    charged_debit INT;
+    bonus_debit INT;
+BEGIN
+    SELECT * INTO STRICT purchase FROM recharge_orders WHERE id = target_order FOR UPDATE;
+    SELECT * INTO STRICT refund FROM payment_refunds WHERE order_id = target_order FOR UPDATE;
+    IF refund.status = 'Completed' THEN
+        IF refund.provider_refund_id <> provider_refund THEN RAISE EXCEPTION 'Refund ID mismatch'; END IF;
+        RETURN;
+    END IF;
+    IF purchase.status <> 'RefundPending' OR purchase.payment_method <> 'paypal'
+        OR refund.status <> 'Pending'
+        OR (refund.provider_refund_id IS NOT NULL AND refund.provider_refund_id <> provider_refund)
+        OR provider_refund = '' THEN
+        RAISE EXCEPTION 'Invalid refund transition';
+    END IF;
+    SELECT charged_coins, bonus_coins INTO charged_balance, bonus_balance
+        FROM wallets WHERE user_id = purchase.user_id FOR UPDATE;
+    charged_debit := LEAST(GREATEST(0, COALESCE(charged_balance,0)), GREATEST(0,purchase.coins));
+    bonus_debit := LEAST(GREATEST(0, COALESCE(bonus_balance,0)), GREATEST(0,purchase.bonus_coins_credited));
+    IF charged_debit + bonus_debit > 0 THEN
+        UPDATE wallets SET charged_coins = charged_coins - charged_debit,
+            bonus_coins = bonus_coins - bonus_debit, updated_at = now() WHERE user_id = purchase.user_id;
+        INSERT INTO transactions (id,user_id,type,biz_type,amount,charged_amount,bonus_amount,description)
+            VALUES (gen_random_uuid()::text,purchase.user_id,'debit','refund',charged_debit+bonus_debit,
+                    charged_debit,bonus_debit,'Refund for order #' || target_order);
+    END IF;
+    UPDATE payment_refunds SET status='Completed', provider_refund_id=provider_refund,
+        charged_coin_shortfall=GREATEST(0,purchase.coins)-charged_debit,
+        bonus_coin_shortfall=GREATEST(0,purchase.bonus_coins_credited)-bonus_debit,
+        updated_at=now() WHERE order_id=target_order;
+    UPDATE recharge_orders SET status='Refunded', updated_at=now() WHERE id=target_order;
+    IF purchase.subscription_id IS NOT NULL AND purchase.paid_period_end IS NOT NULL THEN
+        UPDATE user_subscriptions SET current_period_end = (
+            SELECT max(paid_period_end) FROM recharge_orders
+            WHERE subscription_id = purchase.subscription_id AND status IN ('Success','Paid','RefundPending')
+              AND NOT paypal_refund_reported
+        ), updated_at = now()
+        WHERE subscription_id = purchase.subscription_id AND current_period_end <= purchase.paid_period_end;
+    END IF;
+END;
+$$;
+
+ALTER TABLE recharge_orders ADD COLUMN IF NOT EXISTS reconciliation_at TIMESTAMPTZ;
+CREATE INDEX IF NOT EXISTS idx_paypal_pending_reconciliation
+ON recharge_orders(COALESCE(reconciliation_at, created_at))
+WHERE payment_method='paypal' AND status='Pending' AND external_ref_id IS NOT NULL AND checkout_id IS NOT NULL;
+
+ALTER TABLE payment_refunds ADD COLUMN IF NOT EXISTS prior_order_status VARCHAR(20) NOT NULL DEFAULT 'Success';
+CREATE TABLE IF NOT EXISTS payment_refund_failures (
+    request_id UUID PRIMARY KEY,
+    order_id BIGINT NOT NULL REFERENCES recharge_orders(id) ON DELETE CASCADE,
+    provider_refund_id VARCHAR(100) NOT NULL,
+    provider_status TEXT NOT NULL,
+    admin_id VARCHAR(100),
+    failed_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS paypal_event_inbox (
+    event_id TEXT PRIMARY KEY,
+    event_type TEXT NOT NULL,
+    capture_id TEXT,
+    refund_id TEXT,
+    amount_cents BIGINT NOT NULL,
+    currency TEXT NOT NULL,
+    event JSONB NOT NULL,
+    next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    processed_at TIMESTAMPTZ,
+    attempts INT NOT NULL DEFAULT 0,
+    last_error TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_paypal_inbox_due ON paypal_event_inbox(next_attempt_at,event_id)
+    WHERE processed_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_paypal_inbox_refund_capture ON paypal_event_inbox(capture_id,amount_cents,currency)
+    WHERE event_type='refund_completed';
+
+ALTER TABLE recharge_orders ADD COLUMN IF NOT EXISTS reconciliation_note TEXT;
+ALTER TABLE user_subscriptions ADD COLUMN IF NOT EXISTS paypal_transaction_cursor TIMESTAMPTZ;
+ALTER TABLE user_subscriptions ADD COLUMN IF NOT EXISTS paypal_next_check_at TIMESTAMPTZ;
+ALTER TABLE user_subscriptions ADD COLUMN IF NOT EXISTS cancel_next_attempt_at TIMESTAMPTZ;
+ALTER TABLE user_subscriptions ADD COLUMN IF NOT EXISTS cancel_attempts INT NOT NULL DEFAULT 0;
+ALTER TABLE user_subscriptions ADD COLUMN IF NOT EXISTS cancel_reason TEXT;
+ALTER TABLE user_subscriptions ADD COLUMN IF NOT EXISTS cancel_last_error TEXT;
+
+CREATE INDEX IF NOT EXISTS idx_paypal_cancel_due ON user_subscriptions(cancel_next_attempt_at,id)
+    WHERE payment_method='paypal' AND status='CANCEL_PENDING';
+CREATE INDEX IF NOT EXISTS idx_paypal_subscription_due ON user_subscriptions(paypal_next_check_at,id)
+    WHERE payment_method='paypal';

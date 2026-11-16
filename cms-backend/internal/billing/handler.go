@@ -24,7 +24,7 @@ func (h *Handler) RegisterRoutes(rg *gin.RouterGroup) {
 	{
 		orders.GET("", h.ListOrders)
 		orders.GET("/:id/payment-details", h.GetThirdPartyPaymentDetails)
-		orders.POST("/:id/refund", h.RefundOrder)
+		orders.POST("/:id/refund", auth.RoleMiddleware("SuperAdmin", "Finance"), h.RefundOrder)
 	}
 
 	templates := rg.Group("/recharge-templates", auth.AuthMiddleware())
@@ -74,11 +74,19 @@ func (h *Handler) RefundOrder(c *gin.Context) {
 	ctx := c.Request.Context()
 	err := h.service.RefundOrder(ctx, orderID, adminIDStr)
 	if err != nil {
+		if errors.Is(err, ErrRefundForbidden) {
+			c.JSON(http.StatusForbidden, gin.H{"error": ErrRefundForbidden.Error()})
+			return
+		}
+		if errors.Is(err, ErrRefundPending) {
+			c.JSON(http.StatusConflict, gin.H{"error": ErrRefundPending.Error()})
+			return
+		}
 		if errors.Is(err, ErrOrderNotFound) {
 			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
 			return
 		}
-		if errors.Is(err, ErrOrderAlreadyRefunded) || errors.Is(err, ErrOrderNotRefundable) {
+		if errors.Is(err, ErrRefundFailed) || errors.Is(err, ErrOrderAlreadyRefunded) || errors.Is(err, ErrOrderNotRefundable) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
@@ -117,8 +125,6 @@ func (h *Handler) GetThirdPartyPaymentDetails(c *gin.Context) {
 		"details": details,
 	})
 }
-
-
 
 func (h *Handler) ListRechargeTemplates(c *gin.Context) {
 	ctx := c.Request.Context()

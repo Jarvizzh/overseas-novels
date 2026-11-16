@@ -11,10 +11,10 @@ import (
 )
 
 type fakeReaderRepo struct {
-	novels       []model.Novel
-	chapters     map[int64][]model.Chapter
-	lastSortBy   string
-	effectiveCost int
+	novels         []model.Novel
+	chapters       map[int64][]model.Chapter
+	lastSortBy     string
+	effectiveCost  int
 	effectiveStart int
 }
 
@@ -202,4 +202,10 @@ func TestReaderNovelService_HidesUnpublishedOrArchivedAndPricesConsistently(t *t
 	if err != nil || contentRes == nil || contentRes.Price != list[0].Price {
 		t.Fatalf("expected chapter price=%d, got %+v err=%v", list[0].Price, contentRes, err)
 	}
+	if result, err := svc.GetChapterContent(ctx, 0, 3, 999, 0, "", ""); err != nil || result != nil {
+		t.Fatalf("missing chapter should be not found, got %+v, %v", result, err)
+	}
+
 }
+
+func (*fakeReaderRepo) HasWholeBook(context.Context, int64, int64) (bool, error) { return false, nil }

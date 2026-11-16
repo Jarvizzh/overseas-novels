@@ -102,3 +102,31 @@ func TestUnlockChapter_EnforcesPublishedAndUnifiedPrice(t *testing.T) {
 		t.Fatalf("expected unified calculated price=0 (not stale 99), got novel=%d idx=%d price=%d", wRepo.chargedNovelID, wRepo.chargedIdx, wRepo.chargedPrice)
 	}
 }
+
+func (*fakeWalletNovelRepo) HasWholeBook(context.Context, int64, int64) (bool, error) {
+	return false, nil
+}
+
+type subscribedNovelRepository struct{ *fakeWalletNovelRepo }
+
+func (subscribedNovelRepository) HasActiveSubscription(context.Context, int64) (bool, error) {
+	return true, nil
+}
+
+func TestUnlockChapterDoesNotDebitPaidVIP(t *testing.T) {
+	novels := subscribedNovelRepository{&fakeWalletNovelRepo{
+		novels: map[int64]*model.Novel{1: {ID: 1, Status: "Ongoing", PublishStatus: "published"}},
+		chapters: map[int64]map[int]*model.Chapter{
+			1: {2: {NovelID: 1, ChapterIndex: 2, WordCount: 1000}},
+		},
+		startPay: 3, effectiveCost: 500,
+	}}
+	repo := &fakeWalletRepo{}
+	service := NewService(repo, novels, fakeWalletNovelCache{}, nil, nil)
+	if err := service.UnlockChapter(context.Background(), 42, 1, 2, 0, "", "", 500); err != nil {
+		t.Fatal(err)
+	}
+	if repo.chargedNovelID != 0 {
+		t.Fatalf("VIP reached debit path for %d coins", repo.chargedPrice)
+	}
+}

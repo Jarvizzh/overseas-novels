@@ -107,9 +107,11 @@ flowchart TD
 3. **执行 Schema 结构初始化**：
    在本地或网关机上执行：
    ```bash
-   psql -h <RDS内网地址> -p <端口> -U star_admin -d star_novel -f reader-backend/db/schema.sql
+   psql -h <RDS内网地址> -p <端口> -U star_admin -d star_novel -f cms-backend/db/schema.sql
    ```
    *说明：初始化脚本已包含 `CREATE EXTENSION IF NOT EXISTS pg_trgm;` 以及所有核心业务表、GIN 索引与偏唯一索引。*
+
+   部署新版支付前，先执行共用数据库 schema，再配套更新 CMS、Reader API 与 Reader H5。为 Reader 设置当前 PayPal 应用对应的 `PAYPAL_WEBHOOK_ID`（若用 Linux 配置生成脚本，则设置 `payment.paypal_webhook_id`）。注册订单批准、扣款完成、支付和订阅状态、退款完成的通知。Stripe 接口当前返回停用。CMS 必须配置独立的 `CMS_JWT_SECRET`（Linux 配置生成脚本读取 `cms.jwt_secret`），切换后 CMS 管理员需重新登录。 完成迁移后，可从 CMS 订单接口的 `reconciliation_note` 定位待核对的历史订单或账期。核实存量 PayPal 交易和退款凭证后再补发权益。
 
 ### 3.2 自建 Redis 生产配置
 修改 Redis 所在机器的 `/etc/redis/redis.conf`：
@@ -289,7 +291,7 @@ GIN_MODE=release
 PORT=8081
 DATABASE_URL=postgres://star_admin:YOUR_RDS_PASSWORD@pgm-xxxxxx.pgsql.rds.aliyuncs.com:3433/star_novel?sslmode=disable
 REDIS_URL=redis://:YOUR_STRONG_REDIS_PASSWORD_2026@172.16.0.15:6379/0
-JWT_SECRET=STAR_NOVEL_CMS_SUPER_KEY_2026
+CMS_JWT_SECRET=<独立于 Reader 的至少 32 字符随机密钥>
 DEFAULT_DOMAIN=https://h5.starsfic.com
 
 # 章节正文存储引擎配置 ("postgres" 或 "oss")

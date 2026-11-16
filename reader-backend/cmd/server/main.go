@@ -79,6 +79,8 @@ func main() {
 	})
 
 	// 6. Basic Health check and routes
+	reconcileCtx, stopReconciliation := context.WithCancel(context.Background())
+	defer stopReconciliation()
 	api := r.Group("/api/v1")
 	{
 		authRepo := auth.NewUserRepository()
@@ -114,6 +116,7 @@ func main() {
 
 		walletRepo := wallet.NewDBRepository()
 		walletService := wallet.NewService(walletRepo, novelRepo, novelCache, stripeClient, paypalClient)
+		go walletService.RunReconciliation(reconcileCtx)
 		walletHandler := wallet.NewHandler(walletService)
 		walletHandler.RegisterRoutes(api)
 
@@ -148,6 +151,7 @@ func main() {
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
+	stopReconciliation()
 	log.Println("Shutting down server...")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

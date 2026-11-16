@@ -5,15 +5,15 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"log"
 	"math"
-	"strconv"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"reader-backend/internal/db"
 	"reader-backend/internal/model"
+	"reader-backend/internal/novel"
+	"reader-backend/internal/payment"
 )
 
 var (
@@ -22,12 +22,14 @@ var (
 )
 
 type Repository interface {
+	CompletePayPalRefund(context.Context, string, string, int64, string) error
+	enqueuePayPalEvent(context.Context, *payment.WebhookEventResult) error
+	enqueuePayPalCancellation(context.Context, string, int64, string) error
 	GetWallet(ctx context.Context, userID int64) (*model.Wallet, error)
 	GetTransactions(ctx context.Context, userID int64, limit, offset int) ([]model.Transaction, error)
 	UnlockChapterTx(ctx context.Context, userID int64, novelID int64, chapterIndex int, price int, chapterTitle string) error
 	AddCoins(ctx context.Context, userID int64, amount int, isBonus bool, bizType string, description string) error
-	HasCheckedInToday(ctx context.Context, userID int64) (bool, error)
-	GetPriceCentsByCoins(ctx context.Context, coins int) (int, error)
+	CheckIn(context.Context, int64, bool) (*CheckInState, error)
 	GetUserEmail(ctx context.Context, userID int64) (string, error)
 	GetRechargeTemplateByID(ctx context.Context, templateID int) (*model.RechargeTemplate, error)
 	GetDefaultRechargeTemplate(ctx context.Context) (*model.RechargeTemplate, error)
@@ -36,15 +38,17 @@ type Repository interface {
 	GetRechargeSlotByID(ctx context.Context, slotID int) (*model.RechargeSlot, error)
 	GetProviderPlan(ctx context.Context, provider string, slotID int) (*model.PaymentProviderPlan, error)
 	SaveProviderPlan(ctx context.Context, plan *model.PaymentProviderPlan) error
-	CreateUserSubscriptionTx(ctx context.Context, tx pgx.Tx, sub *model.UserSubscription) error
 	UpsertUserSubscription(ctx context.Context, sub *model.UserSubscription) error
 	GetActiveSubscriptionByUserID(ctx context.Context, userID int64) (*model.UserSubscription, error)
 	GetSubscriptionByID(ctx context.Context, subID string) (*model.UserSubscription, error)
 	UpdateUserSubscriptionStatus(ctx context.Context, subID string, status string) error
-	RecordSubscriptionOrderTx(ctx context.Context, userID int64, subID, externalRefID string, slotID int, amountCents int64, currency, paymentMethod, fbLeadJSON string, tpOrder *model.ThirdPartyPaymentOrder) error
-	RecordSubscriptionRenewalOrderTx(ctx context.Context, sub *model.UserSubscription, externalRefID string, amountCents int64, currency string, tpOrder *model.ThirdPartyPaymentOrder) error
-	RecordRechargeOrderAndCreditCoinsTx(ctx context.Context, userID int64, externalRefID string, coinsAmount int, amountCents int64, currency string, paymentMethod string, fbLeadJSON string, tpOrder *model.ThirdPartyPaymentOrder) error
-	CreatePendingOrder(ctx context.Context, userID int64, externalRefID string, coinsAmount int, amountCents int64, currency string, paymentMethod string) error
+	RecordSubscriptionRenewalOrderTx(ctx context.Context, sub *model.UserSubscription, externalRefID string, amountCents int64, currency string, paidAt, periodEnd time.Time, providerStatus string, tpOrder *model.ThirdPartyPaymentOrder) (bool, error)
+	GetCheckoutTemplate(context.Context, int64) (int, error)
+	CreateCheckout(context.Context, int64, *model.RechargeSlot, int64, checkoutAttribution) (string, error)
+	BindCheckout(context.Context, string, string) error
+	findCheckout(context.Context, string) (*checkoutOrder, error)
+	flagCheckoutForReview(context.Context, int64, string) error
+	settleCheckout(context.Context, string, *payment.PayPalCaptureResult) (*CheckoutResult, error)
 }
 
 type dbRepository struct{}
@@ -115,6 +119,16 @@ func (r *dbRepository) UnlockChapterTx(ctx context.Context, userID int64, novelI
 	var exists bool
 	checkQuery := `SELECT EXISTS(SELECT 1 FROM unlock_records WHERE user_id = $1 AND novel_id = $2 AND chapter_index = $3)`
 	err = tx.QueryRow(txCtx, checkQuery, userID, novelID, chapterIndex).Scan(&exists)
+	if err != nil {
+		return err
+	}
+	if exists {
+		return ErrAlreadyUnlocked
+	}
+
+	err = tx.QueryRow(txCtx, `SELECT EXISTS(SELECT 1 FROM user_subscriptions WHERE user_id=$1 AND `+novel.PaidSubscriptionPredicate+`)
+		OR EXISTS(SELECT 1 FROM recharge_orders WHERE user_id=$1 AND novel_id=$2 AND `+novel.WholeBookEntitlementPredicate+`)`,
+		userID, novelID).Scan(&exists)
 	if err != nil {
 		return err
 	}
@@ -207,30 +221,6 @@ func (r *dbRepository) AddCoins(ctx context.Context, userID int64, amount int, i
 	}
 
 	return tx.Commit(ctx)
-}
-
-func (r *dbRepository) HasCheckedInToday(ctx context.Context, userID int64) (bool, error) {
-	checkQuery := `
-		SELECT EXISTS(
-			SELECT 1 FROM transactions 
-			WHERE user_id = $1 AND biz_type = 'checkin' AND created_at::date = CURRENT_DATE
-		)`
-	var checkedInToday bool
-	err := db.DB.QueryRow(ctx, checkQuery, userID).Scan(&checkedInToday)
-	return checkedInToday, err
-}
-
-func (r *dbRepository) GetPriceCentsByCoins(ctx context.Context, coins int) (int, error) {
-	var priceCents int
-	query := "SELECT price_cents FROM recharge_slots WHERE (coins + bonus) = $1 OR coins = $1 LIMIT 1"
-	err := db.DB.QueryRow(ctx, query, coins).Scan(&priceCents)
-	if err != nil {
-		if err == pgx.ErrNoRows {
-			return 0, nil
-		}
-		return 0, err
-	}
-	return priceCents, nil
 }
 
 func (r *dbRepository) GetUserEmail(ctx context.Context, userID int64) (string, error) {
@@ -382,34 +372,6 @@ func (r *dbRepository) SaveProviderPlan(ctx context.Context, plan *model.Payment
 	return db.DB.QueryRow(ctx, query, plan.Provider, plan.SlotID, plan.Cycle, plan.PriceCents, plan.Currency, plan.ExternalPlanID, plan.Status, raw).Scan(&plan.ID)
 }
 
-func (r *dbRepository) CreateUserSubscriptionTx(ctx context.Context, tx pgx.Tx, sub *model.UserSubscription) error {
-	query := `
-		INSERT INTO user_subscriptions (
-			user_id, subscription_id, plan_id, slot_id, template_id, status,
-			cycle, price_cents, currency, payment_method, current_period_start, current_period_end,
-			next_billing_time, last_payment_time, raw_payload
-		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15::jsonb)
-		ON CONFLICT (subscription_id) DO UPDATE SET
-			status = EXCLUDED.status,
-			current_period_start = EXCLUDED.current_period_start,
-			current_period_end = EXCLUDED.current_period_end,
-			next_billing_time = EXCLUDED.next_billing_time,
-			last_payment_time = EXCLUDED.last_payment_time,
-			raw_payload = EXCLUDED.raw_payload,
-			updated_at = CURRENT_TIMESTAMP
-		RETURNING id`
-	raw := sub.RawPayload
-	if raw == "" {
-		raw = "{}"
-	}
-	return tx.QueryRow(ctx, query,
-		sub.UserID, sub.SubscriptionID, sub.PlanID, sub.SlotID, sub.TemplateID, sub.Status,
-		sub.Cycle, sub.PriceCents, sub.Currency, sub.PaymentMethod, sub.CurrentPeriodStart, sub.CurrentPeriodEnd,
-		sub.NextBillingTime, sub.LastPaymentTime, raw,
-	).Scan(&sub.ID)
-}
-
 func (r *dbRepository) UpsertUserSubscription(ctx context.Context, sub *model.UserSubscription) error {
 	query := `
 		INSERT INTO user_subscriptions (
@@ -444,7 +406,7 @@ func (r *dbRepository) GetActiveSubscriptionByUserID(ctx context.Context, userID
 		       status, cycle, price_cents, currency, payment_method, current_period_start, current_period_end,
 		       next_billing_time, last_payment_time, cancelled_at, COALESCE(raw_payload::text, '{}'), created_at, updated_at
 		FROM user_subscriptions
-		WHERE user_id = $1 AND status = 'ACTIVE' AND (current_period_end IS NULL OR current_period_end > CURRENT_TIMESTAMP)
+		WHERE user_id = $1 AND ` + novel.PaidSubscriptionPredicate + `
 		ORDER BY id DESC
 		LIMIT 1`
 	var s model.UserSubscription
@@ -489,426 +451,177 @@ func (r *dbRepository) GetSubscriptionByID(ctx context.Context, subID string) (*
 func (r *dbRepository) UpdateUserSubscriptionStatus(ctx context.Context, subID string, status string) error {
 	var cancelQuery string
 	if status == "CANCELLED" {
-		cancelQuery = ", cancelled_at = CURRENT_TIMESTAMP"
+		cancelQuery = ", cancelled_at = COALESCE(cancelled_at, CURRENT_TIMESTAMP), next_billing_time = NULL, cancel_next_attempt_at=NULL, cancel_last_error=NULL"
 	}
-	query := fmt.Sprintf("UPDATE user_subscriptions SET status = $1, updated_at = CURRENT_TIMESTAMP %s WHERE subscription_id = $2", cancelQuery)
+	query := fmt.Sprintf("UPDATE user_subscriptions SET status = $1, updated_at = CURRENT_TIMESTAMP %s WHERE subscription_id = $2 AND (status <> 'CANCELLED' OR $1='CANCELLED')  AND (status <> 'CANCEL_PENDING' OR $1 IN ('CANCELLED','EXPIRED'))", cancelQuery)
 	_, err := db.DB.Exec(ctx, query, status, subID)
 	return err
 }
 
-func (r *dbRepository) RecordSubscriptionOrderTx(
-	ctx context.Context,
-	userID int64,
-	subID, externalRefID string,
-	slotID int,
-	amountCents int64,
-	currency, paymentMethod, fbLeadJSON string,
-	tpOrder *model.ThirdPartyPaymentOrder,
-) error {
-	txCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-
-	tx, err := db.DB.Begin(txCtx)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback(txCtx)
-
-	var utmSource, utmCampaign sql.NullString
-	_ = tx.QueryRow(txCtx, "SELECT utm_source, utm_campaign FROM users WHERE id = $1", userID).Scan(&utmSource, &utmCampaign)
-
-	var promoID, novelID sql.NullInt64
-	if utmSource.Valid && utmSource.String != "" && utmCampaign.Valid && utmCampaign.String != "" {
-		_ = tx.QueryRow(txCtx, "SELECT id, novel_id FROM promotion_links WHERE utm_source = $1 AND utm_campaign = $2 LIMIT 1", utmSource.String, utmCampaign.String).Scan(&promoID, &novelID)
-	}
-
-	var fbLeadVal *string
-	if fbLeadJSON != "" {
-		fbLeadVal = &fbLeadJSON
-	}
-	var utmSrcVal, utmCampVal *string
-	if utmSource.Valid && utmSource.String != "" {
-		utmSrcVal = &utmSource.String
-	}
-	if utmCampaign.Valid && utmCampaign.String != "" {
-		utmCampVal = &utmCampaign.String
-	}
-
-	var orderID int64
-	checkQuery := `SELECT id FROM recharge_orders WHERE external_ref_id = $1 FOR UPDATE`
-	err = tx.QueryRow(txCtx, checkQuery, externalRefID).Scan(&orderID)
-	if err != nil {
-		if err == pgx.ErrNoRows {
-			insertOrderQuery := `
-				INSERT INTO recharge_orders (
-					user_id, external_ref_id, amount_cents, currency, coins,
-					bonus_coins_credited, payment_method, status, utm_source, utm_campaign,
-					fb_lead_metadata, paid_at, order_type, subscription_id, recharge_slot_id,
-					promotion_link_id, novel_id
-				)
-				VALUES ($1, $2, $3, $4, 0, 0, $5, 'Success', $6, $7, $8, CURRENT_TIMESTAMP, 'subscription', $9, $10, $11, $12)
-				RETURNING id`
-			err = tx.QueryRow(txCtx, insertOrderQuery, userID, externalRefID, amountCents, currency, paymentMethod, utmSrcVal, utmCampVal, fbLeadVal, subID, slotID, promoID, novelID).Scan(&orderID)
-			if err != nil {
-				return err
-			}
-		} else {
-			return err
-		}
-	} else {
-		_, err = tx.Exec(txCtx, "UPDATE recharge_orders SET status = 'Success', paid_at = CURRENT_TIMESTAMP, subscription_id = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2", subID, orderID)
-		if err != nil {
-			return err
-		}
-	}
-
-	if tpOrder != nil && orderID > 0 {
-		insertTPQuery := `
-			INSERT INTO third_party_payment_orders (
-				order_id, payment_provider, external_order_id, capture_id,
-				payer_id, payer_email, payer_name, payer_country,
-				currency, gross_amount, fee_amount, net_amount,
-				status, seller_protection_status, raw_payload
-			)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15::jsonb)
-			ON CONFLICT (payment_provider, external_order_id, capture_id) DO UPDATE SET
-				status = EXCLUDED.status,
-				fee_amount = EXCLUDED.fee_amount,
-				net_amount = EXCLUDED.net_amount,
-				raw_payload = EXCLUDED.raw_payload,
-				updated_at = CURRENT_TIMESTAMP`
-		rawPayload := tpOrder.RawPayload
-		if rawPayload == "" {
-			rawPayload = "{}"
-		}
-		_, _ = tx.Exec(txCtx, insertTPQuery,
-			orderID, tpOrder.PaymentProvider, tpOrder.ExternalOrderID, tpOrder.CaptureID,
-			tpOrder.PayerID, tpOrder.PayerEmail, tpOrder.PayerName, tpOrder.PayerCountry,
-			tpOrder.Currency, tpOrder.GrossAmount, tpOrder.FeeAmount, tpOrder.NetAmount,
-			tpOrder.Status, tpOrder.SellerProtectionStatus, rawPayload,
-		)
-	}
-
-	return tx.Commit(txCtx)
-}
-
 func (r *dbRepository) RecordSubscriptionRenewalOrderTx(
-	ctx context.Context,
-	sub *model.UserSubscription,
-	externalRefID string,
-	amountCents int64,
-	currency string,
-	tpOrder *model.ThirdPartyPaymentOrder,
-) error {
-	txCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-
-	tx, err := db.DB.Begin(txCtx)
+	ctx context.Context, sub *model.UserSubscription, externalRefID string, amountCents int64,
+	currency string, paidAt, periodEnd time.Time, providerStatus string, tpOrder *model.ThirdPartyPaymentOrder,
+) (bool, error) {
+	tx, err := db.DB.Begin(ctx)
 	if err != nil {
-		return err
+		return false, err
 	}
-	defer tx.Rollback(txCtx)
-
-	var exists bool
-	_ = tx.QueryRow(txCtx, "SELECT EXISTS(SELECT 1 FROM recharge_orders WHERE external_ref_id = $1)", externalRefID).Scan(&exists)
-	if exists {
-		return nil
+	defer tx.Rollback(context.WithoutCancel(ctx))
+	if err := lockPayPalCapture(ctx, tx, externalRefID); err != nil {
+		return false, err
 	}
 
+	var confirmedEnd *time.Time
+	if !periodEnd.IsZero() {
+		confirmedEnd = &periodEnd
+	}
+	reportedRefund := tpOrder.Status == "REFUNDED"
 	var orderID int64
-	insertOrderQuery := `
-		INSERT INTO recharge_orders (
-			user_id, external_ref_id, amount_cents, currency, coins,
-			bonus_coins_credited, payment_method, status, paid_at,
-			order_type, subscription_id, recharge_slot_id
-		)
-		VALUES ($1, $2, $3, $4, 0, 0, $5, 'Success', CURRENT_TIMESTAMP, 'subscription', $6, $7)
-		RETURNING id`
-	err = tx.QueryRow(txCtx, insertOrderQuery, sub.UserID, externalRefID, amountCents, currency, sub.PaymentMethod, sub.SubscriptionID, sub.SlotID).Scan(&orderID)
+	err = tx.QueryRow(ctx, `INSERT INTO recharge_orders
+		(user_id, external_ref_id, amount_cents,currency,coins,bonus_coins_credited,payment_method,status,
+		paid_at, order_type, subscription_id, recharge_slot_id, recharge_template_id, fulfilled_at, paid_period_end,
+		utm_source, utm_campaign, promotion_link_id, novel_id, reconciliation_note, paypal_refund_reported)
+		SELECT u.id,$2,$3,$4,0,0,$5,'Success',$6,'subscription',$7,$8,
+			(SELECT id FROM recharge_templates WHERE id=$9),CASE WHEN $10::timestamptz IS NOT NULL THEN now() END,$10,u.utm_source,u.utm_campaign,p.id,p.novel_id,
+ CASE WHEN $11 THEN 'PayPal reports refunded sale; match refund ID'
+ WHEN $10::timestamptz IS NULL THEN 'PayPal settled amount verified; billing period needs review' END,$11
+		FROM users u LEFT JOIN LATERAL (
+			SELECT id,novel_id FROM promotion_links WHERE utm_source=u.utm_source AND utm_campaign=u.utm_campaign
+			AND u.utm_source <> '' AND u.utm_campaign <> '' ORDER BY id DESC LIMIT 1
+		) p ON TRUE WHERE u.id=$1
+		ON CONFLICT(external_ref_id) DO UPDATE SET
+			paid_period_end=COALESCE(EXCLUDED.paid_period_end,recharge_orders.paid_period_end),
+			fulfilled_at=COALESCE(recharge_orders.fulfilled_at,EXCLUDED.fulfilled_at),
+			paypal_refund_reported=EXCLUDED.paypal_refund_reported,
+			reconciliation_note=EXCLUDED.reconciliation_note
+		WHERE ((recharge_orders.paid_period_end IS NULL AND EXCLUDED.paid_period_end IS NOT NULL
+			AND NOT recharge_orders.paypal_refund_reported) OR EXCLUDED.paypal_refund_reported)
+			AND recharge_orders.status IN ('Success','Paid') AND recharge_orders.user_id=EXCLUDED.user_id
+			AND recharge_orders.subscription_id=EXCLUDED.subscription_id AND recharge_orders.payment_method=EXCLUDED.payment_method
+			AND recharge_orders.amount_cents=EXCLUDED.amount_cents AND recharge_orders.currency=EXCLUDED.currency
+		RETURNING id`,
+		sub.UserID, externalRefID, amountCents, currency, sub.PaymentMethod, paidAt, sub.SubscriptionID, sub.SlotID, sub.TemplateID, confirmedEnd, reportedRefund).Scan(&orderID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
 	if err != nil {
-		return err
+		return false, err
 	}
-
-	now := time.Now()
-	var newPeriodEnd time.Time
-	switch sub.Cycle {
-	case "day":
-		newPeriodEnd = now.Add(24 * time.Hour)
-	case "week":
-		newPeriodEnd = now.Add(7 * 24 * time.Hour)
-	case "month":
-		newPeriodEnd = now.Add(30 * 24 * time.Hour)
-	default:
-		newPeriodEnd = now.Add(30 * 24 * time.Hour)
-	}
-
-	updateSubQuery := `
-		UPDATE user_subscriptions
-		SET status = 'ACTIVE', last_payment_time = $1, current_period_end = $2, next_billing_time = $2, updated_at = CURRENT_TIMESTAMP
-		WHERE subscription_id = $3`
-	_, err = tx.Exec(txCtx, updateSubQuery, now, newPeriodEnd, sub.SubscriptionID)
+	_, err = tx.Exec(ctx, `INSERT INTO third_party_payment_orders
+		(order_id,payment_provider,external_order_id,capture_id,payer_id,payer_email,payer_name,currency,gross_amount,net_amount,status,raw_payload)
+		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9::bigint::numeric/100,$9::bigint::numeric/100,'VERIFIED',$10::jsonb)
+ ON CONFLICT(payment_provider,external_order_id,capture_id) DO UPDATE SET status='VERIFIED',raw_payload=EXCLUDED.raw_payload
+ WHERE third_party_payment_orders.order_id=EXCLUDED.order_id`,
+		orderID, sub.PaymentMethod, sub.SubscriptionID, externalRefID, tpOrder.PayerID, tpOrder.PayerEmail, tpOrder.PayerName,
+		currency, amountCents, tpOrder.RawPayload)
 	if err != nil {
-		return err
+		return false, err
+	}
+	var priorPeriod bool
+	err = tx.QueryRow(ctx, `SELECT paid_period_end IS NOT NULL FROM recharge_orders WHERE id=$1`, orderID).Scan(&priorPeriod)
+	if err != nil {
+		return false, err
+	}
+	refunded := false
+	if !priorPeriod || (!reportedRefund && !periodEnd.IsZero()) {
+		refunded, err = applyRefundBeforeFulfillment(ctx, tx, orderID, externalRefID, amountCents, currency)
+	}
+	if err != nil {
+		return false, err
+	}
+	if refunded {
+		return false, tx.Commit(ctx)
+	}
+	var firstPayment bool
+	err = tx.QueryRow(ctx, `SELECT last_payment_time IS NULL FROM user_subscriptions WHERE subscription_id=$1 FOR UPDATE`,
+		sub.SubscriptionID).Scan(&firstPayment)
+	if err != nil {
+		return false, err
 	}
 
-	if tpOrder != nil && orderID > 0 {
-		insertTPQuery := `
-			INSERT INTO third_party_payment_orders (
-				order_id, payment_provider, external_order_id, capture_id,
-				payer_id, payer_email, payer_name, payer_country,
-				currency, gross_amount, fee_amount, net_amount,
-				status, seller_protection_status, raw_payload
-			)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15::jsonb)
-			ON CONFLICT (payment_provider, external_order_id, capture_id) DO NOTHING`
-		rawPayload := tpOrder.RawPayload
-		if rawPayload == "" {
-			rawPayload = "{}"
+	if reportedRefund {
+		_, err = tx.Exec(ctx, `UPDATE user_subscriptions SET current_period_end=(
+			SELECT max(paid_period_end) FROM recharge_orders WHERE subscription_id=$1
+			AND status IN ('Success','Paid','RefundPending') AND NOT paypal_refund_reported
+		),updated_at=now()
+		WHERE subscription_id=$1 AND current_period_end<=(
+			SELECT paid_period_end FROM recharge_orders WHERE id=$2)`, sub.SubscriptionID, orderID)
+		if err != nil {
+			return false, err
 		}
-		_, _ = tx.Exec(txCtx, insertTPQuery,
-			orderID, tpOrder.PaymentProvider, tpOrder.ExternalOrderID, tpOrder.CaptureID,
-			tpOrder.PayerID, tpOrder.PayerEmail, tpOrder.PayerName, tpOrder.PayerCountry,
-			tpOrder.Currency, tpOrder.GrossAmount, tpOrder.FeeAmount, tpOrder.NetAmount,
-			tpOrder.Status, tpOrder.SellerProtectionStatus, rawPayload,
-		)
+		return false, tx.Commit(ctx)
 	}
 
-	return tx.Commit(txCtx)
+	if periodEnd.IsZero() {
+		return false, tx.Commit(ctx)
+	}
+
+	_, err = tx.Exec(ctx, `UPDATE user_subscriptions SET
+		status=CASE WHEN status IN ('CANCELLED','CANCEL_PENDING') THEN status ELSE $4 END,
+		last_payment_time=$2, current_period_end=GREATEST(current_period_end,$3),
+		next_billing_time=CASE WHEN status IN ('CANCELLED','CANCEL_PENDING') OR $4 <> 'ACTIVE' THEN NULL ELSE $3 END,
+		updated_at=now()
+		WHERE subscription_id=$1 AND (last_payment_time IS NULL OR last_payment_time < $2)`,
+		sub.SubscriptionID, paidAt, periodEnd, providerStatus)
+	if err != nil {
+		return false, err
+	}
+	return firstPayment, tx.Commit(ctx)
 }
 
-
-func (r *dbRepository) RecordRechargeOrderAndCreditCoinsTx(
-	ctx context.Context,
-	userID int64,
-	externalRefID string,
-	coinsAmount int,
-	amountCents int64,
-	currency string,
-	paymentMethod string,
-	fbLeadJSON string,
-	tpOrder *model.ThirdPartyPaymentOrder,
-) error {
-	txCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-
-	tx, err := db.DB.Begin(txCtx)
+func (r *dbRepository) CompletePayPalRefund(ctx context.Context, refundID, captureID string, amount int64, currency string) error {
+	tx, err := db.DB.Begin(ctx)
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback(txCtx)
+	defer tx.Rollback(context.WithoutCancel(ctx))
 
-	// 1. Fetch UTM parameters from users table
-	var utmSource, utmCampaign sql.NullString
-	userQuery := `SELECT utm_source, utm_campaign FROM users WHERE id = $1`
-	err = tx.QueryRow(txCtx, userQuery, userID).Scan(&utmSource, &utmCampaign)
-	if err != nil && err != pgx.ErrNoRows {
-		return err
-	}
-
-	// 2. Fetch slot information to distinguish charged coins vs bonus coins
-	var slotCoins, slotBonus, slotPriceCents int
-	var slotType string
-	slotQuery := `SELECT coins, bonus, price_cents, type FROM recharge_slots WHERE (coins + bonus) = $1 OR coins = $1 LIMIT 1`
-	err = tx.QueryRow(txCtx, slotQuery, coinsAmount).Scan(&slotCoins, &slotBonus, &slotPriceCents, &slotType)
-	if err != nil {
-		if err == pgx.ErrNoRows {
-			// Fallback: treat all as charged coins
-			slotCoins = coinsAmount
-			slotBonus = 0
-			slotPriceCents = int(amountCents)
-			slotType = "single"
-		} else {
+	if captureID != "" {
+		if err := lockPayPalCapture(ctx, tx, captureID); err != nil {
 			return err
 		}
 	}
 
-	// 2b. Fetch promotion link and novel details from UTM parameters
-	var promotionLinkID, novelID sql.NullInt64
-	if utmSource.Valid && utmSource.String != "" && utmCampaign.Valid && utmCampaign.String != "" {
-		promoQuery := `SELECT id, novel_id FROM promotion_links WHERE utm_source = $1 AND utm_campaign = $2 LIMIT 1`
-		err = tx.QueryRow(txCtx, promoQuery, utmSource.String, utmCampaign.String).Scan(&promotionLinkID, &novelID)
-		if err != nil && err != pgx.ErrNoRows {
-			return err
-		}
-	}
-
-	// If slotPriceCents is 0 and amountCents is passed, use amountCents
-	finalAmountCents := slotPriceCents
-	if finalAmountCents == 0 && amountCents > 0 {
-		finalAmountCents = int(amountCents)
-	}
-
-	// 3. Check if this order (externalRefID) is already processed WITH ROW LOCK (FOR UPDATE)
 	var orderID int64
 	var status string
-	checkQuery := `SELECT id, status FROM recharge_orders WHERE external_ref_id = $1 FOR UPDATE`
-	err = tx.QueryRow(txCtx, checkQuery, externalRefID).Scan(&orderID, &status)
+	err = tx.QueryRow(ctx, `SELECT o.id,o.status FROM recharge_orders o
+		LEFT JOIN payment_refunds r ON r.order_id=o.id
+		WHERE o.payment_method='paypal' AND o.amount_cents=$3 AND o.currency=$4
+		AND (r.provider_refund_id=$1 OR ((r.provider_refund_id IS NULL OR r.status='Failed') AND $2 <> '' AND EXISTS (
+			SELECT 1 FROM third_party_payment_orders p WHERE p.order_id=o.id AND p.payment_provider='paypal'
+			AND p.capture_id=$2 AND (p.status='VERIFIED' OR (o.status='RefundPending' AND p.status='COMPLETED')))))
+		ORDER BY o.id LIMIT 1 FOR UPDATE OF o`, refundID, captureID, amount, currency).Scan(&orderID, &status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return errRefundUnmatched
+	}
 	if err != nil {
-		if err == pgx.ErrNoRows {
-			// Order doesn't exist at all, we insert a new Success order
-			var utmSrcVal, utmCampVal *string
-			if utmSource.Valid && utmSource.String != "" {
-				utmSrcVal = &utmSource.String
-			}
-			if utmCampaign.Valid && utmCampaign.String != "" {
-				utmCampVal = &utmCampaign.String
-			}
-			var fbLeadVal *string
-			if fbLeadJSON != "" {
-				fbLeadVal = &fbLeadJSON
-			}
-
-			insertOrderQuery := `
-				INSERT INTO recharge_orders (
-					user_id, external_ref_id, amount_cents, currency, coins, 
-					bonus_coins_credited, payment_method, status, utm_source, utm_campaign, 
-					fb_lead_metadata, paid_at, order_type, promotion_link_id, novel_id
-				)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, 'Success', $8, $9, $10, CURRENT_TIMESTAMP, $11, $12, $13)
-				RETURNING id`
-			err = tx.QueryRow(txCtx, insertOrderQuery, userID, externalRefID, finalAmountCents, currency, slotCoins, slotBonus, paymentMethod, utmSrcVal, utmCampVal, fbLeadVal, slotType, promotionLinkID, novelID).Scan(&orderID)
-			if err != nil {
-				return err
-			}
-		} else {
+		return err
+	}
+	if status == "Success" || status == "Paid" {
+		_, err = tx.Exec(ctx, `INSERT INTO payment_refunds(order_id,request_id,provider_refund_id)
+			VALUES($1,gen_random_uuid(),$2) ON CONFLICT(order_id) DO UPDATE SET provider_refund_id=EXCLUDED.provider_refund_id,
+			status='Pending' WHERE payment_refunds.status='Failed'`, orderID, refundID)
+		if err != nil {
 			return err
 		}
-	} else {
-		// Order already exists
-		if status == "Success" || status == "Paid" {
-			// Already completed, skip (idempotency)
-			return nil
-		}
-		// If it is Pending, we update it to Success and credit coins
-		var fbLeadVal *string
-		if fbLeadJSON != "" {
-			fbLeadVal = &fbLeadJSON
-		}
-		updateOrderQuery := `
-			UPDATE recharge_orders
-			SET status = 'Success', paid_at = CURRENT_TIMESTAMP, fb_lead_metadata = COALESCE($1, fb_lead_metadata), updated_at = CURRENT_TIMESTAMP
-			WHERE external_ref_id = $2
-			RETURNING id`
-		err = tx.QueryRow(txCtx, updateOrderQuery, fbLeadVal, externalRefID).Scan(&orderID)
+		_, err = tx.Exec(ctx, `UPDATE recharge_orders SET status='RefundPending',updated_at=now() WHERE id=$1`, orderID)
 		if err != nil {
 			return err
 		}
 	}
-
-	// 3b. Record third-party payment transaction details
-	if tpOrder != nil && orderID > 0 {
-		insertTPQuery := `
-			INSERT INTO third_party_payment_orders (
-				order_id, payment_provider, external_order_id, capture_id,
-				payer_id, payer_email, payer_name, payer_country,
-				currency, gross_amount, fee_amount, net_amount,
-				status, seller_protection_status, raw_payload
-			)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15::jsonb)
-			ON CONFLICT (payment_provider, external_order_id, capture_id) DO UPDATE SET
-				status = EXCLUDED.status,
-				fee_amount = EXCLUDED.fee_amount,
-				net_amount = EXCLUDED.net_amount,
-				raw_payload = EXCLUDED.raw_payload,
-				updated_at = CURRENT_TIMESTAMP`
-		rawPayload := tpOrder.RawPayload
-		if rawPayload == "" {
-			rawPayload = "{}"
-		}
-		_, err = tx.Exec(txCtx, insertTPQuery,
-			orderID, tpOrder.PaymentProvider, tpOrder.ExternalOrderID, tpOrder.CaptureID,
-			tpOrder.PayerID, tpOrder.PayerEmail, tpOrder.PayerName, tpOrder.PayerCountry,
-			tpOrder.Currency, tpOrder.GrossAmount, tpOrder.FeeAmount, tpOrder.NetAmount,
-			tpOrder.Status, tpOrder.SellerProtectionStatus, rawPayload,
-		)
-		if err != nil {
-			log.Printf("[Warning] Failed to insert third_party_payment_orders: %v", err)
-		}
+	if status == "Pending" {
+		return ErrCheckoutUnavailable
 	}
-
-	// 4. Update wallet balance
-	updateQuery := `
-		INSERT INTO wallets (user_id, charged_coins, bonus_coins, updated_at)
-		VALUES ($1, $2, $3, CURRENT_TIMESTAMP)
-		ON CONFLICT (user_id) DO UPDATE 
-		SET charged_coins = wallets.charged_coins + EXCLUDED.charged_coins, 
-		    bonus_coins = wallets.bonus_coins + EXCLUDED.bonus_coins, 
-		    updated_at = CURRENT_TIMESTAMP`
-	_, err = tx.Exec(txCtx, updateQuery, userID, slotCoins, slotBonus)
+	_, err = tx.Exec(ctx, `SELECT complete_paypal_refund($1,$2)`, orderID, refundID)
 	if err != nil {
 		return err
 	}
-
-	// 5. Create transaction record
-	txID := uuid.New().String()
-	insertTxQuery := `
-		INSERT INTO transactions (id, user_id, type, biz_type, amount, charged_amount, bonus_amount, description)
-		VALUES ($1, $2, 'credit', 'recharge', $3, $4, $5, $6)`
-	desc := paymentMethod + " Recharge (+" + strconv.Itoa(coinsAmount) + " Coins)"
-	_, err = tx.Exec(txCtx, insertTxQuery, txID, userID, coinsAmount, slotCoins, slotBonus, desc)
-	if err != nil {
-		return err
-	}
-
-	return tx.Commit(txCtx)
+	return tx.Commit(ctx)
 }
 
-func (r *dbRepository) CreatePendingOrder(ctx context.Context, userID int64, externalRefID string, coinsAmount int, amountCents int64, currency string, paymentMethod string) error {
-	// 1. Fetch UTM parameters from users table
-	var utmSource, utmCampaign sql.NullString
-	userQuery := `SELECT utm_source, utm_campaign FROM users WHERE id = $1`
-	err := db.DB.QueryRow(ctx, userQuery, userID).Scan(&utmSource, &utmCampaign)
-	if err != nil && err != pgx.ErrNoRows {
-		return err
-	}
-
-	// 2. Fetch slot information to distinguish charged coins vs bonus coins and slot type
-	var slotCoins, slotBonus, slotPriceCents int
-	var slotType string
-	slotQuery := `SELECT coins, bonus, price_cents, type FROM recharge_slots WHERE (coins + bonus) = $1 OR coins = $1 LIMIT 1`
-	err = db.DB.QueryRow(ctx, slotQuery, coinsAmount).Scan(&slotCoins, &slotBonus, &slotPriceCents, &slotType)
-	if err != nil {
-		if err == pgx.ErrNoRows {
-			slotCoins = coinsAmount
-			slotBonus = 0
-			slotPriceCents = int(amountCents)
-			slotType = "single"
-		} else {
-			return err
-		}
-	}
-
-	// 3. Fetch promotion link and novel details from UTM parameters
-	var promotionLinkID, novelID sql.NullInt64
-	if utmSource.Valid && utmSource.String != "" && utmCampaign.Valid && utmCampaign.String != "" {
-		promoQuery := `SELECT id, novel_id FROM promotion_links WHERE utm_source = $1 AND utm_campaign = $2 LIMIT 1`
-		err = db.DB.QueryRow(ctx, promoQuery, utmSource.String, utmCampaign.String).Scan(&promotionLinkID, &novelID)
-		if err != nil && err != pgx.ErrNoRows {
-			return err
-		}
-	}
-
-	finalAmountCents := slotPriceCents
-	if finalAmountCents == 0 && amountCents > 0 {
-		finalAmountCents = int(amountCents)
-	}
-
-	var utmSrcVal, utmCampVal *string
-	if utmSource.Valid && utmSource.String != "" {
-		utmSrcVal = &utmSource.String
-	}
-	if utmCampaign.Valid && utmCampaign.String != "" {
-		utmCampVal = &utmCampaign.String
-	}
-
-	insertOrderQuery := `
-		INSERT INTO recharge_orders (
-			user_id, external_ref_id, amount_cents, currency, coins, 
-			bonus_coins_credited, payment_method, status, utm_source, utm_campaign, 
-			order_type, promotion_link_id, novel_id
-		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, 'Pending', $8, $9, $10, $11, $12)
-		ON CONFLICT (external_ref_id) DO NOTHING`
-	_, err = db.DB.Exec(ctx, insertOrderQuery, userID, externalRefID, finalAmountCents, currency, slotCoins, slotBonus, paymentMethod, utmSrcVal, utmCampVal, slotType, promotionLinkID, novelID)
+func (r *dbRepository) enqueuePayPalCancellation(ctx context.Context, id string, userID int64, reason string) error {
+	_, err := db.DB.Exec(ctx, `UPDATE user_subscriptions SET status='CANCEL_PENDING',
+		cancel_reason=COALESCE(cancel_reason,NULLIF($3,'')),cancel_next_attempt_at=COALESCE(cancel_next_attempt_at,now()),updated_at=now()
+		WHERE subscription_id=$1 AND user_id=$2 AND status NOT IN ('CANCELLED','EXPIRED')`, id, userID, reason)
 	return err
 }

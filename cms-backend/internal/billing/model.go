@@ -3,6 +3,7 @@ package billing
 import "time"
 
 type Order struct {
+	ReconciliationNote string     `json:"reconciliation_note,omitempty"`
 	ID                 int64      `json:"id"`
 	UserID             string     `json:"user_id"`
 	ExternalRefID      string     `json:"external_ref_id"`

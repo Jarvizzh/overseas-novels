@@ -4,7 +4,6 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"os"
 	"strconv"
 
 	"github.com/gin-gonic/gin"
@@ -38,6 +37,7 @@ func (h *Handler) RegisterRoutes(r *gin.RouterGroup) {
 		walletGroup.POST("/recharge/paypal/activate-subscription", h.ActivateSubscription)
 		walletGroup.GET("/subscription/status", h.GetSubscriptionStatus)
 		walletGroup.POST("/subscription/cancel", h.CancelSubscription)
+		walletGroup.GET("/rewards/checkin", h.GetCheckIn)
 		walletGroup.POST("/rewards/checkin", h.DailyCheckIn)
 		walletGroup.GET("/recharge/templates", h.GetRechargeTemplates)
 	}
@@ -90,6 +90,7 @@ func (h *Handler) GetHistory(c *gin.Context) {
 type UnlockRequest struct {
 	NovelID      int64 `json:"novel_id" binding:"required"`
 	ChapterIndex int   `json:"chapter_index" binding:"gte=0"`
+	Price        *int  `json:"price" binding:"required,gte=0"`
 }
 
 func (h *Handler) UnlockChapter(c *gin.Context) {
@@ -119,10 +120,14 @@ func (h *Handler) UnlockChapter(c *gin.Context) {
 	}
 
 	ctx := c.Request.Context()
-	err := h.service.UnlockChapter(ctx, userID, req.NovelID, req.ChapterIndex, promoID, utmSource, utmCampaign)
+	err := h.service.UnlockChapter(ctx, userID, req.NovelID, req.ChapterIndex, promoID, utmSource, utmCampaign, *req.Price)
 	if err != nil {
 		if errors.Is(err, novel.ErrNovelNotFound) || errors.Is(err, ErrChapterNotFound) {
 			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ErrPriceChanged) {
+			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
 			return
 		}
 		if errors.Is(err, ErrInsufficientBalance) {
@@ -181,165 +186,89 @@ type StripeRechargeRequest struct {
 }
 
 func (h *Handler) CreateStripeIntent(c *gin.Context) {
-	userID := c.MustGet("user_id").(int64)
-	var req StripeRechargeRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	ctx := c.Request.Context()
-
-	fbp := c.GetHeader("X-FB-FBP")
-	fbc := c.GetHeader("X-FB-FBC")
-	pixelID := c.GetHeader("X-FB-Pixel-ID")
-	ip := c.ClientIP()
-	ua := c.Request.UserAgent()
-	sourceURL := c.GetHeader("X-Event-Source-URL")
-	country := c.GetHeader("X-Country")
-	if country == "" {
-		country = c.GetHeader("CF-IPCountry")
-	}
-
-	clientSecret, err := h.service.CreateStripeIntent(ctx, userID, req.AmountCents, req.CoinsAmount, fbp, fbc, pixelID, ip, ua, sourceURL, country)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create payment intent"})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"client_secret": clientSecret,
-	})
+	// TODO(stripe): enable this endpoint when Stripe settlement is implemented.
+	c.JSON(http.StatusServiceUnavailable, gin.H{"error": ErrStripeDisabled.Error()})
 }
 
 type PayPalCreateOrderRequest struct {
-	AmountCents int64  `json:"amount_cents" binding:"required"`
-	CoinsAmount int    `json:"coins_amount" binding:"required"`
-	ReturnURL   string `json:"return_url"`
-	CancelURL   string `json:"cancel_url"`
+	SlotID    int    `json:"slot_id" binding:"gt=0"`
+	NovelID   int64  `json:"novel_id"`
+	ReturnURL string `json:"return_url"`
+	CancelURL string `json:"cancel_url"`
 }
 
 func (h *Handler) CreatePayPalOrder(c *gin.Context) {
-	userID := c.MustGet("user_id").(int64)
 	var req PayPalCreateOrderRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid checkout package"})
 		return
 	}
-
-	ctx := c.Request.Context()
-
-	fbp := c.GetHeader("X-FB-FBP")
-	fbc := c.GetHeader("X-FB-FBC")
-	pixelID := c.GetHeader("X-FB-Pixel-ID")
-	ip := c.ClientIP()
-	ua := c.Request.UserAgent()
-	sourceURL := c.GetHeader("X-Event-Source-URL")
-	country := c.GetHeader("X-Country")
-	if country == "" {
-		country = c.GetHeader("CF-IPCountry")
+	attribution := checkoutAttribution{
+		FBP: c.GetHeader("X-FB-FBP"), FBC: c.GetHeader("X-FB-FBC"), IP: c.ClientIP(),
+		UserAgent: c.Request.UserAgent(), SourceURL: c.GetHeader("X-Event-Source-URL"), Country: c.GetHeader("X-Country"),
 	}
-
-	orderID, approveURL, err := h.service.CreatePayPalOrder(ctx, userID, req.AmountCents, req.CoinsAmount, req.ReturnURL, req.CancelURL, fbp, fbc, pixelID, ip, ua, sourceURL, country)
+	if attribution.Country == "" {
+		attribution.Country = c.GetHeader("CF-IPCountry")
+	}
+	id, approval, err := h.service.CreatePayPalOrder(c.Request.Context(), c.GetInt64("user_id"), req.SlotID, req.NovelID, req.ReturnURL, req.CancelURL, attribution)
+	if errors.Is(err, ErrCheckoutUnavailable) {
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		return
+	}
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create PayPal order: " + err.Error()})
+		c.JSON(http.StatusBadGateway, gin.H{"error": "PayPal checkout unavailable"})
 		return
 	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"order_id":    orderID,
-		"approve_url": approveURL,
-	})
+	c.JSON(http.StatusOK, gin.H{"order_id": id, "approve_url": approval})
 }
 
 type PayPalCaptureRequest struct {
-	OrderID     string `json:"order_id" binding:"required"`
-	CoinsAmount int    `json:"coins_amount" binding:"required"`
+	OrderID string `json:"order_id" binding:"required,max=100"`
 }
 
 func (h *Handler) CapturePayPalPayment(c *gin.Context) {
-	userID := c.MustGet("user_id").(int64)
 	var req PayPalCaptureRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid payment order"})
 		return
 	}
-
-	ctx := c.Request.Context()
-
-	fbp := c.GetHeader("X-FB-FBP")
-	fbc := c.GetHeader("X-FB-FBC")
-	pixelID := c.GetHeader("X-FB-Pixel-ID")
-	ip := c.ClientIP()
-	ua := c.Request.UserAgent()
-	sourceURL := c.GetHeader("X-Event-Source-URL")
-	country := c.GetHeader("X-Country")
-	if country == "" {
-		country = c.GetHeader("CF-IPCountry")
+	result, err := h.service.CapturePayPalPayment(c.Request.Context(), c.GetInt64("user_id"), req.OrderID)
+	if errors.Is(err, ErrCheckoutUnavailable) {
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		return
 	}
-
-	err := h.service.CapturePayPalPayment(ctx, userID, req.OrderID, req.CoinsAmount, fbp, fbc, pixelID, ip, ua, sourceURL, country)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		c.JSON(http.StatusBadGateway, gin.H{"error": "Payment confirmation is pending. Please try again."})
 		return
 	}
-
-	c.JSON(http.StatusOK, gin.H{"message": "Payment captured and coins credited successfully"})
+	c.JSON(http.StatusOK, result)
 }
 
 func (h *Handler) StripeWebhook(c *gin.Context) {
-	payload, err := io.ReadAll(c.Request.Body)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Failed to read request body"})
-		return
-	}
-
-	sigHeader := c.GetHeader("Stripe-Signature")
-	webhookSecret := os.Getenv("STRIPE_WEBHOOK_SECRET")
-
-	ctx := c.Request.Context()
-	err = h.service.ProcessStripeWebhook(ctx, payload, sigHeader, webhookSecret)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{"received": true})
+	// TODO(stripe): enable this endpoint when Stripe settlement is implemented.
+	c.JSON(http.StatusServiceUnavailable, gin.H{"error": ErrStripeDisabled.Error()})
 }
 
-type CheckInRequest struct {
-	Day   int `json:"day" binding:"required,min=1,max=7"`
-	Coins int `json:"coins" binding:"required,min=1"`
+func (h *Handler) GetCheckIn(c *gin.Context) {
+	h.checkIn(c, false)
 }
 
 func (h *Handler) DailyCheckIn(c *gin.Context) {
-	userID := c.MustGet("user_id").(int64)
-	var req CheckInRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
+	h.checkIn(c, true)
+}
 
-	ctx := c.Request.Context()
-
-	err := h.service.AwardDailyCheckIn(ctx, userID, req.Coins, req.Day)
+func (h *Handler) checkIn(c *gin.Context, claim bool) {
+	state, err := h.service.CheckIn(c.Request.Context(), c.GetInt64("user_id"), claim)
 	if err != nil {
-		if errors.Is(err, ErrAlreadyCheckedIn) {
-			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
-			return
-		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to credit check-in rewards"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Check-in unavailable"})
 		return
 	}
-
-	c.JSON(http.StatusOK, gin.H{"message": "Checked in successfully", "coins_awarded": req.Coins})
+	c.JSON(http.StatusOK, state)
 }
 
 func (h *Handler) GetRechargeTemplates(c *gin.Context) {
 	ctx := c.Request.Context()
-	templateIDHeader := c.GetHeader("X-Recharge-Template-ID")
-
-	slots, err := h.service.GetRechargeTemplates(ctx, templateIDHeader)
+	slots, err := h.service.GetRechargeTemplates(ctx, c.GetInt64("user_id"))
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to query template slots: " + err.Error()})
 		return
@@ -425,7 +354,7 @@ func (h *Handler) ActivateSubscription(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"message": "Subscription activated successfully. VIP unlimited access enabled!"})
+	c.JSON(http.StatusAccepted, gin.H{"message": "Subscription confirmed. VIP starts when payment settles."})
 }
 
 func (h *Handler) GetSubscriptionStatus(c *gin.Context) {
@@ -454,7 +383,7 @@ func (h *Handler) GetSubscriptionStatus(c *gin.Context) {
 
 type CancelSubscriptionRequest struct {
 	SubscriptionID string `json:"subscription_id" binding:"required"`
-	Reason         string `json:"reason"`
+	Reason         string `json:"reason" binding:"max=128"`
 }
 
 func (h *Handler) CancelSubscription(c *gin.Context) {
@@ -472,7 +401,7 @@ func (h *Handler) CancelSubscription(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"message": "Subscription cancelled successfully"})
+	c.JSON(http.StatusAccepted, gin.H{"message": "Cancellation requested. Access continues through the paid period."})
 }
 
 func (h *Handler) SubscriptionWebhook(c *gin.Context) {
@@ -481,7 +410,7 @@ func (h *Handler) SubscriptionWebhook(c *gin.Context) {
 		provider = "paypal"
 	}
 
-	payload, err := io.ReadAll(c.Request.Body)
+	payload, err := io.ReadAll(http.MaxBytesReader(c.Writer, c.Request.Body, 1<<20))
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Failed to read body"})
 		return
@@ -497,10 +426,9 @@ func (h *Handler) SubscriptionWebhook(c *gin.Context) {
 	ctx := c.Request.Context()
 	err = h.service.ProcessSubscriptionWebhook(ctx, provider, payload, headers)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Payment event could not be processed"})
 		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{"received": true})
 }
-

@@ -5,43 +5,41 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
-	"math"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/stripe/stripe-go/v80"
 	"reader-backend/internal/db"
 	"reader-backend/internal/model"
 	"reader-backend/internal/novel"
 	"reader-backend/internal/payment"
-	redisclient "reader-backend/internal/redis"
 	"reader-backend/internal/tracking"
 	"reader-backend/internal/workerpool"
 )
 
 var (
-	ErrAlreadyCheckedIn = errors.New("you have already checked in today")
-	ErrChapterNotFound  = errors.New("chapter not found")
+	ErrPriceChanged    = errors.New("Chapter price changed. Refresh before confirming.")
+	ErrStripeDisabled  = errors.New("Stripe payments are disabled")
+	ErrChapterNotFound = errors.New("chapter not found")
 )
 
 type Service interface {
+	RunReconciliation(context.Context)
 	GetWallet(ctx context.Context, userID int64) (*model.Wallet, error)
 	GetHistory(ctx context.Context, userID int64, limit, offset int) ([]model.Transaction, error)
-	UnlockChapter(ctx context.Context, userID int64, novelID int64, chapterIndex int, promoID int, utmSource, utmCampaign string) error
+	UnlockChapter(ctx context.Context, userID int64, novelID int64, chapterIndex int, promoID int, utmSource, utmCampaign string, quotedPrice ...int) error
 	InitiateCheckout(ctx context.Context, userID int64, amountCents int64, coinsAmount int, fbp, fbc, pixelID, ip, ua, sourceURL, country string) error
 	CreateStripeIntent(ctx context.Context, userID int64, amountCents int64, coinsAmount int, fbp, fbc, pixelID, ip, ua, sourceURL, country string) (string, error)
-	CreatePayPalOrder(ctx context.Context, userID int64, amountCents int64, coinsAmount int, returnURL, cancelURL, fbp, fbc, pixelID, ip, ua, sourceURL, country string) (string, string, error)
-	CapturePayPalPayment(ctx context.Context, userID int64, orderID string, coinsAmount int, fbp, fbc, pixelID, ip, ua, sourceURL, country string) error
+	CreatePayPalOrder(context.Context, int64, int, int64, string, string, checkoutAttribution) (string, string, error)
+	CapturePayPalPayment(context.Context, int64, string) (*CheckoutResult, error)
 	CreateSubscription(ctx context.Context, userID int64, providerName string, slotID int, returnURL, cancelURL, fbp, fbc, pixelID, ip, ua, sourceURL, country string) (*payment.SubscriptionResult, error)
 	ActivateSubscription(ctx context.Context, userID int64, providerName string, subscriptionID string, fbp, fbc, pixelID, ip, ua, sourceURL, country string) error
 	GetActiveSubscription(ctx context.Context, userID int64) (*model.UserSubscription, error)
 	CancelSubscription(ctx context.Context, userID int64, subscriptionID string, reason string) error
 	ProcessSubscriptionWebhook(ctx context.Context, providerName string, payload []byte, headers map[string]string) error
 	ProcessStripeWebhook(ctx context.Context, payload []byte, sigHeader string, webhookSecret string) error
-	AwardDailyCheckIn(ctx context.Context, userID int64, coinsAmount int, day int) error
-	GetRechargeTemplates(ctx context.Context, templateIDHeader string) (*model.RechargeTemplate, error)
+	CheckIn(context.Context, int64, bool) (*CheckInState, error)
+	GetRechargeTemplates(ctx context.Context, userID int64) (*model.RechargeTemplate, error)
 }
 
 type service struct {
@@ -81,7 +79,7 @@ func (s *service) GetHistory(ctx context.Context, userID int64, limit, offset in
 	return s.repo.GetTransactions(ctx, userID, limit, offset)
 }
 
-func (s *service) UnlockChapter(ctx context.Context, userID int64, novelID int64, chapterIndex int, promoID int, utmSource, utmCampaign string) error {
+func (s *service) UnlockChapter(ctx context.Context, userID int64, novelID int64, chapterIndex int, promoID int, utmSource, utmCampaign string, quotedPrice ...int) error {
 	n, err := s.novelRepo.GetByID(ctx, novelID)
 	if err != nil {
 		return err
@@ -98,14 +96,24 @@ func (s *service) UnlockChapter(ctx context.Context, userID int64, novelID int64
 		return ErrChapterNotFound
 	}
 
-	effectiveStartPay, effectiveCost, _ := s.novelRepo.GetEffectivePricingRule(ctx, userID, novelID, promoID, utmSource, utmCampaign)
+	effectiveStartPay, effectiveCost, err := s.novelRepo.GetEffectivePricingRule(ctx, userID, novelID, promoID, utmSource, utmCampaign)
+	if err != nil {
+		return err
+	}
 
 	isPaid := (chapterIndex >= (effectiveStartPay - 1))
 	if !isPaid {
 		return nil
 	}
 
+	hasPass, err := novel.HasReadingPass(ctx, s.novelRepo, userID, novelID)
+	if err != nil || hasPass {
+		return err
+	}
 	price := novel.CalculateChapterPrice(ch.WordCount, effectiveCost)
+	if len(quotedPrice) != 0 && quotedPrice[0] != price {
+		return ErrPriceChanged
+	}
 
 	err = s.repo.UnlockChapterTx(ctx, userID, novelID, chapterIndex, price, ch.Title)
 	if err != nil {
@@ -134,320 +142,182 @@ func (s *service) InitiateCheckout(ctx context.Context, userID int64, amountCent
 }
 
 func (s *service) CreateStripeIntent(ctx context.Context, userID int64, amountCents int64, coinsAmount int, fbp, fbc, pixelID, ip, ua, sourceURL, country string) (string, error) {
-	clientSecret, piID, err := s.stripeClient.CreatePaymentIntent(amountCents, "usd", strconv.FormatInt(userID, 10), coinsAmount)
-	if err != nil {
-		return "", err
-	}
-
-	// Create a Pending order in our local database
-	err = s.repo.CreatePendingOrder(ctx, userID, piID, coinsAmount, amountCents, "USD", "stripe")
-	if err != nil {
-		log.Printf("[Warning] Failed to pre-create Pending order: %v", err)
-	}
-
-	email, _ := s.repo.GetUserEmail(ctx, userID)
-
-	// Trigger FB Conversions API InitiateCheckout event asynchronously via WorkerPool strictly using CMS configured pixel
-	workerpool.Submit(func() {
-		effectivePixelID := pixelID
-		if effectivePixelID == "" && db.DB != nil {
-			_ = db.DB.QueryRow(context.Background(), "SELECT fp.pixel_id FROM users u JOIN promotion_links pl ON (u.utm_source = pl.utm_source AND u.utm_campaign = pl.utm_campaign) JOIN fb_pixels fp ON pl.fb_pixel_id = fp.id WHERE u.id = $1 LIMIT 1", userID).Scan(&effectivePixelID)
-		}
-		if effectivePixelID != "" {
-			tracking.SendFacebookEvent(effectivePixelID, "InitiateCheckout", strconv.FormatInt(userID, 10), email, ip, ua, fbc, fbp, float64(amountCents)/100.0, "USD", sourceURL, country)
-		}
-	})
-
-	return clientSecret, nil
+	// TODO(stripe): implement server-priced orders and authenticated, idempotent settlement.
+	return "", ErrStripeDisabled
 }
 
-func (s *service) CreatePayPalOrder(ctx context.Context, userID int64, amountCents int64, coinsAmount int, returnURL, cancelURL, fbp, fbc, pixelID, ip, ua, sourceURL, country string) (string, string, error) {
-	// Security Check: Verify amount against expected price in recharge_slots
-	expectedPriceCents, err := s.repo.GetPriceCentsByCoins(ctx, coinsAmount)
-	if err == nil && expectedPriceCents > 0 && amountCents < int64(expectedPriceCents) {
-		log.Printf("[Security Risk] User %d attempted PayPal amount tampering! Paid Cents: %d, Expected Cents: %d", userID, amountCents, expectedPriceCents)
-		return "", "", errors.New("payment amount does not match the configured price for requested coins")
-	}
-
-	description := fmt.Sprintf("Star Novel %d Coins Topup", coinsAmount)
-	orderID, approveURL, err := s.paypalClient.CreateOrder(ctx, amountCents, coinsAmount, userID, description, returnURL, cancelURL)
+func (s *service) CreatePayPalOrder(ctx context.Context, userID int64, slotID int, novelID int64, returnURL, cancelURL string, attribution checkoutAttribution) (string, string, error) {
+	slot, err := s.checkoutSlot(ctx, userID, slotID)
 	if err != nil {
 		return "", "", err
 	}
-
-	// Create a Pending order in our local database
-	err = s.repo.CreatePendingOrder(ctx, userID, orderID, coinsAmount, amountCents, "USD", "paypal")
-	if err != nil {
-		log.Printf("[Warning] Failed to pre-create PayPal Pending order: %v", err)
+	switch slot.Type {
+	case "single":
+		novelID = 0
+	case "whole_book":
+		book, err := s.novelRepo.GetByID(ctx, novelID)
+		if err != nil {
+			return "", "", err
+		}
+		if !novel.IsNovelPublished(book) {
+			return "", "", ErrCheckoutUnavailable
+		}
+		// Whole book purchases grant reading access. Only explicitly configured bonus coins are issued.
+		slot.Coins = 0
+	default:
+		return "", "", ErrCheckoutUnavailable
+	}
+	if !s.paypalClient.WebhookConfigured() {
+		return "", "", errors.New("PayPal webhook is not configured")
 	}
 
-	email, _ := s.repo.GetUserEmail(ctx, userID)
-
-	// Trigger FB Conversions API InitiateCheckout event asynchronously via WorkerPool strictly using CMS configured pixel
-	workerpool.Submit(func() {
-		effectivePixelID := pixelID
-		if effectivePixelID == "" && db.DB != nil {
-			_ = db.DB.QueryRow(context.Background(), "SELECT fp.pixel_id FROM users u JOIN promotion_links pl ON (u.utm_source = pl.utm_source AND u.utm_campaign = pl.utm_campaign) JOIN fb_pixels fp ON pl.fb_pixel_id = fp.id WHERE u.id = $1 LIMIT 1", userID).Scan(&effectivePixelID)
-		}
-		if effectivePixelID != "" {
-			tracking.SendFacebookEvent(effectivePixelID, "InitiateCheckout", strconv.FormatInt(userID, 10), email, ip, ua, fbc, fbp, float64(amountCents)/100.0, "USD", sourceURL, country)
-		}
-	})
-
-	return orderID, approveURL, nil
+	checkoutID, err := s.repo.CreateCheckout(ctx, userID, slot, novelID, attribution)
+	if err != nil {
+		return "", "", err
+	}
+	orderID, approvalURL, err := s.paypalClient.CreateOrder(ctx, int64(slot.PriceCents), checkoutID, "Star Novel "+slot.Type, returnURL, cancelURL)
+	if err != nil {
+		return "", "", err
+	}
+	if orderID == "" {
+		return "", "", errors.New("missing PayPal order ID")
+	}
+	if err := s.repo.BindCheckout(ctx, checkoutID, orderID); err != nil {
+		return "", "", err
+	}
+	s.trackCheckoutPayment(orderID, "InitiateCheckout", "")
+	return orderID, approvalURL, nil
 }
 
-func (s *service) CapturePayPalPayment(ctx context.Context, userID int64, orderID string, coinsAmount int, fbp, fbc, pixelID, ip, ua, sourceURL, country string) error {
-	// Distributed lock to prevent concurrent duplicate payment processing
-	if redisclient.RDB != nil && orderID != "" {
-		lockKey := fmt.Sprintf("lock:recharge:%s", orderID)
-		acquired, err := redisclient.RDB.SetNX(ctx, lockKey, "1", 10*time.Second).Result()
-		if err == nil && !acquired {
-			return errors.New("payment is currently being processed by another request, please do not retry")
+func (s *service) checkoutSlot(ctx context.Context, userID int64, slotID int) (*model.RechargeSlot, error) {
+	templateID, err := s.repo.GetCheckoutTemplate(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	slot, err := s.repo.GetRechargeSlotByID(ctx, slotID)
+	if err != nil {
+		return nil, err
+	}
+	if slot == nil || slot.TemplateID != templateID || slot.PriceCents <= 0 || slot.Coins < 0 || slot.Bonus < 0 {
+		return nil, ErrCheckoutUnavailable
+	}
+	return slot, nil
+}
+
+func (s *service) CapturePayPalPayment(ctx context.Context, userID int64, orderID string) (*CheckoutResult, error) {
+	return s.completePayPalOrder(ctx, userID, orderID, true)
+}
+
+func (s *service) completePayPalOrder(ctx context.Context, userID int64, orderID string, allowCapture bool) (*CheckoutResult, error) {
+	order, err := s.repo.findCheckout(ctx, orderID)
+	if err != nil {
+		return nil, err
+	}
+	if userID != 0 && order.userID != userID {
+		return nil, ErrCheckoutUnavailable
+	}
+	switch order.status {
+	case "Success", "Paid":
+		if !order.needsHistoricalBookVerification() {
+			return &CheckoutResult{Coins: order.coins + order.bonus, OrderType: order.orderType}, nil
 		}
-		defer redisclient.RDB.Del(ctx, lockKey)
+	case "Pending":
+	case "Refunded":
+		return nil, ErrPaymentRefunded
+	default:
+		return nil, ErrCheckoutUnavailable
 	}
-
-	paypalResult, err := s.paypalClient.CaptureOrder(ctx, orderID)
-	if err != nil {
-		return err
-	}
-
-	customID := paypalResult.CustomID
-	if customID == "mock_user_id:1000" {
-		customID = strconv.FormatInt(userID, 10) + ":" + strconv.Itoa(coinsAmount)
-	}
-
-	parts := strings.Split(customID, ":")
-	if len(parts) != 2 {
-		return errors.New("invalid custom_id format in PayPal response")
-	}
-
-	targetUserIDVal, err := strconv.ParseInt(parts[0], 10, 64)
-	if err != nil {
-		return errors.New("invalid target user_id in PayPal response")
-	}
-	parsedCoinsAmount, err := strconv.Atoi(parts[1])
-	if err != nil {
-		return errors.New("invalid coins amount in PayPal response")
-	}
-
-	if targetUserIDVal != userID {
-		return errors.New("paypal transaction owner mismatch")
-	}
-
-	valFloat, err := strconv.ParseFloat(paypalResult.GrossAmount, 64)
-	if err != nil {
-		valFloat = 0.0
-	}
-	amountCents := int64(math.Round(valFloat * 100))
-
-	// Security Check: Verify actual captured amount against expected price in recharge_slots
-	expectedPriceCents, err := s.repo.GetPriceCentsByCoins(ctx, parsedCoinsAmount)
-	if err == nil && expectedPriceCents > 0 && amountCents < int64(expectedPriceCents) {
-		log.Printf("[Security Risk] User %d attempted PayPal amount tampering! Paid Cents: %d, Expected Cents: %d", userID, amountCents, expectedPriceCents)
-		return errors.New("payment amount does not match the configured price for requested coins")
-	}
-
-	var fbLeadJSON string
-	if pixelID != "" {
-		fbLeadData := map[string]string{
-			"fbp":        fbp,
-			"fbc":        fbc,
-			"pixel_id":   pixelID,
-			"ip_address": ip,
-			"user_agent": ua,
-			"source_url": sourceURL,
+	if order.orderType == "whole_book" && order.novelID <= 0 {
+		if err := s.repo.flagCheckoutForReview(ctx, order.id, "Missing original whole-book target"); err != nil {
+			return nil, err
 		}
-		fbLeadJSONBytes, _ := json.Marshal(fbLeadData)
-		fbLeadJSON = string(fbLeadJSONBytes)
+		return nil, ErrCheckoutUnavailable
 	}
-
-	feeFloat, _ := strconv.ParseFloat(paypalResult.FeeAmount, 64)
-	netFloat, _ := strconv.ParseFloat(paypalResult.NetAmount, 64)
-
-	tpOrder := &model.ThirdPartyPaymentOrder{
-		PaymentProvider:        "paypal",
-		ExternalOrderID:        orderID,
-		CaptureID:              paypalResult.CaptureID,
-		PayerID:                paypalResult.PayerID,
-		PayerEmail:             paypalResult.PayerEmail,
-		PayerName:              paypalResult.PayerName,
-		PayerCountry:           paypalResult.PayerCountry,
-		Currency:               paypalResult.CurrencyCode,
-		GrossAmount:            valFloat,
-		FeeAmount:              feeFloat,
-		NetAmount:              netFloat,
-		Status:                 paypalResult.Status,
-		SellerProtectionStatus: paypalResult.SellerProtectionStatus,
-		RawPayload:             paypalResult.RawPayload,
-	}
-
-	err = s.repo.RecordRechargeOrderAndCreditCoinsTx(ctx, targetUserIDVal, orderID, parsedCoinsAmount, amountCents, paypalResult.CurrencyCode, "paypal", fbLeadJSON, tpOrder)
-	if err != nil {
-		return err
-	}
-
-	// Trigger FB Conversions API purchase event via WorkerPool
-	priceCents, err := s.repo.GetPriceCentsByCoins(ctx, coinsAmount)
-	if err != nil || priceCents == 0 {
-		priceCents = int(amountCents)
-		if priceCents == 0 {
-			priceCents = coinsAmount
+	capture, err := s.paypalClient.GetCapture(ctx, orderID)
+	if errors.Is(err, payment.ErrPayPalApproved) && allowCapture && order.status == "Pending" {
+		if !order.matchesPayPalOrder(capture, orderID) {
+			if err := s.repo.flagCheckoutForReview(ctx, order.id, "PayPal approval does not match order snapshot"); err != nil {
+				return nil, err
+			}
+			return nil, ErrCheckoutUnavailable
+		}
+		capture, err = s.paypalClient.CaptureOrder(ctx, orderID)
+		if err != nil {
+			capture, err = s.paypalClient.GetCapture(ctx, orderID)
 		}
 	}
-
-	email, _ := s.repo.GetUserEmail(ctx, userID)
-	if email == "" && paypalResult.PayerEmail != "" {
-		email = paypalResult.PayerEmail
+	if err != nil {
+		if order.needsHistoricalBookVerification() {
+			if markErr := s.repo.flagCheckoutForReview(ctx, order.id, "Historical PayPal receipt could not be confirmed"); markErr != nil {
+				return nil, markErr
+			}
+		}
+		return nil, err
 	}
+	result, err := s.repo.settleCheckout(ctx, orderID, capture)
+	if errors.Is(err, ErrCheckoutUnavailable) || errors.Is(err, errRefundUnmatched) {
+		if markErr := s.repo.flagCheckoutForReview(ctx, order.id, "PayPal payment or refund requires verification"); markErr != nil {
+			return nil, markErr
+		}
+	}
+	if err == nil && result.settled {
+		s.trackCheckoutPayment(orderID, "Purchase", capture.PayerEmail)
+	}
+	return result, err
+}
 
-	// Trigger FB Conversions API purchase event via WorkerPool strictly using CMS configured pixel
+func (s *service) trackCheckoutPayment(orderID, event, payerEmail string) {
 	workerpool.Submit(func() {
-		effectivePixelID := pixelID
-		if effectivePixelID == "" && db.DB != nil {
-			_ = db.DB.QueryRow(context.Background(), "SELECT fp.pixel_id FROM users u JOIN promotion_links pl ON (u.utm_source = pl.utm_source AND u.utm_campaign = pl.utm_campaign) JOIN fb_pixels fp ON pl.fb_pixel_id = fp.id WHERE u.id = $1 LIMIT 1", userID).Scan(&effectivePixelID)
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		var userID int64
+		var amount int64
+		var pixel, currency, email string
+		var metadata []byte
+		err := db.DB.QueryRow(ctx, `SELECT o.user_id,o.amount_cents,o.currency,
+			COALESCE(u.email,''),fp.pixel_id,COALESCE(o.fb_lead_metadata,'{}')
+			FROM recharge_orders o JOIN users u ON u.id=o.user_id
+			JOIN promotion_links p ON p.id=o.promotion_link_id JOIN fb_pixels fp ON fp.id=p.fb_pixel_id
+			WHERE o.external_ref_id=$1 AND o.payment_method='paypal'`, orderID).
+			Scan(&userID, &amount, &currency, &email, &pixel, &metadata)
+		if err != nil {
+			return
 		}
-		if effectivePixelID != "" {
-			tracking.SendFacebookEvent(effectivePixelID, "Purchase", strconv.FormatInt(userID, 10), email, ip, ua, fbc, fbp, float64(priceCents)/100.0, "USD", sourceURL, country)
+		var attribution checkoutAttribution
+		if err := json.Unmarshal(metadata, &attribution); err != nil {
+			return
 		}
+		if email == "" {
+			email = payerEmail
+		}
+		tracking.SendFacebookEvent(pixel, event, strconv.FormatInt(userID, 10), email, attribution.IP, attribution.UserAgent,
+			attribution.FBC, attribution.FBP, float64(amount)/100, currency, attribution.SourceURL, attribution.Country)
 	})
-
-	return nil
 }
 
 func (s *service) ProcessStripeWebhook(ctx context.Context, payload []byte, sigHeader string, webhookSecret string) error {
-	var event stripe.Event
-	var err error
-
-	if webhookSecret == "" || sigHeader == "t=123,v1=abc" {
-		err = json.Unmarshal(payload, &event)
-	} else {
-		event, err = s.stripeClient.VerifyWebhook(payload, sigHeader, webhookSecret)
-	}
-
-	if err != nil {
-		return err
-	}
-
-	if event.Type == "payment_intent.succeeded" {
-		var pi stripe.PaymentIntent
-		err := json.Unmarshal(event.Data.Raw, &pi)
-		if err != nil {
-			return err
-		}
-
-		userIDStr := pi.Metadata["user_id"]
-		userID, err := strconv.ParseInt(userIDStr, 10, 64)
-		coinsAmountStr := pi.Metadata["coins_amount"]
-		coinsAmount, err2 := strconv.Atoi(coinsAmountStr)
-		if err != nil || err2 != nil || userID == 0 {
-			return errors.New("missing user_id or coins_amount in Stripe metadata")
-		}
-
-		if pi.ID != "" && redisclient.RDB != nil {
-			lockKey := fmt.Sprintf("lock:recharge:%s", pi.ID)
-			acquired, err := redisclient.RDB.SetNX(ctx, lockKey, "1", 10*time.Second).Result()
-			if err == nil && !acquired {
-				log.Printf("[Stripe Webhook] Duplicate concurrent webhook event ignored for PI: %s", pi.ID)
-				return nil
-			}
-			defer redisclient.RDB.Del(ctx, lockKey)
-		}
-
-		gross := float64(pi.Amount) / 100.0
-		var chargeID, customerID, receiptEmail, billingCountry string
-		if pi.LatestCharge != nil {
-			chargeID = pi.LatestCharge.ID
-			if pi.LatestCharge.BillingDetails != nil {
-				receiptEmail = pi.LatestCharge.BillingDetails.Email
-				if pi.LatestCharge.BillingDetails.Address != nil {
-					billingCountry = pi.LatestCharge.BillingDetails.Address.Country
-				}
-			}
-		}
-		if pi.Customer != nil {
-			customerID = pi.Customer.ID
-		}
-		if receiptEmail == "" && pi.ReceiptEmail != "" {
-			receiptEmail = pi.ReceiptEmail
-		}
-
-		tpOrder := &model.ThirdPartyPaymentOrder{
-			PaymentProvider: "stripe",
-			ExternalOrderID: pi.ID,
-			CaptureID:       chargeID,
-			PayerID:         customerID,
-			PayerEmail:      receiptEmail,
-			PayerCountry:    billingCountry,
-			Currency:        strings.ToUpper(string(pi.Currency)),
-			GrossAmount:     gross,
-			FeeAmount:       0.0,
-			NetAmount:       gross,
-			Status:          strings.ToUpper(string(pi.Status)),
-			RawPayload:      string(payload),
-		}
-
-		err = s.repo.RecordRechargeOrderAndCreditCoinsTx(ctx, userID, pi.ID, coinsAmount, pi.Amount, strings.ToUpper(string(pi.Currency)), "stripe", "", tpOrder)
-		return err
-	}
-
-	return nil
+	// TODO(stripe): verify the signature and reconcile the actual payment with a local order.
+	return ErrStripeDisabled
 }
 
-func (s *service) AwardDailyCheckIn(ctx context.Context, userID int64, coinsAmount int, day int) error {
-	lockKey := fmt.Sprintf("lock:checkin:%d", userID)
-	if redisclient.RDB != nil {
-		locked, err := redisclient.RDB.SetNX(ctx, lockKey, "1", 5*time.Second).Result()
-		if err != nil || !locked {
-			return errors.New("frequent check-in request, please try again later")
-		}
-		defer redisclient.RDB.Del(ctx, lockKey)
-	}
-
-	checked, err := s.repo.HasCheckedInToday(ctx, userID)
-	if err != nil {
-		return err
-	}
-	if checked {
-		return ErrAlreadyCheckedIn
-	}
-
-	desc := "Daily Check-in (Day " + strconv.Itoa(day) + ")"
-	err = s.repo.AddCoins(ctx, userID, coinsAmount, true, "checkin", desc)
-	if err != nil {
-		if strings.Contains(err.Error(), "idx_unique_user_daily_checkin") {
-			return ErrAlreadyCheckedIn
-		}
-		return err
-	}
-	return nil
+func (s *service) CheckIn(ctx context.Context, userID int64, claim bool) (*CheckInState, error) {
+	return s.repo.CheckIn(ctx, userID, claim)
 }
 
-func (s *service) GetRechargeTemplates(ctx context.Context, templateIDHeader string) (*model.RechargeTemplate, error) {
-	var t *model.RechargeTemplate
-	var err error
-
-	if templateIDHeader != "" {
-		if templateID, errConv := strconv.Atoi(templateIDHeader); errConv == nil {
-			t, err = s.repo.GetRechargeTemplateByID(ctx, templateID)
-		}
+func (s *service) GetRechargeTemplates(ctx context.Context, userID int64) (*model.RechargeTemplate, error) {
+	templateID, err := s.repo.GetCheckoutTemplate(ctx, userID)
+	if err != nil {
+		return nil, err
 	}
-
-	if err != nil || t == nil {
-		t, err = s.repo.GetDefaultRechargeTemplate(ctx)
-		if err != nil || t == nil {
-			t, err = s.repo.GetFirstRechargeTemplate(ctx)
-			if err != nil || t == nil {
-				// Return empty template config if none exist
-				return &model.RechargeTemplate{
-					ID:        0,
-					Name:      "Empty Config",
-					IsDefault: false,
-					Slots:     []model.RechargeSlot{},
-				}, nil
-			}
-		}
+	if templateID == 0 {
+		return &model.RechargeTemplate{Slots: []model.RechargeSlot{}}, nil
+	}
+	t, err := s.repo.GetRechargeTemplateByID(ctx, templateID)
+	if err != nil {
+		return nil, err
+	}
+	if t == nil {
+		return nil, ErrCheckoutUnavailable
 	}
 
 	slots, err := s.repo.GetRechargeSlots(ctx, t.ID)
@@ -476,9 +346,13 @@ func (s *service) CreateSubscription(
 		return nil, err
 	}
 
-	slot, err := s.repo.GetRechargeSlotByID(ctx, slotID)
-	if err != nil || slot == nil {
-		return nil, errors.New("recharge slot not found")
+	if providerName == payment.ProviderPayPal && !s.paypalClient.WebhookConfigured() {
+		return nil, errors.New("PayPal webhook is not configured")
+	}
+
+	slot, err := s.checkoutSlot(ctx, userID, slotID)
+	if err != nil {
+		return nil, err
 	}
 
 	if slot.Type != "subscription" && slot.Type != "vip" {
@@ -493,9 +367,17 @@ func (s *service) CreateSubscription(
 		cycleStr = "month"
 	}
 
-	existingPlan, _ := s.repo.GetProviderPlan(ctx, providerName, slot.ID)
+	switch payment.SubscriptionCycle(cycleStr) {
+	case payment.CycleDay, payment.CycleWeek, payment.CycleMonth:
+	default:
+		return nil, ErrCheckoutUnavailable
+	}
+	existingPlan, err := s.repo.GetProviderPlan(ctx, providerName, slot.ID)
+	if err != nil {
+		return nil, err
+	}
 	var planID string
-	if existingPlan != nil && existingPlan.ExternalPlanID != "" {
+	if existingPlan != nil && existingPlan.ExternalPlanID != "" && existingPlan.PriceCents == slot.PriceCents && existingPlan.Cycle == cycleStr && existingPlan.Currency == "USD" {
 		planID = existingPlan.ExternalPlanID
 	} else {
 		planName := slot.VipName
@@ -517,7 +399,7 @@ func (s *service) CreateSubscription(
 			return nil, fmt.Errorf("failed to create subscription plan with %s: %w", providerName, errPlan)
 		}
 		planID = newPlanID
-		_ = s.repo.SaveProviderPlan(ctx, &model.PaymentProviderPlan{
+		err = s.repo.SaveProviderPlan(ctx, &model.PaymentProviderPlan{
 			Provider:       providerName,
 			SlotID:         slot.ID,
 			Cycle:          cycleStr,
@@ -526,6 +408,9 @@ func (s *service) CreateSubscription(
 			ExternalPlanID: planID,
 			Status:         "ACTIVE",
 		})
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	customID := fmt.Sprintf("%d:%d:%s", userID, slot.ID, cycleStr)
@@ -559,7 +444,9 @@ func (s *service) CreateSubscription(
 		CurrentPeriodStart: &now,
 		RawPayload:         "{}",
 	}
-	_ = s.repo.UpsertUserSubscription(ctx, sub)
+	if err := s.repo.UpsertUserSubscription(ctx, sub); err != nil {
+		return nil, err
+	}
 
 	email, _ := s.repo.GetUserEmail(ctx, userID)
 	workerpool.Submit(func() {
@@ -585,158 +472,41 @@ func (s *service) ActivateSubscription(
 	if providerName == "" {
 		providerName = payment.ProviderPayPal
 	}
-
-	if redisclient.RDB != nil && subscriptionID != "" {
-		lockKey := fmt.Sprintf("lock:sub:activate:%s", subscriptionID)
-		acquired, err := redisclient.RDB.SetNX(ctx, lockKey, "1", 10*time.Second).Result()
-		if err == nil && !acquired {
-			return errors.New("subscription is currently being activated by another request")
-		}
-		defer redisclient.RDB.Del(ctx, lockKey)
+	sub, err := s.repo.GetSubscriptionByID(ctx, subscriptionID)
+	if err != nil {
+		return err
 	}
-
+	if sub == nil || sub.UserID != userID || sub.PaymentMethod != providerName {
+		return ErrCheckoutUnavailable
+	}
 	provider, err := payment.GetSubscriptionProvider(providerName)
 	if err != nil {
 		return err
 	}
-
-	_ = provider.ActivateSubscription(ctx, subscriptionID)
 	details, err := provider.GetSubscription(ctx, subscriptionID)
 	if err != nil {
-		return fmt.Errorf("failed to verify subscription with provider: %w", err)
+		return err
 	}
-
-	if details.Status != "ACTIVE" && details.Status != "APPROVED" {
-		return fmt.Errorf("subscription is not active (status: %s)", details.Status)
+	if details.PlanID != sub.PlanID || details.SubscriptionID != subscriptionID {
+		return ErrCheckoutUnavailable
 	}
-
-	// Fetch existing pending sub or parse slot
-	existingSub, _ := s.repo.GetSubscriptionByID(ctx, subscriptionID)
-	var slotID int
-	var templateID int
-	var cycleStr = "month"
-	var priceCents = 999
-
-	if existingSub != nil {
-		slotID = existingSub.SlotID
-		templateID = existingSub.TemplateID
-		cycleStr = existingSub.Cycle
-		priceCents = existingSub.PriceCents
-	} else if details.CustomID != "" {
-		parts := strings.Split(details.CustomID, ":")
-		if len(parts) >= 2 {
-			slotID, _ = strconv.Atoi(parts[1])
+	switch details.Status {
+	case "APPROVED":
+		return provider.ActivateSubscription(ctx, subscriptionID)
+	case "ACTIVE":
+		if details.LastPaymentTime == nil {
+			return nil
 		}
-		if len(parts) >= 3 {
-			cycleStr = parts[2]
+		end := time.Now().UTC().Truncate(time.Second)
+		// The recurring reconciliation job retries if the transaction is not
+		// visible in PayPal's ledger while the buyer is returning.
+		if err := s.importPayPalSubscriptionTransactions(ctx, sub, details, end.Add(-24*time.Hour), end); err != nil {
+			return fmt.Errorf("subscription payment confirmation pending: %w", err)
 		}
+		return nil
+	default:
+		return errors.New("subscription is not approved")
 	}
-
-	if slotID > 0 {
-		if slot, errSlot := s.repo.GetRechargeSlotByID(ctx, slotID); errSlot == nil && slot != nil {
-			templateID = slot.TemplateID
-			if slot.SubscriptionCycle != "" {
-				cycleStr = slot.SubscriptionCycle
-			}
-			priceCents = slot.PriceCents
-		}
-	}
-
-	now := time.Now()
-	periodStart := details.CurrentPeriodStart
-	if periodStart == nil {
-		periodStart = &now
-	}
-	periodEnd := details.CurrentPeriodEnd
-	if periodEnd == nil {
-		var calcEnd time.Time
-		switch cycleStr {
-		case "day":
-			calcEnd = now.Add(24 * time.Hour)
-		case "week":
-			calcEnd = now.Add(7 * 24 * time.Hour)
-		case "month":
-			calcEnd = now.Add(30 * 24 * time.Hour)
-		default:
-			calcEnd = now.Add(30 * 24 * time.Hour)
-		}
-		periodEnd = &calcEnd
-	}
-
-	userSub := &model.UserSubscription{
-		UserID:             userID,
-		SubscriptionID:     subscriptionID,
-		PlanID:             details.PlanID,
-		SlotID:             slotID,
-		TemplateID:         templateID,
-		Status:             "ACTIVE",
-		Cycle:              cycleStr,
-		PriceCents:         priceCents,
-		Currency:           "USD",
-		PaymentMethod:      providerName,
-		CurrentPeriodStart: periodStart,
-		CurrentPeriodEnd:   periodEnd,
-		NextBillingTime:    details.NextBillingTime,
-		LastPaymentTime:    details.LastPaymentTime,
-		RawPayload:         details.RawPayload,
-	}
-
-	err = s.repo.UpsertUserSubscription(ctx, userSub)
-	if err != nil {
-		return fmt.Errorf("failed to save active user subscription: %w", err)
-	}
-
-	var fbLeadJSON string
-	if pixelID != "" {
-		fbLeadData := map[string]string{
-			"fbp":        fbp,
-			"fbc":        fbc,
-			"pixel_id":   pixelID,
-			"ip_address": ip,
-			"user_agent": ua,
-			"source_url": sourceURL,
-		}
-		fbLeadJSONBytes, _ := json.Marshal(fbLeadData)
-		fbLeadJSON = string(fbLeadJSONBytes)
-	}
-
-	tpOrder := &model.ThirdPartyPaymentOrder{
-		PaymentProvider:        providerName,
-		ExternalOrderID:        subscriptionID,
-		CaptureID:              subscriptionID,
-		PayerID:                details.PayerID,
-		PayerEmail:             details.PayerEmail,
-		PayerName:              details.PayerName,
-		Currency:               "USD",
-		GrossAmount:            float64(priceCents) / 100.0,
-		FeeAmount:              0.0,
-		NetAmount:              float64(priceCents) / 100.0,
-		Status:                 "COMPLETED",
-		SellerProtectionStatus: "ELIGIBLE",
-		RawPayload:             details.RawPayload,
-	}
-
-	err = s.repo.RecordSubscriptionOrderTx(ctx, userID, subscriptionID, subscriptionID, slotID, int64(priceCents), "USD", providerName, fbLeadJSON, tpOrder)
-	if err != nil {
-		log.Printf("[Warning] Failed to record initial subscription order: %v", err)
-	}
-
-	email, _ := s.repo.GetUserEmail(ctx, userID)
-	if email == "" && details.PayerEmail != "" {
-		email = details.PayerEmail
-	}
-
-	workerpool.Submit(func() {
-		effectivePixelID := pixelID
-		if effectivePixelID == "" && db.DB != nil {
-			_ = db.DB.QueryRow(context.Background(), "SELECT fp.pixel_id FROM users u JOIN promotion_links pl ON (u.utm_source = pl.utm_source AND u.utm_campaign = pl.utm_campaign) JOIN fb_pixels fp ON pl.fb_pixel_id = fp.id WHERE u.id = $1 LIMIT 1", userID).Scan(&effectivePixelID)
-		}
-		if effectivePixelID != "" {
-			tracking.SendFacebookEvent(effectivePixelID, "Subscribe", strconv.FormatInt(userID, 10), email, ip, ua, fbc, fbp, float64(priceCents)/100.0, "USD", sourceURL, country)
-		}
-	})
-
-	return nil
 }
 
 func (s *service) GetActiveSubscription(ctx context.Context, userID int64) (*model.UserSubscription, error) {
@@ -753,59 +523,130 @@ func (s *service) CancelSubscription(ctx context.Context, userID int64, subscrip
 		return errors.New("subscription owner mismatch")
 	}
 
-	provider, err := payment.GetSubscriptionProvider(sub.PaymentMethod)
-	if err == nil && provider != nil {
-		_ = provider.CancelSubscription(ctx, subscriptionID, reason)
+	if sub.PaymentMethod != payment.ProviderPayPal {
+		return ErrCheckoutUnavailable
 	}
-
-	return s.repo.UpdateUserSubscriptionStatus(ctx, subscriptionID, "CANCELLED")
+	return s.repo.enqueuePayPalCancellation(ctx, subscriptionID, userID, reason)
 }
 
 func (s *service) ProcessSubscriptionWebhook(ctx context.Context, providerName string, payload []byte, headers map[string]string) error {
 	if providerName == "" {
 		providerName = payment.ProviderPayPal
 	}
-
 	provider, err := payment.GetSubscriptionProvider(providerName)
 	if err != nil {
 		return err
 	}
-
-	eventRes, err := provider.ParseWebhook(ctx, payload, headers)
+	event, err := provider.ParseWebhook(ctx, payload, headers)
 	if err != nil {
 		return err
 	}
-
-	switch eventRes.EventType {
-	case "payment_succeeded":
-		sub, err := s.repo.GetSubscriptionByID(ctx, eventRes.SubscriptionID)
-		if err != nil || sub == nil {
-			log.Printf("[Webhook] Subscription not found for event: %s", eventRes.SubscriptionID)
-			return nil
-		}
-
-		tpOrder := &model.ThirdPartyPaymentOrder{
-			PaymentProvider:        providerName,
-			ExternalOrderID:        eventRes.SubscriptionID,
-			CaptureID:              eventRes.ExternalRefID,
-			PayerID:                eventRes.PayerID,
-			PayerEmail:             eventRes.PayerEmail,
-			PayerName:              eventRes.PayerName,
-			Currency:               eventRes.Currency,
-			GrossAmount:            float64(eventRes.AmountCents) / 100.0,
-			FeeAmount:              0.0,
-			NetAmount:              float64(eventRes.AmountCents) / 100.0,
-			Status:                 eventRes.Status,
-			SellerProtectionStatus: "ELIGIBLE",
-			RawPayload:             eventRes.RawPayload,
-		}
-
-		return s.repo.RecordSubscriptionRenewalOrderTx(ctx, sub, eventRes.ExternalRefID, eventRes.AmountCents, eventRes.Currency, tpOrder)
-
-	case "subscription_cancelled", "subscription_suspended", "subscription_expired":
-		return s.repo.UpdateUserSubscriptionStatus(ctx, eventRes.SubscriptionID, "CANCELLED")
+	if event.EventID == "" {
+		return errors.New("missing payment event ID")
 	}
-
-	return nil
+	return s.repo.enqueuePayPalEvent(ctx, event)
 }
 
+func (s *service) applyPayPalEvent(ctx context.Context, provider payment.SubscriptionProvider, event *payment.WebhookEventResult) error {
+	switch event.EventType {
+	case "refund_completed":
+		return s.repo.CompletePayPalRefund(ctx, event.ExternalRefID, event.CaptureID, event.AmountCents, event.Currency)
+	case "order_approved", "capture_completed":
+		if event.ExternalRefID == "" {
+			return errors.New("missing PayPal order ID")
+		}
+		_, err := s.completePayPalOrder(ctx, 0, event.ExternalRefID, event.EventType == "order_approved")
+		if errors.Is(err, ErrPaymentRefunded) {
+			return nil
+		}
+		if errors.Is(err, ErrCheckoutUnavailable) {
+			order, lookupErr := s.repo.findCheckout(ctx, event.ExternalRefID)
+			if lookupErr == nil && order.status != "Pending" {
+				return nil
+			}
+		}
+		return err
+	case "payment_succeeded", "subscription_cancelled", "subscription_suspended", "subscription_expired":
+	default:
+		return nil
+	}
+	if event.SubscriptionID == "" {
+		return nil
+	} // A one-time sale is handled by the capture event.
+	sub, err := s.repo.GetSubscriptionByID(ctx, event.SubscriptionID)
+	if err != nil {
+		return err
+	}
+	if sub == nil || sub.PaymentMethod != provider.GetProviderName() {
+		return ErrCheckoutUnavailable
+	}
+
+	details, err := provider.GetSubscription(ctx, sub.SubscriptionID)
+	if err != nil {
+		return err
+	}
+	if details.SubscriptionID != sub.SubscriptionID || details.PlanID != sub.PlanID {
+		return ErrCheckoutUnavailable
+	}
+
+	if event.EventType != "payment_succeeded" {
+		switch details.Status {
+		case "CANCELLED", "EXPIRED", "SUSPENDED":
+			return s.repo.UpdateUserSubscriptionStatus(ctx, sub.SubscriptionID, details.Status)
+		default:
+			return nil
+		}
+	}
+
+	// The signed notification identifies the sale. The merchant transaction list
+	// confirms the amount and transaction's subscription, including catch-up payments.
+	end := time.Now().UTC().Add(time.Second)
+	if after := event.PaidAt.Add(24 * time.Hour); after.Before(end) {
+		end = after
+	}
+	transactions, err := s.paypalClient.ListSubscriptionTransactions(ctx, sub.SubscriptionID, event.PaidAt.Add(-24*time.Hour), end)
+	if err != nil {
+		return err
+	}
+	for _, transaction := range transactions {
+		if transaction.ID == event.ExternalRefID {
+			return s.recordPayPalSubscriptionTransaction(ctx, sub, details, transaction)
+		}
+	}
+	return errors.New("PayPal transaction is not visible in the subscription ledger yet")
+}
+
+func (s *service) recordPayPalSubscriptionTransaction(ctx context.Context, sub *model.UserSubscription,
+	details *payment.SubscriptionDetails, transaction payment.PayPalSubscriptionTransaction) error {
+	if transaction.Status != "COMPLETED" && transaction.Status != "REFUNDED" &&
+		transaction.Status != "PARTIALLY_REFUNDED" {
+		return nil
+	}
+	amount, err := payment.ParseCents(transaction.Amount.Gross.Value)
+	if err != nil || transaction.ID == "" || transaction.Time.IsZero() || transaction.Amount.Gross.Currency != sub.Currency {
+		return errors.New("invalid PayPal subscription transaction")
+	}
+	var periodEnd time.Time
+	if transaction.Status == "COMPLETED" && details.LastPaymentTime != nil &&
+		transaction.Time.Sub(*details.LastPaymentTime).Abs() <= time.Minute &&
+		details.LastPaymentCents == amount && details.LastPaymentCurrency == sub.Currency &&
+		amount >= int64(sub.PriceCents) && details.CurrentPeriodEnd != nil && details.CurrentPeriodEnd.After(transaction.Time) {
+		periodEnd = *details.CurrentPeriodEnd
+	}
+
+	raw, err := json.Marshal(transaction)
+	if err != nil {
+		return err
+	}
+	tpOrder := &model.ThirdPartyPaymentOrder{
+		PaymentProvider: sub.PaymentMethod, ExternalOrderID: sub.SubscriptionID,
+		CaptureID: transaction.ID, Currency: sub.Currency, PayerEmail: details.PayerEmail, Status: transaction.Status,
+		PayerID: details.PayerID, PayerName: details.PayerName, RawPayload: string(raw),
+	}
+	first, err := s.repo.RecordSubscriptionRenewalOrderTx(ctx, sub, transaction.ID, amount, sub.Currency,
+		transaction.Time, periodEnd, details.Status, tpOrder)
+	if err == nil && first {
+		s.trackCheckoutPayment(transaction.ID, "Subscribe", details.PayerEmail)
+	}
+	return err
+}

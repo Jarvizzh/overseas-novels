@@ -44,11 +44,20 @@ func LoadConfig() {
 		log.Println("No .env file found, using environment variables")
 	}
 
+	adminJWTSecret := strings.TrimSpace(os.Getenv("CMS_JWT_SECRET"))
+	if os.Getenv("GIN_MODE") == "release" {
+		if len(adminJWTSecret) < 32 || adminJWTSecret == strings.TrimSpace(os.Getenv("JWT_SECRET")) {
+			log.Fatal("CMS_JWT_SECRET must be distinct from Reader JWT_SECRET and at least 32 characters")
+		}
+	} else if adminJWTSecret == "" {
+		adminJWTSecret = "star-novel-cms-local-development-only"
+	}
+
 	AppConfig = &Config{
 		Port:                    getEnv("PORT", "8081"),
 		DatabaseURL:             getEnv("DATABASE_URL", "postgres://postgres:password@localhost:5432/novel_db?sslmode=disable"),
 		RedisURL:                getEnv("REDIS_URL", "localhost:6379"),
-		JWTSecret:               getEnv("JWT_SECRET", "super-secret-key-star-novel-cms-2026"),
+		JWTSecret:               adminJWTSecret,
 		StripeSecretKey:         getEnv("STRIPE_SECRET_KEY", ""),
 		PayPalClientID:          getEnv("PAYPAL_CLIENT_ID", ""),
 		PayPalClientSecret:      getEnv("PAYPAL_CLIENT_SECRET", ""),

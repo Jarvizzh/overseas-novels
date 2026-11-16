@@ -7,8 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+
+	"github.com/jackc/pgx/v5"
 	"net/http"
+	"net/url"
+	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -70,10 +74,15 @@ func (p *PayPalClient) getConfig(ctx context.Context) (clientID, secret, baseURL
 
 	var dbClientID, dbSecret, dbMode, dbSandboxMode string
 	if db.DB != nil {
-		_ = db.DB.QueryRow(ctx, "SELECT value FROM system_configs WHERE key = 'paypal_client_id'").Scan(&dbClientID)
-		_ = db.DB.QueryRow(ctx, "SELECT value FROM system_configs WHERE key = 'paypal_secret_key'").Scan(&dbSecret)
-		_ = db.DB.QueryRow(ctx, "SELECT value FROM system_configs WHERE key = 'paypal_mode'").Scan(&dbMode)
-		_ = db.DB.QueryRow(ctx, "SELECT value FROM system_configs WHERE key = 'payment_sandbox_mode'").Scan(&dbSandboxMode)
+		for key, value := range map[string]*string{
+			"paypal_client_id": &dbClientID, "paypal_secret_key": &dbSecret,
+			"paypal_mode": &dbMode, "payment_sandbox_mode": &dbSandboxMode,
+		} {
+			err := db.DB.QueryRow(ctx, "SELECT value FROM system_configs WHERE key=$1", key).Scan(value)
+			if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+				return "", "", "", ""
+			}
+		}
 	}
 
 	// 1. Determine ClientID and Secret (DB highest priority > .env fallback)
@@ -126,7 +135,7 @@ func (p *PayPalClient) getAccessToken(ctx context.Context) (string, error) {
 	clientID, secret, baseURL, _ := p.getConfig(ctx)
 
 	if clientID == "" || secret == "" || clientID == "paypal_client_id_placeholder" {
-		return "mock_paypal_token", nil
+		return "", errors.New("PayPal credentials unavailable")
 	}
 
 	req, err := http.NewRequestWithContext(ctx, "POST", baseURL+"/v1/oauth2/token", bytes.NewBufferString("grant_type=client_credentials"))
@@ -205,7 +214,11 @@ type CaptureResponse struct {
 	PurchaseUnits []struct {
 		ReferenceID string `json:"reference_id"`
 		CustomID    string `json:"custom_id"`
-		Payments    struct {
+		Amount      struct {
+			CurrencyCode string `json:"currency_code"`
+			Value        string `json:"value"`
+		} `json:"amount"`
+		Payments struct {
 			Captures []struct {
 				ID       string `json:"id"`
 				Status   string `json:"status"`
@@ -272,28 +285,15 @@ type CreateOrderResponse struct {
 }
 
 // CreateOrder creates a single order in PayPal
-func (p *PayPalClient) CreateOrder(ctx context.Context, amountCents int64, coinsAmount int, userID int64, description, returnURL, cancelURL string) (string, string, error) {
-	clientID, _, baseURL, mode := p.getConfig(ctx)
-	if clientID == "" || clientID == "paypal_client_id_placeholder" {
-		mockID := fmt.Sprintf("mock_paypal_order_%d", time.Now().UnixNano())
-		mockRedirect := returnURL
-		if mockRedirect == "" {
-			mockRedirect = "http://localhost:5173/recharge"
-		}
-		separator := "?"
-		if strings.Contains(mockRedirect, "?") {
-			separator = "&"
-		}
-		return mockID, fmt.Sprintf("%s%stoken=%s&payment=success", mockRedirect, separator, mockID), nil
-	}
+func (p *PayPalClient) CreateOrder(ctx context.Context, amountCents int64, checkoutID string, description, returnURL, cancelURL string) (string, string, error) {
+	_, _, baseURL, mode := p.getConfig(ctx)
 
 	token, err := p.getAccessToken(ctx)
 	if err != nil {
 		return "", "", fmt.Errorf("failed to get paypal access token: %w", err)
 	}
 
-	valStr := fmt.Sprintf("%.2f", float64(amountCents)/100.0)
-	customID := fmt.Sprintf("%d:%d", userID, coinsAmount)
+	valStr := fmt.Sprintf("%d.%02d", amountCents/100, amountCents%100)
 
 	orderReq := CreateOrderRequest{
 		Intent: "CAPTURE",
@@ -306,7 +306,7 @@ func (p *PayPalClient) CreateOrder(ctx context.Context, amountCents int64, coins
 					CurrencyCode: "USD",
 					Value:        valStr,
 				},
-				CustomID:    customID,
+				CustomID:    checkoutID,
 				Description: description,
 			},
 		},
@@ -333,6 +333,7 @@ func (p *PayPalClient) CreateOrder(ctx context.Context, amountCents int64, coins
 		return "", "", err
 	}
 
+	req.Header.Set("PayPal-Request-Id", checkoutID)
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 
@@ -373,38 +374,38 @@ func (p *PayPalClient) CreateOrder(ctx context.Context, amountCents int64, coins
 }
 
 // CaptureOrder captures a PayPal single transaction
+var ErrPayPalApproved = errors.New("PayPal order approved and awaiting capture")
+
 func (p *PayPalClient) CaptureOrder(ctx context.Context, orderID string) (*PayPalCaptureResult, error) {
-	clientID, _, baseURL, _ := p.getConfig(ctx)
-	if clientID == "" || clientID == "paypal_client_id_placeholder" {
-		return &PayPalCaptureResult{
-			OrderID:                orderID,
-			CaptureID:              "mock_capture_" + orderID,
-			CustomID:               "mock_user_id:1000",
-			CurrencyCode:           "USD",
-			GrossAmount:            "9.99",
-			FeeAmount:              "0.49",
-			NetAmount:              "9.50",
-			PayerID:                "MOCK_PAYER_ID",
-			PayerEmail:             "mock_payer@example.com",
-			PayerName:              "Mock User",
-			PayerCountry:           "US",
-			Status:                 "COMPLETED",
-			SellerProtectionStatus: "ELIGIBLE",
-			RawPayload:             `{"mock": true}`,
-		}, nil
-	}
+	return p.readCapture(ctx, orderID, true)
+}
+
+func (p *PayPalClient) GetCapture(ctx context.Context, orderID string) (*PayPalCaptureResult, error) {
+	return p.readCapture(ctx, orderID, false)
+}
+
+func (p *PayPalClient) readCapture(ctx context.Context, orderID string, captureOrder bool) (*PayPalCaptureResult, error) {
+	_, _, baseURL, _ := p.getConfig(ctx)
 
 	token, err := p.getAccessToken(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get paypal access token: %w", err)
 	}
 
-	url := fmt.Sprintf("%s/v2/checkout/orders/%s/capture", baseURL, orderID)
-	req, err := http.NewRequestWithContext(ctx, "POST", url, nil)
+	url := baseURL + "/v2/checkout/orders/" + url.PathEscape(orderID)
+	method := http.MethodGet
+	if captureOrder {
+		url += "/capture"
+		method = http.MethodPost
+	}
+	req, err := http.NewRequestWithContext(ctx, method, url, nil)
 	if err != nil {
 		return nil, err
 	}
 
+	if captureOrder {
+		req.Header.Set("PayPal-Request-Id", "capture-"+orderID)
+	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 
@@ -429,6 +430,16 @@ func (p *PayPalClient) CaptureOrder(ctx context.Context, orderID string) (*PayPa
 		return nil, err
 	}
 
+	if captureResp.ID != orderID {
+		return nil, errors.New("unexpected PayPal order ID")
+	}
+	if !captureOrder && captureResp.Status == "APPROVED" {
+		if len(captureResp.PurchaseUnits) != 1 {
+			return nil, errors.New("unexpected PayPal purchase units")
+		}
+		unit := captureResp.PurchaseUnits[0]
+		return &PayPalCaptureResult{OrderID: orderID, CustomID: unit.CustomID, GrossAmount: unit.Amount.Value, CurrencyCode: unit.Amount.CurrencyCode}, ErrPayPalApproved
+	}
 	if captureResp.Status != "COMPLETED" {
 		return nil, fmt.Errorf("paypal transaction is not completed: status is %s", captureResp.Status)
 	}
@@ -437,6 +448,9 @@ func (p *PayPalClient) CaptureOrder(ctx context.Context, orderID string) (*PayPa
 		pu := captureResp.PurchaseUnits[0]
 		if len(pu.Payments.Captures) > 0 {
 			capture := pu.Payments.Captures[0]
+			if (capture.Status != "COMPLETED" && (captureOrder || capture.Status != "REFUNDED")) || capture.ID == "" {
+				return nil, errors.New("PayPal capture has not completed")
+			}
 			customID := capture.CustomID
 			if customID == "" {
 				customID = pu.CustomID
@@ -499,10 +513,7 @@ func (p *PayPalClient) CaptureOrder(ctx context.Context, orderID string) (*PayPa
 
 // CreateOrGetProduct ensures a default subscription product exists on PayPal
 func (p *PayPalClient) CreateOrGetProduct(ctx context.Context) (string, error) {
-	clientID, _, baseURL, _ := p.getConfig(ctx)
-	if clientID == "" || clientID == "paypal_client_id_placeholder" {
-		return "PROD_STAR_NOVEL_VIP", nil
-	}
+	_, _, baseURL, _ := p.getConfig(ctx)
 
 	token, err := p.getAccessToken(ctx)
 	if err != nil {
@@ -544,20 +555,16 @@ func (p *PayPalClient) CreateOrGetProduct(ctx context.Context) (string, error) {
 		}
 	}
 
-	return "PROD_STAR_NOVEL_VIP", nil
+	return "", errors.New("PayPal did not create a subscription product")
 }
 
 // CreatePlan creates a recurring billing plan on PayPal (Day, Week, Month)
 func (p *PayPalClient) CreatePlan(ctx context.Context, param CreateSubscriptionPlanParam) (string, error) {
-	clientID, _, baseURL, _ := p.getConfig(ctx)
-	if clientID == "" || clientID == "paypal_client_id_placeholder" {
-		return fmt.Sprintf("mock_paypal_plan_%s_%d", param.Cycle, param.PriceCents), nil
-	}
+	_, _, baseURL, _ := p.getConfig(ctx)
 
 	productID, err := p.CreateOrGetProduct(ctx)
 	if err != nil {
-		log.Printf("[PayPal] Failed to ensure product: %v", err)
-		productID = "PROD_STAR_NOVEL_VIP"
+		return "", err
 	}
 
 	token, err := p.getAccessToken(ctx)
@@ -605,7 +612,7 @@ func (p *PayPalClient) CreatePlan(ctx context.Context, param CreateSubscriptionP
 		},
 		"payment_preferences": map[string]interface{}{
 			"auto_bill_outstanding":     true,
-			"setup_fee_failure_action": "CONTINUE",
+			"setup_fee_failure_action":  "CONTINUE",
 			"payment_failure_threshold": 3,
 		},
 	}
@@ -644,24 +651,7 @@ func (p *PayPalClient) CreatePlan(ctx context.Context, param CreateSubscriptionP
 
 // CreateSubscription creates a subscription agreement on PayPal and returns subscription ID and approval URL
 func (p *PayPalClient) CreateSubscription(ctx context.Context, param CreateSubscriptionParam) (*SubscriptionResult, error) {
-	clientID, _, baseURL, mode := p.getConfig(ctx)
-	if clientID == "" || clientID == "paypal_client_id_placeholder" {
-		mockSubID := fmt.Sprintf("I-MOCK%d", time.Now().UnixNano())
-		mockRedirect := param.ReturnURL
-		if mockRedirect == "" {
-			mockRedirect = "http://localhost:5173/recharge"
-		}
-		separator := "?"
-		if strings.Contains(mockRedirect, "?") {
-			separator = "&"
-		}
-		approveURL := fmt.Sprintf("%s%ssubscription_id=%s&payment=success", mockRedirect, separator, mockSubID)
-		return &SubscriptionResult{
-			SubscriptionID: mockSubID,
-			ApproveURL:     approveURL,
-			Status:         "APPROVAL_PENDING",
-		}, nil
-	}
+	_, _, baseURL, mode := p.getConfig(ctx)
 
 	token, err := p.getAccessToken(ctx)
 	if err != nil {
@@ -740,32 +730,14 @@ func (p *PayPalClient) CreateSubscription(ctx context.Context, param CreateSubsc
 
 // GetSubscription fetches the full subscription details from PayPal
 func (p *PayPalClient) GetSubscription(ctx context.Context, subscriptionID string) (*SubscriptionDetails, error) {
-	clientID, _, baseURL, _ := p.getConfig(ctx)
-	if clientID == "" || clientID == "paypal_client_id_placeholder" || strings.HasPrefix(subscriptionID, "I-MOCK") {
-		now := time.Now()
-		periodEnd := now.Add(30 * 24 * time.Hour)
-		return &SubscriptionDetails{
-			SubscriptionID:     subscriptionID,
-			PlanID:             "mock_paypal_plan_month_1499",
-			CustomID:           "mock_user_1",
-			Status:             "ACTIVE",
-			CurrentPeriodStart: &now,
-			CurrentPeriodEnd:   &periodEnd,
-			NextBillingTime:    &periodEnd,
-			LastPaymentTime:    &now,
-			PayerEmail:         "mock_subscriber@example.com",
-			PayerID:            "MOCK_SUBSCRIBER_PAYER_ID",
-			PayerName:          "Mock VIP Subscriber",
-			RawPayload:         `{"mock": true}`,
-		}, nil
-	}
+	_, _, baseURL, _ := p.getConfig(ctx)
 
 	token, err := p.getAccessToken(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	url := fmt.Sprintf("%s/v1/billing/subscriptions/%s", baseURL, subscriptionID)
+	url := fmt.Sprintf("%s/v1/billing/subscriptions/%s", baseURL, url.PathEscape(subscriptionID))
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, err
@@ -827,29 +799,29 @@ func (p *PayPalClient) GetSubscription(ctx context.Context, subscriptionID strin
 		lastPayT = &t
 	}
 
+	lastCents, _ := ParseCents(subResp.BillingInfo.LastPayment.Amount.Value)
 	payerName := strings.TrimSpace(subResp.Subscriber.Name.GivenName + " " + subResp.Subscriber.Name.Surname)
 
 	return &SubscriptionDetails{
-		SubscriptionID:     subResp.ID,
-		PlanID:             subResp.PlanID,
-		CustomID:           subResp.CustomID,
-		Status:             subResp.Status,
-		CurrentPeriodStart: startT,
-		CurrentPeriodEnd:   nextT,
-		NextBillingTime:    nextT,
-		LastPaymentTime:    lastPayT,
-		PayerEmail:         subResp.Subscriber.EmailAddress,
-		PayerID:            subResp.Subscriber.PayerID,
-		PayerName:          payerName,
-		RawPayload:         string(bodyBytes),
+		SubscriptionID:      subResp.ID,
+		PlanID:              subResp.PlanID,
+		CustomID:            subResp.CustomID,
+		Status:              subResp.Status,
+		CurrentPeriodStart:  startT,
+		CurrentPeriodEnd:    nextT,
+		NextBillingTime:     nextT,
+		LastPaymentTime:     lastPayT,
+		LastPaymentCents:    lastCents,
+		LastPaymentCurrency: subResp.BillingInfo.LastPayment.Amount.CurrencyCode,
+		PayerEmail:          subResp.Subscriber.EmailAddress,
+		PayerID:             subResp.Subscriber.PayerID,
+		PayerName:           payerName,
+		RawPayload:          string(bodyBytes),
 	}, nil
 }
 
 // ActivateSubscription activates an approved subscription
 func (p *PayPalClient) ActivateSubscription(ctx context.Context, subscriptionID string) error {
-	if strings.HasPrefix(subscriptionID, "I-MOCK") {
-		return nil
-	}
 
 	token, err := p.getAccessToken(ctx)
 	if err != nil {
@@ -857,7 +829,7 @@ func (p *PayPalClient) ActivateSubscription(ctx context.Context, subscriptionID 
 	}
 
 	_, _, baseURL, _ := p.getConfig(ctx)
-	url := fmt.Sprintf("%s/v1/billing/subscriptions/%s/activate", baseURL, subscriptionID)
+	url := fmt.Sprintf("%s/v1/billing/subscriptions/%s/activate", baseURL, url.PathEscape(subscriptionID))
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBufferString(`{"reason": "Activating subscription on star-novel"}`))
 	if err != nil {
 		return err
@@ -887,9 +859,6 @@ func (p *PayPalClient) ActivateSubscription(ctx context.Context, subscriptionID 
 
 // CancelSubscription cancels a subscription on PayPal
 func (p *PayPalClient) CancelSubscription(ctx context.Context, subscriptionID string, reason string) error {
-	if strings.HasPrefix(subscriptionID, "I-MOCK") {
-		return nil
-	}
 
 	token, err := p.getAccessToken(ctx)
 	if err != nil {
@@ -902,7 +871,7 @@ func (p *PayPalClient) CancelSubscription(ctx context.Context, subscriptionID st
 
 	_, _, baseURL, _ := p.getConfig(ctx)
 	bodyJSON, _ := json.Marshal(map[string]string{"reason": reason})
-	url := fmt.Sprintf("%s/v1/billing/subscriptions/%s/cancel", baseURL, subscriptionID)
+	url := fmt.Sprintf("%s/v1/billing/subscriptions/%s/cancel", baseURL, url.PathEscape(subscriptionID))
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(bodyJSON))
 	if err != nil {
 		return err
@@ -928,6 +897,9 @@ func (p *PayPalClient) CancelSubscription(ctx context.Context, subscriptionID st
 
 // ParseWebhook parses incoming PayPal Webhook payloads
 func (p *PayPalClient) ParseWebhook(ctx context.Context, payload []byte, headers map[string]string) (*WebhookEventResult, error) {
+	if err := p.verifyWebhook(ctx, payload, headers); err != nil {
+		return nil, err
+	}
 	var event struct {
 		EventType string          `json:"event_type"`
 		ID        string          `json:"id"`
@@ -939,29 +911,112 @@ func (p *PayPalClient) ParseWebhook(ctx context.Context, payload []byte, headers
 	}
 
 	switch event.EventType {
+	case "PAYMENT.CAPTURE.REFUNDED", "PAYMENT.SALE.REFUNDED":
+		var refund struct {
+			ID                string `json:"id"`
+			CaptureID         string `json:"capture_id"`
+			SaleID            string `json:"sale_id"`
+			Status            string `json:"status"`
+			State             string `json:"state"`
+			SupplementaryData struct {
+				RelatedIDs struct {
+					CaptureID string `json:"capture_id"`
+				} `json:"related_ids"`
+			} `json:"supplementary_data"`
+			Links []struct {
+				Rel  string `json:"rel"`
+				Href string `json:"href"`
+			} `json:"links"`
+			Amount struct {
+				Value        string `json:"value"`
+				CurrencyCode string `json:"currency_code"`
+				Total        string `json:"total"`
+				Currency     string `json:"currency"`
+			}
+		}
+		if err := json.Unmarshal(event.Resource, &refund); err != nil {
+			return nil, err
+		}
+		amount, currency, captureID := refund.Amount.Value, refund.Amount.CurrencyCode, refund.CaptureID
+		if event.EventType == "PAYMENT.SALE.REFUNDED" {
+			amount, currency, captureID = refund.Amount.Total, refund.Amount.Currency, refund.SaleID
+		}
+		if captureID == "" {
+			captureID = refund.SupplementaryData.RelatedIDs.CaptureID
+		}
+		if captureID == "" {
+			for _, link := range refund.Links {
+				if link.Rel != "up" {
+					continue
+				}
+				u, err := url.Parse(link.Href)
+				if err != nil {
+					continue
+				}
+				for _, prefix := range []string{"/v2/payments/captures/", "/v1/payments/sale/"} {
+					if id, ok := strings.CutPrefix(u.Path, prefix); ok && id != "" && !strings.Contains(id, "/") {
+						captureID = id
+					}
+				}
+			}
+		}
+		if !strings.EqualFold(refund.Status, "completed") && !strings.EqualFold(refund.State, "completed") {
+			return &WebhookEventResult{EventID: event.ID}, nil
+		}
+		cents, err := ParseCents(amount)
+		if err != nil || refund.ID == "" {
+			return nil, errors.New("invalid PayPal refund event")
+		}
+		return &WebhookEventResult{EventID: event.ID, EventType: "refund_completed", ExternalRefID: refund.ID,
+			CaptureID: captureID, AmountCents: cents, Currency: currency}, nil
+
+	case "CHECKOUT.ORDER.APPROVED", "PAYMENT.CAPTURE.COMPLETED":
+		var resource struct {
+			ID                string `json:"id"`
+			SupplementaryData struct {
+				RelatedIDs struct {
+					OrderID string `json:"order_id"`
+				} `json:"related_ids"`
+			} `json:"supplementary_data"`
+		}
+		if err := json.Unmarshal(event.Resource, &resource); err != nil {
+			return nil, err
+		}
+		if event.EventType == "CHECKOUT.ORDER.APPROVED" {
+			return &WebhookEventResult{EventID: event.ID, EventType: "order_approved", ExternalRefID: resource.ID}, nil
+		}
+		return &WebhookEventResult{EventID: event.ID, EventType: "capture_completed", ExternalRefID: resource.SupplementaryData.RelatedIDs.OrderID}, nil
+
 	case "PAYMENT.SALE.COMPLETED":
 		// Recurring cycle payment completed
 		var sale struct {
+			CreateTime         string `json:"create_time"`
 			ID                 string `json:"id"`
 			BillingAgreementID string `json:"billing_agreement_id"` // This is the Subscription ID
 			Amount             struct {
 				Total    string `json:"total"`
 				Currency string `json:"currency"`
 			} `json:"amount"`
-			State    string `json:"state"` // completed
-			Custom   string `json:"custom"`
+			State  string `json:"state"` // completed
+			Custom string `json:"custom"`
 		}
 		if err := json.Unmarshal(event.Resource, &sale); err != nil {
 			return nil, err
 		}
 
-		var amountCents int64
-		if f, err := json.Number(sale.Amount.Total).Float64(); err == nil {
-			amountCents = int64(f * 100)
+		amountCents, err := ParseCents(sale.Amount.Total)
+		if err != nil || sale.State != "completed" || sale.ID == "" {
+			return nil, errors.New("invalid PayPal sale")
 		}
 
+		paidAt, err := time.Parse(time.RFC3339, sale.CreateTime)
+		if err != nil {
+			return nil, err
+		}
 		return &WebhookEventResult{
 			EventType:      "payment_succeeded",
+			EventID:        event.ID,
+			PaidAt:         paidAt,
 			SubscriptionID: sale.BillingAgreementID,
 			ExternalRefID:  sale.ID,
 			AmountCents:    amountCents,
@@ -978,6 +1033,7 @@ func (p *PayPalClient) ParseWebhook(ctx context.Context, payload []byte, headers
 		_ = json.Unmarshal(event.Resource, &sub)
 		return &WebhookEventResult{
 			EventType:      "subscription_activated",
+			EventID:        event.ID,
 			SubscriptionID: sub.ID,
 			Status:         sub.Status,
 			RawPayload:     string(payload),
@@ -991,11 +1047,137 @@ func (p *PayPalClient) ParseWebhook(ctx context.Context, payload []byte, headers
 		_ = json.Unmarshal(event.Resource, &sub)
 		return &WebhookEventResult{
 			EventType:      "subscription_cancelled",
+			EventID:        event.ID,
 			SubscriptionID: sub.ID,
 			Status:         sub.Status,
 			RawPayload:     string(payload),
 		}, nil
 	}
 
-	return nil, fmt.Errorf("unsupported paypal webhook event_type: %s", event.EventType)
+	return &WebhookEventResult{EventID: event.ID}, nil
+}
+
+func (p *PayPalClient) WebhookConfigured() bool {
+	return strings.TrimSpace(os.Getenv("PAYPAL_WEBHOOK_ID")) != ""
+}
+
+func (p *PayPalClient) verifyWebhook(ctx context.Context, payload []byte, headers map[string]string) error {
+	webhookID := strings.TrimSpace(os.Getenv("PAYPAL_WEBHOOK_ID"))
+	if webhookID == "" {
+		return errors.New("PayPal webhook ID unavailable")
+	}
+	h := make(http.Header, len(headers))
+	for key, value := range headers {
+		h.Set(key, value)
+	}
+	request := map[string]any{"webhook_id": webhookID, "webhook_event": json.RawMessage(payload)}
+	for field, header := range map[string]string{
+		"auth_algo": "Paypal-Auth-Algo", "cert_url": "Paypal-Cert-Url",
+		"transmission_id": "Paypal-Transmission-Id", "transmission_sig": "Paypal-Transmission-Sig",
+		"transmission_time": "Paypal-Transmission-Time",
+	} {
+		value := h.Get(header)
+		if value == "" {
+			return errors.New("incomplete PayPal signature")
+		}
+		request[field] = value
+	}
+	var result struct {
+		Status string `json:"verification_status"`
+	}
+	if err := p.request(ctx, http.MethodPost, "/v1/notifications/verify-webhook-signature", "", request, &result); err != nil {
+		return err
+	}
+	if result.Status != "SUCCESS" {
+		return errors.New("invalid PayPal signature")
+	}
+	return nil
+}
+
+func (p *PayPalClient) request(ctx context.Context, method, path, requestID string, body, result any) error {
+	token, err := p.getAccessToken(ctx)
+	if err != nil {
+		return err
+	}
+	_, _, baseURL, _ := p.getConfig(ctx)
+	var reader io.Reader
+	if body != nil {
+		data, err := json.Marshal(body)
+		if err != nil {
+			return err
+		}
+		reader = bytes.NewReader(data)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, baseURL+path, reader)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	if requestID != "" {
+		req.Header.Set("PayPal-Request-Id", requestID)
+	}
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("PayPal request failed with HTTP %d", resp.StatusCode)
+	}
+	if result == nil {
+		return nil
+	}
+	return json.NewDecoder(io.LimitReader(resp.Body, 2<<20)).Decode(result)
+}
+
+func ParseCents(amount string) (int64, error) {
+	whole, fraction, found := strings.Cut(amount, ".")
+	if !found {
+		fraction = "00"
+	}
+	if len(fraction) == 1 {
+		fraction += "0"
+	}
+	if whole == "" || len(fraction) != 2 || strings.Trim(whole+fraction, "0123456789") != "" {
+		return 0, errors.New("invalid payment amount")
+	}
+	cents, err := strconv.ParseInt(whole+fraction, 10, 64)
+	if err != nil || cents <= 0 {
+		return 0, errors.New("invalid payment amount")
+	}
+	return cents, nil
+}
+
+type PayPalSubscriptionTransaction struct {
+	ID     string    `json:"id"`
+	Status string    `json:"status"`
+	Time   time.Time `json:"time"`
+	Amount struct {
+		Gross struct {
+			Value    string `json:"value"`
+			Currency string `json:"currency_code"`
+		} `json:"gross_amount"`
+	} `json:"amount_with_breakdown"`
+}
+
+func (p *PayPalClient) ListSubscriptionTransactions(ctx context.Context, id string, from, to time.Time) ([]PayPalSubscriptionTransaction, error) {
+	query := url.Values{"start_time": {from.UTC().Format(time.RFC3339)}, "end_time": {to.UTC().Format(time.RFC3339)}}
+	path := "/v1/billing/subscriptions/" + url.PathEscape(id) + "/transactions?" + query.Encode()
+	var response struct {
+		Transactions []PayPalSubscriptionTransaction `json:"transactions"`
+		Links        []struct {
+			Rel string `json:"rel"`
+		} `json:"links"`
+	}
+	if err := p.request(ctx, http.MethodGet, path, "", nil, &response); err != nil {
+		return nil, err
+	}
+	for _, link := range response.Links {
+		if link.Rel == "next" {
+			return nil, errors.New("PayPal transaction result is incomplete; use a smaller reconciliation window")
+		}
+	}
+	return response.Transactions, nil
 }

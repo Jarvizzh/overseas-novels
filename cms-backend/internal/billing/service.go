@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-
-	"github.com/google/uuid"
 )
 
 var (
@@ -21,6 +19,7 @@ var (
 )
 
 type BillingService interface {
+	RunRefundReconciliation(context.Context)
 	ListOrders(ctx context.Context, page, pageSize int, status, userID, orderType, promotionLinkID, paidStart, paidEnd string) ([]Order, int, error)
 	GetThirdPartyPaymentDetails(ctx context.Context, orderID int64) (*ThirdPartyPaymentOrder, error)
 	RefundOrder(ctx context.Context, orderID, adminID string) error
@@ -105,7 +104,7 @@ func (s *billingService) ListOrders(ctx context.Context, page, pageSize int, sta
 	}
 
 	selectQuery := fmt.Sprintf(`
-		SELECT id, user_id, COALESCE(external_ref_id, ''), amount_cents, currency, coins, bonus_coins_credited, payment_method, status, COALESCE(utm_source, ''), COALESCE(utm_campaign, ''), paid_at, order_type, promotion_link_id, novel_id, created_at, updated_at
+		SELECT id, user_id, COALESCE(external_ref_id, ''), amount_cents, currency, coins, bonus_coins_credited, payment_method, status, COALESCE(utm_source, ''), COALESCE(utm_campaign, ''), paid_at, order_type, promotion_link_id, novel_id, created_at, updated_at, COALESCE(reconciliation_note, '')
 		FROM recharge_orders
 		%s
 		ORDER BY created_at DESC
@@ -118,58 +117,6 @@ func (s *billingService) ListOrders(ctx context.Context, page, pageSize int, sta
 	}
 
 	return orders, total, nil
-}
-
-func (s *billingService) RefundOrder(ctx context.Context, orderID, adminID string) error {
-	tx, err := s.repo.BeginTx(ctx)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback(ctx)
-
-	// Fetch order with row lock
-	order, err := s.repo.GetOrderForUpdateTx(ctx, tx, orderID)
-	if err != nil {
-		return err
-	}
-	if order == nil {
-		return ErrOrderNotFound
-	}
-
-	if order.Status == "Refunded" {
-		return ErrOrderAlreadyRefunded
-	}
-	if order.Status != "Success" && order.Status != "Paid" {
-		return ErrOrderNotRefundable
-	}
-
-	// Update order status
-	err = s.repo.UpdateOrderStatusTx(ctx, tx, orderID, "Refunded")
-	if err != nil {
-		return err
-	}
-
-	// Deduct wallet balance from user
-	err = s.repo.DeductWalletBalanceTx(ctx, tx, order.UserID, order.Coins, order.BonusCoinsCredited)
-	if err != nil {
-		return err
-	}
-
-	// Record transaction history
-	txID := uuid.New().String()
-	desc := fmt.Sprintf("Refund deduction for Order #%s (-%d Charged, -%d Bonus)", orderID, order.Coins, order.BonusCoinsCredited)
-	totalDeducted := order.Coins + order.BonusCoinsCredited
-	err = s.repo.InsertTransactionRecordTx(ctx, tx, txID, order.UserID, "debit", "refund", totalDeducted, order.Coins, order.BonusCoinsCredited, desc)
-	if err != nil {
-		return err
-	}
-
-	// Write admin audit log
-	beforeJSON := fmt.Sprintf(`{"status": "%s"}`, order.Status)
-	afterJSON := `{"status": "Refunded"}`
-	_ = s.repo.InsertAdminAuditLogTx(ctx, tx, adminID, "refund_order", orderID, beforeJSON, afterJSON)
-
-	return tx.Commit(ctx)
 }
 
 func (s *billingService) ListRechargeTemplates(ctx context.Context) ([]RechargeTemplate, error) {

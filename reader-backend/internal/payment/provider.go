@@ -46,21 +46,26 @@ type SubscriptionResult struct {
 }
 
 type SubscriptionDetails struct {
-	SubscriptionID     string     `json:"subscription_id"`
-	PlanID             string     `json:"plan_id"`
-	CustomID           string     `json:"custom_id"`
-	Status             string     `json:"status"` // ACTIVE, CANCELLED, SUSPENDED, EXPIRED, PENDING
-	CurrentPeriodStart *time.Time `json:"current_period_start"`
-	CurrentPeriodEnd   *time.Time `json:"current_period_end"`
-	NextBillingTime    *time.Time `json:"next_billing_time"`
-	LastPaymentTime    *time.Time `json:"last_payment_time"`
-	PayerEmail         string     `json:"payer_email"`
-	PayerID            string     `json:"payer_id"`
-	PayerName          string     `json:"payer_name"`
-	RawPayload         string     `json:"raw_payload"`
+	SubscriptionID      string     `json:"subscription_id"`
+	PlanID              string     `json:"plan_id"`
+	CustomID            string     `json:"custom_id"`
+	Status              string     `json:"status"` // ACTIVE, CANCELLED, SUSPENDED, EXPIRED, PENDING
+	CurrentPeriodStart  *time.Time `json:"current_period_start"`
+	CurrentPeriodEnd    *time.Time `json:"current_period_end"`
+	NextBillingTime     *time.Time `json:"next_billing_time"`
+	LastPaymentCents    int64
+	LastPaymentCurrency string
+	LastPaymentTime     *time.Time `json:"last_payment_time"`
+	PayerEmail          string     `json:"payer_email"`
+	PayerID             string     `json:"payer_id"`
+	PayerName           string     `json:"payer_name"`
+	RawPayload          string     `json:"raw_payload"`
 }
 
 type WebhookEventResult struct {
+	EventID        string
+	CaptureID      string
+	PaidAt         time.Time
 	EventType      string // "subscription_activated", "payment_succeeded", "subscription_cancelled", "subscription_suspended"
 	SubscriptionID string
 	ExternalRefID  string // Transaction ID / Sale ID
