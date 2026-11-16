@@ -157,7 +157,7 @@ func (h *Handler) CreateNovel(c *gin.Context) {
 
 	created, err := h.service.CreateNovel(ctx, n)
 	if err != nil {
-		if errors.Is(err, ErrInvalidCover) || errors.Is(err, ErrInvalidPublishStatus) || errors.Is(err, ErrCannotPublishEmptyNovel) {
+		if errors.Is(err, ErrInvalidCover) || errors.Is(err, ErrInvalidPublishStatus) || errors.Is(err, ErrCannotPublishEmptyNovel) || errors.Is(err, ErrInvalidGenres) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
@@ -265,7 +265,7 @@ func (h *Handler) UpdateNovel(c *gin.Context) {
 			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
 			return
 		}
-		if errors.Is(err, ErrInvalidCover) || errors.Is(err, ErrInvalidPublishStatus) || errors.Is(err, ErrCannotPublishEmptyNovel) {
+		if errors.Is(err, ErrInvalidCover) || errors.Is(err, ErrInvalidPublishStatus) || errors.Is(err, ErrCannotPublishEmptyNovel) || errors.Is(err, ErrInvalidGenres) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}

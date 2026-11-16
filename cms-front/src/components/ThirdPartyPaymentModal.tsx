@@ -79,9 +79,9 @@ export const ThirdPartyPaymentModal: React.FC<Props> = ({
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
-        padding: '16px'
+        padding: '16px',
+        overscrollBehavior: 'contain'
       }}
-      onClick={onClose}
     >
       <div
         className="animate-scale-in"
@@ -97,7 +97,6 @@ export const ThirdPartyPaymentModal: React.FC<Props> = ({
           boxShadow: 'var(--shadow-lg)',
           overflow: 'hidden'
         }}
-        onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
         <div
@@ -155,6 +154,7 @@ export const ThirdPartyPaymentModal: React.FC<Props> = ({
               </button>
             )}
             <button
+              type="button"
               onClick={onClose}
               style={{
                 background: 'transparent',

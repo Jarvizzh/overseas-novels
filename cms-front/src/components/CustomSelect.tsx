@@ -39,6 +39,9 @@ export default function CustomSelect({
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Escape') {
+      if (isOpen) {
+        e.stopPropagation();
+      }
       setIsOpen(false);
     } else if (e.key === 'Enter' || e.key === ' ') {
       e.preventDefault();

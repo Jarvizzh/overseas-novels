@@ -174,8 +174,9 @@ export default function PixelsTab() {
           alignItems: 'center',
           justifyContent: 'center',
           zIndex: 10000,
-          padding: '20px'
-        }} onClick={handleClosePixelModal}>
+          padding: '20px',
+          overscrollBehavior: 'contain'
+        }}>
           <div className="glass-panel animate-scale-in" style={{
             width: '100%',
             maxWidth: '480px',
@@ -186,13 +187,14 @@ export default function PixelsTab() {
             borderRadius: '16px',
             boxShadow: 'var(--shadow-lg)',
             overflow: 'hidden'
-          }} onClick={(e) => e.stopPropagation()}>
+          }}>
             <button
               type="button"
+              aria-label="关闭窗口"
               onClick={handleClosePixelModal}
               style={{ position: 'absolute', top: '16px', right: '16px', background: 'transparent', border: 'none', color: 'hsl(var(--text-secondary))', cursor: 'pointer' }}
             >
-              <X size={18} />
+              <X size={18} aria-hidden="true" />
             </button>
             <h3 style={{ fontSize: '1.2rem', fontWeight: 600, marginBottom: '20px' }}>
               {editingPixel ? '编辑像素' : '添加像素'}

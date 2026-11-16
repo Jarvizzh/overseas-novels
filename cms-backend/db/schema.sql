@@ -64,7 +64,7 @@ CREATE TABLE IF NOT EXISTS novels (
     status VARCHAR(20) DEFAULT 'Ongoing', -- Ongoing / Completed / archived
     publish_status VARCHAR(20) NOT NULL DEFAULT 'published', -- draft / published / offline
     synopsis TEXT,
-    genres VARCHAR(50)[] DEFAULT '{}',
+    genres VARCHAR(2048)[] DEFAULT '{}',
     word_count INT DEFAULT 0,
     view_count BIGINT DEFAULT 0,
     coin_cost_per_thousand INT DEFAULT 500,
@@ -77,6 +77,23 @@ ALTER TABLE novels ADD COLUMN IF NOT EXISTS coin_cost_per_thousand INT DEFAULT 5
 ALTER TABLE novels ADD COLUMN IF NOT EXISTS start_pay_chapter_index INT DEFAULT 3;
 ALTER TABLE novels ADD COLUMN IF NOT EXISTS publish_status VARCHAR(20) NOT NULL DEFAULT 'published';
 UPDATE novels SET publish_status = 'offline' WHERE status = 'archived' AND publish_status != 'offline';
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM pg_attribute a
+        JOIN pg_class c ON a.attrelid = c.oid
+        JOIN pg_namespace n ON c.relnamespace = n.oid
+        WHERE n.nspname = current_schema()
+          AND c.relname = 'novels'
+          AND a.attname = 'genres'
+          AND NOT a.attisdropped
+          AND a.atttypmod > 0
+          AND a.atttypmod < 2052
+    ) THEN
+        ALTER TABLE novels ALTER COLUMN genres TYPE VARCHAR(2048)[] USING genres::VARCHAR(2048)[];
+    END IF;
+END $$;
 
 -- 7. 章节表 (Chapters)
 CREATE TABLE IF NOT EXISTS chapters (

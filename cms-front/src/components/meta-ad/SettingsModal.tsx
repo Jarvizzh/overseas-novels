@@ -104,8 +104,8 @@ export const SettingsModal: React.FC<Props> = ({
         justifyContent: 'center',
         zIndex: 10000,
         padding: '20px',
+        overscrollBehavior: 'contain',
       }}
-      onClick={onClose}
     >
       <div
         className="glass-panel animate-fade-in"
@@ -119,13 +119,14 @@ export const SettingsModal: React.FC<Props> = ({
           position: 'relative',
           boxShadow: 'var(--shadow-lg)',
         }}
-        onClick={(e) => e.stopPropagation()}
       >
         <button
+          type="button"
+          aria-label="关闭窗口"
           onClick={onClose}
           style={{ position: 'absolute', right: '16px', top: '16px', background: 'none', border: 'none', cursor: 'pointer', color: 'hsl(var(--text-muted))', padding: '4px', display: 'flex' }}
         >
-          <X size={20} />
+          <X size={20} aria-hidden="true" />
         </button>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '20px' }}>

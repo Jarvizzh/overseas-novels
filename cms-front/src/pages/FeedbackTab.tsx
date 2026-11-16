@@ -36,18 +36,6 @@ export default function FeedbackTab() {
     fetchList();
   }, [page, statusFilter]);
 
-  // Handle ESC to close modal
-  useEffect(() => {
-    if (!selectedItem) return;
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        setSelectedItem(null);
-      }
-    };
-    document.addEventListener('keydown', handleKeyDown);
-    return () => document.removeEventListener('keydown', handleKeyDown);
-  }, [selectedItem]);
-
   const fetchList = async () => {
     setLoading(true);
     try {
@@ -310,8 +298,8 @@ export default function FeedbackTab() {
             justifyContent: 'center',
             zIndex: 10000,
             padding: '20px',
+            overscrollBehavior: 'contain',
           }}
-          onClick={() => setSelectedItem(null)}
         >
           <div
             className="glass-panel animate-fade-in"
@@ -327,7 +315,6 @@ export default function FeedbackTab() {
               flexDirection: 'column',
               overflow: 'hidden',
             }}
-            onClick={(e) => e.stopPropagation()}
           >
             {/* Modal Header */}
             <div
@@ -345,10 +332,11 @@ export default function FeedbackTab() {
               </h3>
               <button
                 type="button"
+                aria-label="关闭窗口"
                 onClick={() => setSelectedItem(null)}
                 style={{ background: 'none', border: 'none', color: 'hsl(var(--text-muted))', cursor: 'pointer', padding: '4px' }}
               >
-                <X size={20} />
+                <X size={20} aria-hidden="true" />
               </button>
             </div>
 

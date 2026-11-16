@@ -516,8 +516,9 @@ export default function PromotionsTab() {
           alignItems: 'center',
           justifyContent: 'center',
           zIndex: 10000,
-          padding: '20px'
-        }} onClick={() => setIsEditModalOpen(false)}>
+          padding: '20px',
+          overscrollBehavior: 'contain'
+        }}>
           <div className="glass-panel animate-scale-in" style={{
             width: '100%',
             maxWidth: '520px',
@@ -528,13 +529,14 @@ export default function PromotionsTab() {
             borderRadius: '16px',
             boxShadow: 'var(--shadow-lg)',
             overflow: 'hidden'
-          }} onClick={(e) => e.stopPropagation()}>
+          }}>
             <button
               type="button"
+              aria-label="关闭窗口"
               onClick={() => setIsEditModalOpen(false)}
               style={{ position: 'absolute', top: '16px', right: '16px', background: 'transparent', border: 'none', color: 'hsl(var(--text-secondary))', cursor: 'pointer' }}
             >
-              <X size={18} />
+              <X size={18} aria-hidden="true" />
             </button>
             <h3 style={{ fontSize: '1.25rem', fontWeight: 600, marginBottom: '20px' }}>编辑推广链接</h3>
 

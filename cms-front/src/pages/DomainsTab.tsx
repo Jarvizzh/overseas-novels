@@ -465,10 +465,10 @@ export default function DomainsTab() {
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
-            zIndex: 10000
+            zIndex: 10000,
+            overscrollBehavior: 'contain'
           }}
           className="animate-fade-in"
-          onClick={() => setIsModalOpen(false)}
         >
           <div
             className="glass-panel"
@@ -486,9 +486,10 @@ export default function DomainsTab() {
               flexDirection: 'column',
               gap: '18px'
             }}
-            onClick={(e) => e.stopPropagation()}
           >
             <button
+              type="button"
+              aria-label="关闭窗口"
               onClick={() => setIsModalOpen(false)}
               style={{
                 position: 'absolute',
@@ -500,7 +501,7 @@ export default function DomainsTab() {
                 color: 'hsl(var(--text-muted))'
               }}
             >
-              <X size={18} />
+              <X size={18} aria-hidden="true" />
             </button>
 
             <h3 style={{ fontSize: '1.15rem', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px', color: 'hsl(var(--text-primary))' }}>

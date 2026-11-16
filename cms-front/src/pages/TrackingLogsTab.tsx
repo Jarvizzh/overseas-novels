@@ -240,8 +240,9 @@ export default function TrackingLogsTab() {
           display: 'flex',
           justifyContent: 'center',
           alignItems: 'center',
-          zIndex: 10000
-        }} onClick={handleCloseModal}>
+          zIndex: 10000,
+          overscrollBehavior: 'contain'
+        }}>
           <div className="animate-zoom-in" style={{
             width: '800px',
             maxWidth: '95%',
@@ -256,15 +257,16 @@ export default function TrackingLogsTab() {
             display: 'flex',
             flexDirection: 'column',
             border: '1px solid #e5e7eb'
-          }} onClick={(e) => e.stopPropagation()}>
+          }}>
             <button
               type="button"
+              aria-label="关闭窗口"
               onClick={handleCloseModal}
               style={{ position: 'absolute', top: '20px', right: '20px', background: 'transparent', border: 'none', color: '#9ca3af', cursor: 'pointer', transition: 'color 0.2s' }}
               onMouseEnter={(e) => e.currentTarget.style.color = '#4b5563'}
               onMouseLeave={(e) => e.currentTarget.style.color = '#9ca3af'}
             >
-              <X size={18} />
+              <X size={18} aria-hidden="true" />
             </button>
 
             <h3 style={{ fontSize: '1.25rem', fontWeight: 700, marginBottom: '6px', display: 'flex', alignItems: 'center', gap: '8px', color: '#111827' }}>

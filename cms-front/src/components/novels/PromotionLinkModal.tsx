@@ -1,5 +1,6 @@
 import React from 'react';
 import { createPortal } from 'react-dom';
+import { X } from 'lucide-react';
 import CustomSelect from '../CustomSelect';
 import type { SystemDomain } from '../../utils/api';
 
@@ -55,17 +56,6 @@ export const PromotionLinkModal: React.FC<PromotionLinkModalProps> = ({
   generatedLink,
   onCopyLink,
 }) => {
-  React.useEffect(() => {
-    if (!isOpen) return;
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        onClose();
-      }
-    };
-    document.addEventListener('keydown', handleKeyDown);
-    return () => document.removeEventListener('keydown', handleKeyDown);
-  }, [isOpen, onClose]);
-
   if (!isOpen) return null;
 
   return createPortal(
@@ -84,8 +74,8 @@ export const PromotionLinkModal: React.FC<PromotionLinkModalProps> = ({
         justifyContent: 'center',
         zIndex: 10000,
         padding: '20px',
+        overscrollBehavior: 'contain',
       }}
-      onClick={onClose}
     >
       <div
         className="glass-panel animate-fade-in"
@@ -100,7 +90,6 @@ export const PromotionLinkModal: React.FC<PromotionLinkModalProps> = ({
           boxShadow: 'var(--shadow-lg)',
           overflow: 'hidden',
         }}
-        onClick={(e) => e.stopPropagation()}
       >
         {/* Modal Header */}
         <div
@@ -113,6 +102,24 @@ export const PromotionLinkModal: React.FC<PromotionLinkModalProps> = ({
           }}
         >
           <h3 style={{ fontSize: '1.25rem', fontWeight: 600 }}>生成书籍推广链接</h3>
+          <button
+            type="button"
+            aria-label="关闭窗口"
+            onClick={onClose}
+            style={{
+              background: 'transparent',
+              border: 'none',
+              padding: '6px',
+              borderRadius: '8px',
+              display: 'inline-flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              color: 'hsl(var(--text-secondary))',
+              cursor: 'pointer',
+            }}
+          >
+            <X size={20} aria-hidden="true" />
+          </button>
         </div>
 
         {/* Modal Body */}

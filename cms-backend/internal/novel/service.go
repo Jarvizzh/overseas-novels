@@ -15,11 +15,14 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	redisclient "star-novel-cms/internal/redis"
 	"star-novel-cms/internal/storage"
 )
+
+const maxGenresTotalChars = 2048
 
 var (
 	ErrNovelNotFound           = errors.New("Novel not found")
@@ -30,6 +33,7 @@ var (
 	ErrCannotPublishEmptyNovel = errors.New("书籍暂无章节内容，请先导入章节后再上架发布")
 	ErrInvalidSettingValue     = errors.New("无效的全局配置参数")
 	ErrInvalidPromoPricing     = errors.New("无效的推广链接计费参数")
+	ErrInvalidGenres           = errors.New("分类标签总长度不能超过 2048 个字符")
 )
 
 type BulkImportResult struct {
@@ -241,11 +245,30 @@ func (s *novelService) GetNovel(ctx context.Context, id int64) (*Novel, error) {
 	return n, nil
 }
 
+func normalizeAndValidateGenres(genres []string) ([]string, error) {
+	cleaned := make([]string, 0, len(genres))
+	for _, g := range genres {
+		trimmed := strings.TrimSpace(g)
+		if trimmed != "" {
+			cleaned = append(cleaned, trimmed)
+		}
+	}
+	if utf8.RuneCountInString(strings.Join(cleaned, ",")) > maxGenresTotalChars {
+		return nil, ErrInvalidGenres
+	}
+	return cleaned, nil
+}
+
 func (s *novelService) CreateNovel(ctx context.Context, n *Novel) (*Novel, error) {
 	n.CoverURL = strings.TrimSpace(n.CoverURL)
 	if !s.isValidNewCoverRef(n.CoverURL) {
 		return nil, ErrInvalidCover
 	}
+	genres, err := normalizeAndValidateGenres(n.Genres)
+	if err != nil {
+		return nil, err
+	}
+	n.Genres = genres
 	n.PublishStatus = strings.TrimSpace(n.PublishStatus)
 	if n.PublishStatus == "" {
 		n.PublishStatus = "draft"
@@ -264,7 +287,7 @@ func (s *novelService) CreateNovel(ctx context.Context, n *Novel) (*Novel, error
 		n.StartPayChapterIndex = s.resolveDefaultStartPay(ctx)
 	}
 
-	err := s.repo.CreateNovel(ctx, n)
+	err = s.repo.CreateNovel(ctx, n)
 	if err != nil {
 		return nil, err
 	}
@@ -285,6 +308,12 @@ func (s *novelService) UpdateNovel(ctx context.Context, id int64, title, author,
 	if coverURL == "" || (coverURL != existing.CoverURL && !s.isValidNewCoverRef(coverURL)) {
 		return nil, ErrInvalidCover
 	}
+
+	normalizedGenres, err := normalizeAndValidateGenres(genres)
+	if err != nil {
+		return nil, err
+	}
+	genres = normalizedGenres
 
 	publishStatus = strings.TrimSpace(publishStatus)
 	if publishStatus == "" {

@@ -205,6 +205,8 @@ export default function AccountsTab() {
             color: 'hsl(var(--text-primary))'
           }}>
             <button
+              type="button"
+              aria-label="关闭窗口"
               onClick={handleCloseModal}
               style={{
                 position: 'absolute',
@@ -216,7 +218,7 @@ export default function AccountsTab() {
                 color: 'hsl(var(--text-muted))'
               }}
             >
-              <X size={18} />
+              <X size={18} aria-hidden="true" />
             </button>
 
             <h3 style={{ fontSize: '1.2rem', marginBottom: '18px', display: 'flex', alignItems: 'center', gap: '8px', color: 'hsl(var(--text-primary))', fontWeight: 600 }}>

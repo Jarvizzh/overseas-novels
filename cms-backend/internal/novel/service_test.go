@@ -706,4 +706,21 @@ func TestCoverCleanupSettingsValidationAndPromoLinkGuards(t *testing.T) {
 	if !strings.Contains(goodLink.GeneratedURL, "link_id=1") || repo.promoLinks[goodLink.ID].GeneratedURL != goodLink.GeneratedURL {
 		t.Fatalf("expected link_id=1 persisted in generated_url, got link=%q repo=%q", goodLink.GeneratedURL, repo.promoLinks[goodLink.ID].GeneratedURL)
 	}
+
+	// Genres length validation: allows up to 2048 runes (including >50 rune single tags), rejects 2049
+	exactMaxTag := strings.Repeat(" tag", 0) + strings.Repeat("a", 2048)
+	createdMaxGenres, err := svc.CreateNovel(ctx, &Novel{
+		Title: "LongGenres", Author: "A", CoverURL: newKey, Status: "Ongoing", Genres: []string{" " + exactMaxTag + " "},
+	})
+	if err != nil || len(createdMaxGenres.Genres) != 1 || len(createdMaxGenres.Genres[0]) != 2048 {
+		t.Fatalf("expected 2048-char genre accepted, got n=%+v err=%v", createdMaxGenres, err)
+	}
+	if _, err := svc.CreateNovel(ctx, &Novel{
+		Title: "TooLongGenres", Author: "A", CoverURL: newKey, Status: "Ongoing", Genres: []string{strings.Repeat("a", 2049)},
+	}); !errors.Is(err, ErrInvalidGenres) {
+		t.Fatalf("expected ErrInvalidGenres on CreateNovel >2048 chars, got %v", err)
+	}
+	if _, err := svc.UpdateNovel(ctx, 1, "B1", "A", newKey, "Ongoing", "", "", []string{strings.Repeat("a", 1024), strings.Repeat("b", 1024)}, 4.5, nil, 3); !errors.Is(err, ErrInvalidGenres) {
+		t.Fatalf("expected ErrInvalidGenres on UpdateNovel when joined with comma >2048 chars, got %v", err)
+	}
 }

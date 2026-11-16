@@ -2,8 +2,9 @@ import { useEffect, useId, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { apiRequest, domainApi } from '../utils/api';
 import type { SystemDomain } from '../utils/api';
-import { Book, Plus, ArrowLeft, Upload, Edit, Trash, CheckCircle, HelpCircle, Search, Settings, Link2 } from 'lucide-react';
-import { NovelFormModal, type NovelFormData } from '../components/novels/NovelFormModal';
+import { Book, Plus, ArrowLeft, Upload, Edit, Trash, CheckCircle, Search, Settings, Link2, X } from 'lucide-react';
+import { ChapterUploadFields, DEFAULT_CHAPTER_DELIMITER_REGEX } from '../components/novels/ChapterUploadFields';
+import { MAX_GENRES_LENGTH, NovelFormModal, type NovelFormData } from '../components/novels/NovelFormModal';
 import { PromotionLinkModal } from '../components/novels/PromotionLinkModal';
 
 interface Novel {
@@ -84,6 +85,11 @@ export default function NovelsTab() {
     status: 'Ongoing', publish_status: 'draft', rating: 4.5, synopsis: '', genres: 'Romance, Werewolf',
     coin_cost_per_thousand: '', start_pay_chapter_index: 3
   });
+  const [createImportType, setCreateImportType] = useState<'single_txt' | 'zip'>('single_txt');
+  const [createImportFile, setCreateImportFile] = useState<File | null>(null);
+  const [createRegex, setCreateRegex] = useState(DEFAULT_CHAPTER_DELIMITER_REGEX);
+  const [createModalError, setCreateModalError] = useState('');
+  const [createdDraftId, setCreatedDraftId] = useState<number | null>(null);
 
   const [isEditing, setIsEditing] = useState(false);
   const [editNovelForm, setEditNovelForm] = useState<NovelFormData>({
@@ -93,7 +99,7 @@ export default function NovelsTab() {
 
   const [importFile, setImportFile] = useState<File | null>(null);
   const [importType, setImportType] = useState<'single_txt' | 'zip'>('single_txt');
-  const [regex, setRegex] = useState(`(?i)(chapter\\s+\\d+|第[一二三四五六七八九十百千万零两\\d]+章)`);
+  const [regex, setRegex] = useState(DEFAULT_CHAPTER_DELIMITER_REGEX);
   const [importMessage, setImportMessage] = useState('');
   const [importError, setImportError] = useState('');
   const [importLoading, setImportLoading] = useState(false);
@@ -104,9 +110,6 @@ export default function NovelsTab() {
   const novelsFetchSeqRef = useRef(0);
 
   const importFileInputRef = useRef<HTMLInputElement>(null);
-  const importFileInputId = useId();
-  const importRegexInputId = useId();
-  const importGuideId = useId();
 
   // Promotion Link Builder States
   const [isPromoModalOpen, setIsPromoModalOpen] = useState(false);
@@ -368,45 +371,96 @@ export default function NovelsTab() {
     }
   };
 
+  const resetCreateModalState = () => {
+    setNewNovel({
+      title: '', author: '', cover_url: '', cover_preview_url: '',
+      status: 'Ongoing', publish_status: 'draft', rating: 4.5, synopsis: '', genres: 'Romance, Werewolf',
+      coin_cost_per_thousand: '', start_pay_chapter_index: globalStartPayChapter || 3,
+    });
+    setCreateImportType('single_txt');
+    setCreateImportFile(null);
+    setCreateRegex(DEFAULT_CHAPTER_DELIMITER_REGEX);
+    setCreateModalError('');
+    setCreatedDraftId(null);
+  };
+
+  const refreshFirstPageList = () => {
+    if (novelQuery.page !== 1) {
+      setNovelQuery((prev) => ({ ...prev, page: 1 }));
+    } else {
+      void fetchNovels({ ...novelQuery, page: 1 });
+    }
+  };
+
+  const buildNovelPayload = (form: NovelFormData, publishStatus: string) => {
+    const trimmedGenres = form.genres.trim();
+    if (trimmedGenres.length > MAX_GENRES_LENGTH) {
+      throw new Error(`分类标签不能超过 ${MAX_GENRES_LENGTH} 个字符`);
+    }
+    const parsedGenres = trimmedGenres.split(',').map((g) => g.trim()).filter(Boolean);
+    if (parsedGenres.length === 0) {
+      throw new Error('请输入至少一个有效的分类标签');
+    }
+    const rawCost = form.coin_cost_per_thousand;
+    return {
+      title: form.title,
+      author: form.author,
+      cover_url: form.cover_url,
+      status: form.status,
+      publish_status: publishStatus,
+      rating: Number(form.rating),
+      synopsis: form.synopsis,
+      genres: parsedGenres,
+      coin_cost_per_thousand: rawCost === '' || rawCost === null ? null : Number(rawCost),
+      start_pay_chapter_index: Number(form.start_pay_chapter_index),
+    };
+  };
+
   const handleCreateNovel = async (e: React.FormEvent) => {
     e.preventDefault();
     if (isSubmittingNovel) return;
     setIsSubmittingNovel(true);
+    setCreateModalError('');
+    let targetNovelId = createdDraftId;
     try {
-      const rawCost = newNovel.coin_cost_per_thousand;
-      const payload = {
-        title: newNovel.title,
-        author: newNovel.author,
-        cover_url: newNovel.cover_url,
-        status: newNovel.status,
-        publish_status: 'draft',
-        rating: Number(newNovel.rating),
-        synopsis: newNovel.synopsis,
-        genres: newNovel.genres.split(',').map(g => g.trim()).filter(Boolean),
-        coin_cost_per_thousand: rawCost === '' || rawCost === null ? null : Number(rawCost),
-        start_pay_chapter_index: Number(newNovel.start_pay_chapter_index)
-      };
-      const created = await apiRequest('POST', '/novels', payload);
-      setIsCreating(false);
-      setNewNovel({
-        title: '', author: '', cover_url: '', cover_preview_url: '',
-        status: 'Ongoing', publish_status: 'draft', rating: 4.5, synopsis: '', genres: 'Romance, Werewolf',
-        coin_cost_per_thousand: '', start_pay_chapter_index: globalStartPayChapter || 3
-      });
-      window.showToast?.('新建书籍已保存为草稿，请导入章节后上架发布！', 'success');
-      if (novelQuery.page !== 1) {
-        setNovelQuery(prev => ({ ...prev, page: 1 }));
+      const payload = buildNovelPayload(newNovel, 'draft');
+      if (!targetNovelId) {
+        const created = await apiRequest('POST', '/novels', payload);
+        targetNovelId = created?.id ?? null;
+        if (targetNovelId) {
+          setCreatedDraftId(targetNovelId);
+        }
       } else {
-        void fetchNovels({ ...novelQuery, page: 1 });
+        await apiRequest('PUT', `/novels/${targetNovelId}`, payload);
       }
-      if (created && created.id) {
-        resetDetailTransientState();
-        setSelectedNovel(created);
-        setChapters([]);
-        setChapterPage(1);
+
+      if (createImportFile && targetNovelId) {
+        const formData = new FormData();
+        formData.append('file', createImportFile);
+        formData.append('import_type', createImportType);
+        formData.append('delimiter_regex', createRegex);
+        const importData = await apiRequest('POST', `/novels/${targetNovelId}/chapters/bulk-import`, formData, true);
+        window.showToast?.(
+          `书籍创建成功！已导入 ${importData.chapters_count} 个章节（总字数 ${importData.total_word_count} 字），当前为草稿状态。`,
+          'success'
+        );
+      } else {
+        window.showToast?.('新建书籍已保存为草稿！', 'success');
       }
+
+      setIsCreating(false);
+      resetCreateModalState();
+      setSelectedNovel(null);
+      refreshFirstPageList();
     } catch (err: any) {
-      window.showToast?.(err.message || '新建书籍失败', 'error');
+      const msg = err?.message || '新建书籍失败';
+      if (targetNovelId) {
+        refreshFirstPageList();
+        setCreateModalError(`书籍档案已保存为草稿（ID: ${targetNovelId}），但章节导入失败：${msg}。可调整文件或正则后重试导入，或点击右上角 × 关闭返回列表。`);
+      } else {
+        setCreateModalError(msg);
+      }
+      window.showToast?.(msg, 'error');
     } finally {
       setIsSubmittingNovel(false);
     }
@@ -454,19 +508,7 @@ export default function NovelsTab() {
     if (!selectedNovel || isSubmittingNovel) return;
     setIsSubmittingNovel(true);
     try {
-      const rawCost = editNovelForm.coin_cost_per_thousand;
-      const payload = {
-        title: editNovelForm.title,
-        author: editNovelForm.author,
-        cover_url: editNovelForm.cover_url,
-        status: editNovelForm.status,
-        publish_status: editNovelForm.publish_status || selectedNovel.publish_status || 'draft',
-        rating: Number(editNovelForm.rating),
-        synopsis: editNovelForm.synopsis,
-        genres: editNovelForm.genres.split(',').map(g => g.trim()).filter(Boolean),
-        coin_cost_per_thousand: rawCost === '' || rawCost === null ? null : Number(rawCost),
-        start_pay_chapter_index: Number(editNovelForm.start_pay_chapter_index)
-      };
+      const payload = buildNovelPayload(editNovelForm, editNovelForm.publish_status || selectedNovel.publish_status || 'draft');
       const updated = await apiRequest('PUT', `/novels/${selectedNovel.id}`, payload);
       setSelectedNovel(updated);
       setIsEditing(false);
@@ -947,121 +989,19 @@ export default function NovelsTab() {
             )}
 
             <form onSubmit={handleBulkImport}>
-              <fieldset style={{ border: 'none', marginBottom: '16px', padding: 0 }}>
-                <legend style={{ display: 'block', fontSize: '0.8rem', color: 'hsl(var(--text-secondary))', marginBottom: '6px' }}>导入类型</legend>
-                <div style={{ display: 'flex', gap: '16px', flexWrap: 'wrap' }}>
-                  <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.85rem', cursor: 'pointer' }}>
-                    <input
-                      type="radio"
-                      name="import_type"
-                      checked={importType === 'single_txt'}
-                      onChange={() => {
-                        setImportType('single_txt');
-                        setImportFile(null);
-                      }}
-                    />
-                    单个大 TXT 文件 (正则分章)
-                  </label>
-                  <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.85rem', cursor: 'pointer' }}>
-                    <input
-                      type="radio"
-                      name="import_type"
-                      checked={importType === 'zip'}
-                      onChange={() => {
-                        setImportType('zip');
-                        setImportFile(null);
-                      }}
-                    />
-                    ZIP 压缩包 (内含多个 TXT)
-                  </label>
-                </div>
-              </fieldset>
-
-              <div
-                id={importGuideId}
-                style={{
-                  marginBottom: '16px',
-                  padding: '12px 14px',
-                  borderRadius: '8px',
-                  border: '1px solid hsl(var(--border))',
-                  backgroundColor: 'hsl(var(--bg-base) / 0.7)',
-                  fontSize: '0.78rem',
-                  lineHeight: 1.6,
-                  color: 'hsl(var(--text-secondary))'
-                }}
-              >
-                {importType === 'single_txt' ? (
-                  <div>
-                    <div style={{ fontWeight: 600, color: 'hsl(var(--text-primary))', marginBottom: '4px' }}>
-                      TXT 正则分章说明（UTF-8 编码）
-                    </div>
-                    <ul style={{ paddingLeft: '16px', margin: 0 }}>
-                      <li>每章标题须<strong>单独占一行</strong>且位于行首（允许行首空格），例如：<code>Chapter 1: The Start</code>、<code>chapter 2</code>、<code>第一章 初遇</code>、<code>第10章</code>。</li>
-                      <li>正则从每行起始位置匹配（默认含 <code>(?i)</code> 不区分大小写），正文句子中提及的 <code>Chapter 1</code> 不会误切分。</li>
-                      <li>整行匹配标题将保留为章节名（超出 150 字自动截断），首个标题行之前的序言/版权页不会入库；导入会覆盖当前全部已有章节。</li>
-                    </ul>
-                  </div>
-                ) : (
-                  <div>
-                    <div style={{ fontWeight: 600, color: 'hsl(var(--text-primary))', marginBottom: '4px' }}>
-                      ZIP 压缩包文件命名规范（UTF-8 编码）
-                    </div>
-                    <ul style={{ paddingLeft: '16px', margin: 0 }}>
-                      <li>包内章节文件须按 <code>数字序号_章节标题.txt</code> 命名（支持 <code>_</code>、<code>-</code> 或空格分隔，后缀不区分大小写）。</li>
-                      <li>示例：<code>001_The Shattered Promise.txt</code>、<code>002-A New Path.txt</code>、<code>003.txt</code>（省略标题时默认命名为 <code>Chapter 序号</code>）。</li>
-                      <li>系统按文件名前缀数字从小到大排序生成连续章节（单章 TXT 上限 10MB）；导入会覆盖当前全部已有章节。</li>
-                    </ul>
-                  </div>
-                )}
-              </div>
-
               <div style={{ marginBottom: '16px' }}>
-                <label htmlFor={importFileInputId} style={{ display: 'block', fontSize: '0.8rem', color: 'hsl(var(--text-secondary))', marginBottom: '6px' }}>
-                  选择文件 ({importType === 'single_txt' ? '.txt' : '.zip'})
-                </label>
-                <input
-                  key={importType}
-                  ref={importFileInputRef}
-                  id={importFileInputId}
-                  name="file"
-                  type="file"
-                  accept={importType === 'single_txt' ? '.txt' : '.zip'}
-                  aria-describedby={importGuideId}
-                  onChange={(e) => setImportFile(e.target.files ? e.target.files[0] : null)}
-                  required
-                  style={{
-                    width: '100%',
-                    padding: '12px',
-                    border: '1px dashed hsl(var(--border))',
-                    borderRadius: '8px',
-                    backgroundColor: 'hsl(var(--bg-card))',
-                    cursor: 'pointer'
-                  }}
+                <ChapterUploadFields
+                  importType={importType}
+                  onImportTypeChange={setImportType}
+                  file={importFile}
+                  onFileChange={setImportFile}
+                  fileInputRef={importFileInputRef}
+                  regex={regex}
+                  onRegexChange={setRegex}
+                  required={true}
+                  disabled={importLoading}
                 />
               </div>
-
-              {importType === 'single_txt' && (
-                <div style={{ marginBottom: '16px' }}>
-                  <label htmlFor={importRegexInputId} style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '0.8rem', color: 'hsl(var(--text-secondary))', marginBottom: '6px' }}>
-                    章节匹配分割正则
-                    <span title="正则表达式会从每行非空白起始位置匹配章节标题（含 (?i) 不区分大小写），正文句中出现的关键词不会误切分。" style={{ display: 'inline-flex', cursor: 'help' }}>
-                      <HelpCircle size={12} aria-hidden="true" />
-                    </span>
-                  </label>
-                  <input
-                    id={importRegexInputId}
-                    name="delimiter_regex"
-                    type="text"
-                    className="input-field"
-                    aria-describedby={importGuideId}
-                    value={regex}
-                    onChange={(e) => setRegex(e.target.value)}
-                    required
-                  />
-                </div>
-              )}
-
-
 
               {canEditNovels ? (
                 <button
@@ -1089,14 +1029,15 @@ export default function NovelsTab() {
             backdropFilter: 'blur(2.5px)',
             WebkitBackdropFilter: 'blur(2.5px)',
             display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 10000,
-            padding: '20px'
-          }} onClick={() => setPreviewChapter(null)}>
+            padding: '20px',
+            overscrollBehavior: 'contain'
+          }}>
             <div className="glass-panel animate-fade-in" style={{
               width: '100%', maxWidth: '640px', maxHeight: '80vh',
               backgroundColor: 'hsl(var(--bg-surface))', border: '1px solid hsl(var(--border))',
               borderRadius: '16px', display: 'flex', flexDirection: 'column',
               boxShadow: 'var(--shadow-lg)', overflow: 'hidden'
-            }} onClick={(e) => e.stopPropagation()}>
+            }}>
 
               {/* Modal Header */}
               <div style={{
@@ -1112,11 +1053,16 @@ export default function NovelsTab() {
                   </h3>
                 </div>
                 <button
-                  className="btn-secondary"
-                  style={{ padding: '6px 12px', fontSize: '0.8rem' }}
+                  type="button"
+                  aria-label="关闭预览"
+                  style={{
+                    background: 'transparent', border: 'none', padding: '6px',
+                    borderRadius: '8px', color: 'hsl(var(--text-secondary))', cursor: 'pointer',
+                    display: 'inline-flex', alignItems: 'center', justifyContent: 'center'
+                  }}
                   onClick={() => setPreviewChapter(null)}
                 >
-                  关闭
+                  <X size={20} aria-hidden="true" />
                 </button>
               </div>
 
@@ -1189,12 +1135,8 @@ export default function NovelsTab() {
             <button
               type="button"
               onClick={() => {
-                setNewNovel({
-                  title: '', author: '', cover_url: '', cover_preview_url: '',
-                  status: 'Ongoing', publish_status: 'draft', rating: 4.5, synopsis: '', genres: 'Romance, Werewolf',
-                  coin_cost_per_thousand: '', start_pay_chapter_index: globalStartPayChapter || 3
-                });
-                setIsCreating(!isCreating);
+                resetCreateModalState();
+                setIsCreating(true);
               }}
               className="btn-primary"
               style={{ display: 'flex', gap: '6px' }}
@@ -1272,7 +1214,18 @@ export default function NovelsTab() {
         formData={newNovel}
         setFormData={(data) => setNewNovel(data)}
         onSubmit={handleCreateNovel}
-        onCancel={() => setIsCreating(false)}
+        onCancel={() => {
+          setIsCreating(false);
+          resetCreateModalState();
+        }}
+        chapterImportType={createImportType}
+        onChapterImportTypeChange={setCreateImportType}
+        chapterFile={createImportFile}
+        onChapterFileChange={setCreateImportFile}
+        chapterRegex={createRegex}
+        onChapterRegexChange={setCreateRegex}
+        createdDraftId={createdDraftId}
+        submitError={createModalError}
       />
 
       {/* Search & Publish Status Filter Bar */}
