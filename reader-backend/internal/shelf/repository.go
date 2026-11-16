@@ -2,12 +2,15 @@ package shelf
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"reader-backend/internal/db"
 	"reader-backend/internal/model"
 )
+
+var ErrNovelUnavailable = errors.New("novel not found or unavailable")
 
 type Repository interface {
 	GetShelfItemsWithNovel(ctx context.Context, userID int64) ([]model.BookshelfWithNovel, error)
@@ -27,10 +30,10 @@ func (r *dbRepository) GetShelfItemsWithNovel(ctx context.Context, userID int64)
 	query := `
 		SELECT 
 			b.chapter_index, b.scroll_offset_percentage, b.in_shelf, b.updated_at,
-			n.id, n.title, n.author, n.cover_url, n.rating, n.status, n.synopsis, n.genres, n.word_count, n.view_count
+			n.id, n.title, n.author, n.cover_url, n.rating, n.status, n.publish_status, n.synopsis, n.genres, n.word_count, n.view_count
 		FROM bookshelves b
 		INNER JOIN novels n ON b.novel_id = n.id
-		WHERE b.user_id = $1 AND b.in_shelf = TRUE
+		WHERE b.user_id = $1 AND b.in_shelf = TRUE AND n.status != 'archived' AND n.publish_status = 'published'
 		ORDER BY b.updated_at DESC`
 
 	rows, err := db.DB.Query(ctx, query, userID)
@@ -39,7 +42,7 @@ func (r *dbRepository) GetShelfItemsWithNovel(ctx context.Context, userID int64)
 	}
 	defer rows.Close()
 
-	var items []model.BookshelfWithNovel
+	items := []model.BookshelfWithNovel{}
 	for rows.Next() {
 		var item model.BookshelfWithNovel
 		item.UserID = userID
@@ -47,11 +50,14 @@ func (r *dbRepository) GetShelfItemsWithNovel(ctx context.Context, userID int64)
 		err = rows.Scan(
 			&item.ChapterIndex, &item.ScrollOffsetPercentage, &item.InShelf, &item.UpdatedAt,
 			&item.Novel.ID, &item.Novel.Title, &item.Novel.Author, &item.Novel.CoverURL,
-			&item.Novel.Rating, &item.Novel.Status, &item.Novel.Synopsis, &item.Novel.Genres,
+			&item.Novel.Rating, &item.Novel.Status, &item.Novel.PublishStatus, &item.Novel.Synopsis, &item.Novel.Genres,
 			&item.Novel.WordCount, &item.Novel.ViewCount,
 		)
 		if err != nil {
 			return nil, err
+		}
+		if item.Novel.Genres == nil {
+			item.Novel.Genres = []string{}
 		}
 		item.NovelID = item.Novel.ID
 		items = append(items, item)
@@ -61,13 +67,22 @@ func (r *dbRepository) GetShelfItemsWithNovel(ctx context.Context, userID int64)
 }
 
 func (r *dbRepository) AddToShelf(ctx context.Context, userID int64, novelID int64) error {
+	var published bool
+	err := db.DB.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM novels WHERE id = $1 AND status != 'archived' AND publish_status = 'published')`, novelID).Scan(&published)
+	if err != nil {
+		return err
+	}
+	if !published {
+		return ErrNovelUnavailable
+	}
+
 	query := `
 		INSERT INTO bookshelves (user_id, novel_id, in_shelf, updated_at)
 		VALUES ($1, $2, TRUE, CURRENT_TIMESTAMP)
 		ON CONFLICT (user_id, novel_id)
 		DO UPDATE SET in_shelf = TRUE, updated_at = CURRENT_TIMESTAMP`
 
-	_, err := db.DB.Exec(ctx, query, userID, novelID)
+	_, err = db.DB.Exec(ctx, query, userID, novelID)
 	return err
 }
 

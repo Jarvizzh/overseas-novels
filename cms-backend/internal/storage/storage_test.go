@@ -93,3 +93,24 @@ func TestAliyunOSSStorage_PathFormatting(t *testing.T) {
 		t.Errorf("expected %s, got %s", expectedPrefix, prefix)
 	}
 }
+
+func TestParseChapterIndexFromKey(t *testing.T) {
+	prefix := "novels/10000001/"
+	cases := []struct {
+		key     string
+		wantIdx int
+		wantOK  bool
+	}{
+		{"novels/10000001/0.txt", 0, true},
+		{"novels/10000001/15.txt", 15, true},
+		{"novels/10000001/cover.png", 0, false},
+		{"novels/10000001/sub/1.txt", 0, false},
+		{"novels/999/1.txt", 0, false},
+	}
+	for _, tc := range cases {
+		idx, ok := parseChapterIndexFromKey(prefix, tc.key)
+		if idx != tc.wantIdx || ok != tc.wantOK {
+			t.Errorf("parseChapterIndexFromKey(%q) = (%d, %v), want (%d, %v)", tc.key, idx, ok, tc.wantIdx, tc.wantOK)
+		}
+	}
+}

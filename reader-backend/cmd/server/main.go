@@ -26,6 +26,8 @@ import (
 	"reader-backend/internal/workerpool"
 )
 
+var buildVersion = "dev"
+
 func main() {
 	// 1. Load config
 	config.LoadConfig()
@@ -90,14 +92,20 @@ func main() {
 		}
 		log.Printf("Reader Content Storage initialized with driver: %s", contentStorage.StorageType())
 
+		coverSigner, err := storage.NewCoverOSSSigner(config.AppConfig)
+		if err != nil {
+			log.Fatalf("Failed to initialize reader cover OSS signer: %v", err)
+		}
+		log.Printf("Reader Cover OSS Signer enabled=%t", coverSigner.IsEnabled())
+
 		novelRepo := novel.NewDBRepository()
 		novelCache := novel.NewRedisCache()
-		novelService := novel.NewService(novelRepo, novelCache, contentStorage)
+		novelService := novel.NewService(novelRepo, novelCache, contentStorage, coverSigner)
 		novelHandler := novel.NewHandler(novelService)
 		novelHandler.RegisterRoutes(api)
 
 		shelfRepo := shelf.NewDBRepository()
-		shelfService := shelf.NewService(shelfRepo)
+		shelfService := shelf.NewService(shelfRepo, coverSigner)
 		shelfHandler := shelf.NewHandler(shelfService)
 		shelfHandler.RegisterRoutes(api)
 
@@ -117,8 +125,9 @@ func main() {
 
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
-			"status": "UP",
-			"time":   time.Now().Format(time.RFC3339),
+			"status":  "UP",
+			"version": buildVersion,
+			"time":    time.Now().Format(time.RFC3339),
 		})
 	})
 
@@ -129,7 +138,7 @@ func main() {
 	}
 
 	go func() {
-		log.Printf("Star Novel backend starting on port %s", config.AppConfig.Port)
+		log.Printf("Star Novel backend starting on port %s (version=%s)", config.AppConfig.Port, buildVersion)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Fatalf("listen: %s\n", err)
 		}

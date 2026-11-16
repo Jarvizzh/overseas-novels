@@ -2,6 +2,7 @@ package novel
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"strings"
@@ -11,6 +12,23 @@ import (
 	"reader-backend/internal/storage"
 )
 
+var (
+	ErrNovelNotFound = errors.New("novel not found")
+)
+
+// IsNovelPublished reports whether a novel is active and published for reader access.
+func IsNovelPublished(n *model.Novel) bool {
+	return n != nil && n.Status != "archived" && n.PublishStatus == "published"
+}
+
+// CalculateChapterPrice computes coin price consistently across catalog, reader, and unlock.
+func CalculateChapterPrice(wordCount, effectiveCost int) int {
+	if wordCount <= 0 || effectiveCost <= 0 {
+		return 0
+	}
+	return int(math.Round((float64(wordCount) / 1000.0) * float64(effectiveCost)))
+}
+
 type ChapterReadResult struct {
 	Chapter *model.Chapter `json:"chapter"`
 	Locked  bool           `json:"locked"`
@@ -18,7 +36,7 @@ type ChapterReadResult struct {
 }
 
 type Service interface {
-	GetNovels(ctx context.Context, genre string, limit, offset int) ([]model.Novel, error)
+	GetNovels(ctx context.Context, genre, sortBy string, limit, offset int) ([]model.Novel, error)
 	SearchNovels(ctx context.Context, search string, limit, offset int) ([]model.Novel, error)
 	GetNovelDetail(ctx context.Context, id int64) (*model.Novel, error)
 	GetChaptersList(ctx context.Context, userID int64, novelID int64, promoID int, utmSource, utmCampaign string) ([]model.Chapter, error)
@@ -26,37 +44,71 @@ type Service interface {
 }
 
 type service struct {
-	repo    Repository
-	cache   Cache
-	storage storage.ContentStorage
-	sf      singleflight.Group
+	repo        Repository
+	cache       Cache
+	storage     storage.ContentStorage
+	coverSigner storage.CoverSigner
+	sf          singleflight.Group
 }
 
-func NewService(repo Repository, cache Cache, storage storage.ContentStorage) Service {
+func NewService(repo Repository, cache Cache, storage storage.ContentStorage, coverSigner storage.CoverSigner) Service {
 	return &service{
-		repo:    repo,
-		cache:   cache,
-		storage: storage,
+		repo:        repo,
+		cache:       cache,
+		storage:     storage,
+		coverSigner: coverSigner,
 	}
 }
 
-func (s *service) GetNovels(ctx context.Context, genre string, limit, offset int) ([]model.Novel, error) {
-	return s.repo.GetNovels(ctx, genre, limit, offset)
+func (s *service) signCoverURL(raw string) string {
+	if s.coverSigner == nil {
+		return raw
+	}
+	return s.coverSigner.SignCoverURL(raw)
+}
+
+func (s *service) GetNovels(ctx context.Context, genre, sortBy string, limit, offset int) ([]model.Novel, error) {
+	novels, err := s.repo.GetNovels(ctx, genre, sortBy, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	if novels == nil {
+		novels = []model.Novel{}
+	}
+	for i := range novels {
+		novels[i].CoverURL = s.signCoverURL(novels[i].CoverURL)
+	}
+	return novels, nil
 }
 
 func (s *service) SearchNovels(ctx context.Context, search string, limit, offset int) ([]model.Novel, error) {
-	return s.repo.SearchNovels(ctx, search, limit, offset)
+	novels, err := s.repo.SearchNovels(ctx, search, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	if novels == nil {
+		novels = []model.Novel{}
+	}
+	for i := range novels {
+		novels[i].CoverURL = s.signCoverURL(novels[i].CoverURL)
+	}
+	return novels, nil
 }
 
 func (s *service) GetNovelDetail(ctx context.Context, id int64) (*model.Novel, error) {
 	n, err := s.cache.GetNovel(ctx, id)
-	if err == nil && n != nil {
-		return n, nil
+	if err == nil && n != nil && n.PublishStatus != "" {
+		if !IsNovelPublished(n) {
+			return nil, nil
+		}
+		signed := *n
+		signed.CoverURL = s.signCoverURL(n.CoverURL)
+		return &signed, nil
 	}
 
 	sfKey := fmt.Sprintf("sf:novel:detail:%d", id)
 	val, err, _ := s.sf.Do(sfKey, func() (interface{}, error) {
-		if cached, _ := s.cache.GetNovel(ctx, id); cached != nil {
+		if cached, _ := s.cache.GetNovel(ctx, id); cached != nil && cached.PublishStatus != "" {
 			return cached, nil
 		}
 		nDB, errDB := s.repo.GetByID(ctx, id)
@@ -73,10 +125,24 @@ func (s *service) GetNovelDetail(ctx context.Context, id int64) (*model.Novel, e
 	if val == nil {
 		return nil, nil
 	}
-	return val.(*model.Novel), nil
+	cachedNovel := val.(*model.Novel)
+	if !IsNovelPublished(cachedNovel) {
+		return nil, nil
+	}
+	signed := *cachedNovel
+	signed.CoverURL = s.signCoverURL(cachedNovel.CoverURL)
+	return &signed, nil
 }
 
 func (s *service) GetChaptersList(ctx context.Context, userID int64, novelID int64, promoID int, utmSource, utmCampaign string) ([]model.Chapter, error) {
+	n, err := s.GetNovelDetail(ctx, novelID)
+	if err != nil {
+		return nil, err
+	}
+	if !IsNovelPublished(n) {
+		return nil, ErrNovelNotFound
+	}
+
 	list, err := s.cache.GetChaptersList(ctx, novelID)
 	if err != nil || len(list) == 0 {
 		sfKey := fmt.Sprintf("sf:novel:chapters:%d", novelID)
@@ -109,7 +175,7 @@ func (s *service) GetChaptersList(ctx context.Context, userID int64, novelID int
 		isPaid := (ch.ChapterIndex >= (effectiveStartPay - 1))
 		price := 0
 		if isPaid {
-			price = int(math.Round((float64(ch.WordCount) / 1000.0) * float64(effectiveCost)))
+			price = CalculateChapterPrice(ch.WordCount, effectiveCost)
 		}
 		ch.IsPaid = isPaid
 		ch.Price = price
@@ -120,6 +186,14 @@ func (s *service) GetChaptersList(ctx context.Context, userID int64, novelID int
 }
 
 func (s *service) GetChapterContent(ctx context.Context, userID int64, novelID int64, chapterIndex int, promoID int, utmSource, utmCampaign string) (*ChapterReadResult, error) {
+	n, err := s.GetNovelDetail(ctx, novelID)
+	if err != nil {
+		return nil, err
+	}
+	if !IsNovelPublished(n) {
+		return nil, nil
+	}
+
 	ch, err := s.cache.GetChapter(ctx, novelID, chapterIndex)
 	if err != nil || ch == nil {
 		sfKey := fmt.Sprintf("sf:chapter:%d:%d", novelID, chapterIndex)
@@ -157,7 +231,7 @@ func (s *service) GetChapterContent(ctx context.Context, userID int64, novelID i
 	isPaid := (ch.ChapterIndex >= (effectiveStartPay - 1))
 	price := 0
 	if isPaid {
-		price = int(math.Round((float64(ch.WordCount) / 1000.0) * float64(effectiveCost)))
+		price = CalculateChapterPrice(ch.WordCount, effectiveCost)
 	}
 
 	result := &ChapterReadResult{

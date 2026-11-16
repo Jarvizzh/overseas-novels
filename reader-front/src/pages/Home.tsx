@@ -5,11 +5,23 @@ import { GoldCoin } from '../components/GoldCoin';
 
 interface HomeProps {
   novels: Novel[];
+  latestNovels?: Novel[];
+  hasMore?: boolean;
+  loadingMore?: boolean;
+  onLoadMore?: () => void;
   onNavigate: (page: string, params?: any) => void;
   userCoins: number;
 }
 
-export const Home: React.FC<HomeProps> = ({ novels, onNavigate, userCoins }) => {
+export const Home: React.FC<HomeProps> = ({
+  novels,
+  latestNovels = [],
+  hasMore = false,
+  loadingMore = false,
+  onLoadMore,
+  onNavigate,
+  userCoins,
+}) => {
   const [activeTab, setActiveTab] = useState<'discover' | 'hot'>('discover');
 
   // Format views count (e.g. 2.4M, 98k)
@@ -105,7 +117,7 @@ export const Home: React.FC<HomeProps> = ({ novels, onNavigate, userCoins }) => 
                       <div className="banner-inline-card__title">{novel.title}</div>
                       <div className="banner-inline-card__desc">{novel.synopsis}</div>
                       <div className="banner-inline-card__tags">
-                        {novel.genres.slice(0, 3).map((tag, i) => (
+                        {(novel.genres || []).slice(0, 3).map((tag, i) => (
                           <span key={i} className="banner-inline-card__tag-item">{tag}</span>
                         ))}
                       </div>
@@ -114,6 +126,23 @@ export const Home: React.FC<HomeProps> = ({ novels, onNavigate, userCoins }) => 
                 </div>
               ))}
             </div>
+
+            {latestNovels.length > 0 && (
+              <>
+                <h2 className="section-title">
+                  <span>New Arrivals</span>
+                </h2>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(100px, 1fr))', gap: '12px', marginBottom: '20px' }}>
+                  {latestNovels.slice(0, 6).map((novel) => (
+                    <BookCard
+                      key={`new-${novel.id}`}
+                      novel={novel}
+                      onClick={() => onNavigate('detail', { id: novel.id })}
+                    />
+                  ))}
+                </div>
+              </>
+            )}
 
             {/* Editor's Choice Recommendations */}
             <h2 className="section-title">
@@ -129,6 +158,18 @@ export const Home: React.FC<HomeProps> = ({ novels, onNavigate, userCoins }) => 
                 />
               ))}
             </div>
+            {hasMore && onLoadMore && (
+              <div style={{ display: 'flex', justifyContent: 'center', marginTop: '12px', marginBottom: '16px' }}>
+                <button
+                  type="button"
+                  className="shelf-empty-btn"
+                  disabled={loadingMore}
+                  onClick={onLoadMore}
+                >
+                  {loadingMore ? 'Loading...' : 'Load More Books'}
+                </button>
+              </div>
+            )}
           </div>
         ) : (
           <div className="hot-tab-content">
@@ -161,7 +202,7 @@ export const Home: React.FC<HomeProps> = ({ novels, onNavigate, userCoins }) => 
                       <p className="rank-author">By {novel.author}</p>
                       
                       <div className="rank-meta">
-                        <span className="rank-genre">{novel.genres[0]}</span>
+                        <span className="rank-genre">{novel.genres?.[0] || 'Fiction'}</span>
                         <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
                           <span className="rank-score">⭐ {novel.rating}</span>
                           <span className="rank-views">🔥 {formatViews(novel.views)}</span>

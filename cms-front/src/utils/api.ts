@@ -8,10 +8,11 @@ export interface AdminUser {
 }
 
 export async function apiRequest(
-  method: 'GET' | 'POST' | 'PUT' | 'DELETE',
+  method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE',
   path: string,
   body?: any,
-  isMultipart = false
+  isMultipart = false,
+  signal?: AbortSignal
 ) {
   const token = localStorage.getItem('cms_token');
   const headers: HeadersInit = {};
@@ -30,6 +31,7 @@ export async function apiRequest(
     method,
     headers,
     body: requestBody,
+    signal,
   });
 
   if (response.status === 401) {

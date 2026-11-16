@@ -1,6 +1,7 @@
 package novel
 
 import (
+	"errors"
 	"net/http"
 	"strconv"
 
@@ -31,8 +32,9 @@ func (h *Handler) RegisterRoutes(r *gin.RouterGroup) {
 
 func (h *Handler) GetNovels(c *gin.Context) {
 	genre := c.Query("genre")
+	sortBy := c.DefaultQuery("sort", "popular")
 	pageStr := c.DefaultQuery("page", "1")
-	limitStr := c.DefaultQuery("limit", "10")
+	limitStr := c.DefaultQuery("limit", "20")
 
 	page, err := strconv.Atoi(pageStr)
 	if err != nil || page < 1 {
@@ -41,13 +43,15 @@ func (h *Handler) GetNovels(c *gin.Context) {
 
 	limit, err := strconv.Atoi(limitStr)
 	if err != nil || limit < 1 {
-		limit = 10
+		limit = 20
+	} else if limit > 100 {
+		limit = 100
 	}
 
 	offset := (page - 1) * limit
 	ctx := c.Request.Context()
 
-	novels, err := h.service.GetNovels(ctx, genre, limit, offset)
+	novels, err := h.service.GetNovels(ctx, genre, sortBy, limit, offset)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch novels"})
 		return
@@ -64,7 +68,7 @@ func (h *Handler) SearchNovels(c *gin.Context) {
 	}
 
 	pageStr := c.DefaultQuery("page", "1")
-	limitStr := c.DefaultQuery("limit", "10")
+	limitStr := c.DefaultQuery("limit", "20")
 
 	page, err := strconv.Atoi(pageStr)
 	if err != nil || page < 1 {
@@ -73,7 +77,9 @@ func (h *Handler) SearchNovels(c *gin.Context) {
 
 	limit, err := strconv.Atoi(limitStr)
 	if err != nil || limit < 1 {
-		limit = 10
+		limit = 20
+	} else if limit > 100 {
+		limit = 100
 	}
 
 	offset := (page - 1) * limit
@@ -146,6 +152,10 @@ func (h *Handler) GetChaptersList(c *gin.Context) {
 
 	chapters, err := h.service.GetChaptersList(ctx, userID, id, promoID, utmSource, utmCampaign)
 	if err != nil {
+		if errors.Is(err, ErrNovelNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Novel not found"})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch chapters list"})
 		return
 	}

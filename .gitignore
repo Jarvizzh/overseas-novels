@@ -44,3 +44,6 @@ backend/backend-srv
 # Production Linux binaries are tracked
 !reader-backend/reader-server-linux-amd64
 !cms-backend/cms-server-linux-amd64
+
+# Production deployment directory (contains real RDS / payment / JWT credentials)
+/deploy/

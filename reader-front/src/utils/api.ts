@@ -77,7 +77,8 @@ export interface Novel {
   author: string;
   cover: string;
   rating: number;
-  status: 'Ongoing' | 'Completed';
+  status: 'Ongoing' | 'Completed' | 'archived';
+  publish_status?: 'draft' | 'published' | 'offline';
   synopsis: string;
   genres: string[];
   words: number;
@@ -159,16 +160,17 @@ export const api = {
     request<User>('/auth/profile'),
 
   // === NOVELS ===
-  getNovels: (params: { genre?: string; page?: number; limit?: number } = {}) => {
+  getNovels: (params: { genre?: string; sort?: 'popular' | 'latest'; page?: number; limit?: number } = {}) => {
     const query = new URLSearchParams();
     if (params.genre) query.set('genre', params.genre);
+    if (params.sort) query.set('sort', params.sort);
     if (params.page) query.set('page', String(params.page));
     if (params.limit) query.set('limit', String(params.limit));
     const queryString = query.toString();
     return request<Novel[]>(`/novels${queryString ? `?${queryString}` : ''}`);
   },
 
-  searchNovels: (q: string, page: number = 1, limit: number = 10) =>
+  searchNovels: (q: string, page: number = 1, limit: number = 20) =>
     request<Novel[]>(`/novels/search?q=${encodeURIComponent(q)}&page=${page}&limit=${limit}`),
 
   getNovelDetail: (id: number) => 

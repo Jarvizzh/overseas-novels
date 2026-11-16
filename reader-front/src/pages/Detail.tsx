@@ -104,7 +104,9 @@ export const Detail: React.FC<DetailProps> = ({
               <h2 className="detail-title">{novel.title}</h2>
               <p className="detail-author">By {novel.author}</p>
               <div className="detail-meta-row">
-                <span className="detail-badge" style={{ backgroundColor: 'var(--accent-color)' }}>{novel.genres[0]}</span>
+                {novel.genres?.[0] && (
+                  <span className="detail-badge" style={{ backgroundColor: 'var(--accent-color)' }}>{novel.genres[0]}</span>
+                )}
                 <span className="detail-badge">{novel.status}</span>
               </div>
               <div className="detail-rating">
@@ -167,7 +169,7 @@ export const Detail: React.FC<DetailProps> = ({
 
               <h3 className="hot-tags-title" style={{ fontSize: '14px', margin: '24px 0 8px' }}>Genres</h3>
               <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
-                {novel.genres.map((g) => (
+                {(novel.genres || []).map((g) => (
                   <span key={g} className="tag-pill" style={{ cursor: 'default' }}>
                     {g}
                   </span>
@@ -233,13 +235,16 @@ export const Detail: React.FC<DetailProps> = ({
           )}
         </button>
         <button 
+          type="button"
           className="btn-cta-primary"
+          disabled={chapters.length === 0}
+          style={chapters.length === 0 ? { opacity: 0.55, cursor: 'not-allowed' } : undefined}
           onClick={() => onNavigate('reader', { id: novel.id, chapterIndex: lastReadChapterIndex })}
         >
           <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" style={{ width: '18px', height: '18px' }}>
             <path strokeLinecap="round" strokeLinejoin="round" d="M12 6.042A8.967 8.967 0 006 3.75c-1.052 0-2.062.18-3 .512v14.25A8.987 8.987 0 016 18c2.305 0 4.408.867 6 2.292m0-16.25a8.966 8.966 0 016-2.292c1.052 0 2.062.18 3 .512v14.25A8.987 8.987 0 0018 18a8.967 8.967 0 00-6 2.292m0-16.25v14.25" />
           </svg>
-          <span>{progress ? 'Continue Reading' : 'Start Reading'}</span>
+          <span>{chapters.length === 0 ? 'No Chapters Yet' : progress ? 'Continue Reading' : 'Start Reading'}</span>
         </button>
       </div>
     </div>

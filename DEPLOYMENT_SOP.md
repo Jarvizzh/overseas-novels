@@ -193,7 +193,7 @@ PAYPAL_CLIENT_SECRET=xxxxxx
 PAYPAL_MODE=live
 
 # 默认主站落地页域名
-DEFAULT_DOMAIN=https://h5.star-novel.com
+DEFAULT_DOMAIN=https://h5.starsfic.com
 
 # 章节正文存储引擎配置 ("postgres" 或 "oss")
 STORAGE_TYPE=postgres
@@ -290,7 +290,7 @@ PORT=8081
 DATABASE_URL=postgres://star_admin:YOUR_RDS_PASSWORD@pgm-xxxxxx.pgsql.rds.aliyuncs.com:3433/star_novel?sslmode=disable
 REDIS_URL=redis://:YOUR_STRONG_REDIS_PASSWORD_2026@172.16.0.15:6379/0
 JWT_SECRET=STAR_NOVEL_CMS_SUPER_KEY_2026
-DEFAULT_DOMAIN=https://h5.star-novel.com
+DEFAULT_DOMAIN=https://h5.starsfic.com
 
 # 章节正文存储引擎配置 ("postgres" 或 "oss")
 STORAGE_TYPE=postgres
@@ -455,7 +455,7 @@ server {
 
 | 验收维度 | 测试操作 | 预期结果 |
 | :--- | :--- | :--- |
-| **1. 读者端游客免密鉴权** | 访问 H5 首页 `https://h5.star-novel.com` | 自动发起 `/auth/guest` 请求，成功生成游客 User，下发 JWT 与迎新赠币 |
+| **1. 读者端游客免密鉴权** | 访问 H5 首页 `https://h5.starsfic.com` | 自动发起 `/auth/guest` 请求，成功生成游客 User，下发 JWT 与迎新赠币 |
 | **2. 负载均衡与健康探测** | 手动停止其中一台 `reader-backend` 节点 | 刷新读者端页面无任何报错，网关自动将请求无缝转发到存活节点 |
 | **3. 行锁扣费与章节解锁** | 连续快速点击“解锁付费章节” | 数据库 `wallets` 余额正常扣减，无负余额，无并发双扣，流水记录完整 |
 | **4. 每日签到防刷** | 模拟并发请求 `/wallet/checkin` 接口 | 首次签到成功，后续并发请求被 Redis 分布式锁与偏唯一索引拦截并提示已签到 |

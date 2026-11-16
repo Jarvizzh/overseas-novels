@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { apiRequest, domainApi } from '../utils/api';
 import type { SystemDomain } from '../utils/api';
@@ -11,13 +11,16 @@ interface Novel {
   title: string;
   author: string;
   cover_url: string;
+  cover_key?: string;
   rating: number;
   status: string;
+  publish_status?: string;
   synopsis: string;
   genres: string[];
   word_count: number;
   view_count: number;
-  coin_cost_per_thousand?: number;
+  coin_cost_per_thousand?: number | null;
+  effective_coin_cost_per_thousand?: number;
   start_pay_chapter_index?: number;
 }
 
@@ -33,13 +36,36 @@ interface Chapter {
 }
 
 export default function NovelsTab() {
+  const currentAdminRole = (() => {
+    try {
+      const saved = localStorage.getItem('cms_admin');
+      return saved ? (JSON.parse(saved).role || '') : '';
+    } catch {
+      return '';
+    }
+  })();
+  const canEditNovels = ['SuperAdmin', 'Admin', 'Editor'].includes(currentAdminRole);
+  const canEditGlobalSettings = ['SuperAdmin', 'Admin'].includes(currentAdminRole);
+  const canCreatePromo = ['SuperAdmin', 'Admin', 'Editor', 'MediaBuyer'].includes(currentAdminRole);
+
   const [novels, setNovels] = useState<Novel[]>([]);
+  const [totalNovels, setTotalNovels] = useState(0);
   const [loading, setLoading] = useState(true);
+  const [hasLoadedOnce, setHasLoadedOnce] = useState(false);
   const [selectedNovel, setSelectedNovel] = useState<Novel | null>(null);
   const [chapters, setChapters] = useState<Chapter[]>([]);
+  const [publishUpdatingId, setPublishUpdatingId] = useState<number | null>(null);
 
-  // Novels pagination states
-  const [currentPage, setCurrentPage] = useState(1);
+  // Novels server pagination & filter states (single unified query to prevent debounce double-fetch)
+  const [novelQuery, setNovelQuery] = useState<{
+    page: number;
+    search: string;
+    publishStatus: '' | 'published' | 'draft' | 'offline';
+  }>({
+    page: 1,
+    search: '',
+    publishStatus: '',
+  });
   const pageSize = 10;
 
   // Chapters pagination states
@@ -52,25 +78,35 @@ export default function NovelsTab() {
 
   // Form states
   const [isCreating, setIsCreating] = useState(false);
+  const [isSubmittingNovel, setIsSubmittingNovel] = useState(false);
   const [newNovel, setNewNovel] = useState<NovelFormData>({
-    title: '', author: '', cover_url: 'https://images.unsplash.com/photo-1543002588-bfa74002ed7e?w=300',
-    status: 'Ongoing', rating: 4.5, synopsis: '', genres: 'Romance, Werewolf',
-    coin_cost_per_thousand: 500, start_pay_chapter_index: 3
+    title: '', author: '', cover_url: '', cover_preview_url: '',
+    status: 'Ongoing', publish_status: 'draft', rating: 4.5, synopsis: '', genres: 'Romance, Werewolf',
+    coin_cost_per_thousand: '', start_pay_chapter_index: 3
   });
 
   const [isEditing, setIsEditing] = useState(false);
   const [editNovelForm, setEditNovelForm] = useState<NovelFormData>({
-    title: '', author: '', cover_url: '', status: 'Ongoing', rating: 4.5, synopsis: '', genres: '',
-    coin_cost_per_thousand: 500, start_pay_chapter_index: 3
+    title: '', author: '', cover_url: '', cover_preview_url: '', status: 'Ongoing', publish_status: 'draft', rating: 4.5, synopsis: '', genres: '',
+    coin_cost_per_thousand: '', start_pay_chapter_index: 3
   });
 
   const [importFile, setImportFile] = useState<File | null>(null);
   const [importType, setImportType] = useState<'single_txt' | 'zip'>('single_txt');
-  const [regex, setRegex] = useState(`(?i)(chapter\\s+\\d+|第[一二三四五六七八九十百千\\d]+章)`);
+  const [regex, setRegex] = useState(`(?i)(chapter\\s+\\d+|第[一二三四五六七八九十百千万零两\\d]+章)`);
   const [importMessage, setImportMessage] = useState('');
   const [importError, setImportError] = useState('');
   const [importLoading, setImportLoading] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
+  const searchInputId = useId();
+  const searchDebounceTimerRef = useRef<number | null>(null);
+  const novelsAbortRef = useRef<AbortController | null>(null);
+  const novelsFetchSeqRef = useRef(0);
+
+  const importFileInputRef = useRef<HTMLInputElement>(null);
+  const importFileInputId = useId();
+  const importRegexInputId = useId();
+  const importGuideId = useId();
 
   // Promotion Link Builder States
   const [isPromoModalOpen, setIsPromoModalOpen] = useState(false);
@@ -118,22 +154,26 @@ export default function NovelsTab() {
   // Global config states
   const [globalCoinCost, setGlobalCoinCost] = useState(500);
   const [globalStartPayChapter, setGlobalStartPayChapter] = useState(3);
-  const [applyToAllNovels, setApplyToAllNovels] = useState(true);
+  const [applyToAllNovels, setApplyToAllNovels] = useState(false);
   const [isConfiguringGlobal, setIsConfiguringGlobal] = useState(false);
 
-  const filteredNovels = novels.filter(novel =>
-    novel.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    novel.author.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    String(novel.id).toLowerCase().includes(searchQuery.toLowerCase())
-  );
-
   useEffect(() => {
-    setCurrentPage(1);
+    const trimmed = searchQuery.trim();
+    searchDebounceTimerRef.current = window.setTimeout(() => {
+      searchDebounceTimerRef.current = null;
+      setNovelQuery((prev) => (prev.search === trimmed ? prev : { ...prev, page: 1, search: trimmed }));
+    }, 300);
+    return () => {
+      if (searchDebounceTimerRef.current !== null) {
+        window.clearTimeout(searchDebounceTimerRef.current);
+        searchDebounceTimerRef.current = null;
+      }
+    };
   }, [searchQuery]);
 
-  const totalPages = Math.ceil(filteredNovels.length / pageSize);
+  const currentPage = novelQuery.page;
+  const totalPages = Math.max(1, Math.ceil(totalNovels / pageSize));
   const startIndex = (currentPage - 1) * pageSize;
-  const paginatedNovels = filteredNovels.slice(startIndex, startIndex + pageSize);
 
   const totalChapterPages = Math.ceil(chapters.length / chapterPageSize);
   const startChIndex = (chapterPage - 1) * chapterPageSize;
@@ -141,15 +181,16 @@ export default function NovelsTab() {
 
   const [colWidths, setColWidths] = useState<number[]>([
     80, // 书籍 ID
-    70,  // 封面
-    220, // 书名
-    80, // 作者
+    70, // 封面
+    210, // 书名
+    85, // 作者
     100, // 分类标签
-    90,  // 连载状态
-    100, // 总字数
-    110, // 千字收费
-    70,  // 评分
-    100  // 操作
+    95, // 上架状态
+    85, // 连载状态
+    95, // 总字数
+    125, // 千字收费
+    70, // 评分
+    130 // 操作
   ]);
 
   const columns = [
@@ -158,12 +199,25 @@ export default function NovelsTab() {
     { label: '书名', key: 'title' },
     { label: '作者', key: 'author' },
     { label: '分类标签', key: 'genres' },
+    { label: '上架状态', key: 'publish_status' },
     { label: '连载状态', key: 'status' },
     { label: '总字数', key: 'word_count' },
     { label: '千字收费', key: 'coin_cost_per_thousand' },
     { label: '评分', key: 'rating' },
     { label: '操作', key: 'actions', align: 'right' }
   ];
+
+  const getPublishStatusMeta = (publishStatus?: string) => {
+    switch (publishStatus) {
+      case 'published':
+        return { label: '已上架', badgeClass: 'badge-green' };
+      case 'offline':
+        return { label: '已下架', badgeClass: 'badge-red' };
+      case 'draft':
+      default:
+        return { label: '草稿(未上架)', badgeClass: 'badge-orange' };
+    }
+  };
 
   const handleMouseDown = (index: number, e: React.MouseEvent) => {
     e.preventDefault();
@@ -228,24 +282,49 @@ export default function NovelsTab() {
   };
 
   useEffect(() => {
-    fetchNovels();
     fetchGlobalConfig();
     fetchPixels();
     fetchTemplates();
     fetchDomains();
   }, []);
 
-  const fetchNovels = async () => {
+  const fetchNovels = async (targetQuery = novelQuery) => {
+    novelsAbortRef.current?.abort();
+    const controller = new AbortController();
+    novelsAbortRef.current = controller;
+    const seq = ++novelsFetchSeqRef.current;
+
     setLoading(true);
     try {
-      const data = await apiRequest('GET', '/novels?page_size=100');
+      const query = new URLSearchParams({
+        page: String(targetQuery.page),
+        page_size: String(pageSize),
+      });
+      if (targetQuery.search) query.set('search', targetQuery.search);
+      if (targetQuery.publishStatus) query.set('publish_status', targetQuery.publishStatus);
+      const data = await apiRequest('GET', `/novels?${query.toString()}`, undefined, false, controller.signal);
+      if (controller.signal.aborted || seq !== novelsFetchSeqRef.current) return;
+
       setNovels(data.novels || []);
-    } catch (e) {
+      setTotalNovels(data.total || 0);
+      setHasLoadedOnce(true);
+    } catch (e: any) {
+      if (e?.name === 'AbortError' || controller.signal.aborted) return;
       console.error(e);
+      setHasLoadedOnce(true);
     } finally {
-      setLoading(false);
+      if (seq === novelsFetchSeqRef.current) {
+        setLoading(false);
+      }
     }
   };
+
+  useEffect(() => {
+    void fetchNovels(novelQuery);
+    return () => {
+      novelsAbortRef.current?.abort();
+    };
+  }, [novelQuery]);
 
   const fetchChapters = async (novelID: number) => {
     try {
@@ -256,7 +335,20 @@ export default function NovelsTab() {
     }
   };
 
+  const resetDetailTransientState = () => {
+    setIsEditing(false);
+    setPreviewChapter(null);
+    setPreviewLoading(false);
+    setImportFile(null);
+    setImportMessage('');
+    setImportError('');
+    if (importFileInputRef.current) {
+      importFileInputRef.current.value = '';
+    }
+  };
+
   const handleNovelClick = (novel: Novel) => {
+    resetDetailTransientState();
     setSelectedNovel(novel);
     setChapters([]);
     setChapterPage(1); // Reset chapter page on select
@@ -278,29 +370,49 @@ export default function NovelsTab() {
 
   const handleCreateNovel = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmittingNovel) return;
+    setIsSubmittingNovel(true);
     try {
+      const rawCost = newNovel.coin_cost_per_thousand;
       const payload = {
-        ...newNovel,
+        title: newNovel.title,
+        author: newNovel.author,
+        cover_url: newNovel.cover_url,
+        status: newNovel.status,
+        publish_status: 'draft',
         rating: Number(newNovel.rating),
+        synopsis: newNovel.synopsis,
         genres: newNovel.genres.split(',').map(g => g.trim()).filter(Boolean),
-        coin_cost_per_thousand: Number(newNovel.coin_cost_per_thousand),
+        coin_cost_per_thousand: rawCost === '' || rawCost === null ? null : Number(rawCost),
         start_pay_chapter_index: Number(newNovel.start_pay_chapter_index)
       };
-      await apiRequest('POST', '/novels', payload);
+      const created = await apiRequest('POST', '/novels', payload);
       setIsCreating(false);
       setNewNovel({
-        title: '', author: '', cover_url: 'https://images.unsplash.com/photo-1543002588-bfa74002ed7e?w=300',
-        status: 'Ongoing', rating: 4.5, synopsis: '', genres: 'Romance, Werewolf',
-        coin_cost_per_thousand: globalCoinCost || 500, start_pay_chapter_index: globalStartPayChapter || 3
+        title: '', author: '', cover_url: '', cover_preview_url: '',
+        status: 'Ongoing', publish_status: 'draft', rating: 4.5, synopsis: '', genres: 'Romance, Werewolf',
+        coin_cost_per_thousand: '', start_pay_chapter_index: globalStartPayChapter || 3
       });
-      fetchNovels();
+      window.showToast?.('新建书籍已保存为草稿，请导入章节后上架发布！', 'success');
+      if (novelQuery.page !== 1) {
+        setNovelQuery(prev => ({ ...prev, page: 1 }));
+      } else {
+        void fetchNovels({ ...novelQuery, page: 1 });
+      }
+      if (created && created.id) {
+        resetDetailTransientState();
+        setSelectedNovel(created);
+        setChapters([]);
+        setChapterPage(1);
+      }
     } catch (err: any) {
       window.showToast?.(err.message || '新建书籍失败', 'error');
+    } finally {
+      setIsSubmittingNovel(false);
     }
   };
 
-  const handleSaveGlobalConfig = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const executeSaveGlobalConfig = async () => {
     try {
       await apiRequest('POST', '/settings', {
         global_coin_cost_per_thousand: String(globalCoinCost),
@@ -308,13 +420,13 @@ export default function NovelsTab() {
         apply_to_all_novels: applyToAllNovels ? 'true' : 'false'
       });
       window.showToast?.(
-        applyToAllNovels 
-          ? `全局运营计费配置已保存，并已将全部书籍更新为第 ${globalStartPayChapter} 章起付费！` 
-          : '全局运营计费配置保存成功！', 
+        applyToAllNovels
+          ? `全局运营计费配置已保存，并已将全部在库书籍更新为第 ${globalStartPayChapter} 章起付费！`
+          : '全局运营计费配置保存成功！继承全局配置的书籍已同步更新。',
         'success'
       );
       setIsConfiguringGlobal(false);
-      await fetchNovels();
+      await fetchNovels(novelQuery);
       if (selectedNovel) {
         await fetchChapters(selectedNovel.id);
         const updated = await apiRequest('GET', `/novels/${selectedNovel.id}`);
@@ -325,45 +437,98 @@ export default function NovelsTab() {
     }
   };
 
+  const handleSaveGlobalConfig = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (applyToAllNovels && window.showConfirm) {
+      window.showConfirm(
+        '开启「同步覆盖全部已有书籍」将把所有未归档书籍（包含单独定价书籍）统一重置为当前全局单价与起付章，确定继续吗？',
+        () => { void executeSaveGlobalConfig(); }
+      );
+      return;
+    }
+    await executeSaveGlobalConfig();
+  };
+
   const handleUpdateNovel = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!selectedNovel) return;
+    if (!selectedNovel || isSubmittingNovel) return;
+    setIsSubmittingNovel(true);
     try {
+      const rawCost = editNovelForm.coin_cost_per_thousand;
       const payload = {
         title: editNovelForm.title,
         author: editNovelForm.author,
         cover_url: editNovelForm.cover_url,
         status: editNovelForm.status,
+        publish_status: editNovelForm.publish_status || selectedNovel.publish_status || 'draft',
         rating: Number(editNovelForm.rating),
         synopsis: editNovelForm.synopsis,
         genres: editNovelForm.genres.split(',').map(g => g.trim()).filter(Boolean),
-        coin_cost_per_thousand: Number(editNovelForm.coin_cost_per_thousand),
+        coin_cost_per_thousand: rawCost === '' || rawCost === null ? null : Number(rawCost),
         start_pay_chapter_index: Number(editNovelForm.start_pay_chapter_index)
       };
       const updated = await apiRequest('PUT', `/novels/${selectedNovel.id}`, payload);
       setSelectedNovel(updated);
       setIsEditing(false);
-      fetchNovels();
+      window.showToast?.('书籍信息更新成功', 'success');
+      void fetchNovels(novelQuery);
       fetchChapters(selectedNovel.id);
     } catch (err: any) {
       window.showToast?.(err.message || '更新书籍失败', 'error');
+    } finally {
+      setIsSubmittingNovel(false);
     }
+  };
+
+  const handleTogglePublishStatus = (novel: Novel, targetStatus: 'published' | 'offline', e?: React.MouseEvent) => {
+    e?.stopPropagation();
+    const runUpdate = async () => {
+      setPublishUpdatingId(novel.id);
+      try {
+        const updated = await apiRequest('PATCH', `/novels/${novel.id}/publish-status`, {
+          publish_status: targetStatus,
+        });
+        if (selectedNovel?.id === novel.id) {
+          setSelectedNovel(updated);
+        }
+        window.showToast?.(targetStatus === 'published' ? '书籍已成功上架到书城！' : '书籍已下架，读者端将停止展示与访问。', 'success');
+        void fetchNovels(novelQuery);
+      } catch (err: any) {
+        window.showToast?.(err.message || '更新上架状态失败', 'error');
+      } finally {
+        setPublishUpdatingId(null);
+      }
+    };
+
+    if (targetStatus === 'offline' && window.showConfirm) {
+      window.showConfirm(
+        `确定将《${novel.title}》下架吗？下架后书城、搜索、书架与推广链接均会拦截访问。`,
+        () => { void runUpdate(); }
+      );
+      return;
+    }
+    void runUpdate();
   };
 
   const handleDeleteNovel = async (id: number, e: React.MouseEvent) => {
     e.stopPropagation();
-    window.showConfirm?.('您确定要彻底删除这本小说吗？这将会同时级联删除旗下所有章节目录，此操作不可撤销！', async () => {
+    window.showConfirm?.('您确定要删除这本小说吗？书籍将被归档隐藏，清空 OSS 章节正文并停止全部读者端访问，此操作不可撤销！', async () => {
       try {
         await apiRequest('DELETE', `/novels/${id}`);
-        fetchNovels();
+        window.showToast?.('书籍已删除归档', 'success');
+        const nextPage = novels.length === 1 && novelQuery.page > 1 ? novelQuery.page - 1 : novelQuery.page;
+        if (nextPage !== novelQuery.page) {
+          setNovelQuery(prev => ({ ...prev, page: nextPage }));
+        } else {
+          void fetchNovels({ ...novelQuery, page: nextPage });
+        }
       } catch (err: any) {
         window.showToast?.(err.message, 'error');
       }
     });
   };
 
-  const handleBulkImport = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const executeBulkImport = async () => {
     if (!importFile || !selectedNovel) return;
 
     setImportLoading(true);
@@ -377,13 +542,21 @@ export default function NovelsTab() {
       formData.append('delimiter_regex', regex);
 
       const data = await apiRequest('POST', `/novels/${selectedNovel.id}/chapters/bulk-import`, formData, true);
-      setImportMessage(`导入成功！共提取并导入了 ${data.chapters_count} 个章节（总字数 ${data.total_word_count} 字）。`);
+      const isPublished = selectedNovel.publish_status === 'published';
+      setImportMessage(
+        isPublished
+          ? `导入成功！共提取并导入了 ${data.chapters_count} 个章节（总字数 ${data.total_word_count} 字）。`
+          : `导入成功！共提取并导入了 ${data.chapters_count} 个章节（总字数 ${data.total_word_count} 字）。当前书籍处于未上架状态，核对无误后请点击右上角「上架发布」。`
+      );
       setImportFile(null);
+      if (importFileInputRef.current) {
+        importFileInputRef.current.value = '';
+      }
       fetchChapters(selectedNovel.id);
 
       const updatedNovel = await apiRequest('GET', `/novels/${selectedNovel.id}`);
       setSelectedNovel(updatedNovel);
-      fetchNovels();
+      void fetchNovels(novelQuery);
     } catch (err: any) {
       setImportError(err.message || '导入文件解析失败，请检查文件编码（UTF-8）或压缩包格式。');
     } finally {
@@ -391,10 +564,41 @@ export default function NovelsTab() {
     }
   };
 
+  const handleBulkImport = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!importFile || !selectedNovel) return;
+    if (chapters.length > 0 && window.showConfirm) {
+      window.showConfirm(
+        '覆盖导入会清空现有章节并从第 1 章重新编号，可能影响已有读者的阅读进度与已解锁章节序号，确定继续吗？',
+        () => { void executeBulkImport(); }
+      );
+      return;
+    }
+    await executeBulkImport();
+  };
+
   const handleGeneratePromotionLink = async () => {
     if (!promotionForm.fbPixelId) {
       window.showToast?.('推广链接必须显式绑定 Facebook 像素！请先选择像素。', 'error');
       return;
+    }
+
+    const rawPromoCost = String(promotionForm.coinCostPerThousand ?? '').trim();
+    if (rawPromoCost !== '') {
+      const parsedCost = Number(rawPromoCost);
+      if (!Number.isInteger(parsedCost) || parsedCost < 0) {
+        window.showToast?.('推广覆写单价（千字金币）必须为大于等于 0 的整数。', 'error');
+        return;
+      }
+    }
+
+    const rawPromoStartPay = String(promotionForm.startPayChapterIndex ?? '').trim();
+    if (rawPromoStartPay !== '') {
+      const parsedStartPay = Number(rawPromoStartPay);
+      if (!Number.isInteger(parsedStartPay) || parsedStartPay < 1) {
+        window.showToast?.('推广覆写起始付费章节必须为大于等于 1 的整数。', 'error');
+        return;
+      }
     }
 
     // 1. 匹配选中的可用域名或默认可用主域名
@@ -429,11 +633,11 @@ export default function NovelsTab() {
       params.set('template_id', promotionForm.rechargeTemplateId);
     }
 
-    if (promotionForm.coinCostPerThousand) {
-      params.set('cost', promotionForm.coinCostPerThousand);
+    if (rawPromoCost !== '') {
+      params.set('cost', rawPromoCost);
     }
-    if (promotionForm.startPayChapterIndex) {
-      params.set('pay_ch', promotionForm.startPayChapterIndex);
+    if (rawPromoStartPay !== '') {
+      params.set('pay_ch', rawPromoStartPay);
     }
 
     const path = promotionForm.chapterIndex ? '/content' : '/detail';
@@ -452,8 +656,8 @@ export default function NovelsTab() {
         domain: targetDomainObj ? targetDomainObj.domain : (defaultDomainObj ? defaultDomainObj.domain : ''),
         fb_pixel_id: promotionForm.fbPixelId ? parseInt(promotionForm.fbPixelId, 10) : null,
         recharge_template_id: promotionForm.rechargeTemplateId ? parseInt(promotionForm.rechargeTemplateId, 10) : null,
-        coin_cost_per_thousand: promotionForm.coinCostPerThousand ? parseInt(promotionForm.coinCostPerThousand, 10) : null,
-        start_pay_chapter_index: promotionForm.startPayChapterIndex ? parseInt(promotionForm.startPayChapterIndex, 10) : null,
+        coin_cost_per_thousand: rawPromoCost !== '' ? parseInt(rawPromoCost, 10) : null,
+        start_pay_chapter_index: rawPromoStartPay !== '' ? parseInt(rawPromoStartPay, 10) : null,
       });
 
       // If link was created with an ID, append link_id to the final URL for accurate tracking
@@ -462,7 +666,7 @@ export default function NovelsTab() {
         params.set('link_id', String(created.id));
         resolvedUrl = `${baseUrl}${path}?${params.toString()}`;
       }
-      setGeneratedLink(resolvedUrl);
+      setGeneratedLink(created?.generated_url || resolvedUrl);
       window.showToast?.('推广链接已成功生成并记录！', 'success');
     } catch (err: any) {
       window.showToast?.('保存推广链接失败：' + err.message, 'error');
@@ -493,53 +697,106 @@ export default function NovelsTab() {
     );
   };
 
-  if (loading && novels.length === 0) {
+  if (!hasLoadedOnce && loading) {
     return <div style={{ color: 'hsl(var(--text-secondary))', padding: '20px' }}>正在加载书籍工作台...</div>;
   }
 
   // --- Novel Detail View ---
   if (selectedNovel) {
+    const publishMeta = getPublishStatusMeta(selectedNovel.publish_status);
     return (
       <div className="animate-fade-in" style={{ padding: '16px 24px 24px 24px' }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '24px' }}>
-          <button onClick={() => setSelectedNovel(null)} className="btn-secondary" style={{ display: 'inline-flex', gap: '8px' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '24px', gap: '12px', flexWrap: 'wrap' }}>
+          <button
+            type="button"
+            onClick={() => {
+              resetDetailTransientState();
+              setSelectedNovel(null);
+            }}
+            className="btn-secondary"
+            style={{ display: 'inline-flex', gap: '8px' }}
+          >
             <ArrowLeft size={16} /> 返回书籍列表
           </button>
-          <div style={{ display: 'flex', gap: '12px' }}>
-            <button onClick={() => {
-              setPromotionForm({
-                name: '',
-                novelId: selectedNovel.id,
-                title: selectedNovel.title,
-                chapterIndex: '1',
-                utmSource: 'facebook',
-                utmCampaign: '',
-                fbPixelId: '',
-                rechargeTemplateId: '',
-                coinCostPerThousand: '',
-                startPayChapterIndex: ''
-              });
-              setGeneratedLink('');
-              setIsPromoModalOpen(true);
-            }} className="btn-secondary" style={{ display: 'inline-flex', gap: '8px' }}>
-              <Link2 size={16} /> 生成推广链接
-            </button>
-            <button onClick={() => {
-              setEditNovelForm({
-                title: selectedNovel.title,
-                author: selectedNovel.author,
-                cover_url: selectedNovel.cover_url,
-                status: selectedNovel.status,
-                rating: selectedNovel.rating,
-                synopsis: selectedNovel.synopsis || '',
-                genres: selectedNovel.genres.join(', '),
-                coin_cost_per_thousand: selectedNovel.coin_cost_per_thousand || 5,
-                start_pay_chapter_index: selectedNovel.start_pay_chapter_index || 3
-              });
-              setIsEditing(true);
-            }} className="btn-primary" style={{ display: 'inline-flex', gap: '8px' }}>
-              <Edit size={16} /> 编辑书籍与计费
-            </button>
+          <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
+            {canCreatePromo && (
+              <button
+                type="button"
+                onClick={() => {
+                  if (selectedNovel.publish_status !== 'published') {
+                    window.showToast?.(`提示：当前书籍为「${publishMeta.label}」状态，投放前请先导入章节并上架发布。`, 'info');
+                  }
+                  setPromotionForm({
+                    name: '',
+                    novelId: selectedNovel.id,
+                    title: selectedNovel.title,
+                    chapterIndex: '1',
+                    utmSource: 'facebook',
+                    utmCampaign: '',
+                    fbPixelId: '',
+                    rechargeTemplateId: '',
+                    coinCostPerThousand: '',
+                    startPayChapterIndex: ''
+                  });
+                  setGeneratedLink('');
+                  setIsPromoModalOpen(true);
+                }}
+                className="btn-secondary"
+                style={{ display: 'inline-flex', gap: '8px' }}
+              >
+                <Link2 size={16} /> 生成推广链接
+              </button>
+            )}
+            {canEditNovels && (
+              <>
+                <button
+                  type="button"
+                  disabled={publishUpdatingId === selectedNovel.id}
+                  onClick={() =>
+                    handleTogglePublishStatus(
+                      selectedNovel,
+                      selectedNovel.publish_status === 'published' ? 'offline' : 'published'
+                    )
+                  }
+                  className="btn-secondary"
+                  style={{
+                    display: 'inline-flex',
+                    gap: '8px',
+                    color: selectedNovel.publish_status === 'published' ? '#f87171' : '#10b981',
+                    borderColor: selectedNovel.publish_status === 'published' ? 'rgba(239, 68, 68, 0.3)' : 'rgba(16, 185, 129, 0.35)',
+                  }}
+                >
+                  {publishUpdatingId === selectedNovel.id
+                    ? '状态更新中...'
+                    : selectedNovel.publish_status === 'published'
+                      ? '下架书籍'
+                      : '上架发布'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setEditNovelForm({
+                      title: selectedNovel.title,
+                      author: selectedNovel.author,
+                      cover_url: selectedNovel.cover_key || selectedNovel.cover_url,
+                      cover_preview_url: selectedNovel.cover_url,
+                      status: selectedNovel.status,
+                      publish_status: selectedNovel.publish_status || 'draft',
+                      rating: selectedNovel.rating,
+                      synopsis: selectedNovel.synopsis || '',
+                      genres: selectedNovel.genres.join(', '),
+                      coin_cost_per_thousand: selectedNovel.coin_cost_per_thousand != null ? selectedNovel.coin_cost_per_thousand : '',
+                      start_pay_chapter_index: selectedNovel.start_pay_chapter_index || globalStartPayChapter || 3
+                    });
+                    setIsEditing(true);
+                  }}
+                  className="btn-primary"
+                  style={{ display: 'inline-flex', gap: '8px' }}
+                >
+                  <Edit size={16} /> 编辑书籍与计费
+                </button>
+              </>
+            )}
           </div>
         </div>
 
@@ -551,7 +808,10 @@ export default function NovelsTab() {
             style={{ width: '100%', borderRadius: '12px', border: '1px solid hsl(var(--border))', boxShadow: 'var(--shadow-lg)' }}
           />
           <div>
-            <div style={{ display: 'flex', gap: '8px', marginBottom: '12px' }}>
+            <div style={{ display: 'flex', gap: '8px', marginBottom: '12px', flexWrap: 'wrap' }}>
+              <span className={`badge ${publishMeta.badgeClass}`}>
+                {publishMeta.label}
+              </span>
               <span className={`badge ${selectedNovel.status === 'Completed' ? 'badge-green' : 'badge-orange'}`}>
                 {selectedNovel.status === 'Completed' ? '已完结' : '连载中'}
               </span>
@@ -571,11 +831,15 @@ export default function NovelsTab() {
               </div>
               <div>
                 <span style={{ display: 'block', fontSize: '0.75rem', color: 'hsl(var(--text-muted))' }}>千字价格</span>
-                <span style={{ fontSize: '1.2rem', fontWeight: 600, color: 'hsl(var(--primary))' }}>{selectedNovel.coin_cost_per_thousand || 5} 金币</span>
+                <span style={{ fontSize: '1.2rem', fontWeight: 600, color: 'hsl(var(--primary))' }}>
+                  {selectedNovel.coin_cost_per_thousand != null
+                    ? `${selectedNovel.coin_cost_per_thousand} 金币`
+                    : `全局 (${selectedNovel.effective_coin_cost_per_thousand ?? globalCoinCost ?? 500} 金币)`}
+                </span>
               </div>
               <div>
                 <span style={{ display: 'block', fontSize: '0.75rem', color: 'hsl(var(--text-muted))' }}>收费起点</span>
-                <span style={{ fontSize: '1.2rem', fontWeight: 600, color: 'hsl(var(--primary))' }}>第 {selectedNovel.start_pay_chapter_index || 3} 章起</span>
+                <span style={{ fontSize: '1.2rem', fontWeight: 600, color: 'hsl(var(--primary))' }}>第 {selectedNovel.start_pay_chapter_index || globalStartPayChapter || 3} 章起</span>
               </div>
               <div>
                 <span style={{ display: 'block', fontSize: '0.75rem', color: 'hsl(var(--text-muted))' }}>分类标签</span>
@@ -683,23 +947,86 @@ export default function NovelsTab() {
             )}
 
             <form onSubmit={handleBulkImport}>
-              <div style={{ marginBottom: '16px' }}>
-                <label style={{ display: 'block', fontSize: '0.8rem', color: 'hsl(var(--text-secondary))', marginBottom: '6px' }}>导入类型</label>
-                <div style={{ display: 'flex', gap: '16px' }}>
+              <fieldset style={{ border: 'none', marginBottom: '16px', padding: 0 }}>
+                <legend style={{ display: 'block', fontSize: '0.8rem', color: 'hsl(var(--text-secondary))', marginBottom: '6px' }}>导入类型</legend>
+                <div style={{ display: 'flex', gap: '16px', flexWrap: 'wrap' }}>
                   <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.85rem', cursor: 'pointer' }}>
-                    <input type="radio" name="import_type" checked={importType === 'single_txt'} onChange={() => setImportType('single_txt')} /> 单个大 TXT 文件 (正则分章)
+                    <input
+                      type="radio"
+                      name="import_type"
+                      checked={importType === 'single_txt'}
+                      onChange={() => {
+                        setImportType('single_txt');
+                        setImportFile(null);
+                      }}
+                    />
+                    单个大 TXT 文件 (正则分章)
                   </label>
                   <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.85rem', cursor: 'pointer' }}>
-                    <input type="radio" name="import_type" checked={importType === 'zip'} onChange={() => setImportType('zip')} /> ZIP 压缩包 (内含多个 TXT)
+                    <input
+                      type="radio"
+                      name="import_type"
+                      checked={importType === 'zip'}
+                      onChange={() => {
+                        setImportType('zip');
+                        setImportFile(null);
+                      }}
+                    />
+                    ZIP 压缩包 (内含多个 TXT)
                   </label>
                 </div>
+              </fieldset>
+
+              <div
+                id={importGuideId}
+                style={{
+                  marginBottom: '16px',
+                  padding: '12px 14px',
+                  borderRadius: '8px',
+                  border: '1px solid hsl(var(--border))',
+                  backgroundColor: 'hsl(var(--bg-base) / 0.7)',
+                  fontSize: '0.78rem',
+                  lineHeight: 1.6,
+                  color: 'hsl(var(--text-secondary))'
+                }}
+              >
+                {importType === 'single_txt' ? (
+                  <div>
+                    <div style={{ fontWeight: 600, color: 'hsl(var(--text-primary))', marginBottom: '4px' }}>
+                      TXT 正则分章说明（UTF-8 编码）
+                    </div>
+                    <ul style={{ paddingLeft: '16px', margin: 0 }}>
+                      <li>每章标题须<strong>单独占一行</strong>且位于行首（允许行首空格），例如：<code>Chapter 1: The Start</code>、<code>chapter 2</code>、<code>第一章 初遇</code>、<code>第10章</code>。</li>
+                      <li>正则从每行起始位置匹配（默认含 <code>(?i)</code> 不区分大小写），正文句子中提及的 <code>Chapter 1</code> 不会误切分。</li>
+                      <li>整行匹配标题将保留为章节名（超出 150 字自动截断），首个标题行之前的序言/版权页不会入库；导入会覆盖当前全部已有章节。</li>
+                    </ul>
+                  </div>
+                ) : (
+                  <div>
+                    <div style={{ fontWeight: 600, color: 'hsl(var(--text-primary))', marginBottom: '4px' }}>
+                      ZIP 压缩包文件命名规范（UTF-8 编码）
+                    </div>
+                    <ul style={{ paddingLeft: '16px', margin: 0 }}>
+                      <li>包内章节文件须按 <code>数字序号_章节标题.txt</code> 命名（支持 <code>_</code>、<code>-</code> 或空格分隔，后缀不区分大小写）。</li>
+                      <li>示例：<code>001_The Shattered Promise.txt</code>、<code>002-A New Path.txt</code>、<code>003.txt</code>（省略标题时默认命名为 <code>Chapter 序号</code>）。</li>
+                      <li>系统按文件名前缀数字从小到大排序生成连续章节（单章 TXT 上限 10MB）；导入会覆盖当前全部已有章节。</li>
+                    </ul>
+                  </div>
+                )}
               </div>
 
               <div style={{ marginBottom: '16px' }}>
-                <label style={{ display: 'block', fontSize: '0.8rem', color: 'hsl(var(--text-secondary))', marginBottom: '6px' }}>选择文件 ({importType === 'single_txt' ? '.txt' : '.zip'})</label>
+                <label htmlFor={importFileInputId} style={{ display: 'block', fontSize: '0.8rem', color: 'hsl(var(--text-secondary))', marginBottom: '6px' }}>
+                  选择文件 ({importType === 'single_txt' ? '.txt' : '.zip'})
+                </label>
                 <input
+                  key={importType}
+                  ref={importFileInputRef}
+                  id={importFileInputId}
+                  name="file"
                   type="file"
                   accept={importType === 'single_txt' ? '.txt' : '.zip'}
+                  aria-describedby={importGuideId}
                   onChange={(e) => setImportFile(e.target.files ? e.target.files[0] : null)}
                   required
                   style={{
@@ -715,15 +1042,18 @@ export default function NovelsTab() {
 
               {importType === 'single_txt' && (
                 <div style={{ marginBottom: '16px' }}>
-                  <label style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '0.8rem', color: 'hsl(var(--text-secondary))', marginBottom: '6px' }}>
+                  <label htmlFor={importRegexInputId} style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '0.8rem', color: 'hsl(var(--text-secondary))', marginBottom: '6px' }}>
                     章节匹配分割正则
-                    <span title="正则表达式用来匹配文章分割起点。默认会识别类似 'Chapter 1' 或 '第一章'。编辑可以根据实际手稿格式自定义调整。" style={{ display: 'inline-flex', cursor: 'help' }}>
-                      <HelpCircle size={12} />
+                    <span title="正则表达式会从每行非空白起始位置匹配章节标题（含 (?i) 不区分大小写），正文句中出现的关键词不会误切分。" style={{ display: 'inline-flex', cursor: 'help' }}>
+                      <HelpCircle size={12} aria-hidden="true" />
                     </span>
                   </label>
                   <input
+                    id={importRegexInputId}
+                    name="delimiter_regex"
                     type="text"
                     className="input-field"
+                    aria-describedby={importGuideId}
                     value={regex}
                     onChange={(e) => setRegex(e.target.value)}
                     required
@@ -733,14 +1063,20 @@ export default function NovelsTab() {
 
 
 
-              <button
-                type="submit"
-                className="btn-primary"
-                disabled={importLoading || !importFile}
-                style={{ width: '100%', display: 'flex', gap: '8px' }}
-              >
-                <Upload size={16} /> {importLoading ? '正在分析手稿写入数据库...' : '导入并分割章节'}
-              </button>
+              {canEditNovels ? (
+                <button
+                  type="submit"
+                  className="btn-primary"
+                  disabled={importLoading || !importFile}
+                  style={{ width: '100%', display: 'flex', gap: '8px' }}
+                >
+                  <Upload size={16} /> {importLoading ? '正在分析手稿写入数据库...' : '导入并分割章节（单文件上限 50MB）'}
+                </button>
+              ) : (
+                <div style={{ fontSize: '0.82rem', color: 'hsl(var(--text-muted))', textAlign: 'center', padding: '10px', borderRadius: '8px', border: '1px solid hsl(var(--border))' }}>
+                  当前账号角色仅支持查看书籍目录，如需导入章节请联系管理员授予编辑权限。
+                </div>
+              )}
             </form>
           </div>
         </div>
@@ -824,6 +1160,9 @@ export default function NovelsTab() {
         <NovelFormModal
           isOpen={isEditing}
           isEditing={true}
+          isSubmitting={isSubmittingNovel}
+          hasChapters={chapters.length > 0}
+          globalCoinCost={globalCoinCost}
           formData={editNovelForm}
           setFormData={(data) => setEditNovelForm(data)}
           onSubmit={handleUpdateNovel}
@@ -836,21 +1175,37 @@ export default function NovelsTab() {
   // --- Novels List View ---
   return (
     <div className="animate-fade-in" style={{ padding: '16px 24px 24px 24px' }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '24px' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '24px', gap: '12px', flexWrap: 'wrap' }}>
         <div>
           <h1 style={{ fontSize: '1.5rem', fontWeight: 700 }} className="gradient-text">书籍管理</h1>
         </div>
-        <div style={{ display: 'flex', gap: '12px' }}>
-          <button onClick={() => setIsConfiguringGlobal(!isConfiguringGlobal)} className="btn-secondary" style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
-            <Settings size={16} /> 全局计费配置 (千字 {globalCoinCost} 币 · 第 {globalStartPayChapter} 章起)
-          </button>
-          <button onClick={() => setIsCreating(!isCreating)} className="btn-primary" style={{ display: 'flex', gap: '6px' }}>
-            <Plus size={16} /> 新建书籍档案
-          </button>
+        <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
+          {canEditGlobalSettings && (
+            <button type="button" onClick={() => setIsConfiguringGlobal(!isConfiguringGlobal)} className="btn-secondary" style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+              <Settings size={16} /> 全局计费配置 (千字 {globalCoinCost} 币 · 第 {globalStartPayChapter} 章起)
+            </button>
+          )}
+          {canEditNovels && (
+            <button
+              type="button"
+              onClick={() => {
+                setNewNovel({
+                  title: '', author: '', cover_url: '', cover_preview_url: '',
+                  status: 'Ongoing', publish_status: 'draft', rating: 4.5, synopsis: '', genres: 'Romance, Werewolf',
+                  coin_cost_per_thousand: '', start_pay_chapter_index: globalStartPayChapter || 3
+                });
+                setIsCreating(!isCreating);
+              }}
+              className="btn-primary"
+              style={{ display: 'flex', gap: '6px' }}
+            >
+              <Plus size={16} /> 新建书籍档案
+            </button>
+          )}
         </div>
       </div>
 
-      {isConfiguringGlobal && (
+      {canEditGlobalSettings && isConfiguringGlobal && (
         <form onSubmit={handleSaveGlobalConfig} className="glass-panel" style={{ padding: '24px', marginBottom: '30px' }}>
           <h3 style={{ marginBottom: '18px', display: 'flex', alignItems: 'center', gap: '8px' }}>
             <Settings size={18} style={{ color: 'hsl(var(--primary))' }} /> 配置全局运营计费与起付章节
@@ -893,7 +1248,7 @@ export default function NovelsTab() {
               style={{ width: '16px', height: '16px', cursor: 'pointer' }}
             />
             <label htmlFor="applyAllNovelsCheckbox" style={{ fontSize: '0.85rem', color: 'hsl(var(--text-primary))', cursor: 'pointer' }}>
-              同步覆盖并应用到全部已有书籍（所有书籍均从第 {globalStartPayChapter} 章开始付费）
+              同步覆盖所有已有书籍（勾选后将重置包括独立定价书籍在内的全部未归档书籍为第 {globalStartPayChapter} 章起、千字 {globalCoinCost} 币；不勾选则仅刷新继承全局的书籍）
             </label>
           </div>
 
@@ -911,31 +1266,82 @@ export default function NovelsTab() {
       <NovelFormModal
         isOpen={isCreating}
         isEditing={false}
+        isSubmitting={isSubmittingNovel}
+        hasChapters={false}
+        globalCoinCost={globalCoinCost}
         formData={newNovel}
         setFormData={(data) => setNewNovel(data)}
         onSubmit={handleCreateNovel}
         onCancel={() => setIsCreating(false)}
       />
 
-      {/* Search Input Bar */}
-      <div style={{ display: 'flex', gap: '16px', marginBottom: '20px' }}>
-        <div style={{ position: 'relative', flex: 1 }}>
-          <span style={{ position: 'absolute', left: '12px', top: '12px', color: 'hsl(var(--text-muted))' }}>
-            <Search size={16} />
-          </span>
-          <input
-            type="text"
-            className="input-field"
-            style={{ paddingLeft: '38px' }}
-            placeholder="输入书名、作者或书籍 ID 进行过滤搜索..."
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-          />
-        </div>
-      </div>
+      {/* Search & Publish Status Filter Bar */}
+      <search>
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (searchDebounceTimerRef.current !== null) {
+              window.clearTimeout(searchDebounceTimerRef.current);
+              searchDebounceTimerRef.current = null;
+            }
+            const trimmed = searchQuery.trim();
+            setNovelQuery((prev) => ({ ...prev, page: 1, search: trimmed }));
+          }}
+          style={{ display: 'flex', gap: '16px', marginBottom: '20px', alignItems: 'center', flexWrap: 'wrap' }}
+        >
+          <div style={{ position: 'relative', flex: '1 1 320px' }}>
+            <label htmlFor={searchInputId} className="visually-hidden">搜索书籍</label>
+            <span style={{ position: 'absolute', left: '12px', top: '12px', color: 'hsl(var(--text-muted))' }}>
+              <Search size={16} aria-hidden="true" />
+            </span>
+            <input
+              id={searchInputId}
+              name="search"
+              type="search"
+              className="input-field"
+              style={{ paddingLeft: '38px' }}
+              placeholder="输入书名、作者或书籍 ID 搜索全库..."
+              value={searchQuery}
+              onChange={(e) => {
+                setSearchQuery(e.target.value);
+              }}
+            />
+          </div>
+          <fieldset style={{ border: 'none', margin: 0, padding: 0, display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' }}>
+            <legend className="visually-hidden">按上架状态筛选</legend>
+            {[
+              { value: '', label: '全部' },
+              { value: 'published', label: '已上架' },
+              { value: 'draft', label: '草稿(未上架)' },
+              { value: 'offline', label: '已下架' },
+            ].map((opt) => {
+              const active = novelQuery.publishStatus === opt.value;
+              return (
+                <button
+                  key={opt.value || 'all'}
+                  type="button"
+                  aria-pressed={active}
+                  className={active ? 'btn-primary' : 'btn-secondary'}
+                  style={{ padding: '8px 14px', fontSize: '0.82rem' }}
+                  onClick={() => {
+                    const nextStatus = opt.value as '' | 'published' | 'draft' | 'offline';
+                    setNovelQuery((prev) =>
+                      prev.publishStatus === nextStatus && prev.page === 1
+                        ? prev
+                        : { ...prev, page: 1, publishStatus: nextStatus }
+                    );
+                  }}
+                >
+                  {opt.label}
+                </button>
+              );
+            })}
+          </fieldset>
+        </form>
+      </search>
 
       {/* Books List Table */}
-      <div className="glass-panel" style={{ padding: '8px', overflowX: 'auto' }}>
+      <div className="glass-panel" style={{ padding: '8px', overflowX: 'auto', opacity: loading ? 0.65 : 1, transition: 'opacity 0.15s' }}>
         <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left', tableLayout: 'fixed' }}>
           <colgroup>
             {colWidths.map((width, i) => (
@@ -976,12 +1382,18 @@ export default function NovelsTab() {
             </tr>
           </thead>
           <tbody>
-            {paginatedNovels.length === 0 ? (
+            {loading && novels.length === 0 ? (
               <tr>
-                <td colSpan={10} style={{ padding: '20px', textAlign: 'center', color: 'hsl(var(--text-muted))' }}>未找到匹配条件的书籍。</td>
+                <td colSpan={columns.length} style={{ padding: '20px', textAlign: 'center', color: 'hsl(var(--text-muted))' }}>正在加载书籍列表...</td>
+              </tr>
+            ) : novels.length === 0 ? (
+              <tr>
+                <td colSpan={columns.length} style={{ padding: '20px', textAlign: 'center', color: 'hsl(var(--text-muted))' }}>未找到匹配条件的书籍。</td>
               </tr>
             ) : (
-              paginatedNovels.map((novel) => (
+              novels.map((novel) => {
+                const pubMeta = getPublishStatusMeta(novel.publish_status);
+                return (
                 <tr
                   key={novel.id}
                   onClick={() => handleNovelClick(novel)}
@@ -1009,6 +1421,11 @@ export default function NovelsTab() {
                     {novel.genres.join(', ') || '未分类'}
                   </td>
                   <td style={{ padding: '14px 12px' }}>
+                    <span className={`badge ${pubMeta.badgeClass}`} style={{ fontSize: '0.7rem' }}>
+                      {pubMeta.label}
+                    </span>
+                  </td>
+                  <td style={{ padding: '14px 12px' }}>
                     <span className={`badge ${novel.status === 'Completed' ? 'badge-green' : 'badge-orange'}`} style={{ fontSize: '0.7rem' }}>
                       {novel.status === 'Completed' ? '已完结' : '连载中'}
                     </span>
@@ -1017,51 +1434,81 @@ export default function NovelsTab() {
                     {novel.word_count.toLocaleString()} 字
                   </td>
                   <td style={{ padding: '14px 12px', color: 'hsl(var(--text-secondary))', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                    {novel.coin_cost_per_thousand ? `${novel.coin_cost_per_thousand} 金币` : '全局配置'}
+                    {novel.coin_cost_per_thousand != null
+                      ? `${novel.coin_cost_per_thousand} 金币`
+                      : `全局 (${novel.effective_coin_cost_per_thousand ?? globalCoinCost ?? 500})`}
                   </td>
                   <td style={{ padding: '14px 12px' }}>
                     <span className="badge badge-violet" style={{ fontSize: '0.7rem' }}>{novel.rating} ★</span>
                   </td>
                   <td style={{ padding: '14px 12px', textAlign: 'right' }} onClick={(e) => e.stopPropagation()}>
                     <div style={{ display: 'flex', gap: '6px', justifyContent: 'flex-end' }}>
-                      <button
-                        className="btn-secondary"
-                        style={{ padding: '6px', borderRadius: '6px' }}
-                        title="生成推广链接"
-                        onClick={() => {
-                          setPromotionForm({
-                            name: '',
-                            novelId: novel.id,
-                            title: novel.title,
-                            chapterIndex: '1',
-                            utmSource: 'facebook',
-                            utmCampaign: '',
-                            fbPixelId: '',
-                            rechargeTemplateId: '',
-                            coinCostPerThousand: '',
-                            startPayChapterIndex: ''
-                          });
-                          setGeneratedLink('');
-                          setIsPromoModalOpen(true);
-                        }}
-                      >
-                        <Link2 size={14} />
-                      </button>
-                      <button className="btn-secondary" style={{ padding: '6px', borderRadius: '6px' }} title="进入详情/导入" onClick={() => handleNovelClick(novel)}>
+                      {canEditNovels && (
+                        <button
+                          type="button"
+                          disabled={publishUpdatingId === novel.id}
+                          onClick={(e) => handleTogglePublishStatus(novel, novel.publish_status === 'published' ? 'offline' : 'published', e)}
+                          className="btn-secondary"
+                          style={{
+                            padding: '4px 8px',
+                            borderRadius: '6px',
+                            fontSize: '0.72rem',
+                            color: novel.publish_status === 'published' ? '#f87171' : '#10b981',
+                            borderColor: novel.publish_status === 'published' ? 'rgba(239, 68, 68, 0.25)' : 'rgba(16, 185, 129, 0.3)',
+                          }}
+                          title={novel.publish_status === 'published' ? '下架书籍' : '上架发布'}
+                        >
+                          {novel.publish_status === 'published' ? '下架' : '上架'}
+                        </button>
+                      )}
+                      {canCreatePromo && (
+                        <button
+                          type="button"
+                          className="btn-secondary"
+                          style={{ padding: '6px', borderRadius: '6px' }}
+                          title="生成推广链接"
+                          onClick={() => {
+                            if (novel.publish_status !== 'published') {
+                              window.showToast?.(`提示：当前书籍为「${pubMeta.label}」状态，投放前请先导入章节并上架发布。`, 'info');
+                            }
+                            setPromotionForm({
+                              name: '',
+                              novelId: novel.id,
+                              title: novel.title,
+                              chapterIndex: '1',
+                              utmSource: 'facebook',
+                              utmCampaign: '',
+                              fbPixelId: '',
+                              rechargeTemplateId: '',
+                              coinCostPerThousand: '',
+                              startPayChapterIndex: ''
+                            });
+                            setGeneratedLink('');
+                            setIsPromoModalOpen(true);
+                          }}
+                        >
+                          <Link2 size={14} />
+                        </button>
+                      )}
+                      <button type="button" className="btn-secondary" style={{ padding: '6px', borderRadius: '6px' }} title="进入详情/导入" onClick={() => handleNovelClick(novel)}>
                         <Edit size={14} />
                       </button>
-                      <button
-                        className="btn-secondary"
-                        onClick={(e) => handleDeleteNovel(novel.id, e)}
-                        style={{ padding: '6px', borderRadius: '6px', color: '#f87171', borderColor: 'rgba(239, 68, 68, 0.2)' }}
-                        title="删除书籍"
-                      >
-                        <Trash size={14} />
-                      </button>
+                      {canEditNovels && (
+                        <button
+                          type="button"
+                          className="btn-secondary"
+                          onClick={(e) => handleDeleteNovel(novel.id, e)}
+                          style={{ padding: '6px', borderRadius: '6px', color: '#f87171', borderColor: 'rgba(239, 68, 68, 0.2)' }}
+                          title="删除书籍"
+                        >
+                          <Trash size={14} />
+                        </button>
+                      )}
                     </div>
                   </td>
                 </tr>
-              ))
+              );
+              })
             )}
           </tbody>
         </table>
@@ -1082,12 +1529,13 @@ export default function NovelsTab() {
           border: '1px solid hsl(var(--border))'
         }}>
           <div>
-            显示第 {startIndex + 1} 至 {Math.min(startIndex + pageSize, filteredNovels.length)} 项，共 {filteredNovels.length} 项
+            显示第 {startIndex + 1} 至 {Math.min(startIndex + novels.length, totalNovels)} 项，共 {totalNovels} 项
           </div>
           <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
             <button
+              type="button"
               className="btn-secondary"
-              onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
+              onClick={() => setNovelQuery(prev => ({ ...prev, page: Math.max(1, prev.page - 1) }))}
               disabled={currentPage === 1}
               style={{ padding: '6px 12px', fontSize: '0.8rem', borderRadius: '6px' }}
             >
@@ -1097,8 +1545,9 @@ export default function NovelsTab() {
               第 {currentPage} 页 / 共 {totalPages} 页
             </span>
             <button
+              type="button"
               className="btn-secondary"
-              onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
+              onClick={() => setNovelQuery(prev => ({ ...prev, page: Math.min(totalPages, prev.page + 1) }))}
               disabled={currentPage === totalPages}
               style={{ padding: '6px 12px', fontSize: '0.8rem', borderRadius: '6px' }}
             >

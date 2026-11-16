@@ -9,6 +9,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"reader-backend/internal/auth"
+	"reader-backend/internal/novel"
 )
 
 type Handler struct {
@@ -120,6 +121,10 @@ func (h *Handler) UnlockChapter(c *gin.Context) {
 	ctx := c.Request.Context()
 	err := h.service.UnlockChapter(ctx, userID, req.NovelID, req.ChapterIndex, promoID, utmSource, utmCampaign)
 	if err != nil {
+		if errors.Is(err, novel.ErrNovelNotFound) || errors.Is(err, ErrChapterNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+			return
+		}
 		if errors.Is(err, ErrInsufficientBalance) {
 			c.JSON(http.StatusPaymentRequired, gin.H{"error": "Insufficient balance. Please top up."})
 			return

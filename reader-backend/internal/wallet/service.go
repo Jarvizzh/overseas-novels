@@ -23,6 +23,7 @@ import (
 
 var (
 	ErrAlreadyCheckedIn = errors.New("you have already checked in today")
+	ErrChapterNotFound  = errors.New("chapter not found")
 )
 
 type Service interface {
@@ -81,12 +82,20 @@ func (s *service) GetHistory(ctx context.Context, userID int64, limit, offset in
 }
 
 func (s *service) UnlockChapter(ctx context.Context, userID int64, novelID int64, chapterIndex int, promoID int, utmSource, utmCampaign string) error {
+	n, err := s.novelRepo.GetByID(ctx, novelID)
+	if err != nil {
+		return err
+	}
+	if !novel.IsNovelPublished(n) {
+		return novel.ErrNovelNotFound
+	}
+
 	ch, err := s.novelRepo.GetChapter(ctx, novelID, chapterIndex)
 	if err != nil {
 		return err
 	}
 	if ch == nil {
-		return errors.New("chapter not found")
+		return ErrChapterNotFound
 	}
 
 	effectiveStartPay, effectiveCost, _ := s.novelRepo.GetEffectivePricingRule(ctx, userID, novelID, promoID, utmSource, utmCampaign)
@@ -96,10 +105,7 @@ func (s *service) UnlockChapter(ctx context.Context, userID int64, novelID int64
 		return nil
 	}
 
-	price := int(math.Round((float64(ch.WordCount) / 1000.0) * float64(effectiveCost)))
-	if price <= 0 {
-		price = ch.Price
-	}
+	price := novel.CalculateChapterPrice(ch.WordCount, effectiveCost)
 
 	err = s.repo.UnlockChapterTx(ctx, userID, novelID, chapterIndex, price, ch.Title)
 	if err != nil {

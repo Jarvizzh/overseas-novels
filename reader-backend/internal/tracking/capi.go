@@ -82,7 +82,7 @@ func SendFacebookEvent(pixelID string, eventName string, userID string, email st
 		if config.AppConfig != nil && config.AppConfig.DefaultDomain != "" {
 			sourceURL = config.AppConfig.DefaultDomain
 		} else {
-			sourceURL = "https://h5.star-novel.com"
+			sourceURL = "https://h5.starsfic.com"
 		}
 	}
 
@@ -286,4 +286,3 @@ func flushCAPILogs(batch []CAPILogItem) {
 	}
 	_ = tx.Commit(ctx)
 }
-

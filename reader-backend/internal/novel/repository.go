@@ -10,7 +10,7 @@ import (
 )
 
 type Repository interface {
-	GetNovels(ctx context.Context, genre string, limit, offset int) ([]model.Novel, error)
+	GetNovels(ctx context.Context, genre, sortBy string, limit, offset int) ([]model.Novel, error)
 	SearchNovels(ctx context.Context, search string, limit, offset int) ([]model.Novel, error)
 	GetByID(ctx context.Context, id int64) (*model.Novel, error)
 	GetChaptersList(ctx context.Context, novelID int64) ([]model.Chapter, error)
@@ -26,25 +26,47 @@ func NewDBRepository() Repository {
 	return &dbRepository{}
 }
 
-func (r *dbRepository) GetNovels(ctx context.Context, genre string, limit, offset int) ([]model.Novel, error) {
+const readerNovelSelectColumns = `id, title, author, cover_url, rating, status, publish_status, synopsis, genres, word_count, view_count, COALESCE(coin_cost_per_thousand, (SELECT value::integer FROM system_configs WHERE key = 'global_coin_cost_per_thousand'), 500) AS coin_cost_per_thousand, start_pay_chapter_index, created_at`
+
+func scanReaderNovel(scanner interface{ Scan(dest ...any) error }, n *model.Novel) error {
+	err := scanner.Scan(
+		&n.ID, &n.Title, &n.Author, &n.CoverURL, &n.Rating, &n.Status, &n.PublishStatus,
+		&n.Synopsis, &n.Genres, &n.WordCount, &n.ViewCount,
+		&n.CoinCostPerThousand, &n.StartPayChapterIndex, &n.CreatedAt,
+	)
+	if err != nil {
+		return err
+	}
+	if n.Genres == nil {
+		n.Genres = []string{}
+	}
+	return nil
+}
+
+func (r *dbRepository) GetNovels(ctx context.Context, genre, sortBy string, limit, offset int) ([]model.Novel, error) {
 	var rows pgx.Rows
 	var err error
 
+	orderSQL := "ORDER BY view_count DESC, created_at DESC"
+	if sortBy == "latest" {
+		orderSQL = "ORDER BY created_at DESC, id DESC"
+	}
+
 	if genre != "" {
-		query := `
-			SELECT id, title, author, cover_url, rating, status, synopsis, genres, word_count, view_count, COALESCE(coin_cost_per_thousand, 500) AS coin_cost_per_thousand, start_pay_chapter_index, created_at
+		query := fmt.Sprintf(`
+			SELECT %s
 			FROM novels
-			WHERE genres @> ARRAY[$1]::VARCHAR[] AND status != 'archived'
-			ORDER BY view_count DESC
-			LIMIT $2 OFFSET $3`
+			WHERE genres @> ARRAY[$1]::VARCHAR[] AND status != 'archived' AND publish_status = 'published'
+			%s
+			LIMIT $2 OFFSET $3`, readerNovelSelectColumns, orderSQL)
 		rows, err = db.DB.Query(ctx, query, genre, limit, offset)
 	} else {
-		query := `
-			SELECT id, title, author, cover_url, rating, status, synopsis, genres, word_count, view_count, COALESCE(coin_cost_per_thousand, 500) AS coin_cost_per_thousand, start_pay_chapter_index, created_at
+		query := fmt.Sprintf(`
+			SELECT %s
 			FROM novels
-			WHERE status != 'archived'
-			ORDER BY view_count DESC
-			LIMIT $1 OFFSET $2`
+			WHERE status != 'archived' AND publish_status = 'published'
+			%s
+			LIMIT $1 OFFSET $2`, readerNovelSelectColumns, orderSQL)
 		rows, err = db.DB.Query(ctx, query, limit, offset)
 	}
 
@@ -53,15 +75,10 @@ func (r *dbRepository) GetNovels(ctx context.Context, genre string, limit, offse
 	}
 	defer rows.Close()
 
-	var novels []model.Novel
+	novels := []model.Novel{}
 	for rows.Next() {
 		var n model.Novel
-		err = rows.Scan(
-			&n.ID, &n.Title, &n.Author, &n.CoverURL, &n.Rating, &n.Status,
-			&n.Synopsis, &n.Genres, &n.WordCount, &n.ViewCount,
-			&n.CoinCostPerThousand, &n.StartPayChapterIndex, &n.CreatedAt,
-		)
-		if err != nil {
+		if err := scanReaderNovel(rows, &n); err != nil {
 			return nil, err
 		}
 		novels = append(novels, n)
@@ -72,12 +89,12 @@ func (r *dbRepository) GetNovels(ctx context.Context, genre string, limit, offse
 
 func (r *dbRepository) SearchNovels(ctx context.Context, search string, limit, offset int) ([]model.Novel, error) {
 	likeSearch := "%" + search + "%"
-	query := `
-		SELECT id, title, author, cover_url, rating, status, synopsis, genres, word_count, view_count, COALESCE(coin_cost_per_thousand, 500) AS coin_cost_per_thousand, start_pay_chapter_index, created_at
+	query := fmt.Sprintf(`
+		SELECT %s
 		FROM novels
-		WHERE (title ILIKE $1 OR author ILIKE $1 OR synopsis ILIKE $1) AND status != 'archived'
-		ORDER BY view_count DESC
-		LIMIT $2 OFFSET $3`
+		WHERE (title ILIKE $1 OR author ILIKE $1 OR synopsis ILIKE $1) AND status != 'archived' AND publish_status = 'published'
+		ORDER BY view_count DESC, created_at DESC
+		LIMIT $2 OFFSET $3`, readerNovelSelectColumns)
 
 	rows, err := db.DB.Query(ctx, query, likeSearch, limit, offset)
 	if err != nil {
@@ -85,15 +102,10 @@ func (r *dbRepository) SearchNovels(ctx context.Context, search string, limit, o
 	}
 	defer rows.Close()
 
-	var novels []model.Novel
+	novels := []model.Novel{}
 	for rows.Next() {
 		var n model.Novel
-		err = rows.Scan(
-			&n.ID, &n.Title, &n.Author, &n.CoverURL, &n.Rating, &n.Status,
-			&n.Synopsis, &n.Genres, &n.WordCount, &n.ViewCount,
-			&n.CoinCostPerThousand, &n.StartPayChapterIndex, &n.CreatedAt,
-		)
-		if err != nil {
+		if err := scanReaderNovel(rows, &n); err != nil {
 			return nil, err
 		}
 		novels = append(novels, n)
@@ -103,17 +115,13 @@ func (r *dbRepository) SearchNovels(ctx context.Context, search string, limit, o
 }
 
 func (r *dbRepository) GetByID(ctx context.Context, id int64) (*model.Novel, error) {
-	query := `
-		SELECT id, title, author, cover_url, rating, status, synopsis, genres, word_count, view_count, COALESCE(coin_cost_per_thousand, 500) AS coin_cost_per_thousand, start_pay_chapter_index, created_at
+	query := fmt.Sprintf(`
+		SELECT %s
 		FROM novels
-		WHERE id = $1`
+		WHERE id = $1 AND status != 'archived' AND publish_status = 'published'`, readerNovelSelectColumns)
 
 	var n model.Novel
-	err := db.DB.QueryRow(ctx, query, id).Scan(
-		&n.ID, &n.Title, &n.Author, &n.CoverURL, &n.Rating, &n.Status,
-		&n.Synopsis, &n.Genres, &n.WordCount, &n.ViewCount,
-		&n.CoinCostPerThousand, &n.StartPayChapterIndex, &n.CreatedAt,
-	)
+	err := scanReaderNovel(db.DB.QueryRow(ctx, query, id), &n)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return nil, nil
@@ -127,10 +135,11 @@ func (r *dbRepository) GetByID(ctx context.Context, id int64) (*model.Novel, err
 // GetChaptersList fetches chapters without content to optimize read performance
 func (r *dbRepository) GetChaptersList(ctx context.Context, novelID int64) ([]model.Chapter, error) {
 	query := `
-		SELECT id, novel_id, chapter_index, title, word_count, is_paid, price, created_at
-		FROM chapters
-		WHERE novel_id = $1
-		ORDER BY chapter_index ASC`
+		SELECT c.id, c.novel_id, c.chapter_index, c.title, c.word_count, c.is_paid, c.price, c.created_at
+		FROM chapters c
+		INNER JOIN novels n ON c.novel_id = n.id
+		WHERE c.novel_id = $1 AND n.status != 'archived' AND n.publish_status = 'published'
+		ORDER BY c.chapter_index ASC`
 
 	rows, err := db.DB.Query(ctx, query, novelID)
 	if err != nil {
@@ -138,7 +147,7 @@ func (r *dbRepository) GetChaptersList(ctx context.Context, novelID int64) ([]mo
 	}
 	defer rows.Close()
 
-	var chapters []model.Chapter
+	chapters := []model.Chapter{}
 	for rows.Next() {
 		var c model.Chapter
 		err = rows.Scan(
@@ -155,9 +164,10 @@ func (r *dbRepository) GetChaptersList(ctx context.Context, novelID int64) ([]mo
 
 func (r *dbRepository) GetChapter(ctx context.Context, novelID int64, chapterIndex int) (*model.Chapter, error) {
 	query := `
-		SELECT id, novel_id, chapter_index, title, content, word_count, is_paid, price, created_at
-		FROM chapters
-		WHERE novel_id = $1 AND chapter_index = $2`
+		SELECT c.id, c.novel_id, c.chapter_index, c.title, c.content, c.word_count, c.is_paid, c.price, c.created_at
+		FROM chapters c
+		INNER JOIN novels n ON c.novel_id = n.id
+		WHERE c.novel_id = $1 AND c.chapter_index = $2 AND n.status != 'archived' AND n.publish_status = 'published'`
 
 	var c model.Chapter
 	err := db.DB.QueryRow(ctx, query, novelID, chapterIndex).Scan(
@@ -239,7 +249,7 @@ func (r *dbRepository) GetEffectivePricingRule(ctx context.Context, userID int64
 
 	// 2. Fetch novel settings
 	var novelStartPay, novelCost *int
-	_ = db.DB.QueryRow(ctx, "SELECT start_pay_chapter_index, coin_cost_per_thousand FROM novels WHERE id = $1", novelID).Scan(&novelStartPay, &novelCost)
+	_ = db.DB.QueryRow(ctx, "SELECT start_pay_chapter_index, coin_cost_per_thousand FROM novels WHERE id = $1 AND status != 'archived' AND publish_status = 'published'", novelID).Scan(&novelStartPay, &novelCost)
 
 	// 3. Fetch global settings
 	globalStartPay := 3

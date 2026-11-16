@@ -7,7 +7,9 @@ import (
 	"strconv"
 
 	"github.com/gin-gonic/gin"
+	"github.com/jackc/pgx/v5/pgconn"
 	"star-novel-cms/internal/auth"
+	"star-novel-cms/internal/storage"
 )
 
 type Handler struct {
@@ -20,55 +22,72 @@ func NewHandler(service NovelService) *Handler {
 	}
 }
 
+const maxBulkImportBytes int64 = 50 << 20
+
 func (h *Handler) RegisterRoutes(rg *gin.RouterGroup) {
+	editorRoles := auth.RoleMiddleware("SuperAdmin", "Admin", "Editor")
+	settingsWriteRoles := auth.RoleMiddleware("SuperAdmin", "Admin")
+	promoWriteRoles := auth.RoleMiddleware("SuperAdmin", "Admin", "Editor", "MediaBuyer")
+
 	novels := rg.Group("/novels", auth.AuthMiddleware())
 	{
 		novels.GET("", h.ListNovels)
+		novels.POST("/cover-upload", editorRoles, h.UploadCover)
 		novels.GET("/:id", h.GetNovel)
-		novels.POST("", h.CreateNovel)
-		novels.PUT("/:id", h.UpdateNovel)
-		novels.DELETE("/:id", h.DeleteNovel)
+		novels.POST("", editorRoles, h.CreateNovel)
+		novels.PUT("/:id", editorRoles, h.UpdateNovel)
+		novels.PATCH("/:id/publish-status", editorRoles, h.UpdatePublishStatus)
+		novels.DELETE("/:id", editorRoles, h.DeleteNovel)
 
 		// Chapters sub-routes
 		novels.GET("/:id/chapters", h.ListChapters)
 		novels.GET("/:id/chapters/:index", h.GetChapterDetail)
-		novels.POST("/:id/chapters", h.CreateChapter)
-		novels.PUT("/:id/chapters/:index", h.UpdateChapter)
-		novels.POST("/:id/chapters/bulk-import", h.BulkImportChapters)
+		novels.POST("/:id/chapters", editorRoles, h.CreateChapter)
+		novels.PUT("/:id/chapters/:index", editorRoles, h.UpdateChapter)
+		novels.POST("/:id/chapters/bulk-import", editorRoles, h.BulkImportChapters)
 	}
 
 	settings := rg.Group("/settings", auth.AuthMiddleware())
 	{
 		settings.GET("", h.GetSettings)
-		settings.POST("", h.UpdateSettings)
+		settings.POST("", settingsWriteRoles, h.UpdateSettings)
 	}
 
 	promo := rg.Group("/promotion-links", auth.AuthMiddleware())
 	{
 		promo.GET("", h.ListPromotionLinks)
-		promo.POST("", h.CreatePromotionLink)
-		promo.PUT("/:id", h.UpdatePromotionLink)
-		promo.DELETE("/:id", h.DeletePromotionLink)
+		promo.POST("", promoWriteRoles, h.CreatePromotionLink)
+		promo.PUT("/:id", promoWriteRoles, h.UpdatePromotionLink)
+		promo.DELETE("/:id", promoWriteRoles, h.DeletePromotionLink)
 	}
 
 	pixels := rg.Group("/fb-pixels", auth.AuthMiddleware())
 	{
 		pixels.GET("", h.ListFBPixels)
-		pixels.POST("", h.CreateFBPixel)
-		pixels.PUT("/:id", h.UpdateFBPixel)
-		pixels.DELETE("/:id", h.DeleteFBPixel)
+		pixels.POST("", promoWriteRoles, h.CreateFBPixel)
+		pixels.PUT("/:id", promoWriteRoles, h.UpdateFBPixel)
+		pixels.DELETE("/:id", promoWriteRoles, h.DeleteFBPixel)
 	}
 }
 
 func (h *Handler) ListNovels(c *gin.Context) {
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	if page < 1 {
+		page = 1
+	}
 	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "10"))
+	if pageSize < 1 {
+		pageSize = 10
+	} else if pageSize > 200 {
+		pageSize = 200
+	}
 	status := c.Query("status")
+	publishStatus := c.Query("publish_status")
 	genre := c.Query("genre")
 	search := c.Query("search")
 
 	ctx := c.Request.Context()
-	novels, total, err := h.service.ListNovels(ctx, page, pageSize, status, genre, search)
+	novels, total, err := h.service.ListNovels(ctx, page, pageSize, status, publishStatus, genre, search)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch novels: " + err.Error()})
 		return
@@ -107,6 +126,7 @@ type CreateNovelReq struct {
 	Author               string   `json:"author" binding:"required"`
 	CoverURL             string   `json:"cover_url"`
 	Status               string   `json:"status" binding:"required,oneof=Ongoing Completed"`
+	PublishStatus        string   `json:"publish_status" binding:"omitempty,oneof=draft published offline"`
 	Synopsis             string   `json:"synopsis"`
 	Genres               []string `json:"genres"`
 	Rating               float64  `json:"rating"`
@@ -127,6 +147,7 @@ func (h *Handler) CreateNovel(c *gin.Context) {
 		Author:               req.Author,
 		CoverURL:             req.CoverURL,
 		Status:               req.Status,
+		PublishStatus:        req.PublishStatus,
 		Synopsis:             req.Synopsis,
 		Genres:               req.Genres,
 		Rating:               req.Rating,
@@ -136,11 +157,79 @@ func (h *Handler) CreateNovel(c *gin.Context) {
 
 	created, err := h.service.CreateNovel(ctx, n)
 	if err != nil {
-		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+		if errors.Is(err, ErrInvalidCover) || errors.Is(err, ErrInvalidPublishStatus) || errors.Is(err, ErrCannotPublishEmptyNovel) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
 	c.JSON(http.StatusCreated, created)
+}
+
+func (h *Handler) UploadCover(c *gin.Context) {
+	maxBytes := h.service.MaxCoverUploadBytes()
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxBytes+(1<<20))
+
+	fileHeader, err := c.FormFile("file")
+	if err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": storage.ErrCoverTooLarge.Error()})
+			return
+		}
+		c.JSON(http.StatusBadRequest, gin.H{"error": "请上传封面图片文件（form-data 字段名: file）"})
+		return
+	}
+	if fileHeader.Size > maxBytes {
+		c.JSON(http.StatusBadRequest, gin.H{"error": storage.ErrCoverTooLarge.Error()})
+		return
+	}
+
+	f, err := fileHeader.Open()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "读取上传文件失败"})
+		return
+	}
+	defer f.Close()
+
+	data, err := io.ReadAll(io.LimitReader(f, maxBytes+1))
+	if err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": storage.ErrCoverTooLarge.Error()})
+			return
+		}
+		c.JSON(http.StatusBadRequest, gin.H{"error": "读取封面图片内容失败"})
+		return
+	}
+
+	coverKey, previewURL, err := h.service.UploadCover(c.Request.Context(), data)
+	if err != nil {
+		switch {
+		case errors.Is(err, storage.ErrCoverOSSDisabled):
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": err.Error()})
+		case errors.Is(err, storage.ErrCoverEmpty),
+			errors.Is(err, storage.ErrCoverTooLarge),
+			errors.Is(err, storage.ErrCoverUnsupportedType),
+			errors.Is(err, storage.ErrCoverInvalidImage):
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		}
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"cover_key":   coverKey,
+		"preview_url": previewURL,
+	})
 }
 
 type UpdateNovelReq struct {
@@ -148,6 +237,7 @@ type UpdateNovelReq struct {
 	Author               string   `json:"author" binding:"required"`
 	CoverURL             string   `json:"cover_url"`
 	Status               string   `json:"status" binding:"required,oneof=Ongoing Completed"`
+	PublishStatus        string   `json:"publish_status" binding:"omitempty,oneof=draft published offline"`
 	Synopsis             string   `json:"synopsis"`
 	Genres               []string `json:"genres"`
 	Rating               float64  `json:"rating"`
@@ -169,10 +259,14 @@ func (h *Handler) UpdateNovel(c *gin.Context) {
 	}
 
 	ctx := c.Request.Context()
-	n, err := h.service.UpdateNovel(ctx, id, req.Title, req.Author, req.CoverURL, req.Status, req.Synopsis, req.Genres, req.Rating, req.CoinCostPerThousand, req.StartPayChapterIndex)
+	n, err := h.service.UpdateNovel(ctx, id, req.Title, req.Author, req.CoverURL, req.Status, req.PublishStatus, req.Synopsis, req.Genres, req.Rating, req.CoinCostPerThousand, req.StartPayChapterIndex)
 	if err != nil {
 		if errors.Is(err, ErrNovelNotFound) {
 			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ErrInvalidCover) || errors.Is(err, ErrInvalidPublishStatus) || errors.Is(err, ErrCannotPublishEmptyNovel) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -180,6 +274,40 @@ func (h *Handler) UpdateNovel(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, n)
+}
+
+type UpdatePublishStatusReq struct {
+	PublishStatus string `json:"publish_status" binding:"required,oneof=draft published offline"`
+}
+
+func (h *Handler) UpdatePublishStatus(c *gin.Context) {
+	idStr := c.Param("id")
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid novel ID"})
+		return
+	}
+	var req UpdatePublishStatusReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	updated, err := h.service.UpdatePublishStatus(c.Request.Context(), id, req.PublishStatus)
+	if err != nil {
+		if errors.Is(err, ErrNovelNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ErrInvalidPublishStatus) || errors.Is(err, ErrCannotPublishEmptyNovel) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, updated)
 }
 
 func (h *Handler) DeleteNovel(c *gin.Context) {
@@ -213,6 +341,10 @@ func (h *Handler) ListChapters(c *gin.Context) {
 	ctx := c.Request.Context()
 	chapters, err := h.service.ListChapters(ctx, id)
 	if err != nil {
+		if errors.Is(err, ErrNovelNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -237,7 +369,7 @@ func (h *Handler) GetChapterDetail(c *gin.Context) {
 	ctx := c.Request.Context()
 	chapter, err := h.service.GetChapterDetail(ctx, id, idx)
 	if err != nil {
-		if errors.Is(err, ErrChapterNotFound) {
+		if errors.Is(err, ErrNovelNotFound) || errors.Is(err, ErrChapterNotFound) {
 			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
 			return
 		}
@@ -272,6 +404,15 @@ func (h *Handler) CreateChapter(c *gin.Context) {
 	ctx := c.Request.Context()
 	chapter, err := h.service.CreateChapter(ctx, id, req.ChapterIndex, req.Title, req.Content, req.IsPaid, req.Price)
 	if err != nil {
+		if errors.Is(err, ErrNovelNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+			return
+		}
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			c.JSON(http.StatusConflict, gin.H{"error": "该章节序号已存在，请勿重复创建"})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -309,6 +450,10 @@ func (h *Handler) UpdateChapter(c *gin.Context) {
 	ctx := c.Request.Context()
 	err = h.service.UpdateChapter(ctx, id, idx, req.Title, req.Content, req.IsPaid, req.Price)
 	if err != nil {
+		if errors.Is(err, ErrNovelNotFound) || errors.Is(err, ErrChapterNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -323,13 +468,26 @@ func (h *Handler) BulkImportChapters(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid novel ID"})
 		return
 	}
-	importType := c.DefaultPostForm("import_type", "single_txt")
+
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxBulkImportBytes+(2<<20))
 
 	fileHeader, err := c.FormFile("file")
 	if err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "导入文件大小不能超过 50MB"})
+			return
+		}
 		c.JSON(http.StatusBadRequest, gin.H{"error": "ZIP/TXT file is required via form-data 'file'"})
 		return
 	}
+	if fileHeader.Size > maxBulkImportBytes {
+		c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "导入文件大小不能超过 50MB"})
+		return
+	}
+
+	importType := c.DefaultPostForm("import_type", "single_txt")
+	delimiterRegex := c.PostForm("delimiter_regex")
 
 	f, err := fileHeader.Open()
 	if err != nil {
@@ -338,14 +496,23 @@ func (h *Handler) BulkImportChapters(c *gin.Context) {
 	}
 	defer f.Close()
 
-	zipData, err := io.ReadAll(f)
+	zipData, err := io.ReadAll(io.LimitReader(f, maxBulkImportBytes+1))
 	if err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "导入文件大小不能超过 50MB"})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to read uploaded file"})
+		return
+	}
+	if int64(len(zipData)) > maxBulkImportBytes {
+		c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "导入文件大小不能超过 50MB"})
 		return
 	}
 
 	ctx := c.Request.Context()
-	err = h.service.BulkImportChapters(ctx, id, zipData, importType)
+	result, err := h.service.BulkImportChapters(ctx, id, zipData, importType, delimiterRegex)
 	if err != nil {
 		if errors.Is(err, ErrNovelNotFound) {
 			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
@@ -355,7 +522,11 @@ func (h *Handler) BulkImportChapters(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"message": "Chapters imported successfully"})
+	c.JSON(http.StatusOK, gin.H{
+		"message":          "Chapters imported successfully",
+		"chapters_count":   result.ChaptersCount,
+		"total_word_count": result.TotalWordCount,
+	})
 }
 
 func (h *Handler) GetSettings(c *gin.Context) {
@@ -379,6 +550,10 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 	ctx := c.Request.Context()
 	err := h.service.UpdateSettings(ctx, req)
 	if err != nil {
+		if errors.Is(err, ErrInvalidSettingValue) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -444,6 +619,14 @@ func (h *Handler) CreatePromotionLink(c *gin.Context) {
 
 	created, err := h.service.CreatePromotionLink(ctx, link)
 	if err != nil {
+		if errors.Is(err, ErrInvalidPromoPricing) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ErrNovelNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -487,6 +670,10 @@ func (h *Handler) UpdatePromotionLink(c *gin.Context) {
 	ctx := c.Request.Context()
 	err = h.service.UpdatePromotionLink(ctx, id, req.Name, req.ChapterIndex, req.UtmSource, req.UtmCampaign, req.GeneratedURL, req.FBPixelID, req.RechargeTemplateID, req.DomainID, req.CoinCostPerThousand, req.StartPayChapterIndex, req.Domain)
 	if err != nil {
+		if errors.Is(err, ErrInvalidPromoPricing) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}

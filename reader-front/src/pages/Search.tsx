@@ -31,15 +31,15 @@ export const Search: React.FC<SearchProps> = ({ onNavigate, initialGenre }) => {
       try {
         let list: Novel[] = [];
         if (query.trim()) {
-          list = await api.searchNovels(query.trim());
+          list = await api.searchNovels(query.trim(), 1, 50);
           if (selectedGenre !== 'All') {
-            list = list.filter((n) => n.genres.includes(selectedGenre));
+            list = list.filter((n) => (n.genres || []).includes(selectedGenre));
           }
         } else {
           if (selectedGenre === 'All') {
-            list = await api.getNovels();
+            list = await api.getNovels({ limit: 50 });
           } else {
-            list = await api.getNovels({ genre: selectedGenre });
+            list = await api.getNovels({ genre: selectedGenre, limit: 50 });
           }
         }
         setResults(list);

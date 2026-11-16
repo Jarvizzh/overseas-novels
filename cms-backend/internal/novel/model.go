@@ -3,19 +3,22 @@ package novel
 import "time"
 
 type Novel struct {
-	ID                   int64     `json:"id"`
-	Title                string    `json:"title"`
-	Author               string    `json:"author"`
-	CoverURL             string    `json:"cover_url"`
-	Rating               float64   `json:"rating"`
-	Status               string    `json:"status"` // Ongoing, Completed
-	Synopsis             string    `json:"synopsis"`
-	Genres               []string  `json:"genres"`
-	WordCount            int       `json:"word_count"`
-	ViewCount            int64     `json:"view_count"`
-	CoinCostPerThousand  *int      `json:"coin_cost_per_thousand"`
-	StartPayChapterIndex int       `json:"start_pay_chapter_index"`
-	CreatedAt            time.Time `json:"created_at"`
+	ID                           int64     `json:"id"`
+	Title                        string    `json:"title"`
+	Author                       string    `json:"author"`
+	CoverURL                     string    `json:"cover_url"`
+	CoverKey                     string    `json:"cover_key,omitempty"`
+	Rating                       float64   `json:"rating"`
+	Status                       string    `json:"status"`         // Ongoing, Completed, archived
+	PublishStatus                string    `json:"publish_status"` // draft, published, offline
+	Synopsis                     string    `json:"synopsis"`
+	Genres                       []string  `json:"genres"`
+	WordCount                    int       `json:"word_count"`
+	ViewCount                    int64     `json:"view_count"`
+	CoinCostPerThousand          *int      `json:"coin_cost_per_thousand"`
+	EffectiveCoinCostPerThousand int       `json:"effective_coin_cost_per_thousand"`
+	StartPayChapterIndex         int       `json:"start_pay_chapter_index"`
+	CreatedAt                    time.Time `json:"created_at"`
 }
 
 type Chapter struct {

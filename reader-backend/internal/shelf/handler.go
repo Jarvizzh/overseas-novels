@@ -1,6 +1,7 @@
 package shelf
 
 import (
+	"errors"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -55,6 +56,10 @@ func (h *Handler) AddToShelf(c *gin.Context) {
 	ctx := c.Request.Context()
 	err := h.service.AddToShelf(ctx, userID, req.NovelID)
 	if err != nil {
+		if errors.Is(err, ErrNovelUnavailable) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Novel not found or unavailable"})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to add novel to bookshelf"})
 		return
 	}

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -146,10 +147,65 @@ func (s *AliyunOSSStorage) DeleteNovelContent(ctx context.Context, novelID int64
 	return nil
 }
 
+func parseChapterIndexFromKey(prefix, key string) (int, bool) {
+	if !strings.HasPrefix(key, prefix) || !strings.HasSuffix(key, ".txt") {
+		return 0, false
+	}
+	stem := strings.TrimSuffix(strings.TrimPrefix(key, prefix), ".txt")
+	if stem == "" || strings.Contains(stem, "/") {
+		return 0, false
+	}
+	idx, err := strconv.Atoi(stem)
+	if err != nil {
+		return 0, false
+	}
+	return idx, true
+}
+
+func (s *AliyunOSSStorage) DeleteNovelContentFrom(ctx context.Context, novelID int64, minChapterIndex int) error {
+	prefix := s.formatNovelPrefix(novelID)
+	marker := ""
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		lor, err := s.bucket.ListObjects(oss.Prefix(prefix), oss.Marker(marker), oss.MaxKeys(500))
+		if err != nil {
+			return fmt.Errorf("failed to list objects with prefix %q: %w", prefix, err)
+		}
+
+		var keys []string
+		for _, obj := range lor.Objects {
+			if idx, ok := parseChapterIndexFromKey(prefix, obj.Key); ok && idx >= minChapterIndex {
+				keys = append(keys, obj.Key)
+			}
+		}
+		if len(keys) > 0 {
+			if _, err := s.bucket.DeleteObjects(keys); err != nil {
+				return fmt.Errorf("failed to delete excess OSS objects for novel %d: %w", novelID, err)
+			}
+		}
+
+		if !lor.IsTruncated {
+			break
+		}
+		marker = lor.NextMarker
+	}
+
+	return nil
+}
+
 func (s *AliyunOSSStorage) BatchPutContent(ctx context.Context, novelID int64, items []ChapterContentItem) error {
 	if len(items) == 0 {
 		return nil
 	}
+
+	batchCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
 
 	// Concurrently upload chapters to OSS using a worker pool
 	const workerCount = 10
@@ -173,14 +229,14 @@ func (s *AliyunOSSStorage) BatchPutContent(ctx context.Context, novelID int64, i
 			defer wg.Done()
 			for item := range itemChan {
 				select {
-				case <-ctx.Done():
-					errChan <- ctx.Err()
+				case <-batchCtx.Done():
 					return
 				default:
 				}
 
-				if err := s.PutContent(ctx, novelID, item.ChapterIndex, item.Content); err != nil {
+				if err := s.PutContent(batchCtx, novelID, item.ChapterIndex, item.Content); err != nil {
 					errChan <- fmt.Errorf("failed to upload chapter %d to OSS: %w", item.ChapterIndex, err)
+					cancel()
 					return
 				}
 			}
@@ -195,6 +251,10 @@ func (s *AliyunOSSStorage) BatchPutContent(ctx context.Context, novelID int64, i
 		if err != nil {
 			return err
 		}
+	}
+
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 
 	return nil

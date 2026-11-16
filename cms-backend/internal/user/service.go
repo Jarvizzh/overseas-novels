@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+	"star-novel-cms/internal/storage"
 )
 
 var (
@@ -22,12 +23,14 @@ type UserService interface {
 }
 
 type userService struct {
-	repo UserRepository
+	repo        UserRepository
+	coverSigner storage.CoverSigner
 }
 
-func NewUserService(repo UserRepository) UserService {
+func NewUserService(repo UserRepository, coverSigner storage.CoverSigner) UserService {
 	return &userService{
-		repo: repo,
+		repo:        repo,
+		coverSigner: coverSigner,
 	}
 }
 
@@ -144,6 +147,11 @@ func (s *userService) GetUserDetail(ctx context.Context, userID int64) (*UserDet
 	bookshelf, err := s.repo.GetBookshelfItems(ctx, userID)
 	if err != nil {
 		return nil, err
+	}
+	if s.coverSigner != nil {
+		for i := range bookshelf {
+			bookshelf[i].CoverURL = s.coverSigner.SignCoverURL(bookshelf[i].CoverURL)
+		}
 	}
 
 	subscriptions, err := s.repo.GetUserSubscriptions(ctx, userID)

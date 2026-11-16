@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"reader-backend/internal/model"
+	"reader-backend/internal/storage"
 )
 
 type ProgressUpdate struct {
@@ -22,17 +23,28 @@ type Service interface {
 }
 
 type service struct {
-	repo Repository
+	repo        Repository
+	coverSigner storage.CoverSigner
 }
 
-func NewService(repo Repository) Service {
+func NewService(repo Repository, coverSigner storage.CoverSigner) Service {
 	return &service{
-		repo: repo,
+		repo:        repo,
+		coverSigner: coverSigner,
 	}
 }
 
 func (s *service) GetShelf(ctx context.Context, userID int64) ([]model.BookshelfWithNovel, error) {
-	return s.repo.GetShelfItemsWithNovel(ctx, userID)
+	items, err := s.repo.GetShelfItemsWithNovel(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	if s.coverSigner != nil {
+		for i := range items {
+			items[i].Novel.CoverURL = s.coverSigner.SignCoverURL(items[i].Novel.CoverURL)
+		}
+	}
+	return items, nil
 }
 
 func (s *service) AddToShelf(ctx context.Context, userID int64, novelID int64) error {

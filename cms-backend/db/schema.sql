@@ -61,7 +61,8 @@ CREATE TABLE IF NOT EXISTS novels (
     author VARCHAR(100) NOT NULL,
     cover_url VARCHAR(255),
     rating DECIMAL(2,1) DEFAULT 0.0,
-    status VARCHAR(20) DEFAULT 'Ongoing', -- Ongoing / Completed
+    status VARCHAR(20) DEFAULT 'Ongoing', -- Ongoing / Completed / archived
+    publish_status VARCHAR(20) NOT NULL DEFAULT 'published', -- draft / published / offline
     synopsis TEXT,
     genres VARCHAR(50)[] DEFAULT '{}',
     word_count INT DEFAULT 0,
@@ -74,6 +75,8 @@ CREATE TABLE IF NOT EXISTS novels (
 -- 增量补齐字段
 ALTER TABLE novels ADD COLUMN IF NOT EXISTS coin_cost_per_thousand INT DEFAULT 500;
 ALTER TABLE novels ADD COLUMN IF NOT EXISTS start_pay_chapter_index INT DEFAULT 3;
+ALTER TABLE novels ADD COLUMN IF NOT EXISTS publish_status VARCHAR(20) NOT NULL DEFAULT 'published';
+UPDATE novels SET publish_status = 'offline' WHERE status = 'archived' AND publish_status != 'offline';
 
 -- 7. 章节表 (Chapters)
 CREATE TABLE IF NOT EXISTS chapters (
@@ -425,6 +428,12 @@ CREATE TABLE IF NOT EXISTS facebook_capi_logs (
 );
 
 -- 24. 性能索引构建 (Indexes)
+CREATE INDEX IF NOT EXISTS idx_novels_status_publish_views ON novels(status, publish_status, view_count DESC, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_novels_status_publish_created ON novels(status, publish_status, created_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_novels_genres_gin ON novels USING GIN (genres);
+CREATE INDEX IF NOT EXISTS idx_novels_title_trgm ON novels USING GIN (title gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS idx_novels_author_trgm ON novels USING GIN (author gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS idx_novels_synopsis_trgm ON novels USING GIN (synopsis gin_trgm_ops);
 CREATE INDEX IF NOT EXISTS idx_chapters_novel_index ON chapters(novel_id, chapter_index);
 CREATE INDEX IF NOT EXISTS idx_bookshelves_user ON bookshelves(user_id);
 CREATE INDEX IF NOT EXISTS idx_unlock_records_user_novel ON unlock_records(user_id, novel_id);

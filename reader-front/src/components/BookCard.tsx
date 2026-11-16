@@ -33,7 +33,9 @@ export const BookCard: React.FC<BookCardProps> = ({
           <div className="book-card-horizontal-meta">
             <span className="book-card-horizontal-author">{novel.author}</span>
             <div className="book-card-horizontal-stats">
-              <span className="book-card-horizontal-genre">{novel.genres[0]}</span>
+              {novel.genres?.[0] && (
+                <span className="book-card-horizontal-genre">{novel.genres[0]}</span>
+              )}
               <span>⭐ {novel.rating}</span>
             </div>
           </div>

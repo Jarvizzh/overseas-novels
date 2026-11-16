@@ -26,6 +26,8 @@ import (
 	"star-novel-cms/internal/user"
 )
 
+var buildVersion = "dev"
+
 func main() {
 	// 1. Load config
 	config.LoadConfig()
@@ -76,8 +78,9 @@ func main() {
 
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
-			"status": "UP",
-			"time":   time.Now().Format(time.RFC3339),
+			"status":  "UP",
+			"version": buildVersion,
+			"time":    time.Now().Format(time.RFC3339),
 		})
 	})
 
@@ -94,8 +97,14 @@ func main() {
 		}
 		log.Printf("CMS Content Storage initialized with driver: %s", contentStorage.StorageType())
 
+		coverStore, err := storage.NewCoverOSSStore(config.AppConfig)
+		if err != nil {
+			log.Fatalf("Failed to initialize cover OSS storage: %v", err)
+		}
+		log.Printf("CMS Cover OSS Storage enabled=%t", coverStore.IsEnabled())
+
 		novelRepo := novel.NewNovelRepository()
-		novelService := novel.NewNovelService(novelRepo, contentStorage)
+		novelService := novel.NewNovelService(novelRepo, contentStorage, coverStore)
 		novelHandler := novel.NewHandler(novelService)
 		novelHandler.RegisterRoutes(api)
 
@@ -105,7 +114,7 @@ func main() {
 		billingHandler.RegisterRoutes(api)
 
 		userRepo := user.NewUserRepository()
-		userService := user.NewUserService(userRepo)
+		userService := user.NewUserService(userRepo, coverStore)
 		userHandler := user.NewHandler(userService)
 		userHandler.RegisterRoutes(api)
 
@@ -137,7 +146,7 @@ func main() {
 	}
 
 	go func() {
-		log.Printf("Star Novel CMS Backend starting on port %s", config.AppConfig.Port)
+		log.Printf("Star Novel CMS Backend starting on port %s (version=%s)", config.AppConfig.Port, buildVersion)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Fatalf("listen: %s\n", err)
 		}

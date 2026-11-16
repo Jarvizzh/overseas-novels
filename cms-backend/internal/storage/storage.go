@@ -34,6 +34,9 @@ type ContentStorage interface {
 	// DeleteNovelContent removes all chapter content for a novel.
 	DeleteNovelContent(ctx context.Context, novelID int64) error
 
+	// DeleteNovelContentFrom removes chapter content for a novel starting at minChapterIndex (inclusive).
+	DeleteNovelContentFrom(ctx context.Context, novelID int64, minChapterIndex int) error
+
 	// BatchPutContent stores multiple chapters' content in batch or concurrently.
 	BatchPutContent(ctx context.Context, novelID int64, items []ChapterContentItem) error
 

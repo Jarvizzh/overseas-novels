@@ -2547,3 +2547,24 @@ This was the first victory or realization of the long path ahead. (Locked Chapte
   50
 ) ON CONFLICT (novel_id, chapter_index) DO UPDATE SET title = EXCLUDED.title, content = EXCLUDED.content, word_count = EXCLUDED.word_count, is_paid = EXCLUDED.is_paid, price = EXCLUDED.price;
 
+-- 4. 同步显式指定 ID 插入后的自增序列，避免后续新建记录主键冲突
+SELECT setval(
+    'novels_id_seq',
+    GREATEST(
+        (SELECT MAX(id) FROM novels),
+        (SELECT CASE WHEN is_called THEN last_value ELSE last_value - 1 END FROM novels_id_seq)
+    ),
+    true
+)
+WHERE EXISTS (SELECT 1 FROM novels);
+
+SELECT setval(
+    'recharge_templates_id_seq',
+    GREATEST(
+        (SELECT MAX(id) FROM recharge_templates),
+        (SELECT CASE WHEN is_called THEN last_value ELSE last_value - 1 END FROM recharge_templates_id_seq)
+    ),
+    true
+)
+WHERE EXISTS (SELECT 1 FROM recharge_templates);
+

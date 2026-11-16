@@ -27,9 +27,14 @@ function AppContent() {
 
   // Dynamic Novels State loaded from Backend API
   const [novels, setNovels] = useState<Novel[]>([]);
+  const [latestNovels, setLatestNovels] = useState<Novel[]>([]);
+  const [novelsPage, setNovelsPage] = useState(1);
+  const [hasMoreNovels, setHasMoreNovels] = useState(false);
+  const [loadingMoreNovels, setLoadingMoreNovels] = useState(false);
 
   // Personal Shelf Saved Books
   const [shelfBookIds, setShelfBookIds] = useState<number[]>([]);
+  const [shelfNovelsList, setShelfNovelsList] = useState<Novel[]>([]);
 
   // Reading Progress: { [bookId]: { chapterIndex, scrollOffsetPercentage, paragraphIndex } }
   const [readingProgress, setReadingProgress] = useState<{
@@ -70,6 +75,7 @@ function AppContent() {
       
       const shelfItems = (await api.getShelf()) || [];
       setShelfBookIds(shelfItems.map(item => item.novel_id));
+      setShelfNovelsList(shelfItems.map(item => item.novel).filter(Boolean));
       
       const progressMap: { [bookId: number]: { chapterIndex: number; scrollOffsetPercentage: number } } = {};
       shelfItems.forEach(item => {
@@ -160,9 +166,17 @@ function AppContent() {
 
     const loadNovels = async () => {
       try {
-        const list = await api.getNovels();
-        if (list && list.length > 0) {
-          setNovels(list);
+        const [popularList, newestList] = await Promise.all([
+          api.getNovels({ sort: 'popular', page: 1, limit: 50 }),
+          api.getNovels({ sort: 'latest', page: 1, limit: 12 }),
+        ]);
+        if (popularList) {
+          setNovels(popularList);
+          setNovelsPage(1);
+          setHasMoreNovels(popularList.length >= 50);
+        }
+        if (newestList) {
+          setLatestNovels(newestList);
         }
       } catch (err) {
         console.error("Failed to load novels catalog:", err);
@@ -270,24 +284,61 @@ function AppContent() {
     }
   }, [navigate]);
 
+  const handleLoadMoreNovels = useCallback(async () => {
+    if (loadingMoreNovels || !hasMoreNovels) return;
+    setLoadingMoreNovels(true);
+    try {
+      const nextPage = novelsPage + 1;
+      const batch = (await api.getNovels({ sort: 'popular', page: nextPage, limit: 50 })) || [];
+      setNovels((prev) => {
+        const seen = new Set(prev.map((n) => n.id));
+        const unique = batch.filter((n) => !seen.has(n.id));
+        return [...prev, ...unique];
+      });
+      setNovelsPage(nextPage);
+      setHasMoreNovels(batch.length >= 50);
+    } catch (err) {
+      console.error("Failed to load more novels:", err);
+    } finally {
+      setLoadingMoreNovels(false);
+    }
+  }, [loadingMoreNovels, hasMoreNovels, novelsPage]);
+
   // Manage adding/removing from shelf via API
   const handleToggleShelf = useCallback(async (bookId: number) => {
-    setShelfBookIds((prev) => {
-      const inShelf = prev.includes(bookId);
-      if (inShelf) {
-        api.removeFromShelf([bookId]).catch(err => console.error("Failed to remove from shelf:", err));
-        return prev.filter((id) => id !== bookId);
-      } else {
-        api.addToShelf(bookId).catch(err => console.error("Failed to add to shelf:", err));
-        return [...prev, bookId];
+    const inShelf = shelfBookIds.includes(bookId);
+    if (inShelf) {
+      setShelfBookIds((prev) => prev.filter((id) => id !== bookId));
+      setShelfNovelsList((list) => list.filter((n) => n.id !== bookId));
+      api.removeFromShelf([bookId]).catch(err => console.error("Failed to remove from shelf:", err));
+      return;
+    }
+
+    setShelfBookIds((prev) => (prev.includes(bookId) ? prev : [...prev, bookId]));
+    const known = novels.find((n) => n.id === bookId) || latestNovels.find((n) => n.id === bookId);
+    if (known) {
+      setShelfNovelsList((list) => (list.some((n) => n.id === bookId) ? list : [known, ...list]));
+    }
+    try {
+      await api.addToShelf(bookId);
+      if (!known) {
+        const detail = await api.getNovelDetail(bookId);
+        if (detail) {
+          setShelfNovelsList((list) => (list.some((n) => n.id === bookId) ? list : [detail, ...list]));
+        }
       }
-    });
-  }, []);
+    } catch (err) {
+      console.error("Failed to add to shelf:", err);
+      setShelfBookIds((prev) => prev.filter((id) => id !== bookId));
+      setShelfNovelsList((list) => list.filter((n) => n.id !== bookId));
+    }
+  }, [shelfBookIds, novels, latestNovels]);
 
   const handleRemoveMultipleFromShelf = useCallback(async (bookIds: number[]) => {
     try {
       await api.removeFromShelf(bookIds);
       setShelfBookIds((prev) => prev.filter((id) => !bookIds.includes(id)));
+      setShelfNovelsList((prev) => prev.filter((n) => !bookIds.includes(n.id)));
     } catch (err) {
       console.error("Failed to remove multiple books:", err);
     }
@@ -438,8 +489,8 @@ function AppContent() {
       
       <main className={isFullScreenPage ? 'page-container-full' : (isHomePage ? 'page-container-home' : 'page-container')}>
         <Routes>
-          <Route path="/" element={<Home novels={novels} onNavigate={navigateTo} userCoins={userCoins} />} />
-          <Route path="/shelf" element={<Shelf novels={novels} onNavigate={navigateTo} shelfBookIds={shelfBookIds} onRemoveFromShelf={handleRemoveMultipleFromShelf} readingProgress={readingProgress} />} />
+          <Route path="/" element={<Home novels={novels} latestNovels={latestNovels} hasMore={hasMoreNovels} loadingMore={loadingMoreNovels} onLoadMore={handleLoadMoreNovels} onNavigate={navigateTo} userCoins={userCoins} />} />
+          <Route path="/shelf" element={<Shelf novels={shelfNovelsList.length > 0 ? shelfNovelsList : novels} onNavigate={navigateTo} shelfBookIds={shelfBookIds} onRemoveFromShelf={handleRemoveMultipleFromShelf} readingProgress={readingProgress} />} />
           <Route path="/rewards" element={<Rewards onAddCoins={handleAddCoins} globalTheme={globalTheme} />} />
           <Route 
             path="/profile" 
@@ -461,6 +512,7 @@ function AppContent() {
                   localStorage.removeItem('auth-token');
                   setUser(null);
                   setShelfBookIds([]);
+                  setShelfNovelsList([]);
                   setReadingProgress({});
                   setUserCoins(0);
                   setTransactionHistory([]);

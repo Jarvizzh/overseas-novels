@@ -46,6 +46,7 @@ export const Reader: React.FC<ReaderProps> = ({
   const [isLocked, setIsLocked] = useState<boolean>(false);
   const [chapterPrice, setChapterPrice] = useState<number>(50);
   const [loading, setLoading] = useState(true);
+  const [novelError, setNovelError] = useState(false);
   const [currentChIndex, setCurrentChIndex] = useState(initialChapterIndex);
 
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -134,12 +135,13 @@ export const Reader: React.FC<ReaderProps> = ({
   }, []);
 
   // Tiered Hybrid Caching & SWR strategy:
-  // 1. Guaranteed Free Chapters (targetIdx < 2): Cache-First for 0ms instantaneous render.
+  // 1. Server-verified Free Chapters (knownChapter && !knownChapter.is_paid): Cache-First for instant render.
   // 2. Previously Unlocked Chapters: Cache-First + SWR background revalidation.
-  // 3. Unpurchased Paid Chapters: Network-First to strictly enforce server-side paywall & promo prices.
+  // 3. Unpurchased / Unverified Chapters: Network-First to strictly enforce server-side paywall & promo prices.
   const fetchChapterData = useCallback(
     async (nId: number, cIdx: number): Promise<ChapterContentResponse> => {
-      const isFreeChapter = cIdx < 2;
+      const knownChapter = chaptersRef.current.find((c) => c.novel_id === nId && c.chapter_index === cIdx);
+      const isFreeChapter = knownChapter ? !knownChapter.is_paid : false;
       const isLocallyUnlocked = unlockedBookChaptersRef.current.includes(`${nId}-${cIdx}`);
       const cached = await readerCache.getCachedChapter(nId, cIdx);
 
@@ -181,14 +183,23 @@ export const Reader: React.FC<ReaderProps> = ({
 
   // 1. Fetch novel metadata & chapters list
   useEffect(() => {
+    setNovelError(false);
+    setNovel(null);
+    setChapters([]);
+    setChapterDetail(null);
     const loadNovelMeta = async () => {
       try {
         const detail = await api.getNovelDetail(novelId);
+        if (!detail) {
+          setNovelError(true);
+          return;
+        }
         setNovel(detail);
         const chList = await api.getChaptersList(novelId);
-        setChapters(chList);
+        setChapters(chList || []);
       } catch (err) {
         console.error("Failed to load novel metadata:", err);
+        setNovelError(true);
       }
     };
     loadNovelMeta();
@@ -221,7 +232,7 @@ export const Reader: React.FC<ReaderProps> = ({
 
         setChapterDetail(res.chapter);
         setIsLocked(res.locked);
-        setChapterPrice(res.price || 50);
+        setChapterPrice(res.price ?? 0);
 
         // Background prefetch next 2 chapters into IndexedDB
         readerCache.prefetchChapters(novelId, targetIdx, chaptersRef.current.length || 100, (nId, idx) =>
@@ -352,6 +363,15 @@ export const Reader: React.FC<ReaderProps> = ({
     onToggleShelf(novelId);
     showToast(isInShelf ? "Removed from shelf" : "Added to shelf!", "success");
   };
+
+  if (novelError) {
+    return (
+      <div className="scroll-container animate-fade-in" style={{ textAlign: 'center', paddingTop: '80px', color: 'var(--text-secondary)' }}>
+        <p style={{ marginBottom: '16px' }}>This book is unavailable or has been taken offline.</p>
+        <button type="button" className="shelf-empty-btn" onClick={() => onNavigate('home')}>Go back store</button>
+      </div>
+    );
+  }
 
   if (!novel) {
     return (

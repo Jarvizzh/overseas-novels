@@ -19,19 +19,20 @@ type User struct {
 
 // Novel represents novel metadata
 type Novel struct {
-	ID                  int64     `json:"id" db:"id"`
-	Title               string    `json:"title" db:"title"`
-	Author              string    `json:"author" db:"author"`
-	CoverURL            string    `json:"cover" db:"cover_url"`
-	Rating              float64   `json:"rating" db:"rating"`
-	Status              string    `json:"status" db:"status"` // Ongoing / Completed
-	Synopsis            string    `json:"synopsis" db:"synopsis"`
-	Genres              []string  `json:"genres" db:"genres"`
-	WordCount           int       `json:"words" db:"word_count"`
-	ViewCount           int64     `json:"views" db:"view_count"`
-	CoinCostPerThousand *int      `json:"coin_cost_per_thousand" db:"coin_cost_per_thousand"`
+	ID                   int64     `json:"id" db:"id"`
+	Title                string    `json:"title" db:"title"`
+	Author               string    `json:"author" db:"author"`
+	CoverURL             string    `json:"cover" db:"cover_url"`
+	Rating               float64   `json:"rating" db:"rating"`
+	Status               string    `json:"status" db:"status"` // Ongoing / Completed / archived
+	PublishStatus        string    `json:"publish_status" db:"publish_status"` // draft / published / offline
+	Synopsis             string    `json:"synopsis" db:"synopsis"`
+	Genres               []string  `json:"genres" db:"genres"`
+	WordCount            int       `json:"words" db:"word_count"`
+	ViewCount            int64     `json:"views" db:"view_count"`
+	CoinCostPerThousand  *int      `json:"coin_cost_per_thousand" db:"coin_cost_per_thousand"`
 	StartPayChapterIndex int       `json:"start_pay_chapter_index" db:"start_pay_chapter_index"`
-	CreatedAt           time.Time `json:"created_at" db:"created_at"`
+	CreatedAt            time.Time `json:"created_at" db:"created_at"`
 }
 
 // Chapter represents a chapter of a novel

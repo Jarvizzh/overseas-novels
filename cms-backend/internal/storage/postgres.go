@@ -50,6 +50,10 @@ func (s *PostgresContentStorage) DeleteNovelContent(ctx context.Context, novelID
 	return nil
 }
 
+func (s *PostgresContentStorage) DeleteNovelContentFrom(ctx context.Context, novelID int64, minChapterIndex int) error {
+	return nil
+}
+
 func (s *PostgresContentStorage) BatchPutContent(ctx context.Context, novelID int64, items []ChapterContentItem) error {
 	if len(items) == 0 {
 		return nil
