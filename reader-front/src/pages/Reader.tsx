@@ -143,10 +143,10 @@ export const Reader: React.FC<ReaderProps> = ({
     isVipRef.current = isVip;
   }, [isVip]);
 
-  // Typography & surface settings (default: Humanist Serif + Warm Paper)
+  // Typography & surface settings (default: Humanist Serif 20px + Warm Paper)
   const [fontSize, setFontSize] = useState<number>(() => {
-    const parsed = parseInt(localStorage.getItem('reader-font-size') || '18', 10);
-    return Number.isNaN(parsed) ? 18 : Math.min(28, Math.max(14, parsed));
+    const parsed = parseInt(localStorage.getItem('reader-font-size') || '20', 10);
+    return Number.isNaN(parsed) ? 20 : Math.min(28, Math.max(14, parsed));
   });
   const [theme, setTheme] = useState<string>(() => normalizeReaderTheme(localStorage.getItem('reader-theme')));
   const [fontFamily, setFontFamily] = useState<ReaderFontFamily>(() => {
@@ -554,7 +554,6 @@ export const Reader: React.FC<ReaderProps> = ({
   }
 
   const currentChapterTitle = chapterDetail?.title || chapters[currentChIndex]?.title || `Chapter ${currentChIndex + 1}`;
-  const totalChaptersCount = chapters.length || 1;
   const paragraphs = chapterDetail?.content ? splitParagraphs(chapterDetail.content) : [];
 
   return (
@@ -662,28 +661,7 @@ export const Reader: React.FC<ReaderProps> = ({
           </div>
         ) : (
           <article className="reader-article">
-            <div className="reader-chapter-eyebrow">
-              Chapter {currentChIndex + 1} of {totalChaptersCount}
-            </div>
-            <header
-              style={{
-                borderBottom: '1px solid var(--reader-border)',
-                paddingBottom: '16px',
-                marginBottom: '28px',
-              }}
-            >
-              <h1
-                className="reader-chapter-title"
-                style={{ borderBottom: 'none', paddingBottom: 0, marginBottom: 0 }}
-              >
-                {currentChapterTitle}
-              </h1>
-              {chapterDetail?.word_count ? (
-                <div className="reader-chapter-meta">
-                  {chapterDetail.word_count.toLocaleString()} words
-                </div>
-              ) : null}
-            </header>
+            <h1 className="reader-chapter-title">{currentChapterTitle}</h1>
 
             {paragraphs.map((paragraph, pIdx) => (
               <p key={pIdx} data-paragraph-index={pIdx} className="reader-text-paragraph">
