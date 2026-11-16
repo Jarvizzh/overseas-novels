@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { Search as SearchIcon, Star, Flame, ArrowRight } from 'lucide-react';
 import type { Novel } from '../utils/api';
 import { BookCard } from '../components/BookCard';
 import { GoldCoin } from '../components/GoldCoin';
@@ -9,7 +10,7 @@ interface HomeProps {
   hasMore?: boolean;
   loadingMore?: boolean;
   onLoadMore?: () => void;
-  onNavigate: (page: string, params?: any) => void;
+  onNavigate: (page: string, params?: Record<string, unknown>) => void;
   userCoins: number;
 }
 
@@ -24,65 +25,89 @@ export const Home: React.FC<HomeProps> = ({
 }) => {
   const [activeTab, setActiveTab] = useState<'discover' | 'hot'>('discover');
 
-  // Format views count (e.g. 2.4M, 98k)
   const formatViews = (views: number) => {
-    if (views >= 1000000) return (views / 1000000).toFixed(1) + 'M';
-    if (views >= 1000) return (views / 1000).toFixed(0) + 'k';
+    if (views >= 1000000) return `${(views / 1000000).toFixed(1)}M`;
+    if (views >= 1000) return `${Math.round(views / 1000)}k`;
     return String(views);
   };
 
-  // For the HOT tab, sort novels by views (popularity)
-  const getRankedNovels = () => {
-    return [...novels].sort((a, b) => b.views - a.views);
-  };
+  const rankedNovels = [...novels].sort((a, b) => b.views - a.views);
+  const spotlightNovels = novels.slice(0, 4);
 
   return (
     <div className="home-page-layout animate-fade-in">
-      {/* Custom Sticky Header with Search Box & Wallet & Tabs */}
-      <div className="home-sticky-header">
-        {/* Top Row: Search input + Coin Bubble */}
+      {/* Mobile Sticky Header (< 768px) */}
+      <div className="home-sticky-header glass-panel">
         <div className="home-header-top-row">
-          <div 
-            className="home-search-input-fake" 
-            onClick={() => onNavigate('search')}
-          >
-            <svg 
-              xmlns="http://www.w3.org/2000/svg" 
-              fill="none" 
-              viewBox="0 0 24 24" 
-              strokeWidth={2.5} 
-              stroke="currentColor" 
-              className="home-search-icon"
-            >
-              <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.637 10.637z" />
-            </svg>
-            <span className="home-search-placeholder">Search book name/author</span>
-          </div>
+          <span className="home-brand-mobile">StarNovel</span>
 
-          <div 
-            className="home-header-coin-bubble" 
+          <button
+            type="button"
+            className="home-search-input-fake"
+            onClick={() => onNavigate('search')}
+            aria-label="Search books or authors"
+          >
+            <SearchIcon size={15} strokeWidth={1.75} aria-hidden="true" style={{ flexShrink: 0 }} />
+            <span className="home-search-placeholder">Title or author...</span>
+          </button>
+
+          <button
+            type="button"
+            className="coin-pill-btn"
             onClick={() => onNavigate('recharge')}
+            aria-label={`Wallet balance ${userCoins} coins, open top up`}
           >
             <GoldCoin size={14} />
-            <span className="home-header-coin-count">{userCoins}</span>
-            <span className="home-header-coin-plus">+</span>
-          </div>
+            <span>{userCoins.toLocaleString()}</span>
+            <span className="coin-pill-plus">+</span>
+          </button>
         </div>
 
-        {/* Navigation Tabs Row: DISCOVER | HOT */}
-        <div className="home-header-tabs-row">
-          <button 
+        <div className="home-header-tabs-row" role="tablist" aria-label="Store sections">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={activeTab === 'discover'}
             className={`home-header-tab-btn ${activeTab === 'discover' ? 'active' : ''}`}
             onClick={() => setActiveTab('discover')}
           >
-            DISCOVER
+            For You
             {activeTab === 'discover' && <span className="home-header-tab-indicator" />}
           </button>
-          <button 
+          <button
+            type="button"
+            role="tab"
+            aria-selected={activeTab === 'hot'}
             className={`home-header-tab-btn ${activeTab === 'hot' ? 'active' : ''}`}
             onClick={() => setActiveTab('hot')}
           >
-            HOT
+            Top Charts
+            {activeTab === 'hot' && <span className="home-header-tab-indicator" />}
+          </button>
+        </div>
+      </div>
+
+      {/* Tablet / Desktop Sub-Header Tabs (>= 768px) */}
+      <div className="home-desktop-tabs-wrap">
+        <div className="sn-shell-container home-header-tabs-row" role="tablist" aria-label="Store sections">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={activeTab === 'discover'}
+            className={`home-header-tab-btn ${activeTab === 'discover' ? 'active' : ''}`}
+            onClick={() => setActiveTab('discover')}
+          >
+            For You
+            {activeTab === 'discover' && <span className="home-header-tab-indicator" />}
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={activeTab === 'hot'}
+            className={`home-header-tab-btn ${activeTab === 'hot' ? 'active' : ''}`}
+            onClick={() => setActiveTab('hot')}
+          >
+            Top Charts
             {activeTab === 'hot' && <span className="home-header-tab-indicator" />}
           </button>
         </div>
@@ -90,131 +115,174 @@ export const Home: React.FC<HomeProps> = ({
 
       {/* Main Scroll Content */}
       <div className="home-scroll-content">
-        {activeTab === 'discover' ? (
-          <div className="discover-tab-content">
-            {/* Featured Banner Slider (Styled exactly like target's BannerInlineCard) */}
-            <h2 className="section-title">
-              <span>Featured Banner</span>
-            </h2>
-            <div className="hero-slider">
-              {novels.slice(0, 4).map((novel) => (
-                <div 
-                  key={novel.id} 
-                  className="banner-inline-card"
-                  onClick={() => onNavigate('detail', { id: novel.id })}
-                >
-                  <div className="banner-inline-card__bg" style={{ backgroundImage: `url(${novel.cover})` }} />
-                  <div className="banner-inline-card__mask" />
-                  <div className="banner-inline-card__inner">
-                    <div className="banner-inline-card__cover">
-                      <img 
-                        src={novel.cover} 
-                        alt={novel.title} 
-                        style={{ width: '100%', height: '100%', objectFit: 'cover' }} 
-                      />
-                    </div>
-                    <div className="banner-inline-card__info">
-                      <div className="banner-inline-card__title">{novel.title}</div>
-                      <div className="banner-inline-card__desc">{novel.synopsis}</div>
-                      <div className="banner-inline-card__tags">
-                        {(novel.genres || []).slice(0, 3).map((tag, i) => (
-                          <span key={i} className="banner-inline-card__tag-item">{tag}</span>
-                        ))}
-                      </div>
+        <div className="sn-shell-container">
+          {activeTab === 'discover' ? (
+            <div>
+              {spotlightNovels.length > 0 && (
+                <section style={{ marginBottom: '12px' }}>
+                  <div className="section-header-row">
+                    <div>
+                      <div className="section-eyebrow">Editor&apos;s Picks</div>
+                      <h2 className="section-title">Featured Stories</h2>
                     </div>
                   </div>
-                </div>
-              ))}
-            </div>
+                  <div className="hero-slider">
+                    {spotlightNovels.map((novel) => (
+                      <article
+                        key={novel.id}
+                        className="spotlight-card"
+                        onClick={() => onNavigate('detail', { id: novel.id })}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' || e.key === ' ') {
+                            e.preventDefault();
+                            onNavigate('detail', { id: novel.id });
+                          }
+                        }}
+                        role="button"
+                        tabIndex={0}
+                      >
+                        <img
+                          src={novel.cover}
+                          alt={novel.title}
+                          className="spotlight-card-cover"
+                        />
+                        <div className="spotlight-card-info">
+                          <div className="spotlight-card-meta">
+                            <span>{novel.genres?.[0] || 'Fiction'}</span>
+                            <span>·</span>
+                            <span className="spotlight-rating">
+                              <Star size={11} fill="currentColor" strokeWidth={0} aria-hidden="true" />
+                              <span>{novel.rating}</span>
+                            </span>
+                          </div>
+                          <h3 className="spotlight-card-title">{novel.title}</h3>
+                          <p className="spotlight-card-desc">{novel.synopsis}</p>
+                          <div className="spotlight-card-cta">
+                            <span>Read Story</span>
+                            <ArrowRight size={13} strokeWidth={2} aria-hidden="true" />
+                          </div>
+                        </div>
+                      </article>
+                    ))}
+                  </div>
+                </section>
+              )}
 
-            {latestNovels.length > 0 && (
-              <>
-                <h2 className="section-title">
-                  <span>New Arrivals</span>
-                </h2>
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(100px, 1fr))', gap: '12px', marginBottom: '20px' }}>
-                  {latestNovels.slice(0, 6).map((novel) => (
+              {latestNovels.length > 0 && (
+                <section style={{ marginBottom: '32px' }}>
+                  <div className="section-header-row">
+                    <h2 className="section-title">New Releases</h2>
+                    <button
+                      type="button"
+                      className="section-sub-link"
+                      onClick={() => onNavigate('search')}
+                    >
+                      Browse all
+                    </button>
+                  </div>
+                  <div className="book-grid">
+                    {latestNovels.slice(0, 6).map((novel) => (
+                      <BookCard
+                        key={`new-${novel.id}`}
+                        novel={novel}
+                        onClick={() => onNavigate('detail', { id: novel.id })}
+                      />
+                    ))}
+                  </div>
+                </section>
+              )}
+
+              <section>
+                <div className="section-header-row">
+                  <h2 className="section-title">Curated For You</h2>
+                </div>
+                <div className="book-horizontal-list">
+                  {novels.map((novel) => (
                     <BookCard
-                      key={`new-${novel.id}`}
+                      key={novel.id}
                       novel={novel}
+                      layout="horizontal"
                       onClick={() => onNavigate('detail', { id: novel.id })}
                     />
                   ))}
                 </div>
-              </>
-            )}
 
-            {/* Editor's Choice Recommendations */}
-            <h2 className="section-title">
-              <span>Recommendations</span>
-            </h2>
-            <div style={{ display: 'flex', flexDirection: 'column' }}>
-              {novels.map((novel) => (
-                <BookCard 
-                  key={novel.id} 
-                  novel={novel} 
-                  layout="horizontal" 
-                  onClick={() => onNavigate('detail', { id: novel.id })}
-                />
-              ))}
+                {hasMore && onLoadMore && (
+                  <div style={{ display: 'flex', justifyContent: 'center', marginTop: '20px' }}>
+                    <button
+                      type="button"
+                      className="btn-cta-secondary"
+                      disabled={loadingMore}
+                      onClick={onLoadMore}
+                    >
+                      {loadingMore ? 'Loading...' : 'Load More Stories'}
+                    </button>
+                  </div>
+                )}
+              </section>
             </div>
-            {hasMore && onLoadMore && (
-              <div style={{ display: 'flex', justifyContent: 'center', marginTop: '12px', marginBottom: '16px' }}>
-                <button
-                  type="button"
-                  className="shelf-empty-btn"
-                  disabled={loadingMore}
-                  onClick={onLoadMore}
-                >
-                  {loadingMore ? 'Loading...' : 'Load More Books'}
-                </button>
+          ) : (
+            <section>
+              <div className="section-header-row">
+                <div>
+                  <div className="section-eyebrow">Most Read</div>
+                  <h2 className="section-title">Popular Rankings</h2>
+                </div>
               </div>
-            )}
-          </div>
-        ) : (
-          <div className="hot-tab-content">
-            <h2 className="section-title">
-              <span>Popular Rankings</span>
-            </h2>
-            
-            <div className="rank-list">
-              {getRankedNovels().map((novel, index) => {
-                const rankNum = index + 1;
-                let rankClass = 'rank-number-other';
-                if (rankNum === 1) rankClass = 'rank-number-1';
-                else if (rankNum === 2) rankClass = 'rank-number-2';
-                else if (rankNum === 3) rankClass = 'rank-number-3';
 
-                return (
-                  <div 
-                    key={novel.id} 
-                    className="rank-item"
-                    onClick={() => onNavigate('detail', { id: novel.id })}
-                  >
-                    <div className={`rank-number-box ${rankClass}`}>
-                      {rankNum}
-                    </div>
-                    
-                    <img src={novel.cover} alt={novel.title} className="rank-cover" />
-                    
-                    <div className="rank-info">
-                      <h3 className="rank-title">{novel.title}</h3>
-                      <p className="rank-author">By {novel.author}</p>
-                      
-                      <div className="rank-meta">
-                        <span className="rank-genre">{novel.genres?.[0] || 'Fiction'}</span>
-                        <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-                          <span className="rank-score">⭐ {novel.rating}</span>
-                          <span className="rank-views">🔥 {formatViews(novel.views)}</span>
+              <div className="rank-list">
+                {rankedNovels.map((novel, index) => {
+                  const rankNum = index + 1;
+                  let rankClass = 'rank-number-other';
+                  if (rankNum === 1) rankClass = 'rank-number-1';
+                  else if (rankNum === 2) rankClass = 'rank-number-2';
+                  else if (rankNum === 3) rankClass = 'rank-number-3';
+
+                  return (
+                    <article
+                      key={novel.id}
+                      className="rank-item"
+                      onClick={() => onNavigate('detail', { id: novel.id })}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault();
+                          onNavigate('detail', { id: novel.id });
+                        }
+                      }}
+                      role="button"
+                      tabIndex={0}
+                    >
+                      <div className={`rank-number-box ${rankClass}`}>
+                        {rankNum}
+                      </div>
+
+                      <img src={novel.cover} alt={novel.title} className="rank-cover" loading="lazy" />
+
+                      <div className="rank-info">
+                        <h3 className="rank-title">{novel.title}</h3>
+                        <p className="rank-author">By {novel.author}</p>
+
+                        <div className="rank-meta">
+                          <span className="rank-genre">{novel.genres?.[0] || 'Fiction'}</span>
+                          <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
+                            <span className="rating-inline">
+                              <Star size={11} fill="currentColor" strokeWidth={0} aria-hidden="true" />
+                              <span>{novel.rating}</span>
+                            </span>
+                            <span className="rank-views">
+                              <Flame size={12} strokeWidth={1.8} aria-hidden="true" />
+                              <span>{formatViews(novel.views)}</span>
+                            </span>
+                          </div>
                         </div>
                       </div>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        )}
+                    </article>
+                  );
+                })}
+              </div>
+            </section>
+          )}
+        </div>
       </div>
     </div>
   );

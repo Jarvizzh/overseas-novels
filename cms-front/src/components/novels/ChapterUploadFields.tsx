@@ -1,5 +1,5 @@
-import React, { useId } from 'react';
-import { FileText, HelpCircle, X } from 'lucide-react';
+import React, { useId, useState } from 'react';
+import { CheckCircle2, FileText, HelpCircle, Upload, X } from 'lucide-react';
 
 export const DEFAULT_CHAPTER_DELIMITER_REGEX = `(?i)(chapter\\s+\\d+|第[一二三四五六七八九十百千万零两\\d]+章)`;
 
@@ -17,6 +17,21 @@ interface ChapterUploadFieldsProps {
   isCreateMode?: boolean;
 }
 
+function splitFilenameParts(name: string): { stem: string; ext: string } {
+  const dotIdx = name.lastIndexOf('.');
+  if (dotIdx <= 0 || dotIdx === name.length - 1) {
+    return { stem: name, ext: '' };
+  }
+  return { stem: name.slice(0, dotIdx), ext: name.slice(dotIdx) };
+}
+
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024 * 1024) {
+    return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+  }
+  return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
+}
+
 export const ChapterUploadFields: React.FC<ChapterUploadFieldsProps> = ({
   importType,
   onImportTypeChange,
@@ -30,50 +45,71 @@ export const ChapterUploadFields: React.FC<ChapterUploadFieldsProps> = ({
   disabled = false,
   isCreateMode = false,
 }) => {
+  const [isDragging, setIsDragging] = useState(false);
+
   const fileInputId = useId();
+  const hintId = useId();
   const regexInputId = useId();
   const guideId = useId();
   const radioName = useId();
+  const localInputRef = React.useRef<HTMLInputElement>(null);
+  const resolvedInputRef = fileInputRef || localInputRef;
+
+  const expectedExt = importType === 'single_txt' ? '.txt' : '.zip';
 
   const clearSelectedFile = () => {
     onFileChange(null);
-    if (fileInputRef?.current) {
-      fileInputRef.current.value = '';
+    if (resolvedInputRef.current) {
+      resolvedInputRef.current.value = '';
     }
   };
+
+  const handleSelectedFile = (candidate: File | null | undefined) => {
+    if (!candidate) return;
+    const lowerName = candidate.name.toLowerCase();
+    if (!lowerName.endsWith(expectedExt)) {
+      window.showToast?.(`当前导入模式仅支持 ${expectedExt} 格式文件`, 'error');
+      return;
+    }
+    onFileChange(candidate);
+  };
+
+  const fileParts = file ? splitFilenameParts(file.name) : null;
 
   return (
     <div>
       <fieldset style={{ border: 'none', marginBottom: '14px', padding: 0 }}>
-        <legend style={{ display: 'block', fontSize: '0.8rem', color: 'hsl(var(--text-secondary))', marginBottom: '6px' }}>
+        <legend style={{ display: 'block', fontSize: '0.8rem', color: 'hsl(var(--text-secondary))', marginBottom: '8px' }}>
           导入类型
         </legend>
-        <div style={{ display: 'flex', gap: '16px', flexWrap: 'wrap' }}>
-          <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.85rem', cursor: disabled ? 'not-allowed' : 'pointer' }}>
+        <div style={{ display: 'flex', gap: '18px', flexWrap: 'wrap' }}>
+          <label style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', fontSize: '0.85rem', cursor: disabled ? 'not-allowed' : 'pointer' }}>
             <input
               type="radio"
               name={radioName}
               checked={importType === 'single_txt'}
               disabled={disabled}
+              style={{ accentColor: 'hsl(var(--primary))' }}
               onChange={() => {
                 onImportTypeChange('single_txt');
                 clearSelectedFile();
               }}
             />
-            单个大 TXT 文件 (正则分章)
+            <span>单个大 TXT 文件 (正则分章)</span>
           </label>
-          <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.85rem', cursor: disabled ? 'not-allowed' : 'pointer' }}>
+          <label style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', fontSize: '0.85rem', cursor: disabled ? 'not-allowed' : 'pointer' }}>
             <input
               type="radio"
               name={radioName}
               checked={importType === 'zip'}
               disabled={disabled}
+              style={{ accentColor: 'hsl(var(--primary))' }}
               onChange={() => {
                 onImportTypeChange('zip');
                 clearSelectedFile();
               }}
             />
-            ZIP 压缩包 (内含多个 TXT)
+            <span>ZIP 压缩包 (内含多个 TXT)</span>
           </label>
         </div>
       </fieldset>
@@ -81,7 +117,7 @@ export const ChapterUploadFields: React.FC<ChapterUploadFieldsProps> = ({
       <div
         id={guideId}
         style={{
-          marginBottom: '14px',
+          marginBottom: '16px',
           padding: '12px 14px',
           borderRadius: '8px',
           border: '1px solid hsl(var(--border))',
@@ -132,72 +168,166 @@ export const ChapterUploadFields: React.FC<ChapterUploadFieldsProps> = ({
         )}
       </div>
 
-      <div style={{ marginBottom: importType === 'single_txt' ? '14px' : 0 }}>
-        <label htmlFor={fileInputId} style={{ display: 'block', fontSize: '0.8rem', color: 'hsl(var(--text-secondary))', marginBottom: '6px' }}>
-          选择章节文件 ({importType === 'single_txt' ? '.txt' : '.zip'}) {isCreateMode && !required ? '（可选，也可创建后在详情页补传）' : ''}
-        </label>
-        <input
-          key={importType}
-          ref={fileInputRef}
-          id={fileInputId}
-          name="chapter_file"
-          type="file"
-          accept={importType === 'single_txt' ? '.txt' : '.zip'}
-          aria-describedby={guideId}
-          disabled={disabled}
-          onChange={(e) => onFileChange(e.target.files ? e.target.files[0] : null)}
-          required={required}
+      <div style={{ marginBottom: importType === 'single_txt' ? '16px' : 0 }}>
+        <label
+          htmlFor={fileInputId}
           style={{
-            width: '100%',
-            padding: '12px',
-            border: '1px dashed hsl(var(--border))',
-            borderRadius: '8px',
-            backgroundColor: 'hsl(var(--bg-card))',
-            cursor: disabled ? 'not-allowed' : 'pointer',
+            display: 'block',
+            fontSize: '0.8rem',
+            lineHeight: 1.5,
+            color: 'hsl(var(--text-secondary))',
+            marginBottom: '8px',
           }}
-        />
-        {file && (
+        >
+          选择章节文件 ({expectedExt}){isCreateMode && !required ? '（可选，也可创建后在详情页补传）' : ''}
+        </label>
+
+        <div
+          className="file-upload-dropzone"
+          onDragOver={(e) => {
+            e.preventDefault();
+            if (!disabled) setIsDragging(true);
+          }}
+          onDragLeave={(e) => {
+            e.preventDefault();
+            setIsDragging(false);
+          }}
+          onDrop={(e) => {
+            e.preventDefault();
+            setIsDragging(false);
+            if (!disabled) {
+              handleSelectedFile(e.dataTransfer.files?.[0]);
+            }
+          }}
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: '14px',
+            padding: '14px 16px',
+            borderRadius: '10px',
+            border: isDragging
+              ? '1px dashed hsl(var(--primary))'
+              : file
+                ? '1px solid hsl(var(--primary) / 0.4)'
+                : '1px dashed hsl(var(--border))',
+            backgroundColor: isDragging
+              ? 'hsl(var(--primary) / 0.06)'
+              : 'hsl(var(--bg-surface) / 0.7)',
+            transition: 'border-color 0.2s ease, background-color 0.2s ease',
+          }}
+        >
+          <input
+            key={importType}
+            ref={resolvedInputRef}
+            id={fileInputId}
+            name="chapter_file"
+            type="file"
+            className="visually-hidden"
+            accept={expectedExt}
+            aria-describedby={`${guideId} ${hintId}`}
+            disabled={disabled}
+            onChange={(e) => handleSelectedFile(e.target.files?.[0])}
+            required={required}
+          />
+
           <div
             style={{
-              marginTop: '8px',
+              width: '42px',
+              height: '42px',
+              borderRadius: '10px',
+              backgroundColor: file ? 'hsl(var(--primary) / 0.14)' : 'hsl(var(--bg-card))',
+              border: '1px solid hsl(var(--border))',
               display: 'flex',
               alignItems: 'center',
-              justifyContent: 'space-between',
-              gap: '8px',
-              padding: '6px 10px',
-              borderRadius: '6px',
-              backgroundColor: 'hsl(var(--primary) / 0.08)',
-              fontSize: '0.78rem',
-              color: 'hsl(var(--text-primary))',
+              justifyContent: 'center',
+              color: file ? 'hsl(var(--primary))' : 'hsl(var(--text-muted))',
+              flexShrink: 0,
             }}
           >
-            <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              <FileText size={14} aria-hidden="true" style={{ flexShrink: 0, color: 'hsl(var(--primary))' }} />
-              <span title={file.name} style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                {file.name} ({(file.size / 1024 / 1024).toFixed(2)} MB)
-              </span>
-            </span>
-            <button
-              type="button"
-              disabled={disabled}
-              onClick={clearSelectedFile}
-              aria-label="移除已选章节文件"
-              style={{
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: '2px',
-                padding: '2px 6px',
-                borderRadius: '4px',
-                color: 'hsl(var(--text-secondary))',
-                cursor: disabled ? 'not-allowed' : 'pointer',
-                flexShrink: 0,
-              }}
-            >
-              <X size={13} aria-hidden="true" />
-              <span>清除</span>
-            </button>
+            <FileText size={20} aria-hidden="true" />
           </div>
-        )}
+
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap', marginBottom: '6px' }}>
+              <button
+                type="button"
+                className="btn-secondary"
+                disabled={disabled}
+                onClick={() => resolvedInputRef.current?.click()}
+                style={{ gap: '6px', padding: '6px 12px', fontSize: '0.8rem' }}
+              >
+                <Upload size={14} aria-hidden="true" />
+                <span>{file ? '更换章节文件' : `选择 ${expectedExt} 文件`}</span>
+              </button>
+
+              {file && fileParts && (
+                <>
+                  <span
+                    role="status"
+                    style={{
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: '4px',
+                      fontSize: '0.78rem',
+                      color: 'hsl(var(--accent-green))',
+                      fontWeight: 500,
+                    }}
+                  >
+                    <CheckCircle2 size={14} aria-hidden="true" />
+                    <span>已选文件</span>
+                  </span>
+                  <button
+                    type="button"
+                    disabled={disabled}
+                    onClick={clearSelectedFile}
+                    aria-label="移除已选章节文件"
+                    style={{
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: '3px',
+                      padding: '3px 8px',
+                      borderRadius: '6px',
+                      fontSize: '0.75rem',
+                      color: 'hsl(var(--text-secondary))',
+                      border: '1px solid hsl(var(--border))',
+                      cursor: disabled ? 'not-allowed' : 'pointer',
+                    }}
+                  >
+                    <X size={12} aria-hidden="true" />
+                    <span>移除</span>
+                  </button>
+                </>
+              )}
+            </div>
+
+            {file && fileParts ? (
+              <div
+                id={hintId}
+                title={file.name}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '8px',
+                  fontSize: '0.78rem',
+                  color: 'hsl(var(--text-primary))',
+                  minWidth: 0,
+                }}
+              >
+                <span style={{ display: 'flex', whiteSpace: 'nowrap', minWidth: 0, flex: '0 1 auto' }}>
+                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{fileParts.stem}</span>
+                  <span>{fileParts.ext}</span>
+                </span>
+                <span style={{ color: 'hsl(var(--text-muted))', flexShrink: 0 }}>
+                  ({formatFileSize(file.size)})
+                </span>
+              </div>
+            ) : (
+              <p id={hintId} style={{ fontSize: '0.75rem', color: 'hsl(var(--text-muted))', lineHeight: 1.5, margin: 0 }}>
+                点击按钮选择文件，或直接将 UTF-8 编码的 <code>{expectedExt}</code> 文件拖拽到此处
+              </p>
+            )}
+          </div>
+        </div>
       </div>
 
       {importType === 'single_txt' && (

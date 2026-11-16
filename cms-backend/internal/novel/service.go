@@ -917,7 +917,7 @@ func (s *novelService) UpdateSettings(ctx context.Context, configs map[string]st
 	defer tx.Rollback(ctx)
 
 	for k, v := range configs {
-		if k == "apply_to_all_novels" {
+		if k == "apply_to_all_novels" || k == "apply_coin_cost_to_all_novels" || k == "apply_start_pay_to_all_novels" {
 			continue
 		}
 		err := s.repo.UpdateSettingTx(ctx, tx, k, v)
@@ -931,21 +931,12 @@ func (s *novelService) UpdateSettings(ctx context.Context, configs map[string]st
 		return err
 	}
 
-	startPay := 3
-	if val, ok := configs["global_start_pay_chapter_index"]; ok {
-		startPay, _ = strconv.Atoi(val)
-	} else {
-		allSettings, _ := s.repo.GetSettings(ctx)
-		if dbVal, ok := allSettings["global_start_pay_chapter_index"]; ok {
-			if parsed, convErr := strconv.Atoi(strings.TrimSpace(dbVal)); convErr == nil && parsed > 0 {
-				startPay = parsed
-			}
-		}
-	}
+	coinVal, coinUpdated := configs["global_coin_cost_per_thousand"]
+	startPayVal, startPayUpdated := configs["global_start_pay_chapter_index"]
 
 	costPerThousand := 500
-	if val, ok := configs["global_coin_cost_per_thousand"]; ok {
-		costPerThousand, _ = strconv.Atoi(val)
+	if coinUpdated {
+		costPerThousand, _ = strconv.Atoi(coinVal)
 	} else {
 		allSettings, _ := s.repo.GetSettings(ctx)
 		if dbVal, ok := allSettings["global_coin_cost_per_thousand"]; ok {
@@ -955,14 +946,42 @@ func (s *novelService) UpdateSettings(ctx context.Context, configs map[string]st
 		}
 	}
 
-	if configs["apply_to_all_novels"] != "false" {
-		if startPay > 0 && costPerThousand >= 0 {
-			if err := s.repo.BatchUpdateAllNovelChapterPrices(ctx, startPay, costPerThousand); err != nil {
+	startPay := 3
+	if startPayUpdated {
+		startPay, _ = strconv.Atoi(startPayVal)
+	} else {
+		allSettings, _ := s.repo.GetSettings(ctx)
+		if dbVal, ok := allSettings["global_start_pay_chapter_index"]; ok {
+			if parsed, convErr := strconv.Atoi(strings.TrimSpace(dbVal)); convErr == nil && parsed > 0 {
+				startPay = parsed
+			}
+		}
+	}
+
+	parseScopeFlag := func(specificKey string) bool {
+		if v, ok := configs[specificKey]; ok {
+			return strings.TrimSpace(v) == "true"
+		}
+		if v, ok := configs["apply_to_all_novels"]; ok {
+			return strings.TrimSpace(v) == "true"
+		}
+		return false
+	}
+
+	if coinUpdated {
+		if parseScopeFlag("apply_coin_cost_to_all_novels") {
+			if err := s.repo.BatchUpdateAllNovelCoinCost(ctx, costPerThousand); err != nil {
+				return err
+			}
+		} else {
+			if err := s.repo.BatchUpdateInheritedNovelChapterPrices(ctx, costPerThousand); err != nil {
 				return err
 			}
 		}
-	} else if costPerThousand >= 0 {
-		if err := s.repo.BatchUpdateInheritedNovelChapterPrices(ctx, costPerThousand); err != nil {
+	}
+
+	if startPayUpdated && parseScopeFlag("apply_start_pay_to_all_novels") && startPay > 0 {
+		if err := s.repo.BatchUpdateAllNovelStartPayChapter(ctx, startPay, costPerThousand); err != nil {
 			return err
 		}
 	}

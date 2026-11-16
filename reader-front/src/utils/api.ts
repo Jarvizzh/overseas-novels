@@ -1,24 +1,46 @@
 const BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8080/api/v1';
 
-async function request<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
-  const token = localStorage.getItem('auth-token');
+type SessionRefreshHandler = () => Promise<string | null>;
+
+let sessionRefreshHandler: SessionRefreshHandler | null = null;
+let inFlightRefreshPromise: Promise<string | null> | null = null;
+
+export function registerSessionRefreshHandler(handler: SessionRefreshHandler | null): void {
+  sessionRefreshHandler = handler;
+}
+
+async function runSingleFlightRefresh(): Promise<string | null> {
+  if (!sessionRefreshHandler) {
+    return null;
+  }
+  if (!inFlightRefreshPromise) {
+    inFlightRefreshPromise = sessionRefreshHandler().finally(() => {
+      inFlightRefreshPromise = null;
+    });
+  }
+  return inFlightRefreshPromise;
+}
+
+function getCookie(name: string): string {
+  const value = `; ${document.cookie}`;
+  const parts = value.split(`; ${name}=`);
+  if (parts.length === 2) return parts.pop()?.split(';').shift() || '';
+  return '';
+}
+
+function buildHeaders(options: RequestInit, tokenOverride?: string | null): Headers {
+  const token = tokenOverride !== undefined ? tokenOverride : localStorage.getItem('auth-token');
   const headers = new Headers(options.headers || {});
-  
+
   if (token) {
     headers.set('Authorization', `Bearer ${token}`);
+  } else {
+    headers.delete('Authorization');
   }
-  
+
   if (options.body && !(options.body instanceof FormData)) {
     headers.set('Content-Type', 'application/json');
   }
-
-  // Auto-inject Facebook Pixel & UTM tracking parameters in request headers
-  const getCookie = (name: string): string => {
-    const value = `; ${document.cookie}`;
-    const parts = value.split(`; ${name}=`);
-    if (parts.length === 2) return parts.pop()?.split(';').shift() || '';
-    return '';
-  };
 
   const fbp = getCookie('_fbp');
   const fbc = getCookie('_fbc');
@@ -27,7 +49,6 @@ async function request<T>(endpoint: string, options: RequestInit = {}): Promise<
   const pixelId = localStorage.getItem('fb_pixel_id');
   const templateId = localStorage.getItem('recharge_template_id');
   const promoId = localStorage.getItem('promo_id');
-  const pageURL = window.location.href;
 
   if (fbp) headers.set('X-FB-FBP', fbp);
   if (fbc) headers.set('X-FB-FBC', fbc);
@@ -36,17 +57,29 @@ async function request<T>(endpoint: string, options: RequestInit = {}): Promise<
   if (pixelId) headers.set('X-FB-Pixel-ID', pixelId);
   if (templateId) headers.set('X-Recharge-Template-ID', templateId);
   if (promoId) headers.set('X-Promo-ID', promoId);
-  headers.set('X-Event-Source-URL', pageURL);
+  headers.set('X-Event-Source-URL', window.location.href);
 
+  return headers;
+}
+
+async function request<T>(endpoint: string, options: RequestInit = {}, retried = false): Promise<T> {
+  const headers = buildHeaders(options);
   const response = await fetch(`${BASE_URL}${endpoint}`, {
     ...options,
     headers,
   });
 
-  if (response.status === 401) {
+  const isAuthCredentialEndpoint =
+    endpoint.startsWith('/auth/login') ||
+    endpoint.startsWith('/auth/register') ||
+    endpoint.startsWith('/auth/guest');
+
+  if (response.status === 401 && !isAuthCredentialEndpoint && !retried) {
     localStorage.removeItem('auth-token');
-    // Dispatch custom event to let App.tsx know it needs to run Guest Login
-    window.dispatchEvent(new Event('auth-unauthorized'));
+    const newToken = await runSingleFlightRefresh();
+    if (newToken) {
+      return request<T>(endpoint, options, true);
+    }
   }
 
   if (!response.ok) {
@@ -54,7 +87,6 @@ async function request<T>(endpoint: string, options: RequestInit = {}): Promise<
     throw new Error(errorBody.error || `HTTP error! Status: ${response.status}`);
   }
 
-  // Handle empty responses
   if (response.status === 204) {
     return {} as T;
   }
@@ -133,30 +165,54 @@ export interface ChapterContentResponse {
   price: number;
 }
 
+export interface SubscriptionInfo {
+  id: number;
+  user_id: number;
+  subscription_id: string;
+  plan_id: string;
+  slot_id: number;
+  template_id: number;
+  status: string;
+  cycle: string;
+  price_cents: number;
+  currency: string;
+  payment_method: string;
+  current_period_start?: string;
+  current_period_end?: string;
+  next_billing_time?: string;
+  last_payment_time?: string;
+  cancelled_at?: string;
+}
+
+export interface SubscriptionStatusResponse {
+  is_vip: boolean;
+  subscription: SubscriptionInfo | null;
+}
+
 export const api = {
   // === AUTH ===
-  guestLogin: () => 
+  guestLogin: () =>
     request<{ token: string; user: User }>('/auth/guest', { method: 'POST' }),
-    
-  register: (body: any) => 
+
+  register: (body: { email: string; password: string; nickname?: string }) =>
     request<{ token: string; user: User }>('/auth/register', {
       method: 'POST',
       body: JSON.stringify(body),
     }),
-    
-  login: (body: any) => 
+
+  login: (body: { email: string; password: string }) =>
     request<{ token: string; user: User }>('/auth/login', {
       method: 'POST',
       body: JSON.stringify(body),
     }),
-    
+
   bindEmail: (body: { email: string; password: string; nickname?: string }) =>
     request<{ token: string; user: User }>('/auth/bind', {
       method: 'POST',
       body: JSON.stringify(body),
     }),
 
-  getProfile: () => 
+  getProfile: () =>
     request<User>('/auth/profile'),
 
   // === NOVELS ===
@@ -173,45 +229,45 @@ export const api = {
   searchNovels: (q: string, page: number = 1, limit: number = 20) =>
     request<Novel[]>(`/novels/search?q=${encodeURIComponent(q)}&page=${page}&limit=${limit}`),
 
-  getNovelDetail: (id: number) => 
+  getNovelDetail: (id: number) =>
     request<Novel>(`/novels/${id}`),
 
-  getChaptersList: (id: number) => 
+  getChaptersList: (id: number) =>
     request<Chapter[]>(`/novels/${id}/chapters`),
 
-  getChapterContent: (id: number, index: number) => 
+  getChapterContent: (id: number, index: number) =>
     request<ChapterContentResponse>(`/novels/${id}/chapters/${index}`),
 
   // === SHELF ===
-  getShelf: () => 
+  getShelf: () =>
     request<BookshelfItem[]>('/shelf'),
 
-  addToShelf: (novelId: number) => 
+  addToShelf: (novelId: number) =>
     request<{ message: string }>('/shelf/add', {
       method: 'POST',
       body: JSON.stringify({ novel_id: novelId }),
     }),
 
-  removeFromShelf: (novelIds: number[]) => 
+  removeFromShelf: (novelIds: number[]) =>
     request<{ message: string }>('/shelf/remove', {
       method: 'POST',
       body: JSON.stringify({ novel_ids: novelIds }),
     }),
 
-  syncProgress: (updates: Array<{ novel_id: number; chapter_index: number; scroll_offset_percentage: number; updated_at: string }>) => 
+  syncProgress: (updates: Array<{ novel_id: number; chapter_index: number; scroll_offset_percentage: number; updated_at: string }>) =>
     request<{ message: string }>('/shelf/sync', {
       method: 'POST',
       body: JSON.stringify({ progress_updates: updates }),
     }),
 
   // === WALLET ===
-  getWalletBalance: () => 
+  getWalletBalance: () =>
     request<Wallet>('/wallet/balance'),
 
   getTransactionHistory: (page: number = 1, limit: number = 20) =>
     request<Transaction[]>(`/wallet/history?page=${page}&limit=${limit}`),
 
-  unlockChapter: (novelId: number, chapterIndex: number) => 
+  unlockChapter: (novelId: number, chapterIndex: number) =>
     request<{ message: string }>('/wallet/unlock', {
       method: 'POST',
       body: JSON.stringify({ novel_id: novelId, chapter_index: chapterIndex }),
@@ -223,7 +279,7 @@ export const api = {
       body: JSON.stringify({ amount_cents: amountCents, coins_amount: coinsAmount }),
     }),
 
-  createStripeIntent: (amountCents: number, coinsAmount: number) => 
+  createStripeIntent: (amountCents: number, coinsAmount: number) =>
     request<{ client_secret: string }>('/wallet/recharge/stripe', {
       method: 'POST',
       body: JSON.stringify({ amount_cents: amountCents, coins_amount: coinsAmount }),
@@ -240,13 +296,13 @@ export const api = {
       }),
     }),
 
-  capturePayPalPayment: (orderId: string, coinsAmount: number) => 
+  capturePayPalPayment: (orderId: string, coinsAmount: number) =>
     request<{ message: string }>('/wallet/recharge/paypal/capture', {
       method: 'POST',
       body: JSON.stringify({ order_id: orderId, coins_amount: coinsAmount }),
     }),
 
-  getRechargeTemplates: () => 
+  getRechargeTemplates: () =>
     request<{
       id: number;
       name: string;
@@ -288,38 +344,18 @@ export const api = {
     }),
 
   getSubscriptionStatus: () =>
-    request<{
-      is_vip: boolean;
-      subscription: {
-        id: number;
-        user_id: number;
-        subscription_id: string;
-        plan_id: string;
-        slot_id: number;
-        template_id: number;
-        status: string;
-        cycle: string;
-        price_cents: number;
-        currency: string;
-        payment_method: string;
-        current_period_start?: string;
-        current_period_end?: string;
-        next_billing_time?: string;
-        last_payment_time?: string;
-        cancelled_at?: string;
-      } | null;
-    }>('/wallet/subscription/status'),
+    request<SubscriptionStatusResponse>('/wallet/subscription/status'),
 
   cancelSubscription: (subscriptionId: string, reason: string = 'User requested cancellation') =>
     request<{ message: string }>('/wallet/subscription/cancel', {
       method: 'POST',
       body: JSON.stringify({
         subscription_id: subscriptionId,
-        reason: reason,
+        reason,
       }),
     }),
 
-  dailyCheckIn: (day: number, coins: number) => 
+  dailyCheckIn: (day: number, coins: number) =>
     request<{ message: string; coins_awarded: number }>('/wallet/rewards/checkin', {
       method: 'POST',
       body: JSON.stringify({ day, coins }),

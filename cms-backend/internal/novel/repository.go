@@ -22,6 +22,8 @@ type NovelRepository interface {
 	CountChapters(ctx context.Context, novelID int64) (int, error)
 	UpdateChapterPrices(ctx context.Context, startIdx int, cost *int, novelID int64) error
 	BatchUpdateAllNovelChapterPrices(ctx context.Context, startPayChapterIndex int, coinCostPerThousand int) error
+	BatchUpdateAllNovelCoinCost(ctx context.Context, coinCostPerThousand int) error
+	BatchUpdateAllNovelStartPayChapter(ctx context.Context, startPayChapterIndex int, defaultCoinCostPerThousand int) error
 	BatchUpdateInheritedNovelChapterPrices(ctx context.Context, coinCostPerThousand int) error
 
 	ListChapters(ctx context.Context, novelID int64) ([]Chapter, error)
@@ -227,6 +229,76 @@ func (r *dbNovelRepository) BatchUpdateAllNovelChapterPrices(ctx context.Context
 		FROM novels n
 		WHERE c.novel_id = n.id AND n.status != 'archived'
 	`, startPayChapterIndex, coinCostPerThousand)
+	if err != nil {
+		return err
+	}
+
+	return tx.Commit(ctx)
+}
+
+func (r *dbNovelRepository) BatchUpdateAllNovelCoinCost(ctx context.Context, coinCostPerThousand int) error {
+	tx, err := db.DB.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	_, err = tx.Exec(ctx, `
+		UPDATE novels
+		SET coin_cost_per_thousand = $1
+		WHERE status != 'archived'
+	`, coinCostPerThousand)
+	if err != nil {
+		return err
+	}
+
+	_, err = tx.Exec(ctx, `
+		UPDATE chapters c
+		SET
+			is_paid = (c.chapter_index >= (n.start_pay_chapter_index - 1)),
+			price = CASE
+				WHEN (c.chapter_index >= (n.start_pay_chapter_index - 1))
+				THEN ROUND((c.word_count::decimal / 1000.0) * $1)::integer
+				ELSE 0
+			END
+		FROM novels n
+		WHERE c.novel_id = n.id AND n.status != 'archived'
+	`, coinCostPerThousand)
+	if err != nil {
+		return err
+	}
+
+	return tx.Commit(ctx)
+}
+
+func (r *dbNovelRepository) BatchUpdateAllNovelStartPayChapter(ctx context.Context, startPayChapterIndex int, defaultCoinCostPerThousand int) error {
+	tx, err := db.DB.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	_, err = tx.Exec(ctx, `
+		UPDATE novels
+		SET start_pay_chapter_index = $1
+		WHERE status != 'archived'
+	`, startPayChapterIndex)
+	if err != nil {
+		return err
+	}
+
+	_, err = tx.Exec(ctx, `
+		UPDATE chapters c
+		SET
+			is_paid = (c.chapter_index >= ($1 - 1)),
+			price = CASE
+				WHEN (c.chapter_index >= ($1 - 1))
+				THEN ROUND((c.word_count::decimal / 1000.0) * COALESCE(n.coin_cost_per_thousand, $2))::integer
+				ELSE 0
+			END
+		FROM novels n
+		WHERE c.novel_id = n.id AND n.status != 'archived'
+	`, startPayChapterIndex, defaultCoinCostPerThousand)
 	if err != nil {
 		return err
 	}

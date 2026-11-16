@@ -1,6 +1,6 @@
-import React, { createContext, useContext, useState, useCallback, type ReactNode } from 'react';
-
-export type ToastType = 'info' | 'success' | 'error';
+import React, { useState, useCallback, type ReactNode } from 'react';
+import { CheckCircle2, AlertCircle, Info } from 'lucide-react';
+import { ToastContext, type ToastType } from './toastStore';
 
 interface ToastState {
   id: number;
@@ -8,31 +8,27 @@ interface ToastState {
   type: ToastType;
 }
 
-interface ToastContextType {
-  showToast: (message: string, type?: ToastType) => void;
-}
-
-const ToastContext = createContext<ToastContextType | undefined>(undefined);
-
 export const ToastProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
   const [toasts, setToasts] = useState<ToastState[]>([]);
 
   const showToast = useCallback((message: string, type: ToastType = 'info') => {
-    const id = Date.now();
+    const id = Date.now() + Math.random();
     setToasts((prev) => [...prev, { id, message, type }]);
 
     setTimeout(() => {
       setToasts((prev) => prev.filter((t) => t.id !== id));
-    }, 2500);
+    }, 2600);
   }, []);
 
   return (
     <ToastContext.Provider value={{ showToast }}>
       {children}
       <div
+        aria-live="polite"
+        aria-atomic="false"
         style={{
           position: 'fixed',
-          bottom: '80px',
+          bottom: 'calc(76px + env(safe-area-inset-bottom))',
           left: '50%',
           transform: 'translateX(-50%)',
           zIndex: 9999,
@@ -41,47 +37,51 @@ export const ToastProvider: React.FC<{ children: ReactNode }> = ({ children }) =
           alignItems: 'center',
           gap: '8px',
           pointerEvents: 'none',
-          maxWidth: '90%',
+          maxWidth: 'calc(100dvw - 32px)',
           width: 'max-content',
         }}
       >
-        {toasts.map((toast) => (
-          <div
-            key={toast.id}
-            style={{
-              padding: '10px 18px',
-              borderRadius: '24px',
-              fontSize: '13px',
-              fontWeight: 500,
-              color: '#ffffff',
-              backgroundColor:
-                toast.type === 'error'
-                  ? 'rgba(225, 29, 72, 0.92)'
-                  : toast.type === 'success'
-                  ? 'rgba(16, 185, 129, 0.92)'
-                  : 'rgba(15, 23, 42, 0.88)',
-              backdropFilter: 'blur(8px)',
-              boxShadow: '0 8px 24px rgba(0, 0, 0, 0.25)',
-              display: 'flex',
-              alignItems: 'center',
-              gap: '8px',
-              animation: 'fadeIn 0.2s cubic-bezier(0.16, 1, 0.3, 1) forwards',
-              textAlign: 'center',
-              pointerEvents: 'auto',
-            }}
-          >
-            <span>{toast.message}</span>
-          </div>
-        ))}
+        {toasts.map((toast) => {
+          const isError = toast.type === 'error';
+          const isSuccess = toast.type === 'success';
+          return (
+            <div
+              key={toast.id}
+              role={isError ? 'alert' : 'status'}
+              style={{
+                padding: '10px 16px',
+                borderRadius: '999px',
+                fontSize: '0.8125rem',
+                fontWeight: 500,
+                color: isError || isSuccess ? '#FFFFFF' : 'var(--toast-text)',
+                backgroundColor: isError
+                  ? 'rgba(185, 28, 28, 0.94)'
+                  : isSuccess
+                  ? 'rgba(21, 128, 61, 0.94)'
+                  : 'var(--toast-bg)',
+                backdropFilter: 'blur(10px)',
+                WebkitBackdropFilter: 'blur(10px)',
+                boxShadow: '0 8px 24px rgba(0, 0, 0, 0.2)',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '8px',
+                animation: 'fadeIn 0.2s cubic-bezier(0.16, 1, 0.3, 1) forwards',
+                textAlign: 'left',
+                pointerEvents: 'auto',
+              }}
+            >
+              {isError ? (
+                <AlertCircle size={15} strokeWidth={2} aria-hidden="true" style={{ flexShrink: 0 }} />
+              ) : isSuccess ? (
+                <CheckCircle2 size={15} strokeWidth={2} aria-hidden="true" style={{ flexShrink: 0 }} />
+              ) : (
+                <Info size={15} strokeWidth={2} aria-hidden="true" style={{ flexShrink: 0 }} />
+              )}
+              <span>{toast.message}</span>
+            </div>
+          );
+        })}
       </div>
     </ToastContext.Provider>
   );
-};
-
-export const useToast = (): ToastContextType => {
-  const context = useContext(ToastContext);
-  if (!context) {
-    throw new Error('useToast must be used within a ToastProvider');
-  }
-  return context;
 };

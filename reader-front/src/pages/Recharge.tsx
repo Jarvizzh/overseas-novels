@@ -1,37 +1,48 @@
-import React, { useState } from 'react';
-import { useToast } from '../context/ToastContext';
+import React, { useState, useEffect, useCallback, useRef, useId } from 'react';
+import { ChevronLeft, Crown, Check, Sparkles } from 'lucide-react';
+import { useToast } from '../context/toastStore';
 import { GoldCoin } from '../components/GoldCoin';
-import { api } from '../utils/api';
-import { LegalModal } from '../components/LegalModal';
-import type { LegalModalType } from '../components/LegalModal';
+import { api, type SubscriptionInfo } from '../utils/api';
+import { LegalModal, type LegalModalType } from '../components/LegalModal';
 
 interface RechargeProps {
   userCoins?: number;
   onAddCoins: (amount: number, reason: string) => void;
+  onRefreshStatus?: () => Promise<void>;
   onBack: () => void;
-  onNavigate?: (pageOrPath: string, params?: any) => void;
+  onNavigate?: (pageOrPath: string, params?: Record<string, unknown>) => void;
+}
+
+function stripPayPalQueryParams(): void {
+  try {
+    const clean = new URL(window.location.href);
+    ['payment', 'token', 'subscription_id', 'ba_token', 'PayerID'].forEach((k) => clean.searchParams.delete(k));
+    const nextSearch = clean.searchParams.toString();
+    window.history.replaceState({}, '', `${clean.pathname}${nextSearch ? `?${nextSearch}` : ''}`);
+  } catch {
+    // Fallback safely if URL manipulation fails
+  }
 }
 
 export const Recharge: React.FC<RechargeProps> = ({
   onAddCoins,
+  onRefreshStatus,
   onBack,
   onNavigate,
 }) => {
   const { showToast } = useToast();
   const [selectedPack, setSelectedPack] = useState<number | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
-  const [paymentStep, setPaymentStep] = useState(0); // 0: Idle, 1: connecting, 2: processing
+  const [paymentStep, setPaymentStep] = useState(0);
   const [showSuccess, setShowSuccess] = useState(false);
   const [successAmount, setSuccessAmount] = useState(0);
   const [isVipSuccess, setIsVipSuccess] = useState(false);
   const [vipSuccessTitle, setVipSuccessTitle] = useState('');
   const [activeLegalModal, setActiveLegalModal] = useState<LegalModalType | null>(null);
 
-  // User VIP subscription status
   const [isVIP, setIsVIP] = useState(false);
-  const [userSubscription, setUserSubscription] = useState<any>(null);
+  const [userSubscription, setUserSubscription] = useState<SubscriptionInfo | null>(null);
 
-  // Recharge slot configurations from active default template
   const [slots, setSlots] = useState<Array<{
     id: number;
     template_id: number;
@@ -48,11 +59,25 @@ export const Recharge: React.FC<RechargeProps> = ({
   }>>([]);
   const [loadingTemplates, setLoadingTemplates] = useState(true);
 
-  const fetchStatusAndTemplates = async () => {
+  const successDialogRef = useRef<HTMLDialogElement>(null);
+  const pressedOutsideRef = useRef(false);
+  const successTitleId = useId();
+
+  useEffect(() => {
+    const dialog = successDialogRef.current;
+    if (!dialog) return;
+    if (showSuccess && !dialog.open) {
+      dialog.showModal();
+    } else if (!showSuccess && dialog.open) {
+      dialog.close();
+    }
+  }, [showSuccess]);
+
+  const fetchStatusAndTemplates = useCallback(async () => {
     try {
       const [templateData, subData] = await Promise.all([
         api.getRechargeTemplates().catch(() => null),
-        api.getSubscriptionStatus().catch(() => null)
+        api.getSubscriptionStatus().catch(() => null),
       ]);
 
       const slotList = templateData?.slots || [];
@@ -66,38 +91,48 @@ export const Recharge: React.FC<RechargeProps> = ({
         setUserSubscription(null);
       }
 
-      // Default select first available slot (VIP or Coin)
       if (slotList.length > 0) {
-        const subSlot = slotList.find(s => s.type === 'subscription' || s.type === 'vip');
-        if (subSlot) {
-          setSelectedPack(subSlot.id);
-        } else {
-          setSelectedPack(slotList[0].id);
-        }
+        const subSlot = slotList.find((s) => s.type === 'subscription' || s.type === 'vip');
+        setSelectedPack((prev) => prev ?? (subSlot ? subSlot.id : slotList[0].id));
       }
     } catch (err) {
-      console.error("Failed to load recharge data:", err);
+      console.error('Failed to load recharge data:', err);
     } finally {
       setLoadingTemplates(false);
     }
-  };
-
-  React.useEffect(() => {
-    fetchStatusAndTemplates();
   }, []);
 
-  // Handle PayPal redirect return
-  React.useEffect(() => {
+  useEffect(() => {
+    fetchStatusAndTemplates();
+  }, [fetchStatusAndTemplates]);
+
+  const onAddCoinsRef = useRef(onAddCoins);
+  useEffect(() => {
+    onAddCoinsRef.current = onAddCoins;
+  }, [onAddCoins]);
+
+  const onRefreshStatusRef = useRef(onRefreshStatus);
+  useEffect(() => {
+    onRefreshStatusRef.current = onRefreshStatus;
+  }, [onRefreshStatus]);
+
+  const showToastRef = useRef(showToast);
+  useEffect(() => {
+    showToastRef.current = showToast;
+  }, [showToast]);
+
+  // Handle PayPal return while preserving UTM/fbclid params
+  useEffect(() => {
     const handlePayPalReturn = async () => {
       const urlParams = new URLSearchParams(window.location.search);
       const paymentStatus = urlParams.get('payment');
-      const token = urlParams.get('token'); // PayPal Order ID or Subscription ID
+      const token = urlParams.get('token');
       const subscriptionId = urlParams.get('subscription_id') || token;
 
       if (paymentStatus === 'cancel') {
-        showToast("PayPal payment was cancelled.", "info");
+        showToastRef.current('PayPal payment was cancelled.', 'info');
         sessionStorage.removeItem('pending_paypal_recharge');
-        window.history.replaceState({}, '', window.location.pathname);
+        stripPayPalQueryParams();
         return;
       }
 
@@ -105,86 +140,101 @@ export const Recharge: React.FC<RechargeProps> = ({
         setIsProcessing(true);
         setPaymentStep(2);
 
-        let pendingInfo: any = null;
+        let pendingInfo: { type?: string; coins?: number; name?: string; price?: string } | null = null;
         try {
           const saved = sessionStorage.getItem('pending_paypal_recharge');
           if (saved) {
             pendingInfo = JSON.parse(saved);
           }
-        } catch (_) {}
+        } catch {
+          // Ignore malformed session storage
+        }
 
         const hasSubIdParam = !!urlParams.get('subscription_id');
-        const isSubIdPattern = (subscriptionId && subscriptionId.startsWith('I-')) || (token && token.startsWith('I-'));
-        const isSubOrder = pendingInfo?.type === 'subscription' || pendingInfo?.type === 'vip' || hasSubIdParam || isSubIdPattern;
+        const isSubIdPattern = Boolean(
+          (subscriptionId && subscriptionId.startsWith('I-')) || (token && token.startsWith('I-'))
+        );
+        const isSubOrder =
+          pendingInfo?.type === 'subscription' ||
+          pendingInfo?.type === 'vip' ||
+          hasSubIdParam ||
+          isSubIdPattern;
         const expectedCoins = pendingInfo?.coins || 0;
 
         try {
           if (isSubOrder) {
-            // Activate Recurring VIP Subscription
             const subIdToActivate = subscriptionId || token || '';
             await api.activateSubscription(subIdToActivate, 'paypal');
             setIsProcessing(false);
             setPaymentStep(0);
             setIsVIP(true);
             setIsVipSuccess(true);
-            setVipSuccessTitle(pendingInfo?.name || 'VIP Unlimited Pass');
+            setVipSuccessTitle(pendingInfo?.name || 'StarNovel Unlimited');
             setShowSuccess(true);
             sessionStorage.removeItem('pending_paypal_recharge');
-            fetchStatusAndTemplates();
+            await fetchStatusAndTemplates();
+            if (onRefreshStatusRef.current) {
+              await onRefreshStatusRef.current();
+            }
           } else {
-            // Capture Single Coin Top-up Order
             await api.capturePayPalPayment(token!, expectedCoins);
             setIsProcessing(false);
             setPaymentStep(0);
 
             const reason = pendingInfo ? `PayPal Recharge: ${pendingInfo.price} pack` : 'PayPal Recharge Topup';
-            onAddCoins(expectedCoins, reason);
+            onAddCoinsRef.current(expectedCoins, reason);
             setSuccessAmount(expectedCoins);
             setIsVipSuccess(false);
             setShowSuccess(true);
             sessionStorage.removeItem('pending_paypal_recharge');
           }
-        } catch (err: any) {
+        } catch (err) {
           setIsProcessing(false);
           setPaymentStep(0);
-          showToast(err.message || "Failed to complete PayPal payment capture", "error");
+          const msg = err instanceof Error ? err.message : 'Failed to complete PayPal payment capture';
+          showToastRef.current(msg, 'error');
         } finally {
-          window.history.replaceState({}, '', window.location.pathname);
+          stripPayPalQueryParams();
         }
       }
     };
 
     handlePayPalReturn();
-  }, []);
+  }, [fetchStatusAndTemplates]);
 
   const subscriptionPacks = slots
-    .filter(s => s.type === 'subscription' || s.type === 'vip')
-    .map(s => ({
+    .filter((s) => s.type === 'subscription' || s.type === 'vip')
+    .map((s) => ({
       id: s.id,
-      name: s.vip_name || (s.subscription_cycle === 'day' ? 'VIP Daily Pass' : s.subscription_cycle === 'week' ? 'VIP Weekly Pass' : 'VIP Monthly Pass'),
+      name:
+        s.vip_name ||
+        (s.subscription_cycle === 'day'
+          ? 'VIP Daily Pass'
+          : s.subscription_cycle === 'week'
+            ? 'VIP Weekly Pass'
+            : 'VIP Monthly Pass'),
       price: s.price,
       priceCents: s.price_cents,
-      desc: s.vip_desc || '全站小说无限畅读，自动续费，随时可取消',
+      desc: s.vip_desc || 'Unlimited reading across all titles. Auto-renews, cancel anytime.',
       cycle: s.subscription_cycle || s.vip_duration || 'month',
-      type: s.type
+      type: s.type,
     }));
 
   const coinPacks = slots
-    .filter(s => s.type === 'single')
-    .map(s => ({
+    .filter((s) => s.type === 'single')
+    .map((s) => ({
       id: s.id,
       coins: s.coins,
       bonus: s.bonus,
       price: s.price,
       priceCents: s.price_cents,
       total: s.coins + s.bonus,
-      type: s.type
+      type: s.type,
     }));
 
   const handlePurchase = async () => {
     if (selectedPack === null) return;
-
-    const tSlot = slots.find(p => p.id === selectedPack);
+    const tSlot = slots.find((p) => p.id === selectedPack);
     if (!tSlot) return;
 
     setIsProcessing(true);
@@ -194,63 +244,51 @@ export const Recharge: React.FC<RechargeProps> = ({
       const isSub = tSlot.type === 'subscription' || tSlot.type === 'vip';
       const lastContentPath = localStorage.getItem('last_read_content_path');
 
-      sessionStorage.setItem('pending_paypal_recharge', JSON.stringify({
-        slotId: tSlot.id,
-        coins: tSlot.coins + tSlot.bonus,
-        type: tSlot.type,
-        name: tSlot.vip_name || tSlot.price,
-        price: tSlot.price,
-        time: Date.now(),
-        returnContentPath: lastContentPath || '',
-      }));
+      sessionStorage.setItem(
+        'pending_paypal_recharge',
+        JSON.stringify({
+          slotId: tSlot.id,
+          coins: tSlot.coins + tSlot.bonus,
+          type: tSlot.type,
+          name: tSlot.vip_name || tSlot.price,
+          price: tSlot.price,
+          time: Date.now(),
+          returnContentPath: lastContentPath || '',
+        })
+      );
 
       const currentUrl = new URL(window.location.href);
-      currentUrl.searchParams.delete('token');
-      currentUrl.searchParams.delete('subscription_id');
-      currentUrl.searchParams.delete('ba_token');
-      currentUrl.searchParams.delete('PayerID');
-      currentUrl.searchParams.delete('payment');
+      ['token', 'subscription_id', 'ba_token', 'PayerID', 'payment'].forEach((k) => currentUrl.searchParams.delete(k));
+      const baseQuery = currentUrl.searchParams.toString();
 
-      const returnUrl = `${currentUrl.origin}${currentUrl.pathname}?payment=success`;
-      const cancelUrl = `${currentUrl.origin}${currentUrl.pathname}?payment=cancel`;
+      const returnUrl = `${currentUrl.origin}${currentUrl.pathname}?${baseQuery ? `${baseQuery}&` : ''}payment=success`;
+      const cancelUrl = `${currentUrl.origin}${currentUrl.pathname}?${baseQuery ? `${baseQuery}&` : ''}payment=cancel`;
 
       if (isSub) {
-        // Create PayPal Subscription
         const resp = await api.createSubscription(tSlot.id, 'paypal', returnUrl, cancelUrl);
         if (resp?.approve_url) {
           window.location.href = resp.approve_url;
         } else {
-          throw new Error("No PayPal subscription URL received");
+          throw new Error('No PayPal subscription URL received');
         }
       } else {
-        // Create One-time PayPal Order
         const totalCoins = tSlot.coins + tSlot.bonus;
         const resp = await api.createPayPalOrder(tSlot.price_cents, totalCoins, returnUrl, cancelUrl);
         if (resp?.approve_url) {
           window.location.href = resp.approve_url;
         } else {
-          throw new Error("No PayPal checkout URL received");
+          throw new Error('No PayPal checkout URL received');
         }
       }
-    } catch (err: any) {
+    } catch (err) {
       setIsProcessing(false);
       setPaymentStep(0);
-      showToast(err.message || "Failed to initiate PayPal checkout. Please try again.", "error");
+      const msg = err instanceof Error ? err.message : 'Failed to initiate PayPal checkout. Please try again.';
+      showToast(msg, 'error');
     }
   };
 
-  const selectedSlot = slots.find(p => p.id === selectedPack);
-
-  if (loadingTemplates) {
-    return (
-      <div style={{
-        display: 'flex', minHeight: '100vh', alignItems: 'center', justifyContent: 'center',
-        backgroundColor: 'var(--bg-primary)', color: 'var(--text-secondary)', fontSize: '14px'
-      }}>
-        Loading recharge options...
-      </div>
-    );
-  }
+  const selectedSlot = slots.find((p) => p.id === selectedPack);
 
   const handleReturnToContent = () => {
     let returnPath = '';
@@ -262,7 +300,9 @@ export const Recharge: React.FC<RechargeProps> = ({
           returnPath = parsed.returnContentPath;
         }
       }
-    } catch (_) {}
+    } catch {
+      // Ignore parse errors
+    }
 
     if (!returnPath) {
       returnPath = localStorage.getItem('last_read_content_path') || '';
@@ -274,261 +314,348 @@ export const Recharge: React.FC<RechargeProps> = ({
       } else {
         window.location.href = returnPath;
       }
+    } else if (onNavigate) {
+      onNavigate('shelf');
     } else {
-      if (onNavigate) {
-        onNavigate('shelf');
-      } else {
-        onBack();
-      }
+      onBack();
     }
   };
 
+  const isPointerOutside = (e: React.PointerEvent<HTMLDialogElement>, dialog: HTMLDialogElement) => {
+    const r = dialog.getBoundingClientRect();
+    return e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom;
+  };
+
+  if (loadingTemplates) {
+    return (
+      <div className="page-container-full" style={{ alignItems: 'center', justifyContent: 'center', gap: '12px', color: 'var(--text-secondary)' }}>
+        <div className="sn-spinner" />
+        <span style={{ fontSize: '0.875rem' }}>Loading membership plans...</span>
+      </div>
+    );
+  }
+
   return (
     <div className="page-container-full animate-fade-in" style={{ backgroundColor: 'var(--bg-primary)' }}>
-      {/* Top Header */}
-      <header className="app-header glass-panel">
-        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-          <button className="header-btn" onClick={handleReturnToContent} aria-label="Go back">
-            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2.5} stroke="currentColor" style={{ width: '20px', height: '20px' }}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 19.5L8.25 12l7.5-7.5" />
-            </svg>
+      {/* Top Bar */}
+      <header className="detail-top-bar glass-panel">
+        <div className="sn-narrow-container" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <button type="button" className="header-btn" onClick={handleReturnToContent} aria-label="Go back">
+            <ChevronLeft size={20} strokeWidth={1.8} aria-hidden="true" />
           </button>
-          <h1 className="header-title">Membership & Top-Up</h1>
+          <h1 className="header-title">Membership &amp; Coins</h1>
+          <div style={{ width: '40px' }} />
         </div>
       </header>
 
-      {/* Main Content Area */}
-      <div className="scroll-container-no-pad" style={{ flex: 1, minHeight: 0, padding: '16px 16px 60px' }}>
-        
-        {/* Active VIP Member Card Banner */}
-        {isVIP && userSubscription && (
-          <div style={{
-            background: 'linear-gradient(135deg, #1e1b4b 0%, #312e81 50%, #4338ca 100%)',
-            borderRadius: '16px',
-            padding: '20px',
-            color: '#ffffff',
-            boxShadow: '0 8px 24px rgba(67, 56, 202, 0.25)',
-            marginBottom: '20px',
-            position: 'relative',
-            overflow: 'hidden'
-          }}>
-            <div style={{ position: 'relative', zIndex: 1 }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                  <span style={{ fontSize: '28px' }}>👑</span>
+      <div className="scroll-container" style={{ flex: 1, minHeight: 0 }}>
+        <div className="sn-narrow-container" style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
+          {/* Active VIP Member Card Banner (Clean, no cancel control per requirement) */}
+          {isVIP && userSubscription && (
+            <div
+              style={{
+                backgroundColor: 'var(--hero-bg)',
+                color: 'var(--hero-text)',
+                borderRadius: '18px',
+                padding: '20px',
+                border: '1px solid var(--accent-color)',
+              }}
+            >
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '12px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                  <div
+                    style={{
+                      width: '40px',
+                      height: '40px',
+                      borderRadius: '12px',
+                      backgroundColor: 'rgba(212, 174, 104, 0.16)',
+                      color: '#E2BB6B',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      flexShrink: 0,
+                    }}
+                  >
+                    <Crown size={20} strokeWidth={1.8} aria-hidden="true" />
+                  </div>
                   <div>
-                    <h3 style={{ fontSize: '18px', fontWeight: 800, margin: 0, color: '#fef08a' }}>VIP Unlimited Member</h3>
-                    <p style={{ fontSize: '12px', color: '#cbd5e1', marginTop: '2px' }}>
-                      All-Access Pass: Free reading for all novels & chapters
+                    <h2 style={{ fontFamily: 'var(--font-display)', fontSize: '1.125rem', fontWeight: 600, color: '#FAF8F5' }}>
+                      VIP Unlimited Member
+                    </h2>
+                    <p style={{ fontSize: '0.75rem', color: 'rgba(250, 248, 245, 0.72)', marginTop: '2px' }}>
+                      All-Access Pass · Unlimited reading across all stories
                     </p>
                   </div>
                 </div>
-                <span style={{
-                  backgroundColor: 'rgba(254, 240, 138, 0.2)',
-                  color: '#fef08a',
-                  border: '1px solid rgba(254, 240, 138, 0.4)',
-                  fontSize: '11px',
-                  fontWeight: 700,
-                  padding: '3px 8px',
-                  borderRadius: '99px',
-                  textTransform: 'uppercase'
-                }}>
+                <span
+                  style={{
+                    backgroundColor: 'rgba(212, 174, 104, 0.18)',
+                    color: '#E2BB6B',
+                    fontSize: '0.6875rem',
+                    fontWeight: 600,
+                    padding: '4px 10px',
+                    borderRadius: '999px',
+                    textTransform: 'uppercase',
+                    flexShrink: 0,
+                  }}
+                >
                   {userSubscription.cycle} Plan
                 </span>
               </div>
 
-              <div style={{
-                marginTop: '16px',
-                paddingTop: '12px',
-                borderTop: '1px solid rgba(255,255,255,0.15)',
-                display: 'flex',
-                justifyContent: 'space-between',
-                alignItems: 'center',
-                fontSize: '12px'
-              }}>
-                <div>
-                  <span style={{ color: '#94a3b8' }}>Valid Until: </span>
-                  <span style={{ fontWeight: 600, color: '#ffffff' }}>
-                    {userSubscription.current_period_end ? new Date(userSubscription.current_period_end).toLocaleDateString() : 'Active'}
-                  </span>
-                </div>
-                <span style={{ color: '#86efac', fontWeight: 600, fontSize: '11px', display: 'flex', alignItems: 'center', gap: '4px' }}>
-                  <span style={{ width: '6px', height: '6px', borderRadius: '50%', backgroundColor: '#22c55e' }}></span>
-                  Active Member
-                </span>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* Concentrated Recharge Packages: VIP on top, Coin packs below */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', marginBottom: '20px' }}>
-          {/* VIP Passes on Top */}
-          {subscriptionPacks.map((pack) => {
-            const isSelected = selectedPack === pack.id;
-            return (
               <div
-                key={pack.id}
-                onClick={() => setSelectedPack(pack.id)}
                 style={{
+                  marginTop: '16px',
+                  paddingTop: '12px',
+                  borderTop: '1px solid rgba(255, 255, 255, 0.12)',
                   display: 'flex',
                   justifyContent: 'space-between',
                   alignItems: 'center',
-                  backgroundColor: isSelected ? 'rgba(79, 70, 229, 0.06)' : 'var(--bg-secondary)',
-                  borderRadius: '14px',
-                  padding: '14px 16px',
-                  border: isSelected ? '2px solid var(--accent-color)' : '1px solid var(--border-color)',
-                  boxShadow: isSelected ? '0 4px 15px rgba(79, 70, 229, 0.15)' : 'var(--card-shadow)',
-                  cursor: 'pointer',
-                  position: 'relative',
-                  transition: 'all 0.2s ease'
+                  fontSize: '0.75rem',
                 }}
               >
-                <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
-                  <span style={{ fontSize: '26px' }}>👑</span>
-                  <div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                      <h4 style={{ fontSize: '14.5px', fontWeight: 800, margin: 0, color: 'var(--text-primary)' }}>{pack.name}</h4>
-                      <span style={{
-                        fontSize: '10px',
-                        backgroundColor: 'rgba(79, 70, 229, 0.15)',
-                        color: 'var(--accent-color)',
-                        fontWeight: 700,
-                        padding: '1px 6px',
-                        borderRadius: '4px',
-                        textTransform: 'uppercase'
-                      }}>
-                        {pack.cycle}
-                      </span>
-                    </div>
-                    <p style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '2px', margin: 0 }}>{pack.desc}</p>
-                  </div>
-                </div>
-
-                <div style={{ textAlign: 'right' }}>
-                  <span style={{
-                    fontSize: '14px',
-                    fontWeight: 800,
-                    backgroundColor: isSelected ? 'var(--accent-color)' : 'var(--bg-tertiary)',
-                    color: isSelected ? '#ffffff' : 'var(--text-secondary)',
-                    padding: '6px 12px',
-                    borderRadius: '8px',
-                    display: 'inline-block',
-                    transition: 'var(--transition-fast)'
-                  }}>
-                    {pack.price}
-                  </span>
-                  <span style={{ display: 'block', fontSize: '10px', color: 'var(--text-tertiary)', marginTop: '2px' }}>
-                    /{pack.cycle}
+                <div>
+                  <span style={{ color: 'rgba(250, 248, 245, 0.65)' }}>Valid Until: </span>
+                  <span style={{ fontWeight: 600 }}>
+                    {userSubscription.current_period_end
+                      ? new Date(userSubscription.current_period_end).toLocaleDateString()
+                      : 'Active'}
                   </span>
                 </div>
+                <span style={{ color: '#86efac', fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: '5px' }}>
+                  <span style={{ width: '6px', height: '6px', borderRadius: '50%', backgroundColor: '#22c55e' }} />
+                  Active
+                </span>
               </div>
-            );
-          })}
-
-          {/* Coin Packs Directly Below */}
-          {coinPacks.length > 0 && (
-            <div style={{
-              display: 'grid',
-              gridTemplateColumns: 'repeat(2, 1fr)',
-              gap: '12px',
-              marginTop: subscriptionPacks.length > 0 ? '4px' : '0'
-            }}>
-              {coinPacks.map((pack) => {
-                const isSelected = selectedPack === pack.id;
-                return (
-                  <div
-                    key={pack.id}
-                    onClick={() => setSelectedPack(pack.id)}
-                    style={{
-                      backgroundColor: isSelected ? 'rgba(79, 70, 229, 0.06)' : 'var(--bg-secondary)',
-                      borderRadius: '14px',
-                      padding: '16px 12px',
-                      border: isSelected ? '2px solid var(--accent-color)' : '1px solid var(--border-color)',
-                      boxShadow: isSelected ? '0 4px 15px rgba(79, 70, 229, 0.15)' : 'var(--card-shadow)',
-                      cursor: 'pointer',
-                      display: 'flex',
-                      flexDirection: 'column',
-                      alignItems: 'center',
-                      position: 'relative',
-                      transition: 'transform 0.15s ease'
-                    }}
-                  >
-                    {pack.bonus > 0 && (
-                      <div style={{
-                        position: 'absolute',
-                        top: '-8px',
-                        left: '10px',
-                        backgroundColor: '#ef4444',
-                        color: 'white',
-                        fontSize: '9px',
-                        fontWeight: 700,
-                        padding: '2px 6px',
-                        borderRadius: '4px',
-                        boxShadow: '0 2px 4px rgba(239,68,68,0.2)'
-                      }}>
-                        +{pack.bonus} Bonus
-                      </div>
-                    )}
-
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '4px', marginTop: '6px', marginBottom: '4px' }}>
-                      <GoldCoin size={16} />
-                      <span style={{ fontSize: '20px', fontWeight: 800, color: 'var(--text-primary)' }}>{pack.coins}</span>
-                    </div>
-                    <span style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginBottom: '12px' }}>
-                      Total: {pack.total} Coins
-                    </span>
-                    <span style={{
-                      fontSize: '13px',
-                      fontWeight: 700,
-                      backgroundColor: isSelected ? 'var(--accent-color)' : 'var(--bg-tertiary)',
-                      color: isSelected ? 'white' : 'var(--text-secondary)',
-                      width: '100%',
-                      textAlign: 'center',
-                      padding: '6px 0',
-                      borderRadius: '8px',
-                      transition: 'var(--transition-fast)'
-                    }}>
-                      {pack.price}
-                    </span>
-                  </div>
-                );
-              })}
             </div>
           )}
-        </div>
 
-        {/* Clean & Prominent PayPal Checkout Button */}
-        {selectedSlot && (
-          <div style={{
-            marginTop: '10px',
-            marginBottom: '24px'
-          }}>
+          {/* VIP Passes */}
+          {subscriptionPacks.length > 0 && (
+            <section style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+              <h2 className="hot-tags-title" style={{ margin: 0 }}>Unlimited Membership</h2>
+              {subscriptionPacks.map((pack) => {
+                const isSelected = selectedPack === pack.id;
+                return (
+                  <button
+                    type="button"
+                    key={pack.id}
+                    onClick={() => setSelectedPack(pack.id)}
+                    aria-pressed={isSelected}
+                    style={{
+                      width: '100%',
+                      textAlign: 'left',
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      alignItems: 'center',
+                      gap: '16px',
+                      backgroundColor: isSelected ? 'var(--hero-bg)' : 'var(--bg-secondary)',
+                      color: isSelected ? 'var(--hero-text)' : 'var(--text-primary)',
+                      borderRadius: '16px',
+                      padding: '16px 18px',
+                      border: isSelected ? '1.5px solid var(--accent-color)' : '1px solid var(--border-color)',
+                      cursor: 'pointer',
+                      transition: 'var(--transition-fast)',
+                    }}
+                  >
+                    <div style={{ display: 'flex', gap: '12px', alignItems: 'flex-start', minWidth: 0 }}>
+                      <Crown
+                        size={20}
+                        strokeWidth={1.8}
+                        style={{ color: isSelected ? '#E2BB6B' : 'var(--accent-color)', marginTop: '2px', flexShrink: 0 }}
+                        aria-hidden="true"
+                      />
+                      <div style={{ minWidth: 0 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                          <span style={{ fontFamily: 'var(--font-display)', fontSize: '1.0625rem', fontWeight: 600 }}>
+                            {pack.name}
+                          </span>
+                          <span
+                            style={{
+                              fontSize: '0.625rem',
+                              backgroundColor: isSelected ? 'rgba(212, 174, 104, 0.2)' : 'var(--accent-light)',
+                              color: isSelected ? '#E2BB6B' : 'var(--accent-text)',
+                              fontWeight: 600,
+                              padding: '2px 8px',
+                              borderRadius: '999px',
+                              textTransform: 'uppercase',
+                            }}
+                          >
+                            {pack.cycle}
+                          </span>
+                        </div>
+                        <p
+                          style={{
+                            fontSize: '0.75rem',
+                            color: isSelected ? 'rgba(250, 248, 245, 0.74)' : 'var(--text-secondary)',
+                            marginTop: '4px',
+                            lineHeight: 1.45,
+                          }}
+                        >
+                          {pack.desc}
+                        </p>
+                      </div>
+                    </div>
+
+                    <div style={{ textAlign: 'right', flexShrink: 0 }}>
+                      <div className="tabular-nums" style={{ fontSize: '1.0625rem', fontWeight: 700 }}>
+                        {pack.price}
+                      </div>
+                      <div style={{ fontSize: '0.6875rem', opacity: 0.7 }}>/{pack.cycle}</div>
+                    </div>
+                  </button>
+                );
+              })}
+            </section>
+          )}
+
+          {/* Coin Packs Grid */}
+          {coinPacks.length > 0 && (
+            <section style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+                <h2 className="hot-tags-title" style={{ margin: 0 }}>Or Top Up Coins</h2>
+                <span style={{ fontSize: '0.6875rem', color: 'var(--text-tertiary)' }}>Never expire</span>
+              </div>
+
+              <div className="coin-packs-grid">
+                {coinPacks.map((pack) => {
+                  const isSelected = selectedPack === pack.id;
+                  return (
+                    <button
+                      type="button"
+                      key={pack.id}
+                      onClick={() => setSelectedPack(pack.id)}
+                      aria-pressed={isSelected}
+                      style={{
+                        backgroundColor: 'var(--bg-secondary)',
+                        borderRadius: '14px',
+                        padding: '14px 12px',
+                        border: isSelected ? '1.5px solid var(--accent-color)' : '1px solid var(--border-color)',
+                        boxShadow: isSelected ? '0 0 0 1px var(--accent-color)' : 'none',
+                        cursor: 'pointer',
+                        display: 'flex',
+                        flexDirection: 'column',
+                        alignItems: 'stretch',
+                        justifyContent: 'space-between',
+                        gap: '10px',
+                        textAlign: 'left',
+                        transition: 'var(--transition-fast)',
+                      }}
+                    >
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '6px' }}>
+                        {pack.bonus > 0 ? (
+                          <span
+                            className="tabular-nums"
+                            style={{
+                              backgroundColor: 'var(--accent-light)',
+                              color: 'var(--accent-text)',
+                              fontSize: '0.625rem',
+                              fontWeight: 600,
+                              padding: '2px 7px',
+                              borderRadius: '999px',
+                            }}
+                          >
+                            +{pack.bonus} bonus
+                          </span>
+                        ) : (
+                          <span />
+                        )}
+
+                        <span
+                          aria-hidden="true"
+                          style={{
+                            width: '16px',
+                            height: '16px',
+                            borderRadius: '50%',
+                            border: isSelected ? 'none' : '1.5px solid var(--border-strong)',
+                            backgroundColor: isSelected ? 'var(--accent-color)' : 'transparent',
+                            color: '#FFFFFF',
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            flexShrink: 0,
+                          }}
+                        >
+                          {isSelected && <Check size={11} strokeWidth={2.6} />}
+                        </span>
+                      </div>
+
+                      <div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                          <GoldCoin size={16} />
+                          <span className="tabular-nums" style={{ fontSize: '1.125rem', fontWeight: 700, color: 'var(--text-primary)' }}>
+                            {pack.coins.toLocaleString()}
+                          </span>
+                        </div>
+                        <span className="tabular-nums" style={{ fontSize: '0.6875rem', color: 'var(--text-tertiary)', display: 'block', marginTop: '2px' }}>
+                          Total: {pack.total.toLocaleString()} Coins
+                        </span>
+                      </div>
+
+                      <div
+                        className="tabular-nums"
+                        style={{
+                          fontSize: '0.8125rem',
+                          fontWeight: 600,
+                          backgroundColor: isSelected ? 'var(--cta-bg)' : 'var(--bg-tertiary)',
+                          color: isSelected ? 'var(--cta-text)' : 'var(--text-primary)',
+                          textAlign: 'center',
+                          padding: '7px 0',
+                          borderRadius: '8px',
+                        }}
+                      >
+                        {pack.price}
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            </section>
+          )}
+
+          {/* Empty State if no packages are configured */}
+          {subscriptionPacks.length === 0 && coinPacks.length === 0 && (
+            <div
+              style={{
+                backgroundColor: 'var(--bg-secondary)',
+                borderRadius: '16px',
+                padding: '32px 20px',
+                border: '1px solid var(--border-color)',
+                textAlign: 'center',
+                color: 'var(--text-secondary)',
+                fontSize: '0.875rem',
+              }}
+            >
+              No membership or coin packages are currently available. Please try again later.
+            </div>
+          )}
+
+          {/* PayPal Checkout Button */}
+          {selectedSlot && (
             <button
+              type="button"
               onClick={handlePurchase}
               disabled={isProcessing}
               style={{
                 width: '100%',
-                height: '52px',
-                backgroundColor: '#ffc439',
-                color: '#003087',
+                minHeight: '50px',
+                backgroundColor: '#F5C344',
+                color: '#0F265C',
                 border: 'none',
-                borderRadius: '26px',
-                fontSize: '16px',
-                fontWeight: 800,
+                borderRadius: '999px',
+                fontSize: '0.9375rem',
+                fontWeight: 700,
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'center',
                 gap: '8px',
-                boxShadow: '0 4px 16px rgba(255, 196, 57, 0.45)',
                 cursor: isProcessing ? 'not-allowed' : 'pointer',
-                transition: 'transform 0.15s ease, box-shadow 0.15s ease',
               }}
             >
-              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" style={{ flexShrink: 0 }}>
-                <path d="M7.076 21.337H2.47a.64.64 0 0 1-.633-.74L4.931 2.378A.853.853 0 0 1 5.774 1.7h7.24c3.483 0 5.69 1.642 5.093 5.372-.44 2.75-2.228 4.316-4.945 4.316h-2.14l-1.07 6.776-.026.173a.853.853 0 0 1-.85.8z" fill="#003087"/>
-                <path d="M8.766 18.066l1.24-7.852h2.64c2.717 0 4.505-1.566 4.945-4.316.597-3.73-1.61-5.372-5.093-5.372H5.258a.853.853 0 0 0-.843.678L1.321 19.723a.64.64 0 0 0 .633.74h4.606l1.07-6.776.026-.173a.853.853 0 0 1 .85-.8z" fill="#0079C1"/>
-                <path d="M9.13 14.77l1.07-6.776h2.14c2.717 0 4.505-1.566 4.945-4.316.14-.876.105-1.614-.078-2.217C16.89 2.532 15.65 2 13.904 2H8.354a.853.853 0 0 0-.843.678L4.417 21.2a.64.64 0 0 0 .633.74h4.606l1.07-6.776.026-.173a.853.853 0 0 1 .85-.8z" fill="#00457C"/>
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true" style={{ flexShrink: 0 }}>
+                <path d="M7.076 21.337H2.47a.64.64 0 0 1-.633-.74L4.931 2.378A.853.853 0 0 1 5.774 1.7h7.24c3.483 0 5.69 1.642 5.093 5.372-.44 2.75-2.228 4.316-4.945 4.316h-2.14l-1.07 6.776-.026.173a.853.853 0 0 1-.85.8z" fill="#003087" />
+                <path d="M8.766 18.066l1.24-7.852h2.64c2.717 0 4.505-1.566 4.945-4.316.597-3.73-1.61-5.372-5.093-5.372H5.258a.853.853 0 0 0-.843.678L1.321 19.723a.64.64 0 0 0 .633.74h4.606l1.07-6.776.026-.173a.853.853 0 0 1 .85-.8z" fill="#0079C1" />
+                <path d="M9.13 14.77l1.07-6.776h2.14c2.717 0 4.505-1.566 4.945-4.316.14-.876.105-1.614-.078-2.217C16.89 2.532 15.65 2 13.904 2H8.354a.853.853 0 0 0-.843.678L4.417 21.2a.64.64 0 0 0 .633.74h4.606l1.07-6.776.026-.173a.853.853 0 0 1 .85-.8z" fill="#00457C" />
               </svg>
               <span>
                 {isProcessing
@@ -538,160 +665,194 @@ export const Recharge: React.FC<RechargeProps> = ({
                     : `Pay with PayPal · ${selectedSlot.price}`}
               </span>
             </button>
-          </div>
-        )}
+          )}
 
-        {/* Tips Box */}
-        <div style={{
-          backgroundColor: 'var(--bg-secondary)',
-          borderRadius: '12px',
-          padding: '14px 16px',
-          border: '1px solid var(--border-color)',
-          fontSize: '11px',
-          color: 'var(--text-tertiary)',
-          lineHeight: '1.6'
-        }}>
-          <p style={{ margin: '0 0 4px 0' }}>• <strong>VIP Unlimited Pass:</strong> Instant access to all novel chapters across the site without consuming coins.</p>
-          <p style={{ margin: '0 0 4px 0' }}>• <strong>Coin Top-up:</strong> Permanent coins to unlock chapters across the entire site.</p>
-          <p style={{ margin: 0 }}>• Need help? <span style={{ color: 'var(--accent-color)', fontWeight: 600, cursor: 'pointer', textDecoration: 'underline' }} onClick={() => setActiveLegalModal('contact')}>Contact Customer Support</span>.</p>
-        </div>
-
-        {/* Compliance & Legal Footer Links */}
-        <div style={{
-          display: 'flex',
-          flexWrap: 'wrap',
-          justifyContent: 'center',
-          alignItems: 'center',
-          gap: '8px 12px',
-          marginTop: '20px',
-          padding: '0 8px',
-          fontSize: '11px',
-          color: 'var(--text-tertiary)'
-        }}>
-          <span style={{ cursor: 'pointer', textDecoration: 'underline' }} onClick={() => setActiveLegalModal('terms')}>Terms of Service</span>
-          <span>•</span>
-          <span style={{ cursor: 'pointer', textDecoration: 'underline' }} onClick={() => setActiveLegalModal('privacy')}>Privacy Policy</span>
-          <span>•</span>
-          <span style={{ cursor: 'pointer', textDecoration: 'underline' }} onClick={() => setActiveLegalModal('refund')}>Refund Policy</span>
-          <span>•</span>
-          <span style={{ cursor: 'pointer', textDecoration: 'underline' }} onClick={() => setActiveLegalModal('contact')}>Contact Us</span>
-        </div>
-      </div>
-
-      {/* Payment Processing Loading Screen */}
-      {isProcessing && (
-        <div style={{
-          position: 'fixed',
-          inset: 0,
-          backgroundColor: 'rgba(0,0,0,0.7)',
-          backdropFilter: 'blur(5px)',
-          zIndex: 9999,
-          display: 'flex',
-          flexDirection: 'column',
-          alignItems: 'center',
-          justifyContent: 'center',
-          color: 'white'
-        }}>
-          <div style={{
-            display: 'inline-block',
-            width: '40px',
-            height: '40px',
-            border: '4px solid rgba(255,255,255,0.1)',
-            borderTopColor: 'var(--accent-color)',
-            borderRadius: '50%',
-            animation: 'rotate 1s linear infinite',
-            marginBottom: '20px'
-          }} />
-          <h3 style={{ fontSize: '16px', fontWeight: 700 }}>
-            {paymentStep === 1 ? 'Redirecting to PayPal Checkout...' : 'Processing PayPal transaction...'}
-          </h3>
-          <p style={{ fontSize: '12px', color: '#94a3b8', marginTop: '6px' }}>Please do not close this window</p>
-        </div>
-      )}
-
-      {/* Payment Success Modal */}
-      {showSuccess && (
-        <div style={{
-          position: 'fixed',
-          inset: 0,
-          backgroundColor: 'rgba(0,0,0,0.6)',
-          backdropFilter: 'blur(4px)',
-          zIndex: 9999,
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          padding: '24px'
-        }}>
-          <div className="animate-fade-in" style={{
-            backgroundColor: 'var(--bg-secondary)',
-            borderRadius: '16px',
-            padding: '24px',
-            width: '100%',
-            maxWidth: '320px',
-            textAlign: 'center',
-            boxShadow: '0 20px 25px -5px rgba(0,0,0,0.3)',
-            border: '1px solid var(--border-color)'
-          }}>
-            <span style={{ fontSize: '48px', display: 'block', marginBottom: '12px' }}>
-              {isVipSuccess ? '👑' : '🛍️'}
-            </span>
-            <h3 style={{ fontSize: '18px', fontWeight: 800, marginBottom: '8px', color: 'var(--text-primary)' }}>
-              {isVipSuccess ? 'VIP Unlimited Activated!' : 'Purchase Successful!'}
-            </h3>
-            <p style={{ fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '20px', lineHeight: 1.5 }}>
-              {isVipSuccess
-                ? `You now have full unlimited access to all novels and chapters across the site.`
-                : `Your account has been credited with coins. Happy reading!`}
+          {/* Notes */}
+          <div
+            style={{
+              backgroundColor: 'var(--bg-secondary)',
+              borderRadius: '14px',
+              padding: '14px 16px',
+              border: '1px solid var(--border-color)',
+              fontSize: '0.75rem',
+              color: 'var(--text-secondary)',
+              lineHeight: 1.65,
+            }}
+          >
+            <p>• <strong>VIP Unlimited Pass:</strong> Instant access to all novel chapters across the site without consuming coins.</p>
+            <p>• <strong>Coin Top-up:</strong> Permanent coins to unlock individual chapters across StarNovel.</p>
+            <p>
+              • Need help?{' '}
+              <button
+                type="button"
+                onClick={() => setActiveLegalModal('contact')}
+                style={{ background: 'none', border: 'none', padding: 0, color: 'var(--accent-text)', fontWeight: 600, textDecoration: 'underline', cursor: 'pointer' }}
+              >
+                Contact Customer Support
+              </button>.
             </p>
-            
-            {isVipSuccess ? (
-              <div style={{
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: '6px',
-                backgroundColor: 'rgba(79, 70, 229, 0.12)',
-                color: 'var(--accent-color)',
-                fontWeight: 700,
-                padding: '6px 14px',
-                borderRadius: '99px',
-                marginBottom: '20px',
-                fontSize: '13px'
-              }}>
-                <span>✨ {vipSuccessTitle} Active</span>
-              </div>
-            ) : (
-              <div style={{
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: '6px',
-                backgroundColor: '#dcfce7',
-                color: '#15803d',
-                fontWeight: 700,
-                padding: '6px 14px',
-                borderRadius: '99px',
-                marginBottom: '20px',
-                fontSize: '14px'
-              }}>
-                <GoldCoin size={14} />
-                <span>+{successAmount} Coins Added</span>
-              </div>
-            )}
+          </div>
 
-            <button 
-              className="btn-cta-primary" 
-              style={{ width: '100%', padding: '10px 0' }}
-              onClick={() => {
-                setShowSuccess(false);
-                handleReturnToContent();
-              }}
-            >
-              Start Reading Now
+          {/* Legal Links */}
+          <div
+            style={{
+              display: 'flex',
+              flexWrap: 'wrap',
+              justifyContent: 'center',
+              alignItems: 'center',
+              gap: '8px 12px',
+              paddingBottom: '12px',
+              fontSize: '0.75rem',
+              color: 'var(--text-tertiary)',
+            }}
+          >
+            <button type="button" onClick={() => setActiveLegalModal('terms')} style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', textDecoration: 'underline' }}>
+              Terms of Service
+            </button>
+            <span aria-hidden="true">·</span>
+            <button type="button" onClick={() => setActiveLegalModal('privacy')} style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', textDecoration: 'underline' }}>
+              Privacy Policy
+            </button>
+            <span aria-hidden="true">·</span>
+            <button type="button" onClick={() => setActiveLegalModal('refund')} style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', textDecoration: 'underline' }}>
+              Refund Policy
+            </button>
+            <span aria-hidden="true">·</span>
+            <button type="button" onClick={() => setActiveLegalModal('contact')} style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', textDecoration: 'underline' }}>
+              Contact Us
             </button>
           </div>
         </div>
+      </div>
+
+      {/* Payment Processing Loading Overlay */}
+      {isProcessing && (
+        <div
+          role="status"
+          aria-live="polite"
+          style={{
+            position: 'fixed',
+            inset: 0,
+            backgroundColor: 'rgba(15, 15, 15, 0.72)',
+            backdropFilter: 'blur(6px)',
+            zIndex: 9999,
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: '14px',
+            color: '#FAF8F5',
+            padding: '24px',
+            textAlign: 'center',
+          }}
+        >
+          <div className="sn-spinner" />
+          <p style={{ fontSize: '1rem', fontWeight: 600 }}>
+            {paymentStep === 1 ? 'Redirecting to PayPal Checkout...' : 'Completing PayPal transaction...'}
+          </p>
+          <p style={{ fontSize: '0.8125rem', color: 'rgba(250, 248, 245, 0.72)' }}>Please keep this window open</p>
+        </div>
       )}
 
-      {/* Legal & Compliance Policy Modal */}
+      {/* Native <dialog> Payment Success Modal */}
+      <dialog
+        ref={successDialogRef}
+        className="sn-dialog"
+        aria-labelledby={successTitleId}
+        onCancel={(e) => {
+          e.preventDefault();
+          setShowSuccess(false);
+        }}
+        onPointerDown={(e) => {
+          if (successDialogRef.current) {
+            pressedOutsideRef.current = isPointerOutside(e, successDialogRef.current);
+          }
+        }}
+        onPointerUp={(e) => {
+          if (successDialogRef.current && pressedOutsideRef.current && isPointerOutside(e, successDialogRef.current)) {
+            setShowSuccess(false);
+          }
+          pressedOutsideRef.current = false;
+        }}
+        style={{ width: '100%', maxWidth: '340px', padding: '26px 24px', textAlign: 'center' }}
+      >
+        <div
+          style={{
+            width: '52px',
+            height: '52px',
+            borderRadius: '50%',
+            backgroundColor: 'var(--accent-light)',
+            color: 'var(--accent-text)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            margin: '0 auto 14px',
+          }}
+        >
+          {isVipSuccess ? <Crown size={24} strokeWidth={1.8} aria-hidden="true" /> : <Sparkles size={24} strokeWidth={1.8} aria-hidden="true" />}
+        </div>
+        <h2 id={successTitleId} style={{ fontFamily: 'var(--font-display)', fontSize: '1.25rem', fontWeight: 600, marginBottom: '8px' }}>
+          {isVipSuccess ? 'VIP Unlimited Activated' : 'Purchase Complete'}
+        </h2>
+        <p style={{ fontSize: '0.875rem', color: 'var(--text-secondary)', marginBottom: '18px', lineHeight: 1.5 }}>
+          {isVipSuccess
+            ? 'You now have unlimited access to every story and chapter across StarNovel.'
+            : 'Your coins have been credited to your wallet. Enjoy reading!'}
+        </p>
+
+        {isVipSuccess ? (
+          <div
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '6px',
+              backgroundColor: 'var(--accent-light)',
+              color: 'var(--accent-text)',
+              fontWeight: 600,
+              padding: '7px 14px',
+              borderRadius: '999px',
+              margin: '0 auto 20px',
+              fontSize: '0.8125rem',
+            }}
+          >
+            <Crown size={14} strokeWidth={1.9} aria-hidden="true" />
+            <span>{vipSuccessTitle} Active</span>
+          </div>
+        ) : (
+          <div
+            className="tabular-nums"
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '6px',
+              backgroundColor: 'var(--accent-light)',
+              color: 'var(--accent-text)',
+              fontWeight: 700,
+              padding: '7px 16px',
+              borderRadius: '999px',
+              margin: '0 auto 20px',
+              fontSize: '0.875rem',
+            }}
+          >
+            <GoldCoin size={15} />
+            <span>+{successAmount.toLocaleString()} Coins Added</span>
+          </div>
+        )}
+
+        <button
+          type="button"
+          autoFocus
+          className="btn-cta-primary"
+          style={{ width: '100%', borderRadius: '999px' }}
+          onClick={() => {
+            setShowSuccess(false);
+            handleReturnToContent();
+          }}
+        >
+          Start Reading Now
+        </button>
+      </dialog>
+
       <LegalModal
         isOpen={activeLegalModal !== null}
         type={activeLegalModal || 'contact'}

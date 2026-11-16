@@ -56,16 +56,18 @@ func (t *fakeTx) Rollback(context.Context) error {
 }
 
 type fakeNovelRepo struct {
-	novels              map[int64]*Novel
-	chapters            map[int64]map[int]*Chapter
-	settings            map[string]string
-	promoLinks          map[int]*PromotionLink
-	lastListSelectQuery string
-	batchAllCalled      bool
-	batchInheritedCalls int
-	batchErr            error
-	nextID              int64
-	nextPromoID         int
+	novels                map[int64]*Novel
+	chapters              map[int64]map[int]*Chapter
+	settings              map[string]string
+	promoLinks            map[int]*PromotionLink
+	lastListSelectQuery   string
+	batchAllCalled        bool
+	batchCoinCostCalls    int
+	batchStartPayCalls    int
+	batchInheritedCalls   int
+	batchErr              error
+	nextID                int64
+	nextPromoID           int
 }
 
 func newFakeNovelRepo() *fakeNovelRepo {
@@ -169,6 +171,14 @@ func (r *fakeNovelRepo) CountNovelsByCoverURL(_ context.Context, coverURL string
 func (r *fakeNovelRepo) UpdateChapterPrices(context.Context, int, *int, int64) error { return nil }
 func (r *fakeNovelRepo) BatchUpdateAllNovelChapterPrices(context.Context, int, int) error {
 	r.batchAllCalled = true
+	return r.batchErr
+}
+func (r *fakeNovelRepo) BatchUpdateAllNovelCoinCost(context.Context, int) error {
+	r.batchCoinCostCalls++
+	return r.batchErr
+}
+func (r *fakeNovelRepo) BatchUpdateAllNovelStartPayChapter(context.Context, int, int) error {
+	r.batchStartPayCalls++
 	return r.batchErr
 }
 func (r *fakeNovelRepo) BatchUpdateInheritedNovelChapterPrices(context.Context, int) error {
@@ -708,7 +718,7 @@ func TestCoverCleanupSettingsValidationAndPromoLinkGuards(t *testing.T) {
 	}
 
 	// Genres length validation: allows up to 2048 runes (including >50 rune single tags), rejects 2049
-	exactMaxTag := strings.Repeat(" tag", 0) + strings.Repeat("a", 2048)
+	exactMaxTag := strings.Repeat("a", 2048)
 	createdMaxGenres, err := svc.CreateNovel(ctx, &Novel{
 		Title: "LongGenres", Author: "A", CoverURL: newKey, Status: "Ongoing", Genres: []string{" " + exactMaxTag + " "},
 	})
@@ -722,5 +732,36 @@ func TestCoverCleanupSettingsValidationAndPromoLinkGuards(t *testing.T) {
 	}
 	if _, err := svc.UpdateNovel(ctx, 1, "B1", "A", newKey, "Ongoing", "", "", []string{strings.Repeat("a", 1024), strings.Repeat("b", 1024)}, 4.5, nil, 3); !errors.Is(err, ErrInvalidGenres) {
 		t.Fatalf("expected ErrInvalidGenres on UpdateNovel when joined with comma >2048 chars, got %v", err)
+	}
+
+	// Independent global coin cost & start-pay chapter updates must not couple or cross-trigger
+	if err := svc.UpdateSettings(ctx, map[string]string{
+		"global_coin_cost_per_thousand": "700",
+		"apply_coin_cost_to_all_novels": "true",
+	}); err != nil {
+		t.Fatalf("UpdateSettings coin cost only failed: %v", err)
+	}
+	if repo.batchCoinCostCalls != 1 || repo.batchStartPayCalls != 0 || repo.batchAllCalled {
+		t.Fatalf("expected only coin cost batch call, got coin=%d startPay=%d all=%v", repo.batchCoinCostCalls, repo.batchStartPayCalls, repo.batchAllCalled)
+	}
+
+	if err := svc.UpdateSettings(ctx, map[string]string{
+		"global_start_pay_chapter_index": "6",
+		"apply_start_pay_to_all_novels":  "false",
+	}); err != nil {
+		t.Fatalf("UpdateSettings start pay only (default only) failed: %v", err)
+	}
+	if repo.batchStartPayCalls != 0 || repo.settings["global_start_pay_chapter_index"] != "6" {
+		t.Fatalf("expected no startPay batch overwrite when false, got calls=%d setting=%q", repo.batchStartPayCalls, repo.settings["global_start_pay_chapter_index"])
+	}
+
+	if err := svc.UpdateSettings(ctx, map[string]string{
+		"global_start_pay_chapter_index": "8",
+		"apply_start_pay_to_all_novels":  "true",
+	}); err != nil {
+		t.Fatalf("UpdateSettings start pay all failed: %v", err)
+	}
+	if repo.batchStartPayCalls != 1 || repo.batchCoinCostCalls != 1 {
+		t.Fatalf("expected 1 startPay batch call without re-running coin batch, got coin=%d startPay=%d", repo.batchCoinCostCalls, repo.batchStartPayCalls)
 	}
 }

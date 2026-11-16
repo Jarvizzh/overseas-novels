@@ -1,5 +1,12 @@
 import React from 'react';
+import { Star } from 'lucide-react';
 import type { Novel } from '../utils/api';
+
+const FALLBACK_COVER =
+  "data:image/svg+xml;utf8," +
+  encodeURIComponent(
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 400"><rect width="300" height="400" fill="#262421"/><rect x="24" y="24" width="252" height="352" fill="none" stroke="#9A7132" stroke-opacity="0.4" stroke-width="2"/><text x="150" y="205" fill="#F4F1EA" font-family="Georgia, serif" font-size="22" text-anchor="middle">StarNovel</text></svg>'
+  );
 
 interface BookCardProps {
   novel: Novel;
@@ -12,17 +19,30 @@ export const BookCard: React.FC<BookCardProps> = ({
   onClick,
   layout = 'grid',
 }) => {
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      onClick();
+    }
+  };
+
   if (layout === 'horizontal') {
     return (
-      <div className="book-card-horizontal" onClick={onClick}>
-        <img 
-          src={novel.cover} 
-          alt={novel.title} 
+      <article
+        className="book-card-horizontal"
+        onClick={onClick}
+        onKeyDown={handleKeyDown}
+        role="button"
+        tabIndex={0}
+      >
+        <img
+          src={novel.cover || FALLBACK_COVER}
+          alt={novel.title}
           className="book-card-horizontal-cover"
           loading="lazy"
           onError={(e) => {
-            // fallback in case of loading error
-            (e.target as HTMLImageElement).src = 'https://placehold.co/150x200?text=Novel';
+            const img = e.currentTarget;
+            if (img.src !== FALLBACK_COVER) img.src = FALLBACK_COVER;
           }}
         />
         <div className="book-card-horizontal-info">
@@ -36,35 +56,43 @@ export const BookCard: React.FC<BookCardProps> = ({
               {novel.genres?.[0] && (
                 <span className="book-card-horizontal-genre">{novel.genres[0]}</span>
               )}
-              <span>⭐ {novel.rating}</span>
+              <span className="rating-inline">
+                <Star size={11} fill="currentColor" strokeWidth={0} aria-hidden="true" />
+                <span>{novel.rating}</span>
+              </span>
             </div>
           </div>
         </div>
-      </div>
+      </article>
     );
   }
 
   return (
-    <div className="book-card" onClick={onClick}>
+    <article
+      className="book-card"
+      onClick={onClick}
+      onKeyDown={handleKeyDown}
+      role="button"
+      tabIndex={0}
+    >
       <div className="book-card-cover-wrapper">
-        <img 
-          src={novel.cover} 
-          alt={novel.title} 
-          className="book-card-cover" 
+        <img
+          src={novel.cover || FALLBACK_COVER}
+          alt={novel.title}
+          className="book-card-cover"
           loading="lazy"
           onError={(e) => {
-            (e.target as HTMLImageElement).src = 'https://placehold.co/150x200?text=Novel';
+            const img = e.currentTarget;
+            if (img.src !== FALLBACK_COVER) img.src = FALLBACK_COVER;
           }}
         />
         <div className="book-card-rating">
-          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" style={{ width: '10px', height: '10px' }}>
-            <path fillRule="evenodd" d="M10.788 3.21c.448-1.077 1.976-1.077 2.424 0l2.082 5.007 5.404.433c1.164.093 1.636 1.545.749 2.305l-4.117 3.527 1.257 5.273c.271 1.136-.964 2.033-1.96 1.425L12 18.354 7.373 21.18c-.996.608-2.231-.29-1.96-1.425l1.257-5.273-4.117-3.527c-.887-.76-.415-2.212.749-2.305l5.404-.433 2.082-5.006z" clipRule="evenodd" />
-          </svg>
+          <Star size={10} fill="currentColor" strokeWidth={0} aria-hidden="true" />
           <span>{novel.rating}</span>
         </div>
       </div>
       <h3 className="book-card-title">{novel.title}</h3>
       <span className="book-card-author">{novel.author}</span>
-    </div>
+    </article>
   );
 };

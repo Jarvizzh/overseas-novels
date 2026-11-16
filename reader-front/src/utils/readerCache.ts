@@ -1,7 +1,7 @@
 import type { ChapterContentResponse } from './api';
 
 const DB_NAME = 'StarNovelReaderCacheDB';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const STORE_NAME = 'chapters';
 
 function openDB(): Promise<IDBDatabase> {
@@ -15,9 +15,11 @@ function openDB(): Promise<IDBDatabase> {
 
     request.onupgradeneeded = (event) => {
       const db = (event.target as IDBOpenDBRequest).result;
-      if (!db.objectStoreNames.contains(STORE_NAME)) {
-        db.createObjectStore(STORE_NAME, { keyPath: 'key' });
+      // Recreate store cleanly on v2 so legacy unscoped keys cannot leak across accounts
+      if (db.objectStoreNames.contains(STORE_NAME)) {
+        db.deleteObjectStore(STORE_NAME);
       }
+      db.createObjectStore(STORE_NAME, { keyPath: 'key' });
     };
 
     request.onsuccess = () => resolve(request.result);
@@ -25,11 +27,16 @@ function openDB(): Promise<IDBDatabase> {
   });
 }
 
+function buildKey(userId: number, novelId: number, chapterIndex: number): string {
+  return `u:${userId}:n:${novelId}:c:${chapterIndex}`;
+}
+
 export const readerCache = {
-  async getCachedChapter(novelId: number, chapterIndex: number): Promise<ChapterContentResponse | null> {
+  async getCachedChapter(userId: number, novelId: number, chapterIndex: number): Promise<ChapterContentResponse | null> {
+    if (!userId) return null;
     try {
       const db = await openDB();
-      const key = `${novelId}-${chapterIndex}`;
+      const key = buildKey(userId, novelId, chapterIndex);
       return new Promise((resolve) => {
         const tx = db.transaction(STORE_NAME, 'readonly');
         const store = tx.objectStore(STORE_NAME);
@@ -48,14 +55,15 @@ export const readerCache = {
     }
   },
 
-  async setCachedChapter(novelId: number, chapterIndex: number, data: ChapterContentResponse): Promise<void> {
+  async setCachedChapter(userId: number, novelId: number, chapterIndex: number, data: ChapterContentResponse): Promise<void> {
+    if (!userId || data.locked) return;
     try {
       const db = await openDB();
-      const key = `${novelId}-${chapterIndex}`;
+      const key = buildKey(userId, novelId, chapterIndex);
       return new Promise((resolve, reject) => {
         const tx = db.transaction(STORE_NAME, 'readwrite');
         const store = tx.objectStore(STORE_NAME);
-        const req = store.put({ key, data, timestamp: Date.now() });
+        const req = store.put({ key, userId, data, timestamp: Date.now() });
         req.onsuccess = () => resolve();
         req.onerror = () => reject(req.error);
       });
@@ -65,22 +73,24 @@ export const readerCache = {
   },
 
   async prefetchChapters(
+    userId: number,
     novelId: number,
     currentIndex: number,
     totalCount: number,
     fetchFn: (novelId: number, index: number) => Promise<ChapterContentResponse>
   ): Promise<void> {
+    if (!userId) return;
     const prefetchCount = 2;
     for (let i = 1; i <= prefetchCount; i++) {
       const targetIndex = currentIndex + i;
       if (targetIndex >= totalCount) break;
 
       try {
-        const cached = await this.getCachedChapter(novelId, targetIndex);
+        const cached = await this.getCachedChapter(userId, novelId, targetIndex);
         if (!cached) {
           const res = await fetchFn(novelId, targetIndex);
-          if (res) {
-            await this.setCachedChapter(novelId, targetIndex, res);
+          if (res && !res.locked) {
+            await this.setCachedChapter(userId, novelId, targetIndex, res);
           }
         }
       } catch (err) {

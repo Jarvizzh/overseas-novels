@@ -1,6 +1,7 @@
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700&display=swap');
 
 :root {
+  color-scheme: light;
   --font-sans: 'Inter', system-ui, -apple-system, sans-serif;
   --font-heading: 'Outfit', sans-serif;
 
@@ -32,6 +33,7 @@
 }
 
 [data-theme="dark"] {
+  color-scheme: dark;
   /* HSL Color System - Sleek Dark Theme */
   --bg-base: 222 47% 8%;       /* Very dark slate/blue background */
   --bg-surface: 222 47% 12%;   /* Dark surface */
@@ -389,7 +391,8 @@ select.input-field option {
   outline-offset: 2px;
 }
 
-.cover-upload-dropzone:has(input:focus-visible) {
+.cover-upload-dropzone:has(input:focus-visible),
+.file-upload-dropzone:has(input:focus-visible) {
   border-color: hsl(var(--primary)) !important;
   box-shadow: 0 0 0 3px hsl(var(--primary) / 0.2);
 }

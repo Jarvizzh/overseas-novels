@@ -1,50 +1,57 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
+import { Search as SearchIcon, X, TrendingUp, Clock } from 'lucide-react';
 import { api } from '../utils/api';
 import type { Novel } from '../utils/api';
 import { BookCard } from '../components/BookCard';
 
 interface SearchProps {
   novels: Novel[];
-  onNavigate: (page: string, params?: any) => void;
+  onNavigate: (page: string, params?: Record<string, unknown>) => void;
   initialGenre?: string;
 }
 
-export const Search: React.FC<SearchProps> = ({ onNavigate, initialGenre }) => {
+function loadSearchHistory(): string[] {
+  try {
+    const raw = localStorage.getItem('search-history');
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
+export const Search: React.FC<SearchProps> = ({ novels, onNavigate, initialGenre }) => {
   const [query, setQuery] = useState('');
   const [selectedGenre, setSelectedGenre] = useState<string>(initialGenre || 'All');
-  const [searchHistory, setSearchHistory] = useState<string[]>([]);
+  const [searchHistory, setSearchHistory] = useState<string[]>(loadSearchHistory);
   const [results, setResults] = useState<Novel[]>([]);
   const [loading, setLoading] = useState(false);
 
-  // Load search history on mount
   useEffect(() => {
-    const history = localStorage.getItem('search-history');
-    if (history) {
-      setSearchHistory(JSON.parse(history));
+    if (initialGenre) {
+      setSelectedGenre(initialGenre);
     }
-  }, []);
+  }, [initialGenre]);
 
-  // Fetch search results from backend reactively
   useEffect(() => {
     const performSearch = async () => {
       setLoading(true);
       try {
         let list: Novel[] = [];
         if (query.trim()) {
-          list = await api.searchNovels(query.trim(), 1, 50);
+          list = (await api.searchNovels(query.trim(), 1, 50)) || [];
           if (selectedGenre !== 'All') {
             list = list.filter((n) => (n.genres || []).includes(selectedGenre));
           }
+        } else if (selectedGenre === 'All') {
+          list = (await api.getNovels({ limit: 50 })) || [];
         } else {
-          if (selectedGenre === 'All') {
-            list = await api.getNovels({ limit: 50 });
-          } else {
-            list = await api.getNovels({ genre: selectedGenre, limit: 50 });
-          }
+          list = (await api.getNovels({ genre: selectedGenre, limit: 50 })) || [];
         }
         setResults(list);
       } catch (err) {
-        console.error("Search failed:", err);
+        console.error('Search failed:', err);
       } finally {
         setLoading(false);
       }
@@ -52,146 +59,192 @@ export const Search: React.FC<SearchProps> = ({ onNavigate, initialGenre }) => {
 
     const delayDebounce = setTimeout(() => {
       performSearch();
-    }, 300);
+    }, 280);
 
     return () => clearTimeout(delayDebounce);
   }, [query, selectedGenre]);
 
-  const allGenres = ['All', 'Fantasy', 'Xianxia', 'Romance', 'CEO', 'Sci-Fi', 'Cozy'];
+  const allGenres = useMemo(() => {
+    const base = ['All', 'Fantasy', 'Romance', 'Xianxia', 'CEO', 'Sci-Fi', 'Cozy'];
+    const dynamicGenres = new Set<string>(base);
+    novels.forEach((n) => (n.genres || []).forEach((g) => dynamicGenres.add(g)));
+    return Array.from(dynamicGenres);
+  }, [novels]);
+
+  const trendingTerms = useMemo(() => {
+    if (novels.length > 0) {
+      return novels.slice(0, 4).map((n) => n.title);
+    }
+    return ['Romance', 'Fantasy', 'Billionaire', 'Sci-Fi'];
+  }, [novels]);
 
   const handleSearchSubmit = (searchTerm: string) => {
-    if (!searchTerm.trim()) return;
-    setQuery(searchTerm);
-    
-    // Add to history and persist
+    const trimmed = searchTerm.trim();
+    if (!trimmed) return;
+    setQuery(trimmed);
+
     const updatedHistory = [
-      searchTerm,
-      ...searchHistory.filter((h) => h !== searchTerm)
-    ].slice(0, 5);
-    
+      trimmed,
+      ...searchHistory.filter((h) => h !== trimmed),
+    ].slice(0, 6);
+
     setSearchHistory(updatedHistory);
-    localStorage.setItem('search-history', JSON.stringify(updatedHistory));
+    try {
+      localStorage.setItem('search-history', JSON.stringify(updatedHistory));
+    } catch {
+      // Ignore storage errors
+    }
   };
 
   const clearHistory = () => {
     setSearchHistory([]);
-    localStorage.removeItem('search-history');
+    try {
+      localStorage.removeItem('search-history');
+    } catch {
+      // Ignore storage errors
+    }
   };
 
   return (
-    <div className="scroll-container animate-fade-in" style={{ paddingBottom: '90px' }}>
-      {/* Search Input Box */}
-      <div className="search-input-wrapper">
-        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2.5} stroke="currentColor" style={{ width: '18px', height: '18px', color: 'var(--text-tertiary)' }}>
-          <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.637 10.637z" />
-        </svg>
-        <input 
-          type="text" 
-          placeholder="Search book title, author, key terms..." 
-          className="search-input"
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter') handleSearchSubmit(query);
-          }}
-        />
-        {query && (
-          <button 
-            onClick={() => setQuery('')}
-            style={{ background: 'transparent', border: 'none', color: 'var(--text-tertiary)', cursor: 'pointer' }}
-          >
-            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2.5} stroke="currentColor" style={{ width: '16px', height: '16px' }}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
-            </svg>
-          </button>
-        )}
-      </div>
-
-      {/* Genre Filter Pills */}
-      <div className="genre-filter-row">
-        {allGenres.map((genre) => (
-          <button
-            key={genre}
-            className={`genre-filter-btn ${selectedGenre === genre ? 'active' : ''}`}
-            onClick={() => setSelectedGenre(genre)}
-          >
-            {genre}
-          </button>
-        ))}
-      </div>
-
-      {/* Conditional Search History and Hot Search tags */}
-      {!query && (
-        <>
-          {/* Hot Searches */}
-          <h3 className="hot-tags-title">Trending Searches</h3>
-          <div className="tag-cloud">
-            {['Celestial Monarch', 'Billionaire', 'System Cheat', 'Cozy Alchemist'].map((tag) => (
-              <span 
-                key={tag} 
-                className="tag-pill"
-                onClick={() => handleSearchSubmit(tag)}
-              >
-                🔥 {tag}
-              </span>
-            ))}
-          </div>
-
-          {/* Search History */}
-          {searchHistory.length > 0 && (
-            <div>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
-                <h3 className="hot-tags-title" style={{ margin: 0 }}>Search History</h3>
-                <button 
-                  onClick={clearHistory}
-                  style={{ background: 'transparent', border: 'none', color: 'var(--accent-color)', fontSize: '12px', fontWeight: 600, cursor: 'pointer' }}
-                >
-                  Clear All
-                </button>
-              </div>
-              <div className="tag-cloud">
-                {searchHistory.map((hist) => (
-                  <span 
-                    key={hist} 
-                    className="tag-pill"
-                    onClick={() => setQuery(hist)}
-                  >
-                    ⏱️ {hist}
-                  </span>
-                ))}
-              </div>
-            </div>
+    <div className="scroll-container animate-fade-in">
+      <div className="sn-shell-container">
+        {/* Search Input Box */}
+        <div className="search-input-wrapper">
+          <SearchIcon size={17} strokeWidth={1.8} style={{ color: 'var(--text-tertiary)', flexShrink: 0 }} aria-hidden="true" />
+          <input
+            type="search"
+            aria-label="Search book title, author, or keywords"
+            placeholder="Search title, author, or keyword..."
+            className="search-input"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') handleSearchSubmit(query);
+            }}
+          />
+          {query && (
+            <button
+              type="button"
+              onClick={() => setQuery('')}
+              aria-label="Clear search"
+              style={{
+                background: 'transparent',
+                border: 'none',
+                color: 'var(--text-tertiary)',
+                cursor: 'pointer',
+                padding: '4px',
+                display: 'inline-flex',
+                alignItems: 'center',
+              }}
+            >
+              <X size={16} strokeWidth={2} aria-hidden="true" />
+            </button>
           )}
-        </>
-      )}
+        </div>
 
-      {/* Results Header */}
-      {query && (
-        <h3 className="hot-tags-title" style={{ margin: '12px 0 8px' }}>
-          Search Results ({results.length})
-        </h3>
-      )}
+        {/* Genre Filter Pills */}
+        <div className="genre-filter-row" role="group" aria-label="Filter by genre">
+          {allGenres.map((genre) => (
+            <button
+              key={genre}
+              type="button"
+              className={`genre-filter-btn ${selectedGenre === genre ? 'active' : ''}`}
+              onClick={() => setSelectedGenre(genre)}
+              aria-pressed={selectedGenre === genre}
+            >
+              {genre}
+            </button>
+          ))}
+        </div>
 
-      {/* Search Result List */}
-      <div style={{ display: 'flex', flexDirection: 'column' }}>
+        {/* Discovery Tags & Recent History when query is empty */}
+        {!query.trim() && (
+          <>
+            <h2 className="hot-tags-title">Trending Searches</h2>
+            <div className="tag-cloud">
+              {trendingTerms.map((term) => (
+                <button
+                  key={term}
+                  type="button"
+                  className="tag-pill"
+                  onClick={() => handleSearchSubmit(term)}
+                >
+                  <TrendingUp size={12} strokeWidth={2} style={{ color: 'var(--accent-text)' }} aria-hidden="true" />
+                  <span>{term}</span>
+                </button>
+              ))}
+            </div>
+
+            {searchHistory.length > 0 && (
+              <div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
+                  <h2 className="hot-tags-title" style={{ margin: 0 }}>Recent Searches</h2>
+                  <button
+                    type="button"
+                    onClick={clearHistory}
+                    style={{
+                      background: 'transparent',
+                      border: 'none',
+                      color: 'var(--accent-text)',
+                      fontSize: '0.75rem',
+                      fontWeight: 600,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    Clear All
+                  </button>
+                </div>
+                <div className="tag-cloud">
+                  {searchHistory.map((hist) => (
+                    <button
+                      key={hist}
+                      type="button"
+                      className="tag-pill"
+                      onClick={() => setQuery(hist)}
+                    >
+                      <Clock size={12} strokeWidth={1.8} aria-hidden="true" />
+                      <span>{hist}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+          </>
+        )}
+
+        {/* Results Header */}
+        <h2 className="hot-tags-title" style={{ marginTop: '8px' }}>
+          {query.trim()
+            ? `Search Results (${results.length})`
+            : selectedGenre === 'All'
+              ? 'All Stories'
+              : `${selectedGenre} Stories`}
+        </h2>
+
+        {/* Search Result List */}
         {loading ? (
-          <div style={{ textAlign: 'center', padding: '40px', color: 'var(--text-secondary)' }}>
-            Loading search results...
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', padding: '48px 0', gap: '10px', color: 'var(--text-secondary)' }}>
+            <div className="sn-spinner" />
+            <span style={{ fontSize: '0.875rem' }}>Searching catalog...</span>
           </div>
         ) : results.length > 0 ? (
-          results.map((novel) => (
-            <BookCard 
-              key={novel.id} 
-              novel={novel} 
-              layout="horizontal" 
-              onClick={() => onNavigate('detail', { id: novel.id })}
-            />
-          ))
+          <div className="book-horizontal-list">
+            {results.map((novel) => (
+              <BookCard
+                key={novel.id}
+                novel={novel}
+                layout="horizontal"
+                onClick={() => onNavigate('detail', { id: novel.id })}
+              />
+            ))}
+          </div>
         ) : (
           <div className="shelf-empty-state">
-            <span className="shelf-empty-icon">🔍</span>
-            <p>No novels matched your search.</p>
-            <p style={{ fontSize: '12px', marginTop: '4px' }}>Try using different keywords or categories.</p>
+            <div className="shelf-empty-icon-wrap">
+              <SearchIcon size={24} strokeWidth={1.65} aria-hidden="true" />
+            </div>
+            <p style={{ fontWeight: 600, color: 'var(--text-primary)' }}>No stories matched your search</p>
+            <p style={{ fontSize: '0.8125rem' }}>Try another keyword or switch genre filters.</p>
           </div>
         )}
       </div>

@@ -4,15 +4,18 @@
 <head>
   <meta charset="UTF-8" />
   <link rel="icon" type="image/png" href="/assets/logo_light.png" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <meta name="color-scheme" content="light dark">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="color-scheme" content="light dark" />
   <script>
     (function () {
-      const colorScheme = localStorage.getItem("color-scheme");
-      if (colorScheme && colorScheme !== 'system') {
-        document.documentElement.setAttribute('data-user-theme', colorScheme);
-        document.querySelector('meta[name="color-scheme"]').content = colorScheme;
-      }
+      try {
+        var colorScheme = localStorage.getItem('color-scheme');
+        if (colorScheme === 'light' || colorScheme === 'dark') {
+          document.documentElement.setAttribute('data-user-theme', colorScheme);
+          var meta = document.querySelector('meta[name="color-scheme"]');
+          if (meta) meta.setAttribute('content', colorScheme);
+        }
+      } catch (e) {}
     })();
   </script>
   <title>StarNovel</title>

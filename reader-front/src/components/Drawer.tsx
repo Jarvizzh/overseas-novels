@@ -1,4 +1,5 @@
-import React from 'react';
+import React, { useEffect, useId } from 'react';
+import { X } from 'lucide-react';
 
 interface DrawerProps {
   visible: boolean;
@@ -13,22 +14,42 @@ export const Drawer: React.FC<DrawerProps> = ({
   title,
   children,
 }) => {
+  const titleId = useId();
+
+  useEffect(() => {
+    if (!visible) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        onClose();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [visible, onClose]);
+
   return (
-    <div className={`drawer-backdrop ${visible ? 'visible' : ''}`} onClick={onClose}>
-      <div 
-        className="drawer-content" 
-        onClick={(e) => e.stopPropagation()} // Prevent closing when clicking drawer content
+    <div
+      className={`drawer-backdrop ${visible ? 'visible' : ''}`}
+      onClick={onClose}
+      aria-hidden={!visible}
+      inert={!visible}
+    >
+      <div
+        className="drawer-content"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        onClick={(e) => e.stopPropagation()}
       >
         <div className="drawer-header">
-          <h2 className="drawer-title">{title}</h2>
-          <button 
-            className="header-btn" 
+          <h2 id={titleId} className="drawer-title">{title}</h2>
+          <button
+            type="button"
+            className="header-btn"
             onClick={onClose}
             aria-label="Close drawer"
           >
-            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2.5} stroke="currentColor" style={{ width: '20px', height: '20px' }}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
-            </svg>
+            <X size={20} strokeWidth={1.8} aria-hidden="true" />
           </button>
         </div>
         <div className="scroll-container-no-pad" style={{ flex: 1 }}>

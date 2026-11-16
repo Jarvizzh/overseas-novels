@@ -1,9 +1,17 @@
 import React from 'react';
+import { ChevronLeft, Bookmark, List } from 'lucide-react';
+
+export type ReaderFontFamily = 'serif' | 'sans';
+export type ReaderLineHeight = 'compact' | 'standard' | 'relaxed';
 
 interface ReaderSettingsProps {
   visible: boolean;
   fontSize: number;
   onFontSizeChange: (size: number) => void;
+  fontFamily: ReaderFontFamily;
+  onFontFamilyChange: (family: ReaderFontFamily) => void;
+  lineHeight: ReaderLineHeight;
+  onLineHeightChange: (lh: ReaderLineHeight) => void;
   theme: string;
   onThemeChange: (theme: string) => void;
   onOpenDrawer: () => void;
@@ -17,6 +25,10 @@ export const ReaderSettings: React.FC<ReaderSettingsProps> = ({
   visible,
   fontSize,
   onFontSizeChange,
+  fontFamily,
+  onFontFamilyChange,
+  lineHeight,
+  onLineHeightChange,
   theme,
   onThemeChange,
   onOpenDrawer,
@@ -25,93 +37,140 @@ export const ReaderSettings: React.FC<ReaderSettingsProps> = ({
   isInShelf,
   onAddToShelf,
 }) => {
+  const normalizedTheme = theme === 'day' ? 'paper' : theme === 'mint' ? 'forest' : theme;
+
   const themes = [
-    { id: 'day', name: 'Day', bg: '#fdfdfd' },
-    { id: 'night', name: 'Night', bg: '#121214' },
-    { id: 'sepia', name: 'Sepia', bg: '#f4edd8' },
-    { id: 'forest', name: 'Forest', bg: '#e2edd5' },
-    { id: 'mint', name: 'Mint', bg: '#e6f3f0' },
+    { id: 'paper', name: 'Paper', bg: '#FAF8F4', fg: '#1E1C1A' },
+    { id: 'sepia', name: 'Sepia', bg: '#F3ECD9', fg: '#3A2E21' },
+    { id: 'forest', name: 'Sage', bg: '#E7EFE4', fg: '#223324' },
+    { id: 'night', name: 'Night', bg: '#141413', fg: '#D6D2CA' },
   ];
 
   return (
-    <div className="reader-settings-overlay">
+    <div className="reader-settings-overlay" aria-hidden={!visible}>
       {/* Top Controls */}
       <div className={`reader-hud-top ${visible ? 'visible' : ''}`}>
-        <button className="reader-hud-btn" onClick={onBack} aria-label="Go back">
-          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2.5} stroke="currentColor" style={{ width: '20px', height: '20px' }}>
-            <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 19.5L8.25 12l7.5-7.5" />
-          </svg>
-        </button>
-        <span className="reader-hud-title">{novelTitle}</span>
-        <div style={{ display: 'flex', gap: '8px' }}>
-          <button 
-            className="reader-hud-btn" 
-            onClick={onAddToShelf}
-            aria-label={isInShelf ? "Remove from Shelf" : "Add to Shelf"}
-            style={{ color: isInShelf ? 'var(--accent-color)' : 'var(--text-primary)' }}
-          >
-            {isInShelf ? (
-              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" style={{ width: '20px', height: '20px' }}>
-                <path fillRule="evenodd" d="M6.32 2.577a49.255 49.255 0 0111.36 0c1.497.174 2.57 1.46 2.57 2.93V21a.75.75 0 01-1.085.67L12 18.089l-7.165 3.583A.75.75 0 013.75 21V5.507c0-1.47 1.073-2.756 2.57-2.93z" clipRule="evenodd" />
-              </svg>
-            ) : (
-              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" style={{ width: '20px', height: '20px' }}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M17.593 3.322c1.1.128 1.907 1.077 1.907 2.185V21L12 17.25 4.5 21V5.507c0-1.108.806-2.057 1.907-2.185a48.507 48.507 0 0111.186 0z" />
-              </svg>
-            )}
+        <div className="reader-hud-top-inner">
+          <button type="button" className="reader-hud-btn" onClick={onBack} aria-label="Go back">
+            <ChevronLeft size={20} strokeWidth={1.8} aria-hidden="true" />
           </button>
-          <button className="reader-hud-btn" onClick={onOpenDrawer} aria-label="Table of Contents">
-            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" style={{ width: '20px', height: '20px' }}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M8.25 6.75h12M8.25 12h12m-12 5.25h12M3.75 6.75h.007v.008H3.75V6.75zm.375 0a.375.375 0 11-.75 0 .375.375 0 01.75 0zM3.75 12h.007v.008H3.75V12zm.375 0a.375.375 0 11-.75 0 .375.375 0 01.75 0zm-.375 5.25h.007v.008H3.75v-.008zm.375 0a.375.375 0 11-.75 0 .375.375 0 01.75 0z" />
-            </svg>
-          </button>
+          <span className="reader-hud-title">{novelTitle}</span>
+          <div style={{ display: 'flex', gap: '4px' }}>
+            <button
+              type="button"
+              className="reader-hud-btn"
+              onClick={onAddToShelf}
+              aria-label={isInShelf ? 'Remove from Library' : 'Save to Library'}
+              style={{ color: isInShelf ? 'var(--reader-accent)' : 'var(--reader-text)' }}
+            >
+              <Bookmark
+                size={18}
+                strokeWidth={1.8}
+                fill={isInShelf ? 'currentColor' : 'none'}
+                aria-hidden="true"
+              />
+            </button>
+            <button type="button" className="reader-hud-btn" onClick={onOpenDrawer} aria-label="Table of Contents">
+              <List size={19} strokeWidth={1.8} aria-hidden="true" />
+            </button>
+          </div>
         </div>
       </div>
 
       {/* Bottom Controls */}
-      <div className={`reader-hud-bottom ${visible ? 'visible' : ''}`} style={{ padding: '18px 20px', gap: '16px' }}>
-        {/* Themes Selector */}
-        <div className="hud-section" style={{ width: '100%' }}>
-          <span className="hud-label" style={{ width: 'auto', marginRight: '8px' }}>Theme</span>
-          <div className="hud-theme-picker">
-            {themes.map((t) => (
-              <button
-                key={t.id}
-                className={`hud-theme-dot ${theme === t.id ? 'active' : ''}`}
-                style={{ backgroundColor: t.bg }}
-                onClick={() => onThemeChange(t.id)}
-                title={t.name}
-                aria-label={`Switch to ${t.name} theme`}
-              >
-                {theme === t.id && (
-                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" style={{ width: '14px', height: '14px', color: t.id === 'day' ? '#1e293b' : '#818cf8' }}>
-                    <path fillRule="evenodd" d="M16.704 4.153a.75.75 0 01.143 1.052l-8 10.5a.75.75 0 01-1.127.075l-4.5-4.5a.75.75 0 011.06-1.06l3.894 3.893 7.48-9.817a.75.75 0 011.05-.143z" clipRule="evenodd" />
-                  </svg>
-                )}
-              </button>
-            ))}
+      <div className={`reader-hud-bottom ${visible ? 'visible' : ''}`}>
+        <div className="reader-hud-bottom-inner">
+          {/* Surface Themes */}
+          <div className="hud-section">
+            <span className="hud-label">Surface</span>
+            <div className="hud-theme-picker">
+              {themes.map((t) => {
+                const isActive = normalizedTheme === t.id;
+                return (
+                  <button
+                    key={t.id}
+                    type="button"
+                    className={`hud-theme-pill ${isActive ? 'active' : ''}`}
+                    style={{ backgroundColor: t.bg, color: t.fg }}
+                    onClick={() => onThemeChange(t.id)}
+                    aria-pressed={isActive}
+                  >
+                    <span>{t.name}</span>
+                  </button>
+                );
+              })}
+            </div>
           </div>
-        </div>
 
-        {/* Font Size Adjuster */}
-        <div className="hud-section" style={{ width: '100%' }}>
-          <span className="hud-label" style={{ width: 'auto', marginRight: '8px' }}>Font Size</span>
-          <div className="hud-font-size-row" style={{ flex: 1, maxWidth: '240px' }}>
-            <button 
-              className="hud-font-size-btn" 
-              onClick={() => onFontSizeChange(Math.max(14, fontSize - 2))}
-              aria-label="Decrease font size"
-            >
-              A-
-            </button>
-            <span className="hud-font-size-val">{fontSize}px</span>
-            <button 
-              className="hud-font-size-btn" 
-              onClick={() => onFontSizeChange(Math.min(30, fontSize + 2))}
-              aria-label="Increase font size"
-            >
-              A+
-            </button>
+          {/* Font Family & Font Size */}
+          <div className="hud-section">
+            <span className="hud-label">Typeface</span>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+              <div className="hud-segmented" role="group" aria-label="Font typeface">
+                <button
+                  type="button"
+                  className={`hud-seg-btn ${fontFamily === 'serif' ? 'active' : ''}`}
+                  style={{ fontFamily: 'var(--font-serif)' }}
+                  onClick={() => onFontFamilyChange('serif')}
+                  aria-pressed={fontFamily === 'serif'}
+                >
+                  Serif
+                </button>
+                <button
+                  type="button"
+                  className={`hud-seg-btn ${fontFamily === 'sans' ? 'active' : ''}`}
+                  style={{ fontFamily: 'var(--font-sans)' }}
+                  onClick={() => onFontFamilyChange('sans')}
+                  aria-pressed={fontFamily === 'sans'}
+                >
+                  Sans
+                </button>
+              </div>
+
+              <div className="hud-font-size-row">
+                <button
+                  type="button"
+                  className="hud-font-size-btn"
+                  onClick={() => onFontSizeChange(Math.max(14, fontSize - 1))}
+                  aria-label="Decrease font size"
+                >
+                  A-
+                </button>
+                <span className="hud-font-size-val">{fontSize}px</span>
+                <button
+                  type="button"
+                  className="hud-font-size-btn"
+                  onClick={() => onFontSizeChange(Math.min(28, fontSize + 1))}
+                  aria-label="Increase font size"
+                >
+                  A+
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {/* Line Spacing */}
+          <div className="hud-section">
+            <span className="hud-label">Spacing</span>
+            <div className="hud-segmented" role="group" aria-label="Line spacing">
+              {(
+                [
+                  { id: 'compact', label: 'Compact' },
+                  { id: 'standard', label: 'Standard' },
+                  { id: 'relaxed', label: 'Relaxed' },
+                ] as const
+              ).map((opt) => (
+                <button
+                  key={opt.id}
+                  type="button"
+                  className={`hud-seg-btn ${lineHeight === opt.id ? 'active' : ''}`}
+                  onClick={() => onLineHeightChange(opt.id)}
+                  aria-pressed={lineHeight === opt.id}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
           </div>
         </div>
       </div>

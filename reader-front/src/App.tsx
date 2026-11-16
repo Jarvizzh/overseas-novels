@@ -1,7 +1,9 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
+import { flushSync } from 'react-dom';
 import { Routes, Route, useNavigate, useLocation, useSearchParams } from 'react-router-dom';
 import { Header } from './components/Header';
-import { BottomNav } from './components/BottomNav';
+import { BottomNav, type NavTabType } from './components/BottomNav';
+import { TopNav } from './components/TopNav';
 import { Home } from './pages/Home';
 import { Search } from './pages/Search';
 import { Detail } from './pages/Detail';
@@ -10,97 +12,192 @@ import { Shelf } from './pages/Shelf';
 import { Profile } from './pages/Profile';
 import { Rewards } from './pages/Rewards';
 import { Recharge } from './pages/Recharge';
-import { GoldCoin } from './components/GoldCoin';
-import { api } from './utils/api';
-import type { Novel, User, Transaction } from './utils/api';
+import { api, registerSessionRefreshHandler } from './utils/api';
+import type { Novel, User, Transaction, SubscriptionInfo } from './utils/api';
 import { ToastProvider } from './context/ToastContext';
 import { ConfirmProvider } from './context/ConfirmContext';
+import {
+  applyThemePreference,
+  getStoredThemePreference,
+  getSystemTheme,
+  type ThemePreference,
+} from './utils/theme';
 import './App.css';
+
+const TRACKING_KEYS = [
+  'utm_source',
+  'utm_campaign',
+  'fbclid',
+  'pixel_id',
+  'template_id',
+  'link_id',
+  'promo_id',
+];
+
+function loadScopedUnlockedChapters(userId: number | null): string[] {
+  if (!userId) return [];
+  try {
+    const raw = localStorage.getItem(`unlocked-chapters-u:${userId}`);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveScopedUnlockedChapters(userId: number | null, list: string[]): void {
+  if (!userId) return;
+  try {
+    localStorage.setItem(`unlocked-chapters-u:${userId}`, JSON.stringify(list));
+  } catch {
+    // Ignore storage errors
+  }
+}
+
+function runWithViewTransition(update: () => void): void {
+  const prefersReduced =
+    typeof window !== 'undefined' &&
+    window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+
+  const doc = document as Document & { startViewTransition?: (cb: () => void) => unknown };
+  if (!doc.startViewTransition || prefersReduced) {
+    update();
+    return;
+  }
+
+  doc.startViewTransition(() => {
+    flushSync(() => {
+      update();
+    });
+  });
+}
 
 function AppContent() {
   const navigate = useNavigate();
   const location = useLocation();
   const [searchParams] = useSearchParams();
 
-  // User auth state
+  // Auth & initialization state
   const [user, setUser] = useState<User | null>(null);
+  const [authReady, setAuthReady] = useState(false);
 
-  // Dynamic Novels State loaded from Backend API
+  // Catalog state
   const [novels, setNovels] = useState<Novel[]>([]);
   const [latestNovels, setLatestNovels] = useState<Novel[]>([]);
   const [novelsPage, setNovelsPage] = useState(1);
   const [hasMoreNovels, setHasMoreNovels] = useState(false);
   const [loadingMoreNovels, setLoadingMoreNovels] = useState(false);
 
-  // Personal Shelf Saved Books
+  // Shelf state
+  const [shelfLoading, setShelfLoading] = useState(true);
   const [shelfBookIds, setShelfBookIds] = useState<number[]>([]);
   const [shelfNovelsList, setShelfNovelsList] = useState<Novel[]>([]);
 
-  // Reading Progress: { [bookId]: { chapterIndex, scrollOffsetPercentage, paragraphIndex } }
+  // Reading progress
   const [readingProgress, setReadingProgress] = useState<{
     [bookId: number]: { chapterIndex: number; scrollOffsetPercentage: number; paragraphIndex?: number };
   }>({});
 
-  // Global theme settings
-  const [globalTheme] = useState<'light' | 'dark'>(() => {
-    const saved = localStorage.getItem('color-scheme');
-    if (saved === 'dark' || saved === 'light') return saved;
-    return 'light';
-  });
+  // Tri-state Appearance Theme (light | dark | system)
+  const [themePreference, setThemePreference] = useState<ThemePreference>(getStoredThemePreference);
+  const [systemTheme, setSystemTheme] = useState<'light' | 'dark'>(getSystemTheme);
 
-  // Wallet Coins Balance
+  // Wallet & VIP state
   const [userCoins, setUserCoins] = useState<number>(0);
+  const [chargedCoins, setChargedCoins] = useState<number>(0);
+  const [bonusCoins, setBonusCoins] = useState<number>(0);
+  const [isVip, setIsVip] = useState<boolean>(false);
+  const [subscription, setSubscription] = useState<SubscriptionInfo | null>(null);
 
-  // Unlocked Chapters List across books
-  const [unlockedBookChapters, setUnlockedBookChapters] = useState<string[]>(() => {
-    try {
-      const saved = localStorage.getItem('unlocked-chapters');
-      return saved ? JSON.parse(saved) : [];
-    } catch {
-      return [];
-    }
-  });
-
-  // Wallet Transaction billing history
+  // User-scoped unlocked chapters cache
+  const [unlockedBookChapters, setUnlockedBookChapters] = useState<string[]>([]);
   const [transactionHistory, setTransactionHistory] = useState<Transaction[]>([]);
 
-  // Simple debounce ref for reading progress sync
-  const syncTimeouts = useRef<{ [bookId: string]: any }>({});
+  const syncTimeouts = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
 
-  // Auth & API Initializer
+  // Sync user-scoped unlocked chapters whenever active user changes
+  useEffect(() => {
+    if (user?.id) {
+      setUnlockedBookChapters(loadScopedUnlockedChapters(user.id));
+    } else {
+      setUnlockedBookChapters([]);
+    }
+  }, [user?.id]);
+
+  // Listen for OS color-scheme changes & multi-tab storage sync
+  useEffect(() => {
+    const mq = window.matchMedia?.('(prefers-color-scheme: dark)');
+    const handleSystemChange = (e: MediaQueryListEvent) => {
+      setSystemTheme(e.matches ? 'dark' : 'light');
+    };
+    mq?.addEventListener('change', handleSystemChange);
+
+    const handleStorage = (e: StorageEvent) => {
+      if (e.key === 'color-scheme') {
+        setThemePreference(getStoredThemePreference());
+      }
+    };
+    window.addEventListener('storage', handleStorage);
+
+    return () => {
+      mq?.removeEventListener('change', handleSystemChange);
+      window.removeEventListener('storage', handleStorage);
+    };
+  }, []);
+
+  useEffect(() => {
+    applyThemePreference(themePreference);
+  }, [themePreference]);
+
   const reloadWalletAndShelf = useCallback(async () => {
     try {
-      const balance = await api.getWalletBalance();
+      const [balance, shelfItems, txs, subStatus] = await Promise.all([
+        api.getWalletBalance(),
+        api.getShelf().then((res) => res || []),
+        api.getTransactionHistory(1, 30).then((res) => res || []),
+        api.getSubscriptionStatus().catch(() => null),
+      ]);
+
+      setChargedCoins(balance.charged_coins);
+      setBonusCoins(balance.bonus_coins);
       setUserCoins(balance.charged_coins + balance.bonus_coins);
-      
-      const shelfItems = (await api.getShelf()) || [];
-      setShelfBookIds(shelfItems.map(item => item.novel_id));
-      setShelfNovelsList(shelfItems.map(item => item.novel).filter(Boolean));
-      
+
+      setShelfBookIds(shelfItems.map((item) => item.novel_id));
+      setShelfNovelsList(shelfItems.map((item) => item.novel).filter(Boolean));
+
       const progressMap: { [bookId: number]: { chapterIndex: number; scrollOffsetPercentage: number } } = {};
-      shelfItems.forEach(item => {
+      shelfItems.forEach((item) => {
         progressMap[item.novel_id] = {
           chapterIndex: item.chapter_index,
           scrollOffsetPercentage: item.scroll_offset_percentage,
         };
       });
       setReadingProgress(progressMap);
-
-      const txs = await api.getTransactionHistory(1, 30);
       setTransactionHistory(txs);
+
+      if (subStatus) {
+        setIsVip(Boolean(subStatus.is_vip));
+        setSubscription(subStatus.subscription);
+      }
     } catch (err) {
-      console.error("Failed to load shelf or wallet info:", err);
+      console.error('Failed to load shelf or wallet info:', err);
+    } finally {
+      setShelfLoading(false);
     }
   }, []);
 
-  const triggerGuestLogin = useCallback(async () => {
+  const triggerGuestLogin = useCallback(async (): Promise<string | null> => {
     try {
       const res = await api.guestLogin();
       localStorage.setItem('auth-token', res.token);
       setUser(res.user);
       await reloadWalletAndShelf();
+      return res.token;
     } catch (err) {
-      console.error("Guest login failed:", err);
+      console.error('Guest login failed:', err);
+      setShelfLoading(false);
+      return null;
     }
   }, [reloadWalletAndShelf]);
 
@@ -123,7 +220,6 @@ function AppContent() {
       localStorage.setItem('fbclid', fbclid);
       const creationTime = Date.now();
       const fbcValue = `fb.1.${creationTime}.${fbclid}`;
-      
       const date = new Date();
       date.setTime(date.getTime() + 90 * 24 * 60 * 60 * 1000);
       document.cookie = `_fbc=${fbcValue}; expires=${date.toUTCString()}; path=/`;
@@ -140,14 +236,16 @@ function AppContent() {
       const creationTime = Date.now();
       const randomNumber = Math.floor(1000000000 + Math.random() * 9000000000);
       const fbpValue = `fb.1.${creationTime}.${randomNumber}`;
-      
       const date = new Date();
       date.setTime(date.getTime() + 90 * 24 * 60 * 60 * 1000);
       document.cookie = `_fbp=${fbpValue}; expires=${date.toUTCString()}; path=/`;
     }
   }, []);
 
+  // Register single-flight 401 refresh handler & initialize session + catalog
   useEffect(() => {
+    registerSessionRefreshHandler(triggerGuestLogin);
+
     const initAuth = async () => {
       const token = localStorage.getItem('auth-token');
       if (!token) {
@@ -158,10 +256,11 @@ function AppContent() {
           setUser(u);
           await reloadWalletAndShelf();
         } catch (err) {
-          console.error("Auth init failed, fallback to guest:", err);
+          console.error('Auth init failed, fallback to guest:', err);
           await triggerGuestLogin();
         }
       }
+      setAuthReady(true);
     };
 
     const loadNovels = async () => {
@@ -179,28 +278,19 @@ function AppContent() {
           setLatestNovels(newestList);
         }
       } catch (err) {
-        console.error("Failed to load novels catalog:", err);
+        console.error('Failed to load novels catalog:', err);
       }
-    };
-
-    const handleUnauthorized = () => {
-      triggerGuestLogin();
     };
 
     initAuth();
     loadNovels();
 
-    window.addEventListener('auth-unauthorized', handleUnauthorized);
+    const timeoutsMap = syncTimeouts.current;
     return () => {
-      window.removeEventListener('auth-unauthorized', handleUnauthorized);
-      Object.values(syncTimeouts.current).forEach(clearTimeout);
+      registerSessionRefreshHandler(null);
+      Object.values(timeoutsMap).forEach(clearTimeout);
     };
   }, [triggerGuestLogin, reloadWalletAndShelf]);
-
-  // Sync state changes to local storage for unlocked chapters cache
-  useEffect(() => {
-    localStorage.setItem('unlocked-chapters', JSON.stringify(unlockedBookChapters));
-  }, [unlockedBookChapters]);
 
   // Track last reading content path for smooth post-payment redirect
   useEffect(() => {
@@ -209,80 +299,95 @@ function AppContent() {
     }
   }, [location.pathname, location.search]);
 
-  // Handle Global Theme settings
+  // Update page title per route
   useEffect(() => {
-    const root = document.documentElement;
-    root.setAttribute('data-user-theme', globalTheme);
-    localStorage.setItem('color-scheme', globalTheme);
-  }, [globalTheme]);
-
-  // Centralized SPA Router Navigation helper preserving CMS tracking params
-  const navigateTo = useCallback((pageOrPath: string, params: any = null) => {
-    const trackingKeys = ['utm_source', 'utm_campaign', 'fbclid', 'pixel_id', 'template_id', 'link_id', 'promo_id'];
-    const newSearchParams = new URLSearchParams();
-    
-    trackingKeys.forEach((key) => {
-      const val = searchParams.get(key);
-      if (val) newSearchParams.set(key, val);
-    });
-
-    let targetPath = '/';
-    if (pageOrPath === 'detail' && params?.id) {
-      targetPath = '/detail';
-      newSearchParams.set('novel_id', String(params.id));
-    } else if (pageOrPath === 'reader' && params?.id) {
-      targetPath = '/content';
-      newSearchParams.set('novel_id', String(params.id));
-      if (params.chapterIndex !== undefined) {
-        newSearchParams.set('chapter_index', String(params.chapterIndex + 1));
-      }
-    } else if (pageOrPath === 'search') {
-      targetPath = '/search';
-      if (params?.genre) {
-        newSearchParams.set('genre', params.genre);
-      }
-    } else if (pageOrPath === 'shelf') {
-      targetPath = '/shelf';
-    } else if (pageOrPath === 'rewards') {
-      targetPath = '/rewards';
-    } else if (pageOrPath === 'profile') {
-      targetPath = '/profile';
-    } else if (pageOrPath === 'recharge') {
-      targetPath = '/recharge';
-    } else if (pageOrPath === 'home') {
-      targetPath = '/';
-    } else if (pageOrPath.startsWith('/')) {
-      targetPath = pageOrPath;
-    }
-
-    const finalUrl = `${targetPath}${newSearchParams.toString() ? `?${newSearchParams.toString()}` : ''}`;
-
-    const doNavigate = () => {
-      navigate(finalUrl);
+    const titleMap: Record<string, string> = {
+      '/': 'StarNovel — Curated Fiction & Stories',
+      '/shelf': 'My Library | StarNovel',
+      '/rewards': 'Daily Rewards | StarNovel',
+      '/profile': 'Profile | StarNovel',
+      '/search': 'Search | StarNovel',
+      '/detail': 'Book Details | StarNovel',
+      '/content': 'Reader | StarNovel',
+      '/recharge': 'Membership & Coins | StarNovel',
     };
+    document.title = titleMap[location.pathname] || 'StarNovel';
+  }, [location.pathname]);
 
-    if (!(document as any).startViewTransition) {
-      doNavigate();
-    } else {
-      (document as any).startViewTransition(() => {
-        doNavigate();
+  // Build URL safely preserving tracking parameters (fixes double-? bug)
+  const buildMergedUrl = useCallback(
+    (pageOrPath: string, params: Record<string, unknown> | null = null): string => {
+      const mergedParams = new URLSearchParams();
+      TRACKING_KEYS.forEach((key) => {
+        const val = searchParams.get(key);
+        if (val) mergedParams.set(key, val);
       });
-    }
-  }, [navigate, searchParams]);
+
+      let targetPath = '/';
+      if (pageOrPath === 'detail' && params?.id) {
+        targetPath = '/detail';
+        mergedParams.set('novel_id', String(params.id));
+      } else if (pageOrPath === 'reader' && params?.id) {
+        targetPath = '/content';
+        mergedParams.set('novel_id', String(params.id));
+        if (typeof params.chapterIndex === 'number') {
+          mergedParams.set('chapter_index', String(params.chapterIndex + 1));
+        }
+      } else if (pageOrPath === 'search') {
+        targetPath = '/search';
+        if (typeof params?.genre === 'string' && params.genre) {
+          mergedParams.set('genre', params.genre);
+        }
+      } else if (pageOrPath === 'shelf') {
+        targetPath = '/shelf';
+      } else if (pageOrPath === 'rewards') {
+        targetPath = '/rewards';
+      } else if (pageOrPath === 'profile') {
+        targetPath = '/profile';
+      } else if (pageOrPath === 'recharge') {
+        targetPath = '/recharge';
+      } else if (pageOrPath === 'home') {
+        targetPath = '/';
+      } else if (pageOrPath.startsWith('/')) {
+        const parsed = new URL(pageOrPath, window.location.origin);
+        targetPath = parsed.pathname;
+        parsed.searchParams.forEach((value, key) => {
+          mergedParams.set(key, value);
+        });
+      }
+
+      const qs = mergedParams.toString();
+      return `${targetPath}${qs ? `?${qs}` : ''}`;
+    },
+    [searchParams]
+  );
+
+  const navigateTo = useCallback(
+    (pageOrPath: string, params: Record<string, unknown> | null = null) => {
+      const finalUrl = buildMergedUrl(pageOrPath, params);
+      runWithViewTransition(() => navigate(finalUrl));
+    },
+    [buildMergedUrl, navigate]
+  );
+
+  const syncReaderChapterUrl = useCallback(
+    (bookId: number, chapterIndex: number) => {
+      const finalUrl = buildMergedUrl('reader', { id: bookId, chapterIndex });
+      navigate(finalUrl, { replace: true });
+    },
+    [buildMergedUrl, navigate]
+  );
 
   const navigateBack = useCallback(() => {
-    const doNavigate = () => {
-      navigate(-1);
-    };
-
-    if (!(document as any).startViewTransition) {
-      doNavigate();
-    } else {
-      (document as any).startViewTransition(() => {
-        doNavigate();
-      });
-    }
-  }, [navigate]);
+    const historyIdx = typeof window.history.state?.idx === 'number' ? window.history.state.idx : 0;
+    runWithViewTransition(() => {
+      if (historyIdx > 0) {
+        navigate(-1);
+      } else {
+        navigate(buildMergedUrl('home'));
+      }
+    });
+  }, [navigate, buildMergedUrl]);
 
   const handleLoadMoreNovels = useCallback(async () => {
     if (loadingMoreNovels || !hasMoreNovels) return;
@@ -298,41 +403,43 @@ function AppContent() {
       setNovelsPage(nextPage);
       setHasMoreNovels(batch.length >= 50);
     } catch (err) {
-      console.error("Failed to load more novels:", err);
+      console.error('Failed to load more novels:', err);
     } finally {
       setLoadingMoreNovels(false);
     }
   }, [loadingMoreNovels, hasMoreNovels, novelsPage]);
 
-  // Manage adding/removing from shelf via API
-  const handleToggleShelf = useCallback(async (bookId: number) => {
-    const inShelf = shelfBookIds.includes(bookId);
-    if (inShelf) {
-      setShelfBookIds((prev) => prev.filter((id) => id !== bookId));
-      setShelfNovelsList((list) => list.filter((n) => n.id !== bookId));
-      api.removeFromShelf([bookId]).catch(err => console.error("Failed to remove from shelf:", err));
-      return;
-    }
-
-    setShelfBookIds((prev) => (prev.includes(bookId) ? prev : [...prev, bookId]));
-    const known = novels.find((n) => n.id === bookId) || latestNovels.find((n) => n.id === bookId);
-    if (known) {
-      setShelfNovelsList((list) => (list.some((n) => n.id === bookId) ? list : [known, ...list]));
-    }
-    try {
-      await api.addToShelf(bookId);
-      if (!known) {
-        const detail = await api.getNovelDetail(bookId);
-        if (detail) {
-          setShelfNovelsList((list) => (list.some((n) => n.id === bookId) ? list : [detail, ...list]));
-        }
+  const handleToggleShelf = useCallback(
+    async (bookId: number) => {
+      const inShelf = shelfBookIds.includes(bookId);
+      if (inShelf) {
+        setShelfBookIds((prev) => prev.filter((id) => id !== bookId));
+        setShelfNovelsList((list) => list.filter((n) => n.id !== bookId));
+        api.removeFromShelf([bookId]).catch((err) => console.error('Failed to remove from shelf:', err));
+        return;
       }
-    } catch (err) {
-      console.error("Failed to add to shelf:", err);
-      setShelfBookIds((prev) => prev.filter((id) => id !== bookId));
-      setShelfNovelsList((list) => list.filter((n) => n.id !== bookId));
-    }
-  }, [shelfBookIds, novels, latestNovels]);
+
+      setShelfBookIds((prev) => (prev.includes(bookId) ? prev : [...prev, bookId]));
+      const known = novels.find((n) => n.id === bookId) || latestNovels.find((n) => n.id === bookId);
+      if (known) {
+        setShelfNovelsList((list) => (list.some((n) => n.id === bookId) ? list : [known, ...list]));
+      }
+      try {
+        await api.addToShelf(bookId);
+        if (!known) {
+          const detail = await api.getNovelDetail(bookId);
+          if (detail) {
+            setShelfNovelsList((list) => (list.some((n) => n.id === bookId) ? list : [detail, ...list]));
+          }
+        }
+      } catch (err) {
+        console.error('Failed to add to shelf:', err);
+        setShelfBookIds((prev) => prev.filter((id) => id !== bookId));
+        setShelfNovelsList((list) => list.filter((n) => n.id !== bookId));
+      }
+    },
+    [shelfBookIds, novels, latestNovels]
+  );
 
   const handleRemoveMultipleFromShelf = useCallback(async (bookIds: number[]) => {
     try {
@@ -340,171 +447,184 @@ function AppContent() {
       setShelfBookIds((prev) => prev.filter((id) => !bookIds.includes(id)));
       setShelfNovelsList((prev) => prev.filter((n) => !bookIds.includes(n.id)));
     } catch (err) {
-      console.error("Failed to remove multiple books:", err);
+      console.error('Failed to remove multiple books:', err);
     }
   }, []);
 
-  // Save progress from reading viewport with 2s debounce
-  const handleSaveProgress = useCallback((bookId: number, chapterIndex: number, scrollOffsetPercentage: number, paragraphIndex?: number) => {
-    setReadingProgress((prev) => ({
-      ...prev,
-      [bookId]: { chapterIndex, scrollOffsetPercentage, paragraphIndex },
-    }));
+  const handleSaveProgress = useCallback(
+    (bookId: number, chapterIndex: number, scrollOffsetPercentage: number, paragraphIndex?: number) => {
+      setReadingProgress((prev) => ({
+        ...prev,
+        [bookId]: { chapterIndex, scrollOffsetPercentage, paragraphIndex },
+      }));
 
-    if (syncTimeouts.current[bookId]) {
-      clearTimeout(syncTimeouts.current[bookId]);
-    }
-
-    syncTimeouts.current[bookId] = setTimeout(async () => {
-      try {
-        await api.syncProgress([{
-          novel_id: bookId,
-          chapter_index: chapterIndex,
-          scroll_offset_percentage: scrollOffsetPercentage,
-          updated_at: new Date().toISOString()
-        }]);
-        delete syncTimeouts.current[bookId];
-      } catch (err) {
-        console.error("Reading progress sync failed:", err);
+      if (syncTimeouts.current[bookId]) {
+        clearTimeout(syncTimeouts.current[bookId]);
       }
-    }, 2000);
-  }, []);
 
-  // Wallet Add Coins Trigger
-  const handleAddCoins = useCallback(async (_amount: number, _reason: string) => {
-    await reloadWalletAndShelf();
-  }, [reloadWalletAndShelf]);
+      syncTimeouts.current[bookId] = setTimeout(async () => {
+        try {
+          await api.syncProgress([
+            {
+              novel_id: bookId,
+              chapter_index: chapterIndex,
+              scroll_offset_percentage: scrollOffsetPercentage,
+              updated_at: new Date().toISOString(),
+            },
+          ]);
+          delete syncTimeouts.current[bookId];
+        } catch (err) {
+          console.error('Reading progress sync failed:', err);
+        }
+      }, 2000);
+    },
+    []
+  );
 
-  // Wallet Deduct Coins to Unlock Chapter
-  const handleUnlockChapter = useCallback(async (bookId: number, chapterIndex: number, _price: number): Promise<boolean> => {
-    try {
-      await api.unlockChapter(bookId, chapterIndex);
-      setUnlockedBookChapters((prev) => [...prev, `${bookId}-${chapterIndex}`]);
+  const handleAddCoins = useCallback(
+    async (_amount: number, _reason: string) => {
       await reloadWalletAndShelf();
-      return true;
-    } catch (err) {
-      console.error("Failed to unlock chapter:", err);
-      return false;
-    }
-  }, [reloadWalletAndShelf]);
+    },
+    [reloadWalletAndShelf]
+  );
 
-  // Active Bottom Navigation Tab based on pathname
-  const getActiveTab = (): 'home' | 'shelf' | 'rewards' | 'profile' => {
+  const markChapterUnlocked = useCallback(
+    (bookId: number, chapterIndex: number) => {
+      const key = `${bookId}-${chapterIndex}`;
+      setUnlockedBookChapters((prev) => {
+        if (prev.includes(key)) return prev;
+        const next = [...prev, key];
+        saveScopedUnlockedChapters(user?.id ?? null, next);
+        return next;
+      });
+    },
+    [user?.id]
+  );
+
+  const handleUnlockChapter = useCallback(
+    async (bookId: number, chapterIndex: number, _price: number): Promise<boolean> => {
+      try {
+        await api.unlockChapter(bookId, chapterIndex);
+        markChapterUnlocked(bookId, chapterIndex);
+        await reloadWalletAndShelf();
+        return true;
+      } catch (err) {
+        console.error('Failed to unlock chapter:', err);
+        return false;
+      }
+    },
+    [markChapterUnlocked, reloadWalletAndShelf]
+  );
+
+  const getActiveTab = (): NavTabType | null => {
     if (location.pathname === '/shelf') return 'shelf';
     if (location.pathname === '/rewards') return 'rewards';
     if (location.pathname === '/profile') return 'profile';
-    return 'home';
+    if (location.pathname === '/') return 'home';
+    return null;
   };
 
   const activeTab = getActiveTab();
+  const isFullScreenPage = ['/content', '/detail', '/recharge'].includes(location.pathname);
+  const isHomePage = location.pathname === '/';
 
-  // Configure Header details based on current pathname
-  const getHeaderDetails = () => {
+  const getMobileHeaderDetails = () => {
     switch (location.pathname) {
       case '/search':
-        return {
-          title: 'Search Books',
-          showBack: true,
-          onBack: navigateBack,
-        };
+        return { title: 'Search', showBack: true, onBack: navigateBack };
       case '/shelf':
-        return {
-          title: 'My Library',
-          showBack: false,
-        };
+        return { title: 'My Library', showBack: false };
       case '/rewards':
-        return {
-          title: 'Reward Center',
-          showBack: false,
-        };
+        return { title: 'Daily Rewards', showBack: false };
       case '/profile':
-        return {
-          title: 'Profile Settings',
-          showBack: false,
-        };
-      case '/':
+        return { title: 'Profile', showBack: false };
       default:
-        return {
-          title: 'StarNovel',
-          showBack: false,
-          rightElement: (
-            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-              <div 
-                onClick={() => navigateTo('recharge')}
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '4px',
-                  backgroundColor: 'var(--bg-tertiary)',
-                  padding: '4px 10px',
-                  borderRadius: '99px',
-                  fontSize: '11px',
-                  fontWeight: 700,
-                  cursor: 'pointer',
-                  border: '1px solid var(--border-color)',
-                  color: 'var(--text-primary)',
-                  boxShadow: 'var(--card-shadow)'
-                }}
-              >
-                <GoldCoin size={13} />
-                <span>{userCoins}</span>
-                <span style={{ color: 'var(--accent-color)', fontWeight: 800 }}>+</span>
-              </div>
-              <button 
-                className="header-btn" 
-                onClick={() => navigateTo('search')}
-                aria-label="Open search"
-              >
-                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2.2} stroke="currentColor" style={{ width: '18px', height: '18px' }}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.637 10.637z" />
-                </svg>
-              </button>
-            </div>
-          ),
-        };
+        return { title: 'StarNovel', showBack: false };
     }
   };
 
-  const isFullScreenPage = ['/content', '/detail', '/recharge'].includes(location.pathname);
-  const headerInfo = getHeaderDetails();
-  const isHomePage = location.pathname === '/';
+  const mobileHeaderInfo = getMobileHeaderDetails();
 
-  // Extract query parameters for direct Route element rendering
-  const detailNovelId = parseInt(searchParams.get('novel_id') || '0', 10);
-  const readerNovelId = parseInt(searchParams.get('novel_id') || '0', 10);
+  const rawDetailNovelId = parseInt(searchParams.get('novel_id') || '0', 10);
+  const detailNovelId = Number.isNaN(rawDetailNovelId) ? 0 : rawDetailNovelId;
+  const rawReaderNovelId = parseInt(searchParams.get('novel_id') || '0', 10);
+  const readerNovelId = Number.isNaN(rawReaderNovelId) ? 0 : rawReaderNovelId;
   const readerChapterIdxStr = searchParams.get('chapter_index');
-  const readerChapterIndex = readerChapterIdxStr ? parseInt(readerChapterIdxStr, 10) - 1 : 0;
+  const parsedChapterOneBased = readerChapterIdxStr ? parseInt(readerChapterIdxStr, 10) : NaN;
+  const readerChapterIndex = Number.isFinite(parsedChapterOneBased)
+    ? Math.max(0, parsedChapterOneBased - 1)
+    : readingProgress[readerNovelId]?.chapterIndex ?? 0;
   const searchGenre = searchParams.get('genre') || undefined;
 
   return (
     <>
-      {!isFullScreenPage && !isHomePage && (
-        <Header
-          title={headerInfo.title}
-          showBack={headerInfo.showBack}
-          onBack={headerInfo.onBack}
-          rightElement={headerInfo.rightElement}
+      {!isFullScreenPage && (
+        <TopNav
+          activeTab={activeTab}
+          onChangeTab={(tab) => navigateTo(tab)}
+          onNavigate={navigateTo}
+          userCoins={userCoins}
         />
       )}
-      
-      <main className={isFullScreenPage ? 'page-container-full' : (isHomePage ? 'page-container-home' : 'page-container')}>
+
+      {!isFullScreenPage && !isHomePage && (
+        <Header
+          title={mobileHeaderInfo.title}
+          showBack={mobileHeaderInfo.showBack}
+          onBack={mobileHeaderInfo.onBack}
+        />
+      )}
+
+      <main className={isFullScreenPage ? 'page-container-full' : isHomePage ? 'page-container-home' : 'page-container'}>
         <Routes>
-          <Route path="/" element={<Home novels={novels} latestNovels={latestNovels} hasMore={hasMoreNovels} loadingMore={loadingMoreNovels} onLoadMore={handleLoadMoreNovels} onNavigate={navigateTo} userCoins={userCoins} />} />
-          <Route path="/shelf" element={<Shelf novels={shelfNovelsList.length > 0 ? shelfNovelsList : novels} onNavigate={navigateTo} shelfBookIds={shelfBookIds} onRemoveFromShelf={handleRemoveMultipleFromShelf} readingProgress={readingProgress} />} />
-          <Route path="/rewards" element={<Rewards onAddCoins={handleAddCoins} globalTheme={globalTheme} />} />
-          <Route 
-            path="/profile" 
+          <Route
+            path="/"
+            element={
+              <Home
+                novels={novels}
+                latestNovels={latestNovels}
+                hasMore={hasMoreNovels}
+                loadingMore={loadingMoreNovels}
+                onLoadMore={handleLoadMoreNovels}
+                onNavigate={navigateTo}
+                userCoins={userCoins}
+              />
+            }
+          />
+          <Route
+            path="/shelf"
+            element={
+              <Shelf
+                novels={shelfNovelsList}
+                loading={shelfLoading}
+                onNavigate={navigateTo}
+                shelfBookIds={shelfBookIds}
+                onRemoveFromShelf={handleRemoveMultipleFromShelf}
+                readingProgress={readingProgress}
+              />
+            }
+          />
+          <Route path="/rewards" element={<Rewards onAddCoins={handleAddCoins} />} />
+          <Route
+            path="/profile"
             element={
               <Profile
                 shelfBookIds={shelfBookIds}
-                readingProgress={readingProgress}
                 onNavigate={navigateTo}
                 userCoins={userCoins}
+                chargedCoins={chargedCoins}
+                bonusCoins={bonusCoins}
+                isVip={isVip}
+                subscription={subscription}
                 transactionHistory={transactionHistory}
                 currentUser={user}
+                themePreference={themePreference}
+                systemTheme={systemTheme}
+                onThemePreferenceChange={setThemePreference}
                 onLoginSuccess={async (token, u) => {
                   localStorage.setItem('auth-token', token);
                   setUser(u);
+                  setShelfLoading(true);
                   await reloadWalletAndShelf();
                   navigateTo('profile');
                 }}
@@ -515,20 +635,72 @@ function AppContent() {
                   setShelfNovelsList([]);
                   setReadingProgress({});
                   setUserCoins(0);
+                  setChargedCoins(0);
+                  setBonusCoins(0);
+                  setIsVip(false);
+                  setSubscription(null);
                   setTransactionHistory([]);
+                  setUnlockedBookChapters([]);
+                  setShelfLoading(true);
                   triggerGuestLogin();
                 }}
               />
-            } 
+            }
           />
           <Route path="/search" element={<Search novels={novels} onNavigate={navigateTo} initialGenre={searchGenre} />} />
-          <Route path="/detail" element={<Detail novelId={detailNovelId} novels={novels} onNavigate={navigateTo} shelfBookIds={shelfBookIds} onToggleShelf={handleToggleShelf} readingProgress={readingProgress} />} />
-          <Route path="/content" element={<Reader novelId={readerNovelId} chapterIndex={readerChapterIndex} novels={novels} onNavigate={navigateTo} shelfBookIds={shelfBookIds} onToggleShelf={handleToggleShelf} readingProgress={readingProgress} onSaveProgress={handleSaveProgress} unlockedBookChapters={unlockedBookChapters} onUnlockChapter={handleUnlockChapter} userCoins={userCoins} />} />
-          <Route path="/recharge" element={<Recharge userCoins={userCoins} onAddCoins={handleAddCoins} onBack={navigateBack} onNavigate={navigateTo} />} />
+          <Route
+            path="/detail"
+            element={
+              <Detail
+                novelId={detailNovelId}
+                novels={novels}
+                onNavigate={navigateTo}
+                onBack={navigateBack}
+                shelfBookIds={shelfBookIds}
+                onToggleShelf={handleToggleShelf}
+                readingProgress={readingProgress}
+              />
+            }
+          />
+          <Route
+            path="/content"
+            element={
+              <Reader
+                userId={user?.id ?? 0}
+                authReady={authReady}
+                isVip={isVip}
+                novelId={readerNovelId}
+                chapterIndex={readerChapterIndex}
+                novels={novels}
+                onNavigate={navigateTo}
+                onSyncChapterUrl={syncReaderChapterUrl}
+                shelfBookIds={shelfBookIds}
+                onToggleShelf={handleToggleShelf}
+                readingProgress={readingProgress}
+                onSaveProgress={handleSaveProgress}
+                unlockedBookChapters={unlockedBookChapters}
+                onMarkChapterUnlocked={markChapterUnlocked}
+                onUnlockChapter={handleUnlockChapter}
+                userCoins={userCoins}
+              />
+            }
+          />
+          <Route
+            path="/recharge"
+            element={
+              <Recharge
+                userCoins={userCoins}
+                onAddCoins={handleAddCoins}
+                onRefreshStatus={reloadWalletAndShelf}
+                onBack={navigateBack}
+                onNavigate={navigateTo}
+              />
+            }
+          />
         </Routes>
       </main>
 
-      {!isFullScreenPage && (
+      {!isFullScreenPage && activeTab && (
         <BottomNav
           activeTab={activeTab}
           onChangeTab={(tab) => navigateTo(tab)}

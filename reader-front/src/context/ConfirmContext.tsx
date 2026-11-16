@@ -1,135 +1,125 @@
-import React, { createContext, useContext, useState, useCallback, type ReactNode } from 'react';
-
-interface ConfirmOptions {
-  title?: string;
-  message: string;
-  confirmText?: string;
-  cancelText?: string;
-  onConfirm: () => void;
-  onCancel?: () => void;
-}
-
-interface ConfirmContextType {
-  showConfirm: (options: ConfirmOptions) => void;
-}
-
-const ConfirmContext = createContext<ConfirmContextType | undefined>(undefined);
+import React, { useState, useCallback, useRef, useEffect, useId, type ReactNode } from 'react';
+import { ConfirmContext, type ConfirmOptions } from './confirmStore';
 
 export const ConfirmProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
   const [confirmConfig, setConfirmConfig] = useState<ConfirmOptions | null>(null);
+  const dialogRef = useRef<HTMLDialogElement>(null);
+  const pressedOutsideRef = useRef(false);
+  const titleId = useId();
+  const descId = useId();
 
   const showConfirm = useCallback((options: ConfirmOptions) => {
     setConfirmConfig(options);
   }, []);
 
-  const handleClose = () => {
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    if (!dialog) return;
+
+    if (confirmConfig && !dialog.open) {
+      dialog.showModal();
+    } else if (!confirmConfig && dialog.open) {
+      dialog.close();
+    }
+  }, [confirmConfig]);
+
+  const handleDismiss = useCallback(() => {
+    if (confirmConfig?.onCancel) {
+      confirmConfig.onCancel();
+    }
     setConfirmConfig(null);
-  };
+  }, [confirmConfig]);
 
   const handleConfirmAction = () => {
     if (confirmConfig) {
       confirmConfig.onConfirm();
     }
-    handleClose();
+    setConfirmConfig(null);
   };
 
-  const handleCancelAction = () => {
-    if (confirmConfig?.onCancel) {
-      confirmConfig.onCancel();
-    }
-    handleClose();
+  const isPointerOutside = (e: React.PointerEvent<HTMLDialogElement>, dialog: HTMLDialogElement) => {
+    const r = dialog.getBoundingClientRect();
+    return e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom;
   };
 
   return (
     <ConfirmContext.Provider value={{ showConfirm }}>
       {children}
-      {confirmConfig && (
-        <div
-          style={{
-            position: 'fixed',
-            top: 0,
-            left: 0,
-            right: 0,
-            bottom: 0,
-            backgroundColor: 'rgba(15, 23, 42, 0.5)',
-            backdropFilter: 'blur(4px)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            zIndex: 10000,
-            padding: '24px',
-          }}
-          onClick={handleCancelAction}
-        >
+      <dialog
+        ref={dialogRef}
+        className="sn-dialog"
+        aria-labelledby={confirmConfig?.title ? titleId : undefined}
+        aria-describedby={descId}
+        onCancel={(e) => {
+          e.preventDefault();
+          handleDismiss();
+        }}
+        onPointerDown={(e) => {
+          if (dialogRef.current) {
+            pressedOutsideRef.current = isPointerOutside(e, dialogRef.current);
+          }
+        }}
+        onPointerUp={(e) => {
+          if (dialogRef.current && pressedOutsideRef.current && isPointerOutside(e, dialogRef.current)) {
+            handleDismiss();
+          }
+          pressedOutsideRef.current = false;
+        }}
+        style={{ width: '100%', maxWidth: '360px' }}
+      >
+        {confirmConfig && (
           <div
             style={{
-              width: '100%',
-              maxWidth: '360px',
-              backgroundColor: 'var(--bg-surface, #ffffff)',
-              borderRadius: '20px',
               padding: '24px',
-              boxShadow: '0 20px 40px rgba(0, 0, 0, 0.25)',
               display: 'flex',
               flexDirection: 'column',
-              gap: '16px',
-              animation: 'scaleIn 0.2s cubic-bezier(0.16, 1, 0.3, 1) forwards',
-              color: 'var(--text-primary, #0f172a)',
+              gap: '14px',
             }}
-            onClick={(e) => e.stopPropagation()}
           >
             {confirmConfig.title && (
-              <h3 style={{ fontSize: '17px', fontWeight: 700, margin: 0, textAlign: 'center' }}>
+              <h2
+                id={titleId}
+                style={{
+                  fontFamily: 'var(--font-display)',
+                  fontSize: '1.125rem',
+                  fontWeight: 600,
+                  margin: 0,
+                  textAlign: 'center',
+                  color: 'var(--text-primary)',
+                }}
+              >
                 {confirmConfig.title}
-              </h3>
+              </h2>
             )}
             <p
+              id={descId}
               style={{
-                fontSize: '14px',
-                lineHeight: 1.5,
-                color: 'var(--text-secondary, #64748b)',
+                fontSize: '0.875rem',
+                lineHeight: 1.55,
+                color: 'var(--text-secondary)',
                 margin: 0,
                 textAlign: 'center',
               }}
             >
               {confirmConfig.message}
             </p>
-            <div
-              style={{
-                display: 'flex',
-                gap: '12px',
-                marginTop: '8px',
-                justifyContent: 'center',
-              }}
-            >
+            <div style={{ display: 'flex', gap: '10px', marginTop: '6px' }}>
               <button
                 type="button"
-                style={{
-                  flex: 1,
-                  padding: '10px 16px',
-                  borderRadius: '12px',
-                  fontSize: '14px',
-                  fontWeight: 600,
-                  border: '1px solid var(--border, #e2e8f0)',
-                  backgroundColor: 'transparent',
-                  color: 'var(--text-primary, #0f172a)',
-                  cursor: 'pointer',
-                }}
-                onClick={handleCancelAction}
+                autoFocus
+                className="btn-cta-secondary"
+                style={{ flex: 1 }}
+                onClick={handleDismiss}
               >
                 {confirmConfig.cancelText || 'Cancel'}
               </button>
               <button
                 type="button"
+                className="btn-cta-primary"
                 style={{
                   flex: 1,
-                  padding: '10px 16px',
-                  borderRadius: '12px',
-                  fontSize: '14px',
-                  fontWeight: 600,
-                  border: 'none',
-                  backgroundColor: '#ff4757',
-                  color: '#ffffff',
-                  cursor: 'pointer',
+                  backgroundColor: confirmConfig.destructive === false ? 'var(--cta-bg)' : '#DC2626',
+                  color: confirmConfig.destructive === false ? 'var(--cta-text)' : '#FFFFFF',
                 }}
                 onClick={handleConfirmAction}
               >
@@ -137,16 +127,8 @@ export const ConfirmProvider: React.FC<{ children: ReactNode }> = ({ children })
               </button>
             </div>
           </div>
-        </div>
-      )}
+        )}
+      </dialog>
     </ConfirmContext.Provider>
   );
-};
-
-export const useConfirm = (): ConfirmContextType => {
-  const context = useContext(ConfirmContext);
-  if (!context) {
-    throw new Error('useConfirm must be used within a ConfirmProvider');
-  }
-  return context;
 };
