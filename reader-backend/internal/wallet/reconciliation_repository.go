@@ -19,17 +19,34 @@ type subscriptionJob struct {
 	cursor, lease time.Time
 }
 
+const (
+	paypalOrder         = `payment_method='paypal' AND external_ref_id IS NOT NULL AND external_ref_id NOT LIKE 'mock%'`
+	recentPayPalOrder   = `status='Pending' AND checkout_id IS NOT NULL AND created_at > now()-interval '30 days'`
+	retainedPayPalOrder = `((status='Pending' AND checkout_id IS NULL)
+		OR (status IN ('Success','Paid') AND order_type='whole_book' AND fulfilled_at IS NULL))`
+	orderCheckAt = `COALESCE(reconciliation_at,created_at)`
+	orderDue     = paypalOrder + ` AND ` + orderCheckAt + ` < now()-interval '5 minutes' AND `
+)
+
 func claimPayPalOrders(ctx context.Context) ([]orderJob, error) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	rows, err := db.Pool(ctx).Query(ctx, `
-		WITH batch AS (
-			SELECT id FROM recharge_orders WHERE payment_method='paypal' AND external_ref_id IS NOT NULL
-			AND (status='Pending' OR (status IN ('Success','Paid') AND order_type='whole_book' AND fulfilled_at IS NULL))
-			AND COALESCE(reconciliation_at,created_at) < now() - interval '5 minutes'
-			AND (status <> 'Pending' OR created_at > now() - interval '30 days' OR checkout_id IS NULL)
-			AND external_ref_id NOT LIKE 'mock%'
-			ORDER BY COALESCE(reconciliation_at,created_at), id LIMIT 5 FOR UPDATE SKIP LOCKED
+	// Qualify recent orders before sorting. An ordered LIMIT over the old
+	// due-time index can walk the entire expired Pending backlog.
+	rows, err := db.Pool(ctx).Query(ctx, `WITH recent_candidates AS MATERIALIZED (
+			SELECT id, `+orderCheckAt+` AS due_at FROM recharge_orders
+			WHERE `+orderDue+recentPayPalOrder+`
+		), recent AS (
+			SELECT o.id, c.due_at FROM recent_candidates c JOIN recharge_orders o ON o.id=c.id
+			WHERE `+orderDue+recentPayPalOrder+` AND `+orderCheckAt+`=c.due_at
+			ORDER BY c.due_at,o.id LIMIT 5 FOR UPDATE OF o SKIP LOCKED
+		), retained AS (
+			SELECT id, `+orderCheckAt+` AS due_at FROM recharge_orders
+			WHERE `+orderDue+retainedPayPalOrder+`
+			ORDER BY due_at,id LIMIT 5 FOR UPDATE SKIP LOCKED
+		), batch AS (
+			SELECT id FROM (SELECT id,due_at FROM recent UNION ALL SELECT id,due_at FROM retained) candidates
+			ORDER BY due_at,id LIMIT 5
 		)
 		UPDATE recharge_orders o SET reconciliation_at=now(),reconciliation_attempts=o.reconciliation_attempts+1
 		FROM batch WHERE o.id=batch.id RETURNING o.external_ref_id,o.reconciliation_attempts`)

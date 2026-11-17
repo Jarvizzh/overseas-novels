@@ -14,7 +14,8 @@ BEGIN
           AND c.relname = ANY(ARRAY[
               'idx_orders_subscription_period', 'idx_whole_book_entitlement_v2',
               'idx_transactions_user_feed', 'idx_novels_reader_popular', 'idx_novels_reader_latest',
-              'idx_payment_outbox_pending', 'idx_reader_sessions_user', 'idx_paypal_order_claim',
+              'idx_payment_outbox_pending', 'idx_reader_sessions_user',
+              'idx_paypal_order_recent_pending', 'idx_paypal_order_retained_claim',
               'idx_paypal_cancel_claim', 'idx_payment_order_attention',
               'idx_promotion_links_utm', 'idx_reader_paid_vip_expiry',
               'idx_paypal_subscription_continuous', 'idx_paypal_subscription_recent',
@@ -46,10 +47,16 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_payment_outbox_pending
 
 CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_reader_sessions_user ON reader_sessions(user_id);
 
-CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_paypal_order_claim
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_paypal_order_recent_pending
+    ON recharge_orders(created_at, (COALESCE(reconciliation_at, created_at)))
+    WHERE payment_method = 'paypal' AND external_ref_id IS NOT NULL AND external_ref_id NOT LIKE 'mock%'
+      AND status = 'Pending' AND checkout_id IS NOT NULL;
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_paypal_order_retained_claim
     ON recharge_orders((COALESCE(reconciliation_at, created_at)), id)
     WHERE payment_method = 'paypal' AND external_ref_id IS NOT NULL AND external_ref_id NOT LIKE 'mock%'
-      AND (status = 'Pending' OR (status IN ('Success','Paid') AND order_type = 'whole_book' AND fulfilled_at IS NULL));
+      AND ((status = 'Pending' AND checkout_id IS NULL)
+        OR (status IN ('Success','Paid') AND order_type = 'whole_book' AND fulfilled_at IS NULL));
 
 CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_paypal_cancel_claim
     ON user_subscriptions((COALESCE(cancel_next_attempt_at, updated_at)), id)

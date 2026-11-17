@@ -126,6 +126,8 @@ flowchart TD
 
    脚本需要自动提交。核对新索引的定义和有效性后，对 `user_subscriptions`、`payment_event_outbox`、`bookshelves` 更新统计信息。旧版的 `idx_paypal_subscription_claim`、`idx_reader_shelf_feed` 如已存在，可在升级完成并确认没有依赖后单独并发删除。新版本的任务汇总在同一数据库内每分钟最多采集一次，保留 `PAYMENT_TASK_METRICS_ENABLED` 实例开关和手工查询。
 
+   已在 `2026111704` 的环境升级订单领取时，先重跑上述索引脚本，确认 `idx_paypal_order_recent_pending` 和 `idx_paypal_order_retained_claim` 均有效，再发布 Reader API。可对 `recharge_orders` 执行 `ANALYZE` 更新统计信息。旧索引 `idx_paypal_order_claim` 可在旧版本全部退出且确认没有依赖后单独并发删除。
+
    Reader 单实例数据库连接默认前台 21、支付后台 4。可用 `READER_DB_FOREGROUND_MAX_CONNS` 和 `READER_DB_BACKGROUND_MAX_CONNS` 调整，按 Reader 实例数、CMS 和运维进程预留 RDS 总连接数。阅读请求和不同缓存回源的并发分别由 `READER_MAX_IN_FLIGHT_READS` 和 `READER_MAX_CONTENT_LOADS` 控制，默认 48 和 12。Reader 的 `/healthz` 提供两组池的累计等待、取消和使用量，数据库正常而 Redis 不可用时仍返回 200，由有界回源提供服务。CMS 的就绪检查使用现有依赖策略。
 
    历史单章权益通过 `unlock_records.chapter_id` 迁移。仅在 PostgreSQL 能证明当前章节行已在购买前提交时自动关联。未启用或已缺失提交时间记录的数据库，需要从原始证据复核。恢复扣费流量前导出并处理下列记录。对每条记录，应根据购买时间的正文版本、备份或其他原始购买证据确认章节身份。确认后在短事务中锁住对应的 `novels` 行，填写同一小说的稳定 `chapter_id`、包含证据位置和审核人的 `identity_evidence`，以及 `identity_resolved_at`。同一用户已有该章节的有效记录时，先核对重复扣款再处置。待复核期间，读者仍可使用已确认权益，新的单章购买会提示联系支持。
