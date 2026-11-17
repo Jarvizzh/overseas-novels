@@ -47,7 +47,7 @@ type CheckoutResult struct {
 
 func (r *dbRepository) GetCheckoutTemplate(ctx context.Context, userID int64) (int, error) {
 	var id int
-	err := db.DB.QueryRow(ctx, `
+	err := db.Pool(ctx).QueryRow(ctx, `
 		SELECT COALESCE(
 			(SELECT p.recharge_template_id FROM reader_promotion_for_user($1) p WHERE p.recharge_template_id IS NOT NULL),
 			(SELECT id FROM recharge_templates ORDER BY is_default DESC NULLS LAST, id LIMIT 1), 0)`, userID).Scan(&id)
@@ -61,7 +61,7 @@ func (r *dbRepository) CreateCheckout(ctx context.Context, userID int64, slot *m
 		return "", err
 	}
 	var id int64
-	err = db.DB.QueryRow(ctx, `
+	err = db.Pool(ctx).QueryRow(ctx, `
 		INSERT INTO recharge_orders (checkout_id, user_id, amount_cents, currency, coins, bonus_coins_credited,
 			payment_method, status, order_type, recharge_slot_id, recharge_template_id, novel_id, utm_source, utm_campaign, promotion_link_id,fb_lead_metadata)
 		SELECT $1, u.id, $2, 'USD', $3, $4, 'paypal', 'Pending', $5::varchar, $6, $7, NULLIF($8, 0),
@@ -82,7 +82,7 @@ func (r *dbRepository) CreateCheckout(ctx context.Context, userID int64, slot *m
 }
 
 func (r *dbRepository) BindCheckout(ctx context.Context, checkoutID, orderID string) error {
-	tag, err := db.DB.Exec(ctx, `UPDATE recharge_orders SET external_ref_id=$2
+	tag, err := db.Pool(ctx).Exec(ctx, `UPDATE recharge_orders SET external_ref_id=$2
 		WHERE checkout_id=$1 AND (external_ref_id IS NULL OR external_ref_id=$2)`, checkoutID, orderID)
 	if err == nil && tag.RowsAffected() != 1 {
 		return ErrCheckoutUnavailable
@@ -96,7 +96,7 @@ const checkoutSelect = `SELECT id, user_id, COALESCE(checkout_id::text, ''), sta
 	WHERE external_ref_id=$1 AND payment_method='paypal' AND order_type IN ('single', 'whole_book')`
 
 func (r *dbRepository) findCheckout(ctx context.Context, orderID string) (*checkoutOrder, error) {
-	return scanCheckout(db.DB.QueryRow(ctx, checkoutSelect, orderID))
+	return scanCheckout(db.Pool(ctx).QueryRow(ctx, checkoutSelect, orderID))
 }
 
 func scanCheckout(row pgx.Row) (*checkoutOrder, error) {
@@ -109,7 +109,7 @@ func scanCheckout(row pgx.Row) (*checkoutOrder, error) {
 }
 
 func (r *dbRepository) settleCheckout(ctx context.Context, orderID string, capture *payment.PayPalCaptureResult) (*CheckoutResult, error) {
-	tx, err := db.DB.Begin(ctx)
+	tx, err := db.Pool(ctx).Begin(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -248,7 +248,7 @@ func (o *checkoutOrder) matchesPayPalOrder(capture *payment.PayPalCaptureResult,
 }
 
 func (r *dbRepository) flagCheckoutForReview(ctx context.Context, id int64, reason string) error {
-	_, err := db.DB.Exec(ctx, `UPDATE recharge_orders SET reconciliation_note=$2 WHERE id=$1
+	_, err := db.Pool(ctx).Exec(ctx, `UPDATE recharge_orders SET reconciliation_note=$2 WHERE id=$1
 		AND (status='Pending' OR (order_type='whole_book' AND status IN ('Success','Paid') AND (fulfilled_at IS NULL OR checkout_id IS NULL)))`, id, reason)
 	return err
 }

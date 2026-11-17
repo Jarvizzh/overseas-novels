@@ -20,7 +20,7 @@ type TaskStatus struct {
 
 // PaymentTaskStatus excludes payloads, credentials and customer data.
 func PaymentTaskStatus(ctx context.Context) ([]TaskStatus, error) {
-	rows, err := db.DB.Query(ctx, `
+	rows, err := db.Pool(ctx).Query(ctx, `
  WITH order_attention AS (
    SELECT paid_unfulfilled, order_pending, manual_review,
           COALESCE(paid_at,created_at) AS payment_time, created_at, reconciliation_attempts
@@ -95,7 +95,7 @@ func RetryPaymentTask(ctx context.Context, kind, id string, from *time.Time) err
 	default:
 		return fmt.Errorf("unknown task kind %q", kind)
 	}
-	result, err := db.DB.Exec(ctx, query, args...)
+	result, err := db.Pool(ctx).Exec(ctx, query, args...)
 	if err != nil {
 		return err
 	}

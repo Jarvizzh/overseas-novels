@@ -41,10 +41,10 @@ func InitRedis() {
 	// Test connection
 	_, err := rdb.Ping(ctx).Result()
 	if err != nil {
-		log.Fatalf("Redis connection failed: %v", err)
+		log.Printf("Reading cache unavailable at startup: %v", err)
+	} else {
+		log.Println("Redis client initialized successfully")
 	}
-
-	log.Println("Redis client initialized successfully")
 	RDB = rdb
 }
 

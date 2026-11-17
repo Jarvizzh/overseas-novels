@@ -22,7 +22,7 @@ type subscriptionJob struct {
 func claimPayPalOrders(ctx context.Context) ([]orderJob, error) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	rows, err := db.DB.Query(ctx, `
+	rows, err := db.Pool(ctx).Query(ctx, `
 		WITH batch AS (
 			SELECT id FROM recharge_orders WHERE payment_method='paypal' AND external_ref_id IS NOT NULL
 			AND (status='Pending' OR (status IN ('Success','Paid') AND order_type='whole_book' AND fulfilled_at IS NULL))
@@ -45,7 +45,7 @@ func claimPayPalOrders(ctx context.Context) ([]orderJob, error) {
 func claimPayPalCancellations(ctx context.Context) ([]paypalCancellation, error) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	rows, err := db.DB.Query(ctx, `WITH due AS (
+	rows, err := db.Pool(ctx).Query(ctx, `WITH due AS (
 		SELECT id FROM user_subscriptions WHERE status='CANCEL_PENDING' AND payment_method='paypal'
 		AND COALESCE(cancel_next_attempt_at,updated_at)<=now()
 		ORDER BY COALESCE(cancel_next_attempt_at,updated_at),id LIMIT 5 FOR UPDATE SKIP LOCKED
@@ -65,7 +65,7 @@ func claimPayPalCancellations(ctx context.Context) ([]paypalCancellation, error)
 func claimPayPalSubscriptions(ctx context.Context) ([]subscriptionJob, error) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	rows, err := db.DB.Query(ctx, `WITH due AS (
+	rows, err := db.Pool(ctx).Query(ctx, `WITH due AS (
 		SELECT id FROM user_subscriptions WHERE payment_method='paypal'
 		AND subscription_id NOT LIKE 'I-MOCK%'
 		AND (status IN ('ACTIVE','SUSPENDED','CANCEL_PENDING') OR updated_at>now()-interval '30 days' OR paypal_recovery_requested)
@@ -91,19 +91,19 @@ func finishOrderReconciliation(ctx context.Context, job orderJob, result error) 
 		text := result.Error()
 		message = &text
 	}
-	_, err := db.DB.Exec(ctx, `UPDATE recharge_orders SET reconciliation_error=left($3,1000) WHERE external_ref_id=$1 AND reconciliation_attempts=$2`, job.id, job.attempt, message)
+	_, err := db.Pool(ctx).Exec(ctx, `UPDATE recharge_orders SET reconciliation_error=left($3,1000) WHERE external_ref_id=$1 AND reconciliation_attempts=$2`, job.id, job.attempt, message)
 	return err
 }
 func finishCancellationRetry(ctx context.Context, task paypalCancellation, result error) error {
-	_, err := db.DB.Exec(ctx, `UPDATE user_subscriptions SET cancel_last_error=left($3,1000),cancel_next_attempt_at=now()+interval '1 minute'*LEAST(cancel_attempts,30) WHERE subscription_id=$1 AND cancel_attempts=$2 AND status='CANCEL_PENDING'`, task.id, task.attempt, result.Error())
+	_, err := db.Pool(ctx).Exec(ctx, `UPDATE user_subscriptions SET cancel_last_error=left($3,1000),cancel_next_attempt_at=now()+interval '1 minute'*LEAST(cancel_attempts,30) WHERE subscription_id=$1 AND cancel_attempts=$2 AND status='CANCEL_PENDING'`, task.id, task.attempt, result.Error())
 	return err
 }
 func finishSubscriptionReconciliation(ctx context.Context, job subscriptionJob, end time.Time, result error) error {
 	if result != nil {
-		_, err := db.DB.Exec(ctx, `UPDATE user_subscriptions SET paypal_check_error=left($3,1000) WHERE subscription_id=$1 AND paypal_next_check_at=$2`, job.id, job.lease, result.Error())
+		_, err := db.Pool(ctx).Exec(ctx, `UPDATE user_subscriptions SET paypal_check_error=left($3,1000) WHERE subscription_id=$1 AND paypal_next_check_at=$2`, job.id, job.lease, result.Error())
 		return err
 	}
-	_, err := db.DB.Exec(ctx, `UPDATE user_subscriptions SET paypal_check_error=NULL,paypal_transaction_cursor=$2,paypal_recovery_requested=CASE WHEN $2<now()-interval '1 day' THEN paypal_recovery_requested ELSE false END,paypal_next_check_at=CASE WHEN $2<now()-interval '1 day' THEN now()+interval '30 seconds' ELSE now()+interval '1 hour' END WHERE subscription_id=$1 AND paypal_next_check_at=$3`, job.id, end, job.lease)
+	_, err := db.Pool(ctx).Exec(ctx, `UPDATE user_subscriptions SET paypal_check_error=NULL,paypal_transaction_cursor=$2,paypal_recovery_requested=CASE WHEN $2<now()-interval '1 day' THEN paypal_recovery_requested ELSE false END,paypal_next_check_at=CASE WHEN $2<now()-interval '1 day' THEN now()+interval '30 seconds' ELSE now()+interval '1 hour' END WHERE subscription_id=$1 AND paypal_next_check_at=$3`, job.id, end, job.lease)
 	return err
 }
 
@@ -115,7 +115,7 @@ type inboxJob struct {
 func claimPayPalEvents(ctx context.Context) ([]inboxJob, error) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	rows, err := db.DB.Query(ctx, `WITH due AS (
+	rows, err := db.Pool(ctx).Query(ctx, `WITH due AS (
 		SELECT event_id FROM paypal_event_inbox WHERE processed_at IS NULL AND next_attempt_at<=now()
 		ORDER BY next_attempt_at,event_id LIMIT 10 FOR UPDATE SKIP LOCKED
 	)
@@ -132,9 +132,9 @@ func claimPayPalEvents(ctx context.Context) ([]inboxJob, error) {
 }
 func finishInboxEvent(ctx context.Context, job inboxJob, result error) error {
 	if result != nil {
-		_, err := db.DB.Exec(ctx, `UPDATE paypal_event_inbox SET last_error=left($3,1000),next_attempt_at=now()+interval '1 second'*LEAST(30*attempts,1800) WHERE event_id=$1 AND attempts=$2 AND processed_at IS NULL`, job.event.EventID, job.attempt, result.Error())
+		_, err := db.Pool(ctx).Exec(ctx, `UPDATE paypal_event_inbox SET last_error=left($3,1000),next_attempt_at=now()+interval '1 second'*LEAST(30*attempts,1800) WHERE event_id=$1 AND attempts=$2 AND processed_at IS NULL`, job.event.EventID, job.attempt, result.Error())
 		return err
 	}
-	_, err := db.DB.Exec(ctx, `UPDATE paypal_event_inbox SET processed_at=now(),last_error=NULL WHERE event_id=$1 AND attempts=$2 AND processed_at IS NULL`, job.event.EventID, job.attempt)
+	_, err := db.Pool(ctx).Exec(ctx, `UPDATE paypal_event_inbox SET processed_at=now(),last_error=NULL WHERE event_id=$1 AND attempts=$2 AND processed_at IS NULL`, job.event.EventID, job.attempt)
 	return err
 }

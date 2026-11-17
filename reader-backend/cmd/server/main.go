@@ -82,7 +82,7 @@ func main() {
 		}
 
 		statusCode := http.StatusOK
-		if dbStatus != "UP" || redisStatus != "UP" {
+		if dbStatus != "UP" {
 			statusCode = http.StatusServiceUnavailable
 		}
 
@@ -91,6 +91,7 @@ func main() {
 				"database": dbStatus,
 				"redis":    redisStatus,
 			},
+			"db_pool":   db.ConnectionStats(),
 			"timestamp": time.Now().Format(time.RFC3339),
 		})
 	})
@@ -120,7 +121,9 @@ func main() {
 
 		novelRepo := novel.NewDBRepository()
 		novelCache := novel.NewRedisCache()
-		novelService := novel.NewService(novelRepo, novelCache, contentStorage, coverSigner)
+		novelService := novel.NewService(novelRepo, novelCache, contentStorage, coverSigner, novel.ReadLimits{
+			Requests: int(config.AppConfig.ReadRequestMax), Loads: int(config.AppConfig.ReadLoadMax),
+		})
 		novelHandler := novel.NewHandler(novelService)
 		novelHandler.RegisterRoutes(api)
 
@@ -133,7 +136,7 @@ func main() {
 		paypalClient := payment.NewPayPalClient()
 
 		walletRepo := wallet.NewDBRepository()
-		walletService := wallet.NewService(walletRepo, novelRepo, novelCache, stripeClient, paypalClient)
+		walletService := wallet.NewService(walletRepo, novelRepo, stripeClient, paypalClient)
 		go func() { defer close(reconciliationDone); walletService.RunReconciliation(reconcileCtx) }()
 		walletHandler := wallet.NewHandler(walletService)
 		walletHandler.RegisterRoutes(api)

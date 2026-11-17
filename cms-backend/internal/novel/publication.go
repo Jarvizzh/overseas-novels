@@ -39,11 +39,13 @@ func chapterDigest(content string) string {
 	return fmt.Sprintf("%x", sha256.Sum256([]byte(content)))
 }
 
-func (s *novelService) stageChapters(ctx context.Context, chapters []Chapter) error {
-	for _, ch := range chapters {
+func (s *novelService) stageChapters(ctx context.Context, chapters []Chapter, previous []ChapterIdentity) error {
+	for i := range chapters {
+		ch := &chapters[i]
 		if !utf8.ValidString(ch.Content) || strings.ContainsRune(ch.Content, 0) {
 			return fmt.Errorf("%w：第 %d 章正文必须为有效 UTF-8 文本", ErrInvalidImportFile, ch.ChapterIndex+1)
 		}
+		ch.Preview = storage.ChapterPreview(ch.Content)
 	}
 	if s.storage == nil || s.storage.StorageType() != "oss" {
 		return nil
@@ -52,19 +54,37 @@ func (s *novelService) stageChapters(ctx context.Context, chapters []Chapter) er
 	if !ok {
 		return errors.New("chapter storage does not support immutable objects")
 	}
+	published := make(map[string]ChapterIdentity, len(previous))
+	for _, ch := range previous {
+		if ch.Index != nil && ch.ObjectKey != "" {
+			published[ch.ID] = ch
+		}
+	}
+	uploads := make([]Chapter, 0, len(chapters))
 	for i := range chapters {
 		ch := &chapters[i]
+		if old, ok := published[ch.ID]; ok && old.Hash == ch.ContentHash {
+			ch.ObjectKey = old.ObjectKey
+			continue
+		}
 		ch.ObjectKey = fmt.Sprintf("revisions/%s/%s-%s.txt", ch.ID, ch.ContentHash, uuid.NewString())
+		uploads = append(uploads, *ch)
 	}
-	if err := s.repo.StageChapterObjects(ctx, chapters); err != nil {
+	if len(uploads) == 0 {
+		for i := range chapters {
+			chapters[i].Content = ""
+		}
+		return nil
+	}
+	if err := s.repo.StageChapterObjects(ctx, uploads); err != nil {
 		return fmt.Errorf("stage chapter objects: %w", err)
 	}
 	uploadCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 	group, uploadCtx := errgroup.WithContext(uploadCtx)
 	group.SetLimit(10)
-	for i := range chapters {
-		ch := &chapters[i]
+	for i := range uploads {
+		ch := &uploads[i]
 		group.Go(func() error {
 			if err := uploadCtx.Err(); err != nil {
 				return err

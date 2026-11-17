@@ -38,6 +38,7 @@ type Novel struct {
 
 // Chapter represents a chapter of a novel
 type Chapter struct {
+	BodyRevision       int64     `json:"-"`
 	PublicationVersion int64     `json:"content_version,omitempty"`
 	ObjectKey          string    `json:"-"`
 	ContentHash        string    `json:"-"`

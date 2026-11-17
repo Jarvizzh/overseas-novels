@@ -112,6 +112,14 @@ flowchart TD
 
    **章节发布升级 `2026111702`**。安排一次短维护窗口，先停止旧 CMS 的发布写入和旧 Reader 的扣费流量。运行迁移后配套启动新版 CMS、Reader API 和 H5，确认各服务通过健康检查再恢复流量。迁移等待业务表锁最多 3 秒，单条 SQL 和迁移进程分别有 60 秒和 90 秒上限。出现锁超时先解除业务锁再重试。新版开始发布后，旧程序无法读取不可变正文引用。回退须协调应用与数据库共同恢复。
 
+   **阅读性能升级 `2026111703`**。继续使用同一个 CMS `-migrate` 命令，已在 `2026111702` 的数据库只执行新增迁移。启用 OSS 正文的环境，在迁移成功后用新版 CMS 镜像和原配置回填历史预览，回填可分批重跑，已生成的预览会跳过。
+   ```bash
+   docker run --rm --env-file cms-backend/.env star-cms-backend:latest -backfill-chapter-previews
+   ```
+   检查回填结果后切换 Reader 流量。仍待回填的 OSS 章节会显示付费墙，已授权的读者仍能读取全文。PostgreSQL 正文可直接生成历史预览。有效 VIP 索引在数据库迁移完成后另用 `psql -X -v ON_ERROR_STOP=1 -f cms-backend/db/reader_query_indexes.sql` 连接同一个 RDS 业务库执行，脚本使用并发建索引。
+
+   Reader 单实例数据库连接默认前台 21、支付后台 4。可用 `READER_DB_FOREGROUND_MAX_CONNS` 和 `READER_DB_BACKGROUND_MAX_CONNS` 调整，按 Reader 实例数、CMS 和运维进程预留 RDS 总连接数。阅读请求和不同缓存回源的并发分别由 `READER_MAX_IN_FLIGHT_READS` 和 `READER_MAX_CONTENT_LOADS` 控制，默认 48 和 12。Reader 的 `/healthz` 提供两组池的累计等待、取消和使用量，数据库正常而 Redis 不可用时仍返回 200，由有界回源提供服务。CMS 的就绪检查使用现有依赖策略。
+
    历史单章权益通过 `unlock_records.chapter_id` 迁移。仅在 PostgreSQL 能证明当前章节行已在购买前提交时自动关联。未启用或已缺失提交时间记录的数据库，需要从原始证据复核。恢复扣费流量前导出并处理下列记录。对每条记录，应根据购买时间的正文版本、备份或其他原始购买证据确认章节身份。确认后在短事务中锁住对应的 `novels` 行，填写同一小说的稳定 `chapter_id`、包含证据位置和审核人的 `identity_evidence`，以及 `identity_resolved_at`。同一用户已有该章节的有效记录时，先核对重复扣款再处置。待复核期间，读者仍可使用已确认权益，新的单章购买会提示联系支持。
 
    ```sql

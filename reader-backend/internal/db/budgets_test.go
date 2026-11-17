@@ -48,3 +48,47 @@ func TestConnectionWaitAndQueryBudgets(t *testing.T) {
 		t.Fatalf("pool unusable after timeout: %d %v", answer, err)
 	}
 }
+
+func TestBackgroundPoolSaturationPreservesForegroundCapacity(t *testing.T) {
+	dsn := os.Getenv("STAR_NOVEL_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("requires disposable PostgreSQL")
+	}
+	cfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.MaxConns = 1
+	ctx := context.Background()
+	beforeForeground, beforeBackground := DB, background
+	defer func() { DB, background = beforeForeground, beforeBackground }()
+	DB, err = pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer DB.Close()
+	background, err = pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer background.Close()
+	worker := BackgroundContext(ctx)
+	conn, err := Pool(worker).Acquire(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Release()
+	short, cancel := context.WithTimeout(worker, 30*time.Millisecond)
+	defer cancel()
+	if err := Pool(short).Ping(short); err == nil {
+		t.Fatal("background exceeded its pool budget")
+	}
+	var got int
+	if err := Pool(ctx).QueryRow(ctx, "SELECT 42").Scan(&got); err != nil || got != 42 {
+		t.Fatalf("background saturated foreground: %d %v", got, err)
+	}
+	stats := ConnectionStats()
+	if stats["background"].Canceled != 1 || stats["foreground"].Canceled != 0 {
+		t.Fatalf("unexpected pool metrics: %+v", stats)
+	}
+}

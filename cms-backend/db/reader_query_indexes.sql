@@ -13,7 +13,7 @@ BEGIN
               'idx_transactions_user_feed', 'idx_novels_reader_popular', 'idx_novels_reader_latest',
               'idx_payment_outbox_pending', 'idx_reader_sessions_user', 'idx_paypal_order_claim',
               'idx_paypal_cancel_claim', 'idx_paypal_subscription_claim', 'idx_payment_order_attention',
-              'idx_reader_shelf_feed', 'idx_promotion_links_utm'
+              'idx_reader_shelf_feed', 'idx_promotion_links_utm', 'idx_reader_paid_vip_expiry'
           ])
     ) THEN
         RAISE EXCEPTION 'Invalid Reader query index exists. Inspect pg_index before retrying';
@@ -64,3 +64,9 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_reader_shelf_feed
     ON bookshelves(user_id, updated_at DESC, novel_id DESC) WHERE in_shelf = true;
 
 CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_promotion_links_utm ON promotion_links(utm_source, utm_campaign);
+
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_reader_paid_vip_expiry
+    ON user_subscriptions(user_id, current_period_end) INCLUDE (subscription_id)
+    WHERE status IN ('ACTIVE','CANCELLED','CANCEL_PENDING')
+      AND last_payment_time IS NOT NULL AND subscription_id NOT LIKE 'I-MOCK%';

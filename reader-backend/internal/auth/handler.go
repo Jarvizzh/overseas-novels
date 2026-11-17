@@ -13,17 +13,23 @@ import (
 )
 
 func GuestRateLimitMiddleware(rps float64, burst int) gin.HandlerFunc {
+	return IPRateLimitMiddleware(rps, burst, "Too many authentication attempts")
+}
+
+func IPRateLimitMiddleware(rps float64, burst int, message string) gin.HandlerFunc {
 	type entry struct {
 		limiter *rate.Limiter
 		seen    time.Time
 	}
 	var mu sync.Mutex
 	entries := make(map[string]entry)
+	var sweepAfter time.Time
 	return func(c *gin.Context) {
 		now := time.Now()
 		ip := c.ClientIP()
 		mu.Lock()
-		if len(entries) >= 10000 {
+		if len(entries) >= 10000 && !now.Before(sweepAfter) {
+			sweepAfter = now.Add(time.Minute)
 			for key, v := range entries {
 				if now.Sub(v.seen) > time.Hour {
 					delete(entries, key)
@@ -44,7 +50,7 @@ func GuestRateLimitMiddleware(rps float64, burst int) gin.HandlerFunc {
 		allowed := v.limiter.Allow()
 		mu.Unlock()
 		if !allowed {
-			c.AbortWithStatusJSON(429, gin.H{"error": "Too many authentication attempts"})
+			c.AbortWithStatusJSON(429, gin.H{"error": message})
 			return
 		}
 		c.Next()

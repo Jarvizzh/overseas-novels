@@ -79,34 +79,35 @@ func (r *fakeReaderRepo) GetEffectivePricingRule(context.Context, int64, int64, 
 	return start, cost, nil
 }
 
-type fakeReaderCache struct {
-	cachedNovel *model.Novel
-}
+type fakeReaderCache struct{}
 
-func (c *fakeReaderCache) GetNovel(context.Context, int64) (*model.Novel, error) {
-	return c.cachedNovel, nil
-}
-func (c *fakeReaderCache) SetNovel(_ context.Context, _ int64, n *model.Novel) error {
-	c.cachedNovel = n
-	return nil
-}
 func (c *fakeReaderCache) GetChaptersList(context.Context, int64) ([]model.Chapter, error) {
 	return nil, nil
 }
 func (c *fakeReaderCache) SetChaptersList(context.Context, int64, []model.Chapter) error {
 	return nil
 }
-func (c *fakeReaderCache) GetChapter(context.Context, int64, int) (*model.Chapter, error) {
-	return nil, nil
-}
-func (c *fakeReaderCache) SetChapter(context.Context, int64, int, *model.Chapter) error {
-	return nil
-}
-func (c *fakeReaderCache) IsChapterUnlocked(context.Context, int64, int64, string) (bool, error) {
-	return false, nil
-}
-func (c *fakeReaderCache) SetChapterUnlocked(context.Context, int64, int64, string) error {
-	return nil
+func (*fakeReaderCache) GetBody(context.Context, string) (string, error) { return "", nil }
+func (*fakeReaderCache) SetBody(context.Context, string, string) error   { return nil }
+
+func (r *fakeReaderRepo) ReadSnapshot(ctx context.Context, userID, novelID int64, promoID int, index *int) (ReadSnapshot, error) {
+	result := ReadSnapshot{userID: userID}
+	book, err := r.GetByID(ctx, novelID)
+	if err != nil || book == nil {
+		return result, err
+	}
+	result.version = book.ContentVersion
+	result.start, result.cost, err = r.GetEffectivePricingRule(ctx, userID, novelID, promoID, "", "")
+	if err != nil || index == nil {
+		return result, err
+	}
+	result.chapter, err = r.GetChapter(ctx, novelID, *index)
+	if result.chapter != nil {
+		runes := []rune(result.chapter.Content)
+		result.preview = string(runes[:min(250, len(runes)/2)]) + "..."
+		result.chapter.Content = ""
+	}
+	return result, err
 }
 
 type fakeCoverSigner struct{}
@@ -121,7 +122,7 @@ func (fakeCoverSigner) SignCoverURL(raw string) string {
 
 var _ storage.CoverSigner = fakeCoverSigner{}
 
-func TestReaderNovelService_SignsWithoutMutatingCache(t *testing.T) {
+func TestReaderNovelService_SignsWithoutMutatingSource(t *testing.T) {
 	repo := &fakeReaderRepo{
 		novels: []model.Novel{
 			{ID: 1, Title: "OSS Book", CoverURL: "oss://covers/2026/11/abc.webp", Status: "Ongoing", ContentVersion: 1, PublishStatus: "published"},
@@ -153,13 +154,13 @@ func TestReaderNovelService_SignsWithoutMutatingCache(t *testing.T) {
 	if detail1.CoverURL != "https://oss.starsfic.com/covers/2026/11/abc.webp?signed=1" {
 		t.Fatalf("expected signed detail cover, got %q", detail1.CoverURL)
 	}
-	if cache.cachedNovel == nil || cache.cachedNovel.CoverURL != "oss://covers/2026/11/abc.webp" {
-		t.Fatalf("cache must retain raw oss:// ref, got %+v", cache.cachedNovel)
+	if repo.novels[0].CoverURL != "oss://covers/2026/11/abc.webp" {
+		t.Fatalf("repository must retain raw oss:// ref, got %+v", repo.novels[0])
 	}
 
 	detail2, err := svc.GetNovelDetail(ctx, 1)
 	if err != nil || detail2.CoverURL != "https://oss.starsfic.com/covers/2026/11/abc.webp?signed=1" {
-		t.Fatalf("expected cache-hit detail signed cleanly, got %+v err=%v", detail2, err)
+		t.Fatalf("expected successive detail signed cleanly, got %+v err=%v", detail2, err)
 	}
 }
 

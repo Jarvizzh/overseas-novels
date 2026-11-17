@@ -10,11 +10,13 @@ import (
 	"time"
 
 	"reader-backend/internal/config"
+	"reader-backend/internal/db"
 	"reader-backend/internal/model"
 	"reader-backend/internal/payment"
 )
 
 func (s *service) RunReconciliation(ctx context.Context) {
+	ctx = db.BackgroundContext(ctx)
 	var workers sync.WaitGroup
 	type scheduledWorker struct {
 		run      func(context.Context)

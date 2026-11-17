@@ -8,6 +8,7 @@
     "build": "tsc -b && vite build",
     "lint": "oxlint",
     "test:shelf-batches": "node --test scripts/shelf-batches.test.mjs",
+    "test:progress-browser": "node scripts/progress-outbox-browser.mjs",
     "preview": "vite preview"
   },
   "dependencies": {

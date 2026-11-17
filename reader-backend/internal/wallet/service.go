@@ -49,16 +49,14 @@ type Service interface {
 type service struct {
 	repo         Repository
 	novelRepo    novel.Repository
-	novelCache   novel.Cache
 	stripeClient *payment.StripeClient
 	paypalClient *payment.PayPalClient
 }
 
-func NewService(repo Repository, novelRepo novel.Repository, novelCache novel.Cache, stripeClient *payment.StripeClient, paypalClient *payment.PayPalClient) Service {
+func NewService(repo Repository, novelRepo novel.Repository, stripeClient *payment.StripeClient, paypalClient *payment.PayPalClient) Service {
 	return &service{
 		repo:         repo,
 		novelRepo:    novelRepo,
-		novelCache:   novelCache,
 		stripeClient: stripeClient,
 		paypalClient: paypalClient,
 	}
@@ -129,7 +127,6 @@ func (s *service) UnlockChapter(ctx context.Context, userID int64, novelID int64
 	if err := s.repo.UnlockChapterTx(ctx, userID, novelID, chapterIndex, promoID, quote); err != nil {
 		return err
 	}
-	_ = s.novelCache.SetChapterUnlocked(ctx, userID, novelID, ch.ID)
 	return nil
 }
 
@@ -142,7 +139,7 @@ func (s *service) InitiateCheckout(ctx context.Context, userID int64, amountCent
 		defer cancel()
 		effectivePixelID := ""
 		if effectivePixelID == "" && db.DB != nil {
-			_ = db.DB.QueryRow(taskCtx, "SELECT fp.pixel_id FROM reader_promotion_for_user($1) pl JOIN fb_pixels fp ON pl.fb_pixel_id = fp.id", userID).Scan(&effectivePixelID)
+			_ = db.Pool(db.BackgroundContext(taskCtx)).QueryRow(taskCtx, "SELECT fp.pixel_id FROM reader_promotion_for_user($1) pl JOIN fb_pixels fp ON pl.fb_pixel_id = fp.id", userID).Scan(&effectivePixelID)
 		}
 		if effectivePixelID != "" {
 			tracking.SendFacebookEvent(effectivePixelID, "InitiateCheckout", strconv.FormatInt(userID, 10), email, ip, ua, fbc, fbp, float64(amountCents)/100.0, "USD", sourceURL, country)
@@ -282,7 +279,7 @@ func (s *service) trackCheckoutInitiation(orderID string) {
 		var amount int64
 		var pixel, currency, email string
 		var metadata []byte
-		err := db.DB.QueryRow(ctx, `SELECT o.user_id,o.amount_cents,o.currency,
+		err := db.Pool(ctx).QueryRow(ctx, `SELECT o.user_id,o.amount_cents,o.currency,
 			COALESCE(u.email,''),fp.pixel_id,COALESCE(o.fb_lead_metadata,'{}')
 			FROM recharge_orders o JOIN users u ON u.id=o.user_id
 			JOIN promotion_links p ON p.id=o.promotion_link_id JOIN fb_pixels fp ON fp.id=p.fb_pixel_id
@@ -471,7 +468,7 @@ func (s *service) CreateSubscription(
 		defer cancel()
 		effectivePixelID := ""
 		if effectivePixelID == "" && db.DB != nil {
-			_ = db.DB.QueryRow(taskCtx, "SELECT fp.pixel_id FROM reader_promotion_for_user($1) pl JOIN fb_pixels fp ON pl.fb_pixel_id = fp.id", userID).Scan(&effectivePixelID)
+			_ = db.Pool(db.BackgroundContext(taskCtx)).QueryRow(taskCtx, "SELECT fp.pixel_id FROM reader_promotion_for_user($1) pl JOIN fb_pixels fp ON pl.fb_pixel_id = fp.id", userID).Scan(&effectivePixelID)
 		}
 		if effectivePixelID != "" {
 			tracking.SendFacebookEvent(effectivePixelID, "InitiateCheckout", strconv.FormatInt(userID, 10), email, ip, ua, fbc, fbp, float64(slot.PriceCents)/100.0, "USD", sourceURL, country)

@@ -16,3 +16,8 @@ var SeedSQL string
 //
 //go:embed migrations/2026111702.sql
 var ChapterPublicationSQL string
+
+// ReaderPerformanceSQL separates chapter previews and tracks catalog generations.
+//
+//go:embed migrations/2026111703.sql
+var ReaderPerformanceSQL string

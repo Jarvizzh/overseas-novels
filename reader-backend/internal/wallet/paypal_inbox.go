@@ -25,7 +25,7 @@ func (r *dbRepository) enqueuePayPalEvent(ctx context.Context, event *payment.We
 	if err != nil {
 		return err
 	}
-	tx, err := db.DB.Begin(ctx)
+	tx, err := db.Pool(ctx).Begin(ctx)
 	if err != nil {
 		return err
 	}

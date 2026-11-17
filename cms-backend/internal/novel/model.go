@@ -24,6 +24,7 @@ type Novel struct {
 }
 
 type Chapter struct {
+	Preview      string    `json:"-"`
 	ObjectKey    string    `json:"-"`
 	ContentHash  string    `json:"-"`
 	ID           string    `json:"id"`

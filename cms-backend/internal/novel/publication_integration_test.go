@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -50,7 +51,7 @@ func publicationDB(t *testing.T) *pgxpool.Pool {
 	}
 	db.DB = pool
 	t.Cleanup(func() { db.DB = nil; pool.Close() })
-	for _, sql := range []string{dbassets.SchemaSQL, dbassets.ChapterPublicationSQL} {
+	for _, sql := range []string{dbassets.SchemaSQL, dbassets.ChapterPublicationSQL, dbassets.ReaderPerformanceSQL} {
 		if _, err := pool.Exec(ctx, sql); err != nil {
 			t.Fatal(err)
 		}
@@ -210,6 +211,18 @@ func TestPublicationIsAtomicAcrossStorageAndCatalog(t *testing.T) {
 	if err != nil || got.ID != original.ID || got.WordCount != countCharacters(got.Content) || got.ContentHash != chapterDigest(got.Content) || got.ObjectKey == original.ObjectKey {
 		t.Fatalf("published metadata mismatch: %+v %v", got, err)
 	}
+	published, err := repo.GetNovel(ctx, 1)
+	if err != nil || published.ContentVersion != version+1 {
+		t.Fatalf("bulk publication must advance the version once: %+v %v", published, err)
+	}
+	if _, err := pool.Exec(ctx, "UPDATE chapters SET price=price+1 WHERE novel_id=1; UPDATE novels SET view_count=view_count+1 WHERE id=1"); err != nil {
+		t.Fatal(err)
+	}
+	priced, err := repo.GetNovel(ctx, 1)
+	if err != nil || priced.ContentVersion != published.ContentVersion {
+		t.Fatalf("price and views must preserve catalog version: %+v %v", priced, err)
+	}
+
 	var state string
 	if err := pool.QueryRow(ctx, "SELECT state FROM chapter_content_objects WHERE object_key=$1", original.ObjectKey).Scan(&state); err != nil || state != "retired" {
 		t.Fatalf("old object was not queued for cleanup: %q %v", state, err)
@@ -467,4 +480,210 @@ func TestBatchImportAndBatchPublishPostgresIntegration(t *testing.T) {
 	if err != nil || pubRes.UpdatedCount != 1 || len(pubRes.Skipped) != 1 {
 		t.Fatalf("expected 1 published and 1 skipped, got res=%+v err=%v", pubRes, err)
 	}
+}
+
+func TestHistoricalOSSPreviewBackfillIsBoundedAndIdempotent(t *testing.T) {
+	pool := publicationDB(t)
+	ctx := context.Background()
+	body := strings.Repeat("字", 700)
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO novels(id,title,author) VALUES(1,'Book','Author');
+		INSERT INTO chapters(id,novel_id,chapter_index,title,content)
+		VALUES('legacy-oss',1,0,'Legacy',''),('legacy-inline',1,1,'Inline','inline body')`); err != nil {
+		t.Fatal(err)
+	}
+	var gets atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || !strings.HasSuffix(r.URL.Path, "/novels/1/0.txt") {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		gets.Add(1)
+		_, _ = w.Write([]byte(body))
+	}))
+	t.Cleanup(server.Close)
+	ossStore, err := storage.NewAliyunOSSStorage(server.URL, "key", "secret", "test-bucket", "novels", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var before, after int64
+	if err := pool.QueryRow(ctx, "SELECT content_version FROM novels WHERE id=1").Scan(&before); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if err := ossStore.BackfillChapterPreviews(ctx, pool); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var preview string
+	err = pool.QueryRow(ctx, `SELECT c.content_preview,n.content_version FROM chapters c
+		JOIN novels n ON n.id=c.novel_id WHERE c.id='legacy-oss'`).Scan(&preview, &after)
+	if err != nil || preview != strings.Repeat("字", 250)+"..." || after != before || gets.Load() != 1 {
+		t.Fatalf("preview=%q version=%d/%d OSS reads=%d error=%v", preview, before, after, gets.Load(), err)
+	}
+}
+
+func TestOSSReimportReusesPublishedRevisionsWithoutRewritingChapters(t *testing.T) {
+	pool := publicationDB(t)
+	ctx := context.Background()
+	if _, err := pool.Exec(ctx, `INSERT INTO novels(id,title,author,cover_url,synopsis,start_pay_chapter_index,coin_cost_per_thousand)
+		VALUES(1,'Book','Author','','',1,500)`); err != nil {
+		t.Fatal(err)
+	}
+	var puts atomic.Int64
+	store := &controlledRevisionStore{beforeWrite: func(context.Context, string) error { puts.Add(1); return nil }}
+	repo := NewNovelRepository()
+	service := NewNovelService(repo, store, nil)
+	manuscript := []byte("Chapter 1: First\nFirst body\nChapter 2: Second\nSecond body")
+	if _, err := service.BulkImportChapters(ctx, 1, manuscript, "single_txt", ""); err != nil {
+		t.Fatal(err)
+	}
+	type revision struct{ id, key, xmin string }
+	revisions := func() []revision {
+		t.Helper()
+		rows, err := pool.Query(ctx, "SELECT id,content_object_key,xmin::text FROM chapters WHERE novel_id=1 ORDER BY chapter_index")
+		if err != nil {
+			t.Fatal(err)
+		}
+		result, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (revision, error) {
+			var item revision
+			err := row.Scan(&item.id, &item.key, &item.xmin)
+			return item, err
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+	checkObjects := func(total, published, retired, staged int) {
+		t.Helper()
+		var counts [4]int
+		err := pool.QueryRow(ctx, `SELECT count(*),count(*) FILTER(WHERE state='published'),
+			count(*) FILTER(WHERE state='retired'),count(*) FILTER(WHERE state='staged')
+			FROM chapter_content_objects`).Scan(&counts[0], &counts[1], &counts[2], &counts[3])
+		if err != nil || counts != [4]int{total, published, retired, staged} {
+			t.Fatalf("objects=%v error=%v", counts, err)
+		}
+	}
+	before := revisions()
+	if _, err := service.BulkImportChapters(ctx, 1, manuscript, "single_txt", ""); err != nil {
+		t.Fatal(err)
+	}
+	after := revisions()
+	if puts.Load() != 2 || before[0] != after[0] || before[1] != after[1] {
+		t.Fatalf("same import rewrote objects or rows: puts=%d before=%+v after=%+v", puts.Load(), before, after)
+	}
+	checkObjects(2, 2, 0, 0)
+	moved := []byte("Chapter 1: Renamed second\nSecond body\nChapter 2: Renamed first\nFirst body")
+	if _, err := service.BulkImportChapters(ctx, 1, moved, "single_txt", ""); err != nil {
+		t.Fatal(err)
+	}
+	after = revisions()
+	if puts.Load() != 2 || after[0].key != before[1].key || after[1].key != before[0].key {
+		t.Fatalf("move or rename uploaded body: %+v puts=%d", after, puts.Load())
+	}
+	checkObjects(2, 2, 0, 0)
+	book, err := repo.GetNovel(ctx, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mapping := ChapterImportMapping{Version: book.ContentVersion, Keep: map[int]string{1: after[0].id}}
+	edited := []byte("Chapter 1: Renamed second\nEdited second body\nChapter 2: Renamed first\nFirst body")
+	if _, err := service.BulkImportChapters(ctx, 1, edited, "single_txt", "", mapping); err != nil {
+		t.Fatal(err)
+	}
+	newer := revisions()
+	if puts.Load() != 3 || newer[0].key == after[0].key || newer[1] != after[1] {
+		t.Fatalf("single edit rewrote unchanged body: puts=%d after=%+v before=%+v", puts.Load(), newer, after)
+	}
+	checkObjects(3, 2, 1, 0)
+	book, err = repo.GetNovel(ctx, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mapping.Version = book.ContentVersion
+	failed := NewNovelService(failingCommitRepo{repo}, store, nil)
+	if _, err := failed.BulkImportChapters(ctx, 1, moved, "single_txt", "", mapping); err == nil {
+		t.Fatal("injected commit failure was accepted")
+	}
+	checkObjects(4, 2, 1, 1)
+	failedRows := revisions()
+	if failedRows[0] != newer[0] || failedRows[1] != newer[1] {
+		t.Fatal("failed mixed publication changed online references")
+	}
+
+	// Hold deletion of an old retired object while both importers reuse the
+	// current published object. Published references must remain protected.
+	if _, err := pool.Exec(ctx, "UPDATE chapter_content_objects SET next_attempt_at=now()-interval '1 hour' WHERE state='retired'"); err != nil {
+		t.Fatal(err)
+	}
+	deleteStarted := make(chan struct{})
+	releaseDelete := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseDelete) }) }
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		close(deleteStarted)
+		select {
+		case <-releaseDelete:
+			w.WriteHeader(http.StatusNoContent)
+		case <-r.Context().Done():
+		}
+	}))
+	defer server.Close()
+	defer release()
+	cleaner, err := storage.NewAliyunOSSStorage(server.URL, "test", "test", "bucket", "novels", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanupCtx, stop := context.WithCancel(ctx)
+	cleanupDone := make(chan struct{})
+	go func() { defer close(cleanupDone); cleaner.RunChapterCleanup(cleanupCtx, pool) }()
+	defer func() { release(); stop(); <-cleanupDone }()
+	select {
+	case <-deleteStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("cleanup did not claim retired object")
+	}
+	done := make(chan error, 2)
+	for range 2 {
+		go func() {
+			_, err := service.BulkImportChapters(ctx, 1, edited, "single_txt", "", ChapterImportMapping{Version: book.ContentVersion})
+			done <- err
+		}()
+	}
+	success, conflict := 0, 0
+	for range 2 {
+		err := <-done
+		switch {
+		case err == nil:
+			success++
+		case errors.Is(err, ErrPublicationChanged):
+			conflict++
+		default:
+			t.Fatal(err)
+		}
+	}
+	if success != 1 || conflict != 1 || puts.Load() != 4 {
+		t.Fatalf("concurrent reuse success=%d conflict=%d puts=%d", success, conflict, puts.Load())
+	}
+	release()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		var deleted int
+		if err := pool.QueryRow(ctx, "SELECT count(*) FROM chapter_content_objects WHERE state='deleted'").Scan(&deleted); err != nil {
+			t.Fatal(err)
+		}
+		if deleted == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("cleanup did not complete")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	checkObjects(4, 2, 0, 1)
 }

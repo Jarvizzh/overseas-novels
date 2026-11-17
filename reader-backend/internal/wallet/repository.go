@@ -69,7 +69,7 @@ func NewDBRepository() Repository {
 func (r *dbRepository) GetWallet(ctx context.Context, userID int64) (*model.Wallet, error) {
 	query := `SELECT user_id, charged_coins, bonus_coins, updated_at FROM wallets WHERE user_id = $1`
 	var w model.Wallet
-	err := db.DB.QueryRow(ctx, query, userID).Scan(&w.UserID, &w.ChargedCoins, &w.BonusCoins, &w.UpdatedAt)
+	err := db.Pool(ctx).QueryRow(ctx, query, userID).Scan(&w.UserID, &w.ChargedCoins, &w.BonusCoins, &w.UpdatedAt)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return nil, nil
@@ -102,7 +102,7 @@ func (r *dbRepository) getTransactionsAfter(ctx context.Context, userID int64, l
 }
 
 func queryTransactions(ctx context.Context, query string, args ...any) ([]model.Transaction, error) {
-	rows, err := db.DB.Query(ctx, query, args...)
+	rows, err := db.Pool(ctx).Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -126,7 +126,7 @@ func (r *dbRepository) UnlockChapterTx(ctx context.Context, userID int64, novelI
 	txCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	tx, err := db.DB.Begin(txCtx)
+	tx, err := db.Pool(txCtx).Begin(txCtx)
 	if err != nil {
 		return err
 	}
@@ -231,7 +231,7 @@ func (r *dbRepository) UnlockChapterTx(ctx context.Context, userID int64, novelI
 }
 
 func (r *dbRepository) AddCoins(ctx context.Context, userID int64, amount int, isBonus bool, bizType string, description string) error {
-	tx, err := db.DB.Begin(ctx)
+	tx, err := db.Pool(ctx).Begin(ctx)
 	if err != nil {
 		return err
 	}
@@ -280,7 +280,7 @@ func (r *dbRepository) AddCoins(ctx context.Context, userID int64, amount int, i
 func (r *dbRepository) GetUserEmail(ctx context.Context, userID int64) (string, error) {
 	var email sql.NullString
 	query := "SELECT email FROM users WHERE id = $1"
-	err := db.DB.QueryRow(ctx, query, userID).Scan(&email)
+	err := db.Pool(ctx).QueryRow(ctx, query, userID).Scan(&email)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return "", nil
@@ -297,7 +297,7 @@ func (r *dbRepository) GetRechargeTemplateByID(ctx context.Context, templateID i
 		FROM recharge_templates
 		WHERE id = $1
 		LIMIT 1`
-	err := db.DB.QueryRow(ctx, query, templateID).Scan(&t.ID, &t.Name, &t.IsDefault)
+	err := db.Pool(ctx).QueryRow(ctx, query, templateID).Scan(&t.ID, &t.Name, &t.IsDefault)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return nil, nil
@@ -314,7 +314,7 @@ func (r *dbRepository) GetDefaultRechargeTemplate(ctx context.Context) (*model.R
 		FROM recharge_templates
 		WHERE is_default = TRUE
 		LIMIT 1`
-	err := db.DB.QueryRow(ctx, query).Scan(&t.ID, &t.Name, &t.IsDefault)
+	err := db.Pool(ctx).QueryRow(ctx, query).Scan(&t.ID, &t.Name, &t.IsDefault)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return nil, nil
@@ -331,7 +331,7 @@ func (r *dbRepository) GetFirstRechargeTemplate(ctx context.Context) (*model.Rec
 		FROM recharge_templates
 		ORDER BY id ASC
 		LIMIT 1`
-	err := db.DB.QueryRow(ctx, query).Scan(&t.ID, &t.Name, &t.IsDefault)
+	err := db.Pool(ctx).QueryRow(ctx, query).Scan(&t.ID, &t.Name, &t.IsDefault)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return nil, nil
@@ -347,7 +347,7 @@ func (r *dbRepository) GetRechargeSlots(ctx context.Context, templateID int) ([]
 		FROM recharge_slots
 		WHERE template_id = $1
 		ORDER BY slot_index ASC`
-	rows, err := db.DB.Query(ctx, query, templateID)
+	rows, err := db.Pool(ctx).Query(ctx, query, templateID)
 	if err != nil {
 		return nil, err
 	}
@@ -371,7 +371,7 @@ func (r *dbRepository) GetRechargeSlotByID(ctx context.Context, slotID int) (*mo
 		FROM recharge_slots
 		WHERE id = $1`
 	var s model.RechargeSlot
-	err := db.DB.QueryRow(ctx, query, slotID).Scan(&s.ID, &s.TemplateID, &s.SlotIndex, &s.Type, &s.Coins, &s.Bonus, &s.VipDuration, &s.SubscriptionCycle, &s.VipName, &s.VipDesc, &s.Price, &s.PriceCents)
+	err := db.Pool(ctx).QueryRow(ctx, query, slotID).Scan(&s.ID, &s.TemplateID, &s.SlotIndex, &s.Type, &s.Coins, &s.Bonus, &s.VipDuration, &s.SubscriptionCycle, &s.VipName, &s.VipDesc, &s.Price, &s.PriceCents)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return nil, nil
@@ -389,7 +389,7 @@ func (r *dbRepository) GetProviderPlan(ctx context.Context, provider string, slo
  AND ($1<>'paypal' OR EXISTS(SELECT 1 FROM paypal_identity_lock i WHERE i.client_id=payment_provider_plans.identity_client_id AND i.environment=payment_provider_plans.identity_environment))
 		LIMIT 1`
 	var p model.PaymentProviderPlan
-	err := db.DB.QueryRow(ctx, query, provider, slotID).Scan(
+	err := db.Pool(ctx).QueryRow(ctx, query, provider, slotID).Scan(
 		&p.ID, &p.Provider, &p.SlotID, &p.Cycle, &p.PriceCents, &p.Currency, &p.ExternalPlanID, &p.Status, &p.RawPayload, &p.CreatedAt, &p.UpdatedAt,
 	)
 	if err != nil {
@@ -425,7 +425,7 @@ func (r *dbRepository) SaveProviderPlan(ctx context.Context, plan *model.Payment
 	if plan.Status == "" {
 		plan.Status = "ACTIVE"
 	}
-	return db.DB.QueryRow(ctx, query, plan.Provider, plan.SlotID, plan.Cycle, plan.PriceCents, plan.Currency, plan.ExternalPlanID, plan.Status, raw).Scan(&plan.ID)
+	return db.Pool(ctx).QueryRow(ctx, query, plan.Provider, plan.SlotID, plan.Cycle, plan.PriceCents, plan.Currency, plan.ExternalPlanID, plan.Status, raw).Scan(&plan.ID)
 }
 
 func (r *dbRepository) UpsertUserSubscription(ctx context.Context, sub *model.UserSubscription) error {
@@ -449,7 +449,7 @@ func (r *dbRepository) UpsertUserSubscription(ctx context.Context, sub *model.Us
 	if raw == "" {
 		raw = "{}"
 	}
-	return db.DB.QueryRow(ctx, query,
+	return db.Pool(ctx).QueryRow(ctx, query,
 		sub.UserID, sub.SubscriptionID, sub.PlanID, sub.SlotID, sub.TemplateID, sub.Status,
 		sub.Cycle, sub.PriceCents, sub.Currency, sub.PaymentMethod, sub.CurrentPeriodStart, sub.CurrentPeriodEnd,
 		sub.NextBillingTime, sub.LastPaymentTime, raw,
@@ -472,7 +472,7 @@ func (r *dbRepository) ListManagedSubscriptions(ctx context.Context, userID int6
 		WHERE user_id = $1 AND (status IN ('PENDING','ACTIVE','SUSPENDED','CANCEL_PENDING') OR (` + novel.PaidSubscriptionPredicate + `))
  AND subscription_id NOT LIKE 'I-MOCK%'
 		ORDER BY id DESC`
-	rows, err := db.DB.Query(ctx, query, userID)
+	rows, err := db.Pool(ctx).Query(ctx, query, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -505,7 +505,7 @@ func (r *dbRepository) GetSubscriptionByID(ctx context.Context, subID string) (*
 		ORDER BY id DESC
 		LIMIT 1`
 	var s model.UserSubscription
-	err := db.DB.QueryRow(ctx, query, subID).Scan(
+	err := db.Pool(ctx).QueryRow(ctx, query, subID).Scan(
 		&s.ID, &s.UserID, &s.SubscriptionID, &s.PlanID, &s.SlotID, &s.TemplateID,
 		&s.Status, &s.Cycle, &s.PriceCents, &s.Currency, &s.PaymentMethod, &s.CurrentPeriodStart, &s.CurrentPeriodEnd,
 		&s.NextBillingTime, &s.LastPaymentTime, &s.CancelledAt, &s.RawPayload, &s.CreatedAt, &s.UpdatedAt,
@@ -525,7 +525,7 @@ func (r *dbRepository) UpdateUserSubscriptionStatus(ctx context.Context, subID s
 		cancelQuery = ", cancelled_at = COALESCE(cancelled_at, CURRENT_TIMESTAMP), next_billing_time = NULL, cancel_next_attempt_at=NULL, cancel_last_error=NULL"
 	}
 	query := fmt.Sprintf("UPDATE user_subscriptions SET status = $1, updated_at = CURRENT_TIMESTAMP %s WHERE subscription_id = $2 AND (status <> 'CANCELLED' OR $1='CANCELLED')  AND (status <> 'CANCEL_PENDING' OR $1 IN ('CANCELLED','EXPIRED'))", cancelQuery)
-	_, err := db.DB.Exec(ctx, query, status, subID)
+	_, err := db.Pool(ctx).Exec(ctx, query, status, subID)
 	return err
 }
 
@@ -533,7 +533,7 @@ func (r *dbRepository) RecordSubscriptionRenewalOrderTx(
 	ctx context.Context, sub *model.UserSubscription, externalRefID string, amountCents int64,
 	currency string, paidAt, periodEnd time.Time, providerStatus string, tpOrder *model.ThirdPartyPaymentOrder,
 ) (bool, error) {
-	tx, err := db.DB.Begin(ctx)
+	tx, err := db.Pool(ctx).Begin(ctx)
 	if err != nil {
 		return false, err
 	}
@@ -641,7 +641,7 @@ func (r *dbRepository) RecordSubscriptionRenewalOrderTx(
 }
 
 func (r *dbRepository) CompletePayPalRefund(ctx context.Context, refundID, captureID string, amount int64, currency string) error {
-	tx, err := db.DB.Begin(ctx)
+	tx, err := db.Pool(ctx).Begin(ctx)
 	if err != nil {
 		return err
 	}
@@ -680,7 +680,7 @@ func (r *dbRepository) CompletePayPalRefund(ctx context.Context, refundID, captu
 }
 
 func (r *dbRepository) enqueuePayPalCancellation(ctx context.Context, id string, userID int64, reason string) error {
-	_, err := db.DB.Exec(ctx, `UPDATE user_subscriptions SET status='CANCEL_PENDING',
+	_, err := db.Pool(ctx).Exec(ctx, `UPDATE user_subscriptions SET status='CANCEL_PENDING',
 		cancel_reason=COALESCE(cancel_reason,NULLIF($3,'')),cancel_next_attempt_at=COALESCE(cancel_next_attempt_at,now()),updated_at=now()
 		WHERE subscription_id=$1 AND user_id=$2 AND status NOT IN ('CANCELLED','EXPIRED')`, id, userID, reason)
 	return err
@@ -688,6 +688,6 @@ func (r *dbRepository) enqueuePayPalCancellation(ctx context.Context, id string,
 
 func (r *dbRepository) WholeBookAvailable(ctx context.Context, userID int64, templateID int, novelID int64) (bool, error) {
 	var allowed bool
-	err := db.DB.QueryRow(ctx, `SELECT whole_book_offer_available($1,$2,$3)`, userID, templateID, novelID).Scan(&allowed)
+	err := db.Pool(ctx).QueryRow(ctx, `SELECT whole_book_offer_available($1,$2,$3)`, userID, templateID, novelID).Scan(&allowed)
 	return allowed, err
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"golang.org/x/sync/singleflight"
@@ -55,15 +56,28 @@ type service struct {
 	coverSigner storage.CoverSigner
 	sf          singleflight.Group
 	loads       chan struct{}
+	requests    chan struct{}
+	misses      [2048]absentChapter
+	missesMu    sync.Mutex
 }
 
-func NewService(repo Repository, cache Cache, storage storage.ContentStorage, coverSigner storage.CoverSigner) Service {
+type ReadLimits struct {
+	Requests int
+	Loads    int
+}
+
+func NewService(repo Repository, cache Cache, storage storage.ContentStorage, coverSigner storage.CoverSigner, limits ...ReadLimits) Service {
+	requests, loads := 48, 12
+	if len(limits) > 0 {
+		requests, loads = limits[0].Requests, limits[0].Loads
+	}
 	return &service{
 		repo:        repo,
 		cache:       cache,
 		storage:     storage,
 		coverSigner: coverSigner,
-		loads:       make(chan struct{}, 12),
+		loads:       make(chan struct{}, loads),
+		requests:    make(chan struct{}, requests),
 	}
 }
 
@@ -125,270 +139,226 @@ func (s *service) SearchNovels(ctx context.Context, search string, limit, offset
 	return novels, nil
 }
 
-func (s *service) GetNovelDetail(ctx context.Context, id int64) (*model.Novel, error) {
-	version, err := s.repo.GetContentVersion(ctx, id)
-	if err != nil {
-		return nil, err
-	}
-	if version == 0 {
-		return nil, nil
-	}
-	ctx = withContentVersion(ctx, version)
-	n, err := s.cache.GetNovel(ctx, id)
-	if err == nil && n != nil && n.PublishStatus != "" {
-		if !IsNovelPublished(n) {
-			return nil, nil
-		}
-		signed := *n
-		signed.CoverURL = s.signCoverURL(n.CoverURL)
-		return &signed, nil
-	}
+const wholeNovel = -1
 
-	sfKey := fmt.Sprintf("sf:novel:detail:%d:%d", id, contentVersion(ctx))
-	val, err := s.load(ctx, sfKey, func(ctx context.Context) (any, error) {
-		if cached, _ := s.cache.GetNovel(ctx, id); cached != nil && cached.PublishStatus != "" {
-			return cached, nil
-		}
-		nDB, errDB := s.repo.GetByID(ctx, id)
-		if errDB != nil || nDB == nil {
-			return nil, errDB
-		}
-		if nDB.ContentVersion != contentVersion(ctx) {
-			return nil, ErrContentChanged
-		}
-		_ = s.cache.SetNovel(ctx, id, nDB)
-		return nDB, nil
-	})
-
-	if err != nil {
-		return nil, err
-	}
-	if val == nil {
-		return nil, nil
-	}
-	cachedNovel := val.(*model.Novel)
-	if !IsNovelPublished(cachedNovel) {
-		return nil, nil
-	}
-	signed := *cachedNovel
-	signed.CoverURL = s.signCoverURL(cachedNovel.CoverURL)
-	return &signed, nil
+type absentChapter struct {
+	novelID int64
+	index   int
+	until   time.Time
 }
 
-func (s *service) GetChaptersList(ctx context.Context, userID int64, novelID int64, promoID int, utmSource, utmCampaign string) ([]model.Chapter, error) {
-	n, err := s.GetNovelDetail(ctx, novelID)
+func (s *service) admit() bool {
+	select {
+	case s.requests <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *service) knownAbsent(novelID int64, index int) bool {
+	s.missesMu.Lock()
+	defer s.missesMu.Unlock()
+	entry := s.misses[missBucket(novelID, index)]
+	return entry.novelID == novelID && entry.index == index && time.Now().Before(entry.until)
+}
+
+func missBucket(novelID int64, index int) uint64 {
+	return (uint64(novelID)*31 + uint64(index)) % 2048
+}
+
+func (s *service) rememberAbsent(novelID int64, index int) {
+	s.missesMu.Lock()
+	s.misses[missBucket(novelID, index)] = absentChapter{novelID, index, time.Now().Add(2 * time.Second)}
+	s.missesMu.Unlock()
+}
+
+func (s *service) GetNovelDetail(ctx context.Context, id int64) (*model.Novel, error) {
+	if s.knownAbsent(id, wholeNovel) {
+		return nil, nil
+	}
+	if !s.admit() {
+		return nil, ErrContentBusy
+	}
+	defer func() { <-s.requests }()
+	n, err := s.repo.GetByID(ctx, id)
 	if err != nil {
 		return nil, err
 	}
-	if !IsNovelPublished(n) {
+	if n == nil {
+		s.rememberAbsent(id, wholeNovel)
+		return nil, nil
+	}
+	n.CoverURL = s.signCoverURL(n.CoverURL)
+	return n, nil
+}
+
+func (s *service) GetChaptersList(ctx context.Context, userID, novelID int64, promoID int, _, _ string) ([]model.Chapter, error) {
+	if s.knownAbsent(novelID, wholeNovel) {
 		return nil, ErrNovelNotFound
 	}
-
-	ctx = withContentVersion(ctx, n.ContentVersion)
-	list, err := s.cache.GetChaptersList(ctx, novelID)
-	if err != nil || len(list) == 0 {
-		sfKey := fmt.Sprintf("sf:novel:chapters:%d:%d", novelID, contentVersion(ctx))
-		val, errSF := s.load(ctx, sfKey, func(ctx context.Context) (any, error) {
-			if cached, _ := s.cache.GetChaptersList(ctx, novelID); len(cached) > 0 {
-				return cached, nil
-			}
-			listDB, errDB := s.repo.GetChaptersList(ctx, novelID)
-			if errDB != nil {
-				return nil, errDB
-			}
-			if len(listDB) > 0 {
-				_ = s.cache.SetChaptersList(ctx, novelID, listDB)
-			}
-			return listDB, nil
-		})
-
-		if errSF != nil {
-			return nil, errSF
-		}
-		if val != nil {
-			list = val.([]model.Chapter)
-		}
+	if !s.admit() {
+		return nil, ErrContentBusy
 	}
-
-	effectiveStartPay, effectiveCost, err := s.repo.GetEffectivePricingRule(ctx, userID, novelID, promoID, utmSource, utmCampaign)
+	defer func() { <-s.requests }()
+	snapshot, err := s.repo.ReadSnapshot(ctx, userID, novelID, promoID, nil)
 	if err != nil {
 		return nil, err
 	}
-
-	hasPass, err := HasReadingPass(ctx, s.repo, userID, novelID)
-	if err != nil {
+	if err := verifyReadIdentity(ctx, snapshot.userID); err != nil {
 		return nil, err
 	}
-
-	resultList := make([]model.Chapter, len(list))
-	for i, ch := range list {
-		isPaid := ch.ChapterIndex >= effectiveStartPay-1
-		price := 0
-		if isPaid && !hasPass {
-			price = CalculateChapterPrice(ch.WordCount, effectiveCost)
-		}
-		ch.PublicationVersion = n.ContentVersion
-		ch.IsPaid = isPaid && effectiveCost > 0
-		ch.Price = price
-		resultList[i] = ch
+	if snapshot.version == 0 {
+		s.rememberAbsent(novelID, wholeNovel)
+		return nil, ErrNovelNotFound
 	}
-
-	return resultList, nil
-}
-
-func (s *service) GetChapterContent(ctx context.Context, userID int64, novelID int64, chapterIndex int, promoID int, utmSource, utmCampaign string) (*ChapterReadResult, error) {
-	n, err := s.GetNovelDetail(ctx, novelID)
-	if err != nil {
-		return nil, err
-	}
-	if !IsNovelPublished(n) {
-		return nil, nil
-	}
-
-	ctx = withContentVersion(ctx, n.ContentVersion)
-	ch, err := s.cache.GetChapter(ctx, novelID, chapterIndex)
-	if err != nil || ch == nil {
-		sfKey := fmt.Sprintf("sf:chapter:%d:%d:%d", novelID, chapterIndex, contentVersion(ctx))
-		val, errSF := s.load(ctx, sfKey, func(ctx context.Context) (any, error) {
-			if cached, _ := s.cache.GetChapter(ctx, novelID, chapterIndex); cached != nil {
-				return cached, nil
+	ctx = withContentVersion(ctx, snapshot.version)
+	list, _ := s.cache.GetChaptersList(ctx, novelID)
+	if list == nil {
+		key := fmt.Sprintf("catalog:%d:%d", novelID, snapshot.version)
+		value, err := s.load(ctx, key, func(ctx context.Context) (any, error) {
+			list, _ := s.cache.GetChaptersList(ctx, novelID)
+			if list != nil {
+				return list, nil
 			}
-			chDB, errDB := s.repo.GetChapter(ctx, novelID, chapterIndex)
-			if errDB != nil || chDB == nil {
-				return nil, errDB
+			list, err := s.repo.GetChaptersList(ctx, novelID)
+			if err != nil {
+				return nil, err
 			}
-
-			switch {
-			case chDB.ObjectKey != "":
-				store, ok := s.storage.(interface {
-					ReadChapterRevision(context.Context, string, string) (string, error)
-				})
-				if !ok {
-					return nil, errors.New("chapter storage does not support immutable objects")
-				}
-				content, err := store.ReadChapterRevision(ctx, chDB.ObjectKey, chDB.ContentHash)
+			if len(list) == 0 {
+				current, err := s.repo.GetContentVersion(ctx, novelID)
 				if err != nil {
 					return nil, err
 				}
-				chDB.Content = content
-			case chDB.Content == "" && s.storage != nil && s.storage.StorageType() == "oss":
-				store, ok := s.storage.(interface {
-					ReadLegacyChapter(context.Context, int64, int) (string, error)
-				})
-				if !ok {
-					return nil, errors.New("chapter storage does not support legacy reads")
+				if current != snapshot.version {
+					return nil, ErrContentChanged
 				}
-				content, err := store.ReadLegacyChapter(ctx, novelID, chapterIndex)
-				if err != nil {
-					return nil, err
-				}
-				chDB.Content = content
 			}
-			if chDB.Content == "" {
-				return nil, storage.ErrContentNotFound
-			}
-
-			_ = s.cache.SetChapter(ctx, novelID, chapterIndex, chDB)
-			return chDB, nil
+			_ = s.cache.SetChaptersList(ctx, novelID, list)
+			return list, nil
 		})
-		if errSF != nil {
-			return nil, errSF
-		}
-		if val == nil {
-			current, err := s.repo.GetContentVersion(ctx, novelID)
-			if err == nil && current != 0 && current != n.ContentVersion {
-				return nil, ErrContentChanged
-			}
-			return nil, err
-		}
-		ch = val.(*model.Chapter)
-	}
-
-	effectiveStartPay, effectiveCost, err := s.repo.GetEffectivePricingRule(ctx, userID, novelID, promoID, utmSource, utmCampaign)
-	if err != nil {
-		return nil, err
-	}
-
-	isPaid := (ch.ChapterIndex >= (effectiveStartPay - 1))
-	price := 0
-	if isPaid {
-		price = CalculateChapterPrice(ch.WordCount, effectiveCost)
-	}
-
-	result := &ChapterReadResult{
-		Price: price, ContentVersion: n.ContentVersion,
-	}
-
-	if !isPaid || effectiveCost == 0 {
-		clone := *ch
-		clone.IsPaid = false
-		clone.Price = 0
-		result.Chapter = &clone
-		result.Locked = false
-		result.AccessType = "free"
-		return result, nil
-	}
-
-	if userID == 0 {
-		preview := getLockedPreview(ch)
-		preview.IsPaid = true
-		preview.Price = price
-		result.Chapter = preview
-		result.Locked = true
-		return result, nil
-	}
-
-	// VIP Subscription Check: Members with active subscription have unlimited free reading access to all content
-	hasPass, err := HasReadingPass(ctx, s.repo, userID, novelID)
-	if err != nil {
-		return nil, err
-	}
-	if hasPass {
-		clone := *ch
-		clone.IsPaid = true
-		clone.Price = price
-		result.Chapter = &clone
-		result.Locked = false
-		result.AccessType = "pass"
-		result.Price = 0
-		return result, nil
-	}
-
-	unlocked, err := s.cache.IsChapterUnlocked(ctx, userID, novelID, ch.ID)
-	if err != nil || !unlocked {
-		unlocked, result.PurchaseNeedsReview, err = s.repo.CheckChapterAccess(ctx, userID, novelID, ch.ID)
 		if err != nil {
 			return nil, err
 		}
-		if unlocked {
-			_ = s.cache.SetChapterUnlocked(ctx, userID, novelID, ch.ID)
+		list = value.([]model.Chapter)
+	}
+	result := make([]model.Chapter, len(list))
+	for i, ch := range list {
+		ch.PublicationVersion = snapshot.version
+		ch.IsPaid = ch.ChapterIndex >= snapshot.start-1 && snapshot.cost > 0
+		if ch.IsPaid && !snapshot.pass {
+			ch.Price = CalculateChapterPrice(ch.WordCount, snapshot.cost)
 		}
+		result[i] = ch
 	}
-	if unlocked {
-		clone := *ch
-		clone.IsPaid = true
-		clone.Price = price
-		result.Chapter = &clone
-		result.Locked = false
-		result.AccessType = "chapter"
-		result.PurchaseNeedsReview = false
-	} else {
-		preview := getLockedPreview(ch)
-		preview.IsPaid = true
-		preview.Price = price
-		result.Chapter = preview
-		result.Locked = true
-	}
-
 	return result, nil
 }
 
-func getLockedPreview(original *model.Chapter) *model.Chapter {
-	preview := *original // shallow copy
-	runes := []rune(original.Content)
-	limit := min(250, len(runes)/2)
-	if len(runes) > limit {
-		preview.Content = string(runes[:limit]) + "..."
+func (s *service) GetChapterContent(ctx context.Context, userID, novelID int64, index, promoID int, _, _ string) (*ChapterReadResult, error) {
+	if s.knownAbsent(novelID, wholeNovel) || s.knownAbsent(novelID, index) {
+		return nil, nil
 	}
-	return &preview
+	if !s.admit() {
+		return nil, ErrContentBusy
+	}
+	defer func() { <-s.requests }()
+	snapshot, err := s.repo.ReadSnapshot(ctx, userID, novelID, promoID, &index)
+	if err != nil {
+		return nil, err
+	}
+	if err := verifyReadIdentity(ctx, snapshot.userID); err != nil {
+		return nil, err
+	}
+	if snapshot.version == 0 {
+		s.rememberAbsent(novelID, wholeNovel)
+		return nil, nil
+	}
+	if snapshot.chapter == nil {
+		s.rememberAbsent(novelID, index)
+		return nil, nil
+	}
+	ch := *snapshot.chapter
+	ch.IsPaid = index >= snapshot.start-1 && snapshot.cost > 0
+	if ch.IsPaid {
+		ch.Price = CalculateChapterPrice(ch.WordCount, snapshot.cost)
+	}
+	result := &ChapterReadResult{Chapter: &ch, Price: ch.Price, ContentVersion: snapshot.version}
+	switch {
+	case !ch.IsPaid:
+		result.AccessType = "free"
+	case snapshot.pass:
+		result.AccessType, result.Price = "pass", 0
+	case snapshot.unlocked:
+		result.AccessType = "chapter"
+	default:
+		ch.Content = snapshot.preview
+		result.Locked, result.PurchaseNeedsReview = true, snapshot.review
+		return result, nil
+	}
+	ch.Content, err = s.readBody(withContentVersion(ctx, snapshot.version), &ch)
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+func bodyCacheKey(ch *model.Chapter) string {
+	if ch.ContentHash != "" {
+		return "sha256:" + ch.ContentHash
+	}
+	return fmt.Sprintf("legacy:%d:%s:%d:%d", ch.NovelID, ch.ID, ch.ChapterIndex, ch.BodyRevision)
+}
+
+func (s *service) readBody(ctx context.Context, ch *model.Chapter) (string, error) {
+	key := bodyCacheKey(ch)
+	if body, _ := s.cache.GetBody(ctx, key); body != "" {
+		return body, nil
+	}
+	value, err := s.load(ctx, "body:"+key, func(ctx context.Context) (any, error) {
+		if body, _ := s.cache.GetBody(ctx, key); body != "" {
+			return body, nil
+		}
+		body, err := s.loadBody(ctx, ch)
+		if err != nil {
+			return nil, err
+		}
+		if body == "" {
+			return nil, storage.ErrContentNotFound
+		}
+		_ = s.cache.SetBody(ctx, key, body)
+		return body, nil
+	})
+	if err != nil {
+		return "", err
+	}
+	return value.(string), nil
+}
+
+func (s *service) loadBody(ctx context.Context, ch *model.Chapter) (string, error) {
+	if ch.ObjectKey != "" {
+		store, ok := s.storage.(interface {
+			ReadChapterRevision(context.Context, string, string) (string, error)
+		})
+		if !ok {
+			return "", errors.New("chapter storage does not support immutable objects")
+		}
+		return store.ReadChapterRevision(ctx, ch.ObjectKey, ch.ContentHash)
+	}
+	row, err := s.repo.GetChapter(ctx, ch.NovelID, ch.ChapterIndex)
+	if err != nil {
+		return "", err
+	}
+	if row == nil || row.ID != ch.ID || row.ContentHash != ch.ContentHash || row.BodyRevision != ch.BodyRevision {
+		return "", ErrContentChanged
+	}
+	if row.Content != "" || s.storage == nil || s.storage.StorageType() != "oss" {
+		return row.Content, nil
+	}
+	store, ok := s.storage.(interface {
+		ReadLegacyChapter(context.Context, int64, int) (string, error)
+	})
+	if !ok {
+		return "", errors.New("chapter storage does not support legacy reads")
+	}
+	return store.ReadLegacyChapter(ctx, ch.NovelID, ch.ChapterIndex)
 }

@@ -10,7 +10,7 @@ const source = (await readFile(new URL('../src/utils/api.ts', import.meta.url), 
 const output = ts.transpileModule(source, {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext },
 }).outputText;
-const { api } = await import(`data:text/javascript;base64,${Buffer.from(output).toString('base64')}`);
+const { api, registerSessionRefreshHandler } = await import(`data:text/javascript;base64,${Buffer.from(output).toString('base64')}`);
 
 globalThis.document = { cookie: '' };
 globalThis.window = { location: { href: 'https://example.invalid' } };
@@ -89,5 +89,72 @@ test('normal batching stops on failure and preserves the API error', async () =>
     assert.equal(calls, 1);
   } finally {
     globalThis.fetch = original;
+  }
+});
+
+test('expired reading credentials refresh once and retry concurrent requests', async () => {
+  const previousFetch = globalThis.fetch;
+  const previousStorage = globalThis.localStorage;
+  let token = 'expired';
+  let refreshes = 0;
+  const attempts = [];
+  globalThis.localStorage = { getItem: (key) => key === 'auth-token' ? token : null };
+  globalThis.fetch = async (url, init) => {
+    const bearer = init.headers.get('Authorization');
+    attempts.push(bearer);
+    if (bearer === 'Bearer expired') return Response.json({ error: 'Expired', code: 'invalid_credentials' }, { status: 401 });
+    assert.ok(url.endsWith('?user_id=7'));
+    return Response.json({ chapter: { id: 'purchased' }, access_type: 'chapter', locked: false });
+  };
+  registerSessionRefreshHandler(async () => {
+    refreshes++;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    token = 'renewed';
+    return token;
+  });
+  try {
+    const responses = await Promise.all([api.getChapterContent(1, 0, 7), api.getChapterContent(1, 1, 7)]);
+    assert.equal(refreshes, 1);
+    assert.equal(attempts.filter((value) => value === 'Bearer expired').length, 2);
+    assert.equal(attempts.filter((value) => value === 'Bearer renewed').length, 2);
+    assert.ok(responses.every((response) => !response.locked && response.access_type === 'chapter'));
+  } finally {
+    registerSessionRefreshHandler(null);
+    globalThis.localStorage = previousStorage;
+    globalThis.fetch = previousFetch;
+  }
+});
+
+test('failed refresh and a real account change stop reading retries', async () => {
+  const previousFetch = globalThis.fetch;
+  const previousStorage = globalThis.localStorage;
+  let token = 'expired';
+  let calls = 0;
+  let refreshes = 0;
+  globalThis.localStorage = { getItem: (key) => key === 'auth-token' ? token : null };
+  globalThis.fetch = async () => {
+    calls++;
+    return Response.json({ error: 'Expired' }, { status: 401 });
+  };
+  registerSessionRefreshHandler(async () => { refreshes++; return null; });
+  try {
+    await assert.rejects(api.getChapterContent(1, 0, 7), { status: 401 });
+    assert.equal(calls, 1);
+    assert.equal(refreshes, 1);
+    calls = 0;
+    globalThis.fetch = async () => {
+      calls++;
+      return token === 'expired'
+        ? Response.json({ error: 'Expired' }, { status: 401 })
+        : Response.json({ error: 'Account changed', code: 'account_changed' }, { status: 409 });
+    };
+    registerSessionRefreshHandler(async () => { refreshes++; token = 'other-user'; return token; });
+    await assert.rejects(api.getChapterContent(1, 0, 7), { status: 409, code: 'account_changed' });
+    assert.equal(calls, 2);
+    assert.equal(refreshes, 2);
+  } finally {
+    registerSessionRefreshHandler(null);
+    globalThis.localStorage = previousStorage;
+    globalThis.fetch = previousFetch;
   }
 });

@@ -12,6 +12,10 @@ import (
 type Config struct {
 	Port                    string
 	DatabaseURL             string
+	ForegroundDBMax         int32
+	BackgroundDBMax         int32
+	ReadRequestMax          int32
+	ReadLoadMax             int32
 	RedisURL                string
 	JWTSecret               string
 	StripeSecretKey         string
@@ -53,6 +57,10 @@ func LoadConfig() {
 	AppConfig = &Config{
 		Port:                    getEnv("PORT", "8080"),
 		DatabaseURL:             getEnv("DATABASE_URL", "postgres://postgres:password@localhost:5432/novel_db?sslmode=disable"),
+		ForegroundDBMax:         positiveLimit("READER_DB_FOREGROUND_MAX_CONNS", 21),
+		BackgroundDBMax:         positiveLimit("READER_DB_BACKGROUND_MAX_CONNS", 4),
+		ReadRequestMax:          positiveLimit("READER_MAX_IN_FLIGHT_READS", 48),
+		ReadLoadMax:             positiveLimit("READER_MAX_CONTENT_LOADS", 12),
 		RedisURL:                getEnv("REDIS_URL", "localhost:6379"),
 		JWTSecret:               jwtSecret,
 		StripeSecretKey:         getEnv("STRIPE_SECRET_KEY", ""),
@@ -125,4 +133,16 @@ func getEnvInt(key string, fallback int) int {
 		return fallback
 	}
 	return parsed
+}
+
+func positiveLimit(key string, fallback int32) int32 {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return fallback
+	}
+	value, err := strconv.ParseInt(raw, 10, 32)
+	if err != nil || value <= 0 {
+		log.Fatalf("%s must be a positive limit", key)
+	}
+	return int32(value)
 }

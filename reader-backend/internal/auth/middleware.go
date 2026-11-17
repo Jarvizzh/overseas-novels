@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"errors"
 	"net/http"
 	"strings"
 
@@ -45,6 +46,23 @@ func AuthMiddleware() gin.HandlerFunc {
 		c.Set("user_id", claims.UserID)
 		c.Next()
 	}
+}
+
+// OptionalClaims verifies a bearer token before reading the account and its
+// session in the same database snapshot as the chapter.
+func OptionalClaims(header string) (*JWTClaims, error) {
+	if header == "" {
+		return nil, nil
+	}
+	scheme, token, ok := strings.Cut(header, " ")
+	if !ok || scheme != "Bearer" || token == "" {
+		return nil, errors.New("invalid bearer credentials")
+	}
+	claims, err := parseClaims(token)
+	if err != nil {
+		return nil, err
+	}
+	return claims, nil
 }
 
 func OptionalAuthMiddleware() gin.HandlerFunc {

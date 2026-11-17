@@ -13,9 +13,11 @@ function openOutbox(): Promise<IDBDatabase> {
       };
       request.onsuccess = () => {
         const db = request.result;
+        const reset = () => { opening = undefined; };
+        db.onclose = reset;
         db.onversionchange = () => {
           db.close();
-          opening = undefined;
+          reset();
         };
         resolve(db);
       };
@@ -39,11 +41,19 @@ async function write(
   return new Promise((resolve, reject) => {
     const tx = db.transaction(STORE, 'readwrite');
     tx.oncomplete = () => resolve();
-    tx.onabort = () => reject(tx.error);
+    let failure: unknown;
+    tx.onabort = () => reject(failure ?? tx.error);
     const store = tx.objectStore(STORE);
     for (const entry of entries) {
       const request = store.get([userId, entry.novel_id]);
-      request.onsuccess = () => update(store, { ...entry, userId }, request.result as PendingProgress | undefined);
+      request.onsuccess = () => {
+        try {
+          update(store, { ...entry, userId }, request.result as PendingProgress | undefined);
+        } catch (error) {
+          failure = error;
+          tx.abort();
+        }
+      };
     }
   });
 }
@@ -52,9 +62,10 @@ export const progressOutbox = {
   async list(userId: number): Promise<ProgressUpdate[]> {
     const db = await openOutbox();
     return new Promise((resolve, reject) => {
-      const request = db.transaction(STORE).objectStore(STORE).index('user').getAll(userId);
-      request.onsuccess = () => resolve((request.result as PendingProgress[]).map(({ userId: _userId, ...entry }) => entry));
-      request.onerror = () => reject(request.error);
+      const tx = db.transaction(STORE);
+      const request = tx.objectStore(STORE).index('user').getAll(userId);
+      tx.oncomplete = () => resolve((request.result as PendingProgress[]).map(({ userId: _userId, ...entry }) => entry));
+      tx.onabort = () => reject(tx.error ?? request.error);
     });
   },
 

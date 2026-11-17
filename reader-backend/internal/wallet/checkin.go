@@ -18,7 +18,7 @@ type CheckInState struct {
 }
 
 func (r *dbRepository) CheckIn(ctx context.Context, userID int64, claim bool) (*CheckInState, error) {
-	tx, err := db.DB.Begin(ctx)
+	tx, err := db.Pool(ctx).Begin(ctx)
 	if err != nil {
 		return nil, err
 	}

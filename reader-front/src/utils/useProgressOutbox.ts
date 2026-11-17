@@ -12,8 +12,14 @@ export function useProgressOutbox(userId: number | undefined, token: string | un
   const wake = useRef<() => void>(() => {});
   const lastTimestamp = useRef(0);
 
-  const pending = useCallback(async (owner: number): Promise<ProgressUpdate[]> => {
-    const entries = await progressOutbox.list(owner).catch(() => []);
+  const pending = useCallback(async (owner: number): Promise<{ entries: ProgressUpdate[]; storageFailed: boolean }> => {
+    let entries: ProgressUpdate[] = [];
+    let storageFailed = false;
+    try {
+      entries = await progressOutbox.list(owner);
+    } catch {
+      storageFailed = true;
+    }
     const merged = new Map(entries.map((item) => [item.novel_id, item]));
     for (const entry of memory.current.get(owner)?.values() ?? []) {
       const saved = merged.get(entry.novel_id);
@@ -22,7 +28,7 @@ export function useProgressOutbox(userId: number | undefined, token: string | un
         merged.set(entry.novel_id, entry);
       }
     }
-    return [...merged.values()];
+    return { entries: [...merged.values()], storageFailed };
   }, []);
 
   const enqueue = useCallback((input: Omit<ProgressUpdate, 'updated_at' | 'version'>): ProgressUpdate | undefined => {
@@ -68,7 +74,7 @@ export function useProgressOutbox(userId: number | undefined, token: string | un
       running = true;
       queued = false;
       try {
-        const entries = await pending(owner);
+        const { entries, storageFailed } = await pending(owner);
         // Keep the exit request well below the browser's shared keepalive body limit.
         const limit = keepalive ? Math.min(BATCH_SIZE, entries.length) : entries.length;
         for (let offset = 0; offset < limit && !session.signal.aborted; offset += BATCH_SIZE) {
@@ -81,9 +87,11 @@ export function useProgressOutbox(userId: number | undefined, token: string | un
           for (const item of batch) {
             if (byNovel?.get(item.novel_id)?.version === item.version) byNovel.delete(item.novel_id);
           }
-          // A failed local acknowledgement is safe to resend.
-          await progressOutbox.acknowledge(owner, batch).catch(() => {});
+          // Keep acknowledgement failures on the retry path, including when
+          // the server has already committed this idempotent progress update.
+          await progressOutbox.acknowledge(owner, batch);
         }
+        if (storageFailed) throw new Error('Reading progress storage is temporarily unavailable');
         retry = 0;
       } catch {
         retry = Math.min(retry + 1, 6);

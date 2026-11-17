@@ -10,6 +10,7 @@ import (
 )
 
 type Repository interface {
+	ReadSnapshot(ctx context.Context, userID, novelID int64, promoID int, index *int) (ReadSnapshot, error)
 	GetContentVersion(context.Context, int64) (int64, error)
 	GetNovels(ctx context.Context, genre, sortBy string, limit, offset int) ([]model.Novel, error)
 	SearchNovels(ctx context.Context, search string, limit, offset int) ([]model.Novel, error)
@@ -167,7 +168,7 @@ func (r *dbRepository) GetByID(ctx context.Context, id int64) (*model.Novel, err
 // GetChaptersList fetches chapters without content to optimize read performance
 func (r *dbRepository) GetChaptersList(ctx context.Context, novelID int64) ([]model.Chapter, error) {
 	query := `
-		SELECT c.id, c.novel_id, c.chapter_index, c.title, c.word_count, c.is_paid, c.price, c.created_at
+		SELECT c.id, c.novel_id, c.chapter_index, c.title, c.word_count, c.created_at
 		FROM chapters c
 		INNER JOIN novels n ON c.novel_id = n.id
 		WHERE c.novel_id = $1 AND c.chapter_index IS NOT NULL AND ($2::bigint = 0 OR n.content_version = $2) AND n.status != 'archived' AND n.publish_status = 'published'
@@ -183,7 +184,7 @@ func (r *dbRepository) GetChaptersList(ctx context.Context, novelID int64) ([]mo
 	for rows.Next() {
 		var c model.Chapter
 		err = rows.Scan(
-			&c.ID, &c.NovelID, &c.ChapterIndex, &c.Title, &c.WordCount, &c.IsPaid, &c.Price, &c.CreatedAt,
+			&c.ID, &c.NovelID, &c.ChapterIndex, &c.Title, &c.WordCount, &c.CreatedAt,
 		)
 		if err != nil {
 			return nil, err
@@ -196,14 +197,14 @@ func (r *dbRepository) GetChaptersList(ctx context.Context, novelID int64) ([]mo
 
 func (r *dbRepository) GetChapter(ctx context.Context, novelID int64, chapterIndex int) (*model.Chapter, error) {
 	query := `
-		SELECT c.id, c.novel_id, c.chapter_index, c.title, c.content, c.word_count, c.is_paid, c.price, c.created_at, COALESCE(c.content_object_key, ''), COALESCE(c.content_sha256, '')
+		SELECT c.id, c.novel_id, c.chapter_index, c.title, c.content, c.word_count, c.is_paid, c.price, c.created_at, COALESCE(c.content_object_key, ''), COALESCE(c.content_sha256, ''), c.body_revision
 		FROM chapters c
 		INNER JOIN novels n ON c.novel_id = n.id
 		WHERE c.novel_id = $1 AND c.chapter_index = $2 AND ($3::bigint = 0 OR n.content_version = $3) AND n.status != 'archived' AND n.publish_status = 'published'`
 
 	var c model.Chapter
 	err := db.DB.QueryRow(ctx, query, novelID, chapterIndex, contentVersion(ctx)).Scan(
-		&c.ID, &c.NovelID, &c.ChapterIndex, &c.Title, &c.Content, &c.WordCount, &c.IsPaid, &c.Price, &c.CreatedAt, &c.ObjectKey, &c.ContentHash,
+		&c.ID, &c.NovelID, &c.ChapterIndex, &c.Title, &c.Content, &c.WordCount, &c.IsPaid, &c.Price, &c.CreatedAt, &c.ObjectKey, &c.ContentHash, &c.BodyRevision,
 	)
 	if err != nil {
 		if err == pgx.ErrNoRows {
@@ -273,18 +274,11 @@ func ReadChapterPricing(ctx context.Context, q interface {
 }, userID, novelID int64, promoID int) (int, int, error) {
 	var start, cost int
 	err := q.QueryRow(ctx, `
-		SELECT COALESCE(NULLIF(pl.start_pay_chapter_index, 0), NULLIF(n.start_pay_chapter_index, 0),
-			(SELECT value::int FROM system_configs WHERE key = 'global_start_pay_chapter_index'), 3),
-		       COALESCE(pl.coin_cost_per_thousand, n.coin_cost_per_thousand,
-			(SELECT value::int FROM system_configs WHERE key = 'global_coin_cost_per_thousand'), 500)
-		FROM novels n
-		LEFT JOIN LATERAL (
-			SELECT p.start_pay_chapter_index, p.coin_cost_per_thousand
-			FROM promotion_links p WHERE p.novel_id=n.id AND p.id=CASE WHEN $1::bigint>0
- THEN (SELECT id FROM reader_promotion_for_user($1)) ELSE resolve_reader_promotion($3,'','') END
-		) pl ON TRUE
-		WHERE n.id = $2 AND n.status <> 'archived' AND n.publish_status = 'published'
-		AND ($4::bigint = 0 OR n.content_version = $4)`, userID, novelID, promoID, contentVersion(ctx)).Scan(&start, &cost)
+		SELECT `+chapterPricingColumns+`
+		FROM novels n CROSS JOIN (SELECT $1::bigint user_id, $3::int promo_id) reader
+		`+chapterPricingJoin+`
+		WHERE n.id=$2 AND n.status<>'archived' AND n.publish_status='published'
+		  AND ($4::bigint=0 OR n.content_version=$4)`, userID, novelID, promoID, contentVersion(ctx)).Scan(&start, &cost)
 	if err == pgx.ErrNoRows && contentVersion(ctx) != 0 {
 		return 0, 0, ErrContentChanged
 	}

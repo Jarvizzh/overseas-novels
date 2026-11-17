@@ -28,7 +28,7 @@ func TestAllOwnedAgreementsRemainManageable(t *testing.T) {
 	if _, err := p.Exec(ctx, `INSERT INTO users(id) VALUES(1),(2)`); err != nil {
 		t.Fatal(err)
 	}
-	service := NewService(NewDBRepository(), novel.NewDBRepository(), nil, nil, nil)
+	service := NewService(NewDBRepository(), novel.NewDBRepository(), nil, nil)
 	router := gin.New()
 	NewHandler(service).RegisterRoutes(router.Group("/api/v1"))
 	token, err := auth.GenerateToken(1)

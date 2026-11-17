@@ -620,7 +620,7 @@ func (s *novelService) importNovelAtomically(ctx context.Context, item BatchImpo
 			WordCount:    words,
 		})
 	}
-	if err := s.stageChapters(ctx, chapters); err != nil {
+	if err := s.stageChapters(ctx, chapters, nil); err != nil {
 		return nil, 0, 0, err
 	}
 
@@ -665,6 +665,7 @@ func (s *novelService) importNovelAtomically(ctx context.Context, item BatchImpo
 	committed = true
 
 	n.WordCount = totalWords
+	n.ContentVersion++
 	s.applyCoverDisplay(n)
 	return n, len(chapters), totalWords, nil
 }
@@ -1000,6 +1001,7 @@ func (s *novelService) publishChapter(ctx context.Context, ch *Chapter, update b
 	if n == nil {
 		return ErrNovelNotFound
 	}
+	var previous []ChapterIdentity
 	if update {
 		current, err := s.repo.GetChapter(ctx, ch.NovelID, ch.ChapterIndex)
 		if err != nil {
@@ -1012,11 +1014,14 @@ func (s *novelService) publishChapter(ctx context.Context, ch *Chapter, update b
 			return ErrPublicationChanged
 		}
 		ch.ID = current.ID
+		previous = []ChapterIdentity{{
+			ID: current.ID, Index: &current.ChapterIndex, Hash: current.ContentHash, ObjectKey: current.ObjectKey,
+		}}
 	}
 	ch.ContentHash = chapterDigest(ch.Content)
 	ch.WordCount = countCharacters(ch.Content)
 	staged := []Chapter{*ch}
-	if err := s.stageChapters(ctx, staged); err != nil {
+	if err := s.stageChapters(ctx, staged, previous); err != nil {
 		return err
 	}
 	*ch = staged[0]
@@ -1269,7 +1274,7 @@ func (s *novelService) BulkImportChapters(ctx context.Context, novelID int64, zi
 	if err != nil {
 		return nil, err
 	}
-	if err := s.stageChapters(ctx, chapters); err != nil {
+	if err := s.stageChapters(ctx, chapters, identities); err != nil {
 		return nil, err
 	}
 

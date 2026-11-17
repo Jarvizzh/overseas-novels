@@ -32,13 +32,19 @@ func (sessionRepository) revoke(ctx context.Context, hash string) error {
 }
 
 func loadTokenCutover(ctx context.Context) (time.Time, error) {
+	const tokenMigrationVersion int64 = 2026111701
 	var cutover time.Time
-	err := db.DB.QueryRow(ctx, "SELECT applied_at FROM reader_schema_migrations WHERE version=$1", db.RequiredSchemaVersion).Scan(&cutover)
+	err := db.DB.QueryRow(ctx, "SELECT applied_at FROM reader_schema_migrations WHERE version=$1", tokenMigrationVersion).Scan(&cutover)
 	return cutover, err
 }
 
+// ActiveSessionSQL is shared by standalone authentication and the reading snapshot.
+const ActiveSessionSQL = `EXISTS(SELECT 1 FROM users u WHERE u.id=$1 AND u.status=1
+	AND ($2::text='' OR EXISTS(SELECT 1 FROM reader_sessions s
+		WHERE s.user_id=u.id AND s.token_hash=$2 AND s.expires_at>now())))`
+
 func (sessionRepository) valid(ctx context.Context, id int64, hash string) (bool, error) {
 	var valid bool
-	err := db.DB.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM users u WHERE u.id=$1 AND u.status=1 AND ($2::text='' OR EXISTS(SELECT 1 FROM reader_sessions s WHERE s.user_id=u.id AND s.token_hash=$2 AND s.expires_at>now())))`, id, hash).Scan(&valid)
+	err := db.DB.QueryRow(ctx, "SELECT "+ActiveSessionSQL, id, hash).Scan(&valid)
 	return valid, err
 }

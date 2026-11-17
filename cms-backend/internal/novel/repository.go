@@ -347,25 +347,25 @@ func (r *dbNovelRepository) GetChapter(ctx context.Context, novelID int64, chapt
 	return &c, nil
 }
 
-const insertChapter = `
-	INSERT INTO chapters (id, novel_id, chapter_index, title, content, word_count, is_paid, price, content_object_key, content_sha256)
-	VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULLIF($9, ''), NULLIF($10, ''))`
+const insertChapter = `INSERT INTO chapters
+	(id, novel_id, chapter_index, title, content, word_count, is_paid, price, content_object_key, content_sha256, content_preview)`
 
 func chapterArgs(c *Chapter) []any {
-	return []any{c.ID, c.NovelID, c.ChapterIndex, c.Title, c.Content, c.WordCount, c.IsPaid, c.Price, c.ObjectKey, c.ContentHash}
+	return []any{c.ID, c.NovelID, c.ChapterIndex, c.Title, c.Content, c.WordCount, c.IsPaid, c.Price, c.ObjectKey, c.ContentHash, c.Preview}
 }
 
 func (r *dbNovelRepository) CreateChapterTx(ctx context.Context, tx pgx.Tx, c *Chapter) error {
-	return tx.QueryRow(ctx, insertChapter+" RETURNING created_at", chapterArgs(c)...).Scan(&c.CreatedAt)
+	return tx.QueryRow(ctx, insertChapter+` VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NULLIF($9,''),NULLIF($10,''),$11)
+		RETURNING created_at`, chapterArgs(c)...).Scan(&c.CreatedAt)
 }
 
 func (r *dbNovelRepository) UpdateChapterTx(ctx context.Context, tx pgx.Tx, c *Chapter) (int64, error) {
 	tag, err := tx.Exec(ctx, `
 		UPDATE chapters
 		SET title = $1, content = $2, word_count = $3, is_paid = $4, price = $5,
-		    content_object_key = NULLIF($6, ''), content_sha256 = NULLIF($7, '')
-		WHERE novel_id = $8 AND chapter_index = $9 AND id = $10`,
-		c.Title, c.Content, c.WordCount, c.IsPaid, c.Price, c.ObjectKey, c.ContentHash, c.NovelID, c.ChapterIndex, c.ID)
+		    content_object_key = NULLIF($6, ''), content_sha256 = NULLIF($7, ''), content_preview = $8
+		WHERE novel_id = $9 AND chapter_index = $10 AND id = $11`,
+		c.Title, c.Content, c.WordCount, c.IsPaid, c.Price, c.ObjectKey, c.ContentHash, c.Preview, c.NovelID, c.ChapterIndex, c.ID)
 	return tag.RowsAffected(), err
 }
 
@@ -373,7 +373,7 @@ func (r *dbNovelRepository) SyncNovelWordCountTx(ctx context.Context, tx pgx.Tx,
 	_, err := tx.Exec(ctx, `
 		UPDATE novels
 		SET word_count = COALESCE((SELECT SUM(word_count) FROM chapters WHERE novel_id = $1 AND chapter_index IS NOT NULL), 0),
-		    updated_at = NOW()
+		    updated_at = NOW(), content_version = content_version + 1
 		WHERE id = $1`, novelID)
 	return err
 }

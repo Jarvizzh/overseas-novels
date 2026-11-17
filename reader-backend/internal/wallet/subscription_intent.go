@@ -35,7 +35,7 @@ type subscriptionIntent struct {
 }
 
 func (r *dbRepository) reserveSubscriptionIntent(ctx context.Context, proposed subscriptionIntent) (*subscriptionIntent, error) {
-	tx, err := db.DB.Begin(ctx)
+	tx, err := db.Pool(ctx).Begin(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -109,11 +109,11 @@ func (r *dbRepository) reserveSubscriptionIntent(ctx context.Context, proposed s
 }
 
 func (r *dbRepository) releaseSubscriptionIntent(ctx context.Context, id string) {
-	_, _ = db.DB.Exec(ctx, `UPDATE paypal_subscription_intents SET lease_until=NULL WHERE intent_id=$1 AND subscription_id IS NULL`, id)
+	_, _ = db.Pool(ctx).Exec(ctx, `UPDATE paypal_subscription_intents SET lease_until=NULL WHERE intent_id=$1 AND subscription_id IS NULL`, id)
 }
 
 func (r *dbRepository) submitSubscriptionIntent(ctx context.Context, id, planID string) error {
-	tag, err := db.DB.Exec(ctx, `UPDATE paypal_subscription_intents SET plan_id=$2,submitted_at=COALESCE(submitted_at,now())
+	tag, err := db.Pool(ctx).Exec(ctx, `UPDATE paypal_subscription_intents SET plan_id=$2,submitted_at=COALESCE(submitted_at,now())
 		WHERE intent_id=$1 AND (plan_id IS NULL OR plan_id=$2) AND subscription_id IS NULL`, id, planID)
 	if err == nil && tag.RowsAffected() != 1 {
 		return ErrSubscriptionConflict
@@ -125,7 +125,7 @@ func (r *dbRepository) finishSubscriptionIntent(ctx context.Context, intent *sub
 	if result.SubscriptionID == "" || result.ApproveURL == "" {
 		return errors.New("PayPal did not return a subscription approval link")
 	}
-	tx, err := db.DB.Begin(ctx)
+	tx, err := db.Pool(ctx).Begin(ctx)
 	if err != nil {
 		return err
 	}

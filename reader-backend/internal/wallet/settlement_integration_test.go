@@ -54,7 +54,7 @@ func TestPaymentSettlementIntegration(t *testing.T) {
 	if _, err := r.settleCheckout(ctx, capture.OrderID, &wrong); err == nil {
 		t.Fatal("currency mismatch settled")
 	}
-	checkoutService := NewService(r, nil, nil, nil, nil)
+	checkoutService := NewService(r, nil, nil, nil)
 	if _, err := checkoutService.CapturePayPalPayment(ctx, 102, capture.OrderID); err == nil {
 		t.Fatal("another account reached capture")
 	}
@@ -196,7 +196,7 @@ func TestPaymentSettlementIntegration(t *testing.T) {
 		if err := r.UpsertUserSubscription(ctx, sub); err != nil {
 			t.Fatal(err)
 		}
-		service := NewService(r, n, nil, nil, nil).(*service)
+		service := NewService(r, n, nil, nil).(*service)
 		transaction := payment.PayPalSubscriptionTransaction{ID: "unmapped-catch-up", Status: "COMPLETED", Time: paidAt}
 		transaction.Amount.Gross.Value = "19.98"
 		transaction.Amount.Gross.Currency = "USD"
@@ -391,7 +391,7 @@ func TestPaymentSettlementIntegration(t *testing.T) {
 		transaction := payment.PayPalSubscriptionTransaction{ID: "snapshot-sale", Status: "COMPLETED", Time: paidAt}
 		transaction.Amount.Gross.Value = "9.99"
 		transaction.Amount.Gross.Currency = "USD"
-		service := NewService(r, n, nil, nil, nil).(*service)
+		service := NewService(r, n, nil, nil).(*service)
 		if err := service.recordPayPalSubscriptionTransaction(ctx, sub, &payment.SubscriptionDetails{Status: "CANCELLED"}, transaction); err != nil {
 			t.Fatal(err)
 		}
@@ -477,7 +477,7 @@ func TestPaymentSettlementIntegration(t *testing.T) {
 		transaction := payment.PayPalSubscriptionTransaction{ID: "cancel-first-sale", Status: "COMPLETED", Time: paidAt}
 		transaction.Amount.Gross.Value = "9.99"
 		transaction.Amount.Gross.Currency = "USD"
-		service := NewService(r, n, nil, nil, nil).(*service)
+		service := NewService(r, n, nil, nil).(*service)
 		if err := service.recordPayPalSubscriptionTransaction(ctx, sub, details, transaction); err != nil {
 			t.Fatal(err)
 		}

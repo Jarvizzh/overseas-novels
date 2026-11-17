@@ -31,7 +31,11 @@ var buildVersion = "dev"
 
 func main() {
 	migrate := flag.Bool("migrate", false, "apply pending database migrations and exit")
+	backfill := flag.Bool("backfill-chapter-previews", false, "generate missing historical OSS chapter previews and exit")
 	flag.Parse()
+	if *migrate && *backfill {
+		log.Fatal("run migration and preview backfill separately")
+	}
 	// 1. Load config
 	config.LoadConfig()
 
@@ -44,6 +48,24 @@ func main() {
 	db.InitDB(*migrate)
 	defer db.CloseDB()
 	if *migrate {
+		return
+	}
+
+	if *backfill {
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		store, err := storage.NewContentStorage(config.AppConfig, db.DB)
+		if err != nil {
+			log.Fatal(err)
+		}
+		ossStore, ok := store.(*storage.AliyunOSSStorage)
+		if !ok {
+			log.Println("PostgreSQL previews are available inline")
+			return
+		}
+		if err := ossStore.BackfillChapterPreviews(ctx, db.DB); err != nil {
+			log.Fatal(err)
+		}
 		return
 	}
 

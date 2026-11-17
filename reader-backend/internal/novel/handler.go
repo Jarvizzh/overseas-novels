@@ -1,7 +1,9 @@
 package novel
 
 import (
+	"context"
 	"errors"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -24,12 +26,13 @@ func NewHandler(service Service) *Handler {
 
 func (h *Handler) RegisterRoutes(r *gin.RouterGroup) {
 	novelGroup := r.Group("/novels")
+	readingLimit := auth.IPRateLimitMiddleware(40, 80, "Too many reading requests")
 	{
 		novelGroup.GET("", h.GetNovels)
 		novelGroup.GET("/search", h.SearchNovels)
-		novelGroup.GET("/:id", h.GetNovelDetail)
-		novelGroup.GET("/:id/chapters", auth.OptionalAuthMiddleware(), h.GetChaptersList)
-		novelGroup.GET("/:id/chapters/:index", auth.OptionalAuthMiddleware(), h.GetChapterContent)
+		novelGroup.GET("/:id", readingLimit, h.GetNovelDetail)
+		novelGroup.GET("/:id/chapters", readingLimit, h.GetChaptersList)
+		novelGroup.GET("/:id/chapters/:index", readingLimit, h.GetChapterContent)
 	}
 }
 
@@ -76,7 +79,7 @@ func (h *Handler) SearchNovels(c *gin.Context) {
 func (h *Handler) GetNovelDetail(c *gin.Context) {
 	idStr := c.Param("id")
 	id, err := strconv.ParseInt(idStr, 10, 64)
-	if err != nil {
+	if err != nil || id <= 0 || id > math.MaxInt32 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid novel ID"})
 		return
 	}
@@ -103,38 +106,30 @@ func (h *Handler) GetNovelDetail(c *gin.Context) {
 func (h *Handler) GetChaptersList(c *gin.Context) {
 	idStr := c.Param("id")
 	id, err := strconv.ParseInt(idStr, 10, 64)
-	if err != nil {
+	if err != nil || id <= 0 || id > math.MaxInt32 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid novel ID"})
 		return
 	}
 
-	var userID int64
-	if val, exists := c.Get("user_id"); exists {
-		userID = val.(int64)
+	ctx, userID, promoID, ok := readingRequest(c)
+	if !ok {
+		return
 	}
 
-	promoIDStr := c.GetHeader("X-Promo-ID")
-	if promoIDStr == "" {
-		promoIDStr = c.Query("link_id")
-		if promoIDStr == "" {
-			promoIDStr = c.Query("promo_id")
-		}
-	}
-	promoID, _ := strconv.Atoi(promoIDStr)
-
-	utmSource := c.GetHeader("X-UTM-Source")
-	if utmSource == "" {
-		utmSource = c.Query("utm_source")
-	}
-	utmCampaign := c.GetHeader("X-UTM-Campaign")
-	if utmCampaign == "" {
-		utmCampaign = c.Query("utm_campaign")
-	}
-
-	ctx := c.Request.Context()
-
-	chapters, err := h.service.GetChaptersList(ctx, userID, id, promoID, utmSource, utmCampaign)
+	chapters, err := h.service.GetChaptersList(ctx, userID, id, promoID, "", "")
 	if err != nil {
+		if errors.Is(err, errReadSessionExpired) {
+			httpx.Fail(c, http.StatusUnauthorized, "session_expired", "Session expired. Sign in again.", nil)
+			return
+		}
+		if errors.Is(err, errReadAccountUnavailable) {
+			httpx.Fail(c, http.StatusForbidden, "account_unavailable", "Account unavailable", nil)
+			return
+		}
+		if errors.Is(err, errReadAccountChanged) {
+			httpx.Fail(c, http.StatusConflict, "account_changed", "The signed-in account changed. Reload before reading.", nil)
+			return
+		}
 		if errors.Is(err, ErrContentChanged) || errors.Is(err, ErrContentBusy) {
 			httpx.Fail(c, http.StatusServiceUnavailable, "content_unavailable", err.Error(), nil)
 			return
@@ -153,50 +148,37 @@ func (h *Handler) GetChaptersList(c *gin.Context) {
 func (h *Handler) GetChapterContent(c *gin.Context) {
 	idStr := c.Param("id")
 	id, err := strconv.ParseInt(idStr, 10, 64)
-	if err != nil {
+	if err != nil || id <= 0 || id > math.MaxInt32 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid novel ID"})
 		return
 	}
 	indexStr := c.Param("index")
 
 	chapterIndex, err := strconv.Atoi(indexStr)
-	if err != nil || chapterIndex < 0 {
+	if err != nil || chapterIndex < 0 || chapterIndex > math.MaxInt32 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid chapter index"})
 		return
 	}
 
-	var userID int64
-	if val, exists := c.Get("user_id"); exists {
-		userID = val.(int64)
-	}
-
-	if expected, present := c.GetQuery("user_id"); present && expected != strconv.FormatInt(userID, 10) {
-		httpx.Fail(c, http.StatusConflict, "account_changed", "The signed-in account changed. Reload before reading.", nil)
+	ctx, userID, promoID, ok := readingRequest(c)
+	if !ok {
 		return
 	}
-	c.Header("Cache-Control", "private, no-store")
 
-	promoIDStr := c.GetHeader("X-Promo-ID")
-	if promoIDStr == "" {
-		promoIDStr = c.Query("link_id")
-		if promoIDStr == "" {
-			promoIDStr = c.Query("promo_id")
-		}
-	}
-	promoID, _ := strconv.Atoi(promoIDStr)
-
-	utmSource := c.GetHeader("X-UTM-Source")
-	if utmSource == "" {
-		utmSource = c.Query("utm_source")
-	}
-	utmCampaign := c.GetHeader("X-UTM-Campaign")
-	if utmCampaign == "" {
-		utmCampaign = c.Query("utm_campaign")
-	}
-
-	ctx := c.Request.Context()
-	result, err := h.service.GetChapterContent(ctx, userID, id, chapterIndex, promoID, utmSource, utmCampaign)
+	result, err := h.service.GetChapterContent(ctx, userID, id, chapterIndex, promoID, "", "")
 	if err != nil {
+		if errors.Is(err, errReadSessionExpired) {
+			httpx.Fail(c, http.StatusUnauthorized, "session_expired", "Session expired. Sign in again.", nil)
+			return
+		}
+		if errors.Is(err, errReadAccountUnavailable) {
+			httpx.Fail(c, http.StatusForbidden, "account_unavailable", "Account unavailable", nil)
+			return
+		}
+		if errors.Is(err, errReadAccountChanged) {
+			httpx.Fail(c, http.StatusConflict, "account_changed", "The signed-in account changed. Reload before reading.", nil)
+			return
+		}
 		if errors.Is(err, ErrContentChanged) || errors.Is(err, ErrContentBusy) {
 			httpx.Fail(c, http.StatusServiceUnavailable, "content_unavailable", err.Error(), nil)
 			return
@@ -211,4 +193,33 @@ func (h *Handler) GetChapterContent(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, result)
+}
+
+func readingRequest(c *gin.Context) (context.Context, int64, int, bool) {
+	var userID int64
+	var identity readIdentity
+	claims, err := auth.OptionalClaims(c.GetHeader("Authorization"))
+	if err != nil {
+		httpx.Fail(c, http.StatusUnauthorized, "invalid_credentials", "Invalid or expired credentials", nil)
+		return nil, 0, 0, false
+	}
+	if claims != nil {
+		userID, identity.sessionHash = claims.UserID, claims.SessionHash
+	}
+	if expected, present := c.GetQuery("user_id"); present {
+		identity.expected = &expected
+	}
+	c.Header("Cache-Control", "private, no-store")
+
+	promoIDStr := c.GetHeader("X-Promo-ID")
+	if promoIDStr == "" {
+		promoIDStr = c.Query("link_id")
+		if promoIDStr == "" {
+			promoIDStr = c.Query("promo_id")
+		}
+	}
+	promoID, _ := strconv.Atoi(promoIDStr)
+
+	ctx := context.WithValue(c.Request.Context(), readIdentityKey{}, identity)
+	return ctx, userID, promoID, true
 }

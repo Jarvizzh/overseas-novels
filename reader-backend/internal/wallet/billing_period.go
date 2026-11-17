@@ -16,7 +16,7 @@ func (r *dbRepository) savePayPalBillingSnapshot(ctx context.Context, details *p
 		details.LastPaymentCents <= 0 || len(details.LastPaymentCurrency) != 3 {
 		return nil
 	}
-	_, err := db.DB.Exec(ctx, `INSERT INTO paypal_subscription_billing_snapshots(subscription_id,paid_at,currency,amount_cents,paid_period_end)
+	_, err := db.Pool(ctx).Exec(ctx, `INSERT INTO paypal_subscription_billing_snapshots(subscription_id,paid_at,currency,amount_cents,paid_period_end)
 		VALUES($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING`, details.SubscriptionID, *details.LastPaymentTime,
 		details.LastPaymentCurrency, details.LastPaymentCents, *details.CurrentPeriodEnd)
 	return err
@@ -24,7 +24,7 @@ func (r *dbRepository) savePayPalBillingSnapshot(ctx context.Context, details *p
 
 func (r *dbRepository) getPayPalBillingSnapshot(ctx context.Context, id string, paidAt time.Time, currency string, cents int64) (time.Time, error) {
 	var end time.Time
-	err := db.DB.QueryRow(ctx, `SELECT paid_period_end FROM paypal_subscription_billing_snapshots
+	err := db.Pool(ctx).QueryRow(ctx, `SELECT paid_period_end FROM paypal_subscription_billing_snapshots
 		WHERE subscription_id=$1 AND currency=$3 AND amount_cents=$4 AND paid_at BETWEEN
 			$2::timestamptz - interval '1 minute' AND $2::timestamptz + interval '1 minute'
 			AND paid_period_end>$2 ORDER BY abs(extract(epoch from paid_at-$2)) LIMIT 1`, id, paidAt, currency, cents).Scan(&end)

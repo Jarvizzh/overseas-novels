@@ -105,6 +105,7 @@ function AppContent() {
   };
   const [positions, setPositions] = useState<Record<number, Record<number, ReadingPosition>>>({});
   const [restoredEntry, setRestoredEntry] = useState('');
+  const [progressRestoreError, setProgressRestoreError] = useState(false);
   const readingProgress = user ? positions[user.id] ?? {} : {};
   const { enqueue, pending } = useProgressOutbox(user?.id, session?.token);
   const mergePosition = useCallback((userId: number, entry: SavedProgress, paragraphIndex?: number) => {
@@ -684,21 +685,59 @@ function AppContent() {
       return;
     }
     const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let failures = 0;
+    let running = false;
+    setRestoredEntry('');
+    setProgressRestoreError(false);
+
     async function restore() {
-      // Read the queue first so a concurrent acknowledgement can only make the
-      // subsequent server snapshot newer.
-      const cached = await pending(owner);
-      const remote = await withRequestTimeout(controller.signal, 4_000, (signal) =>
-        api.getProgress(entryNovelId, owner, signal, sessionToken),
-      ).catch(() => null);
-      if (controller.signal.aborted) return;
-      if (remote) mergePosition(owner, remote);
-      const local = cached.find((entry) => entry.novel_id === entryNovelId);
-      if (local) mergePosition(owner, local);
-      setRestoredEntry(progressEntry);
+      if (running || controller.signal.aborted) return;
+      running = true;
+      try {
+        // Read local state before the server so acknowledgements cannot hide a
+        // newer local update behind an older remote snapshot.
+        const cached = await pending(owner);
+        if (controller.signal.aborted) return;
+        const local = cached.entries.find((entry) => entry.novel_id === entryNovelId);
+        if (local) mergePosition(owner, local);
+        if (cached.storageFailed) throw new Error('Local reading progress is temporarily unavailable');
+
+        const remote = await withRequestTimeout(controller.signal, 4_000, (signal) =>
+          api.getProgress(entryNovelId, owner, signal, sessionToken),
+        ).catch(() => null);
+        if (controller.signal.aborted) return;
+        if (remote) mergePosition(owner, remote);
+        setProgressRestoreError(false);
+        setRestoredEntry(progressEntry);
+      } catch {
+        if (controller.signal.aborted) return;
+        setProgressRestoreError(true);
+        failures = Math.min(failures + 1, 6);
+        timer = setTimeout(() => {
+          timer = undefined;
+          void restore();
+        }, Math.min(2_000 * 2 ** (failures - 1), 60_000));
+      } finally {
+        running = false;
+      }
+    }
+
+    function wakeRestore() {
+      if (document.visibilityState === 'hidden') return;
+      if (timer !== undefined) clearTimeout(timer);
+      timer = undefined;
+      void restore();
     }
     void restore();
-    return () => controller.abort();
+    window.addEventListener('online', wakeRestore);
+    document.addEventListener('visibilitychange', wakeRestore);
+    return () => {
+      controller.abort();
+      if (timer !== undefined) clearTimeout(timer);
+      window.removeEventListener('online', wakeRestore);
+      document.removeEventListener('visibilitychange', wakeRestore);
+    };
   }, [entryNovelId, mergePosition, ownerId, pending, progressEntry, sessionToken]);
   const searchGenre = searchParams.get('genre') || undefined;
 
@@ -722,6 +761,9 @@ function AppContent() {
       )}
 
       <main className={isFullScreenPage ? 'page-container-full' : isHomePage ? 'page-container-home' : 'page-container'}>
+        {progressRestoreError && progressEntry && restoredEntry !== progressEntry && (
+          <p role="status">Reading progress is temporarily unavailable. Retrying…</p>
+        )}
         <Routes>
           <Route
             path="/"
