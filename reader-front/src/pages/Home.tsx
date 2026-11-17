@@ -1,14 +1,8 @@
 import React, { useState } from 'react';
-import { Search as SearchIcon, Star, Flame, ArrowRight, Clock } from 'lucide-react';
-import type { BookshelfItem, Novel } from '../utils/api';
+import { Search as SearchIcon, Star, Flame, ArrowRight } from 'lucide-react';
+import type { Novel } from '../utils/api';
 import { BookCard } from '../components/BookCard';
 import { GoldCoin } from '../components/GoldCoin';
-
-const FALLBACK_COVER =
-  'data:image/svg+xml;utf8,' +
-  encodeURIComponent(
-    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 400"><rect width="300" height="400" fill="#262421"/><rect x="24" y="24" width="252" height="352" fill="none" stroke="#9A7132" stroke-opacity="0.4" stroke-width="2"/><text x="150" y="205" fill="#F4F1EA" font-family="Georgia, serif" font-size="22" text-anchor="middle">StarNovel</text></svg>',
-  );
 
 interface HomeProps {
   novels: Novel[];
@@ -16,7 +10,6 @@ interface HomeProps {
   featuredNovels?: Novel[];
   curatedNovels?: Novel[];
   rankedNovels?: Novel[];
-  recentBooks?: BookshelfItem[];
   hasMore?: boolean;
   loadingMore?: boolean;
   onLoadMore?: () => void;
@@ -30,7 +23,6 @@ export const Home: React.FC<HomeProps> = ({
   featuredNovels = [],
   curatedNovels = [],
   rankedNovels: configuredRankings = [],
-  recentBooks = [],
   hasMore = false,
   loadingMore = false,
   onLoadMore,
@@ -181,72 +173,6 @@ export const Home: React.FC<HomeProps> = ({
                             <ArrowRight size={13} strokeWidth={2} aria-hidden="true" />
                           </div>
                         </div>
-                      </article>
-                    ))}
-                  </div>
-                </section>
-              )}
-
-              {recentBooks.length > 0 && (
-                <section style={{ marginBottom: '28px' }}>
-                  <div className="section-header-row">
-                    <div>
-                      <div className="section-eyebrow" style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
-                        <Clock size={11} aria-hidden="true" />
-                        <span>Pick Up Where You Left Off</span>
-                      </div>
-                      <h2 className="section-title">Recently Read</h2>
-                    </div>
-                    <button
-                      type="button"
-                      className="section-sub-link"
-                      onClick={() => onNavigate('shelf', { tab: 'recent' })}
-                    >
-                      View all
-                    </button>
-                  </div>
-                  <div className="book-grid">
-                    {recentBooks.slice(0, 6).map((item) => (
-                      <article
-                        key={`recent-${item.novel_id}`}
-                        className="book-card"
-                        onClick={() =>
-                          onNavigate('reader', {
-                            id: item.novel_id,
-                            chapterIndex: item.chapter_index,
-                          })
-                        }
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter' || e.key === ' ') {
-                            e.preventDefault();
-                            onNavigate('reader', {
-                              id: item.novel_id,
-                              chapterIndex: item.chapter_index,
-                            });
-                          }
-                        }}
-                        role="button"
-                        tabIndex={0}
-                      >
-                        <div className="book-card-cover-wrapper">
-                          <img
-                            src={item.novel.cover || FALLBACK_COVER}
-                            alt={item.novel.title}
-                            className="book-card-cover"
-                            loading="lazy"
-                            onError={(e) => {
-                              const img = e.currentTarget;
-                              if (img.src !== FALLBACK_COVER) img.src = FALLBACK_COVER;
-                            }}
-                          />
-                          <div className="book-card-rating">
-                            <span>Ch. {item.chapter_index + 1}</span>
-                          </div>
-                        </div>
-                        <h3 className="book-card-title">{item.novel.title}</h3>
-                        <span className="book-card-author">
-                          Continue · {Math.round((item.scroll_offset_percentage || 0) * 100)}%
-                        </span>
                       </article>
                     ))}
                   </div>

@@ -665,7 +665,7 @@ function AppContent() {
       return;
     }
     setRecentBooks((prev) => prev.filter((item) => item.user_id === ownerId));
-    if (location.pathname !== '/' && location.pathname !== '/shelf' && location.pathname !== '/profile') {
+    if (location.pathname !== '/shelf' && location.pathname !== '/profile') {
       return;
     }
     const controller = new AbortController();
@@ -811,7 +811,6 @@ function AppContent() {
                 featuredNovels={featuredNovels}
                 curatedNovels={curatedNovels}
                 rankedNovels={rankedNovels}
-                recentBooks={recentBooks}
                 hasMore={hasMoreNovels}
                 loadingMore={loadingMoreNovels}
                 onLoadMore={handleLoadMoreNovels}
