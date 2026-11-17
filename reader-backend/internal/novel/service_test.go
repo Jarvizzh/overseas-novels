@@ -46,6 +46,14 @@ func (r *fakeReaderRepo) GetByID(_ context.Context, id int64) (*model.Novel, err
 	}
 	return nil, nil
 }
+func (r *fakeReaderRepo) GetOperationsCatalog(context.Context) (*OperationsCatalog, error) {
+	return &OperationsCatalog{
+		Featured:    []model.Novel{},
+		Curated:     []model.Novel{},
+		Rankings:    []model.Novel{},
+		RankingRule: "views",
+	}, nil
+}
 func (r *fakeReaderRepo) GetChaptersList(_ context.Context, novelID int64) ([]model.Chapter, error) {
 	return r.chapters[novelID], nil
 }

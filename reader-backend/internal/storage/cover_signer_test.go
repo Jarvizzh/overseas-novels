@@ -38,3 +38,35 @@ func TestCoverOSSSigner_CnameV4Signing(t *testing.T) {
 		t.Fatalf("expected legacy cover untouched, got %q", got)
 	}
 }
+
+func TestCoverOSSSigner_PublicRead(t *testing.T) {
+	signer, err := NewCoverOSSSigner(&config.Config{
+		CoverOSSEnabled:       true,
+		CoverOSSPublicRead:    true,
+		CoverOSSPublicBaseURL: "https://oss.starsfic.com/",
+	})
+	if err != nil {
+		t.Fatalf("NewCoverOSSSigner public read failed: %v", err)
+	}
+
+	got := signer.SignCoverURL("oss://covers/2026/11/sample.webp")
+	if got != "https://oss.starsfic.com/covers/2026/11/sample.webp" {
+		t.Fatalf("unexpected public cover URL: %q", got)
+	}
+	if got := signer.SignCoverURL("/assets/sample.png"); got != "/assets/sample.png" {
+		t.Fatalf("expected legacy cover untouched, got %q", got)
+	}
+	if got := signer.SignCoverURL("oss://covers/../secret.webp"); got != "oss://covers/../secret.webp" {
+		t.Fatalf("expected invalid path ref untouched, got %q", got)
+	}
+
+	for _, badBase := range []string{"", "https://", "ftp://oss.starsfic.com"} {
+		if _, err := NewCoverOSSSigner(&config.Config{
+			CoverOSSEnabled:       true,
+			CoverOSSPublicRead:    true,
+			CoverOSSPublicBaseURL: badBase,
+		}); err == nil {
+			t.Fatalf("expected invalid CoverOSSPublicBaseURL %q rejected", badBase)
+		}
+	}
+}

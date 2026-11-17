@@ -19,6 +19,7 @@ import TrackingLogsTab from './pages/TrackingLogsTab';
 import DomainsTab from './pages/DomainsTab';
 import MetaAdStatsTab from './pages/MetaAdStatsTab';
 import FeedbackTab from './pages/FeedbackTab';
+import OperationsTab from './pages/OperationsTab';
 import {
   LayoutDashboard,
   Book,
@@ -40,7 +41,8 @@ import {
   Moon,
   Globe,
   BarChart3,
-  MessageSquare
+  MessageSquare,
+  Sparkles
 } from 'lucide-react';
 
 
@@ -51,6 +53,12 @@ const navItems = [
   { id: 'orders', label: '订单管理', path: '/orders', icon: <CreditCard size={18} /> },
   { id: 'promotions', label: '推广链接', path: '/promotions', icon: <Link2 size={18} /> },
   { id: 'templates', label: '充值模板', path: '/recharge-templates', icon: <Coins size={18} /> },
+  {
+    id: 'operations',
+    label: '运营配置',
+    path: '/operations',
+    icon: <Sparkles size={18} />
+  },
   {
     id: 'campaign',
     label: '活动配置',
@@ -568,6 +576,7 @@ function AppContent() {
           <Route path="/promotions" element={<PromotionsTab />} />
           <Route path="/recharge-templates" element={<TemplatesTab />} />
           <Route path="/meta-ad-stats" element={admin.role === 'SuperAdmin' ? <MetaAdStatsTab /> : <Navigate to="/" replace />} />
+          <Route path="/operations" element={<OperationsTab />} />
           <Route path="/campaign" element={<CampaignTab />} />
           <Route path="/ad-config/pixels" element={<PixelsTab />} />
           <Route path="/ad-config/logs" element={<TrackingLogsTab />} />

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useId } from 'react';
-import { ChevronRight, Sun, Moon, Monitor, Crown, X, AlertCircle } from 'lucide-react';
+import { ChevronRight, Sun, Moon, Monitor, Crown, X, AlertCircle, Pencil } from 'lucide-react';
 import { useToast } from '../context/toastStore';
 import { GoldCoin } from '../components/GoldCoin';
 import { api } from '../utils/api';
@@ -9,6 +9,7 @@ import type { ThemePreference } from '../utils/theme';
 
 interface ProfileProps {
   shelfBookIds: number[];
+  recentBookCount?: number;
   onNavigate: (page: string, params?: Record<string, unknown>) => void;
   userCoins: number;
   chargedCoins: number;
@@ -24,11 +25,13 @@ interface ProfileProps {
   systemTheme: 'light' | 'dark';
   onThemePreferenceChange: (pref: ThemePreference) => void;
   onLoginSuccess: (token: string, user: User) => void;
+  onProfileUpdated: (user: User, token?: string) => void;
   onLogout: () => void;
 }
 
 export const Profile: React.FC<ProfileProps> = ({
   shelfBookIds,
+  recentBookCount = 0,
   onNavigate,
   userCoins,
   chargedCoins,
@@ -44,6 +47,7 @@ export const Profile: React.FC<ProfileProps> = ({
   systemTheme,
   onThemePreferenceChange,
   onLoginSuccess,
+  onProfileUpdated,
   onLogout,
 }) => {
   const [activeSubTab, setActiveSubTab] = useState<'settings' | 'history'>('settings');
@@ -51,19 +55,48 @@ export const Profile: React.FC<ProfileProps> = ({
   const [activeLegalModal, setActiveLegalModal] = useState<LegalModalType | null>(null);
 
   const [email, setEmail] = useState('');
+  const [emailTouched, setEmailTouched] = useState(false);
   const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [confirmTouched, setConfirmTouched] = useState(false);
   const [nickname, setNickname] = useState('');
   const [authError, setAuthError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
+  // Edit profile modal state
+  const [editOpen, setEditOpen] = useState(false);
+  const [editNickname, setEditNickname] = useState('');
+  const [editEmail, setEditEmail] = useState('');
+  const [editEmailTouched, setEditEmailTouched] = useState(false);
+  const [editCurrentPassword, setEditCurrentPassword] = useState('');
+  const [editNewPassword, setEditNewPassword] = useState('');
+  const [editConfirmPassword, setEditConfirmPassword] = useState('');
+  const [editConfirmTouched, setEditConfirmTouched] = useState(false);
+  const [editError, setEditError] = useState<string | null>(null);
+  const [isUpdatingProfile, setIsUpdatingProfile] = useState(false);
+
   const { showToast } = useToast();
   const authDialogRef = useRef<HTMLDialogElement>(null);
+  const editDialogRef = useRef<HTMLDialogElement>(null);
+  const confirmInputRef = useRef<HTMLInputElement>(null);
   const pressedOutsideRef = useRef(false);
 
   const authTitleId = useId();
   const emailInputId = useId();
+  const emailErrorId = useId();
   const passwordInputId = useId();
+  const confirmPasswordInputId = useId();
+  const confirmErrorId = useId();
   const nicknameInputId = useId();
+
+  const editTitleId = useId();
+  const editNicknameId = useId();
+  const editEmailId = useId();
+  const editEmailErrorId = useId();
+  const editNewPasswordId = useId();
+  const editConfirmPasswordId = useId();
+  const editConfirmErrorId = useId();
+  const editCurrentPasswordId = useId();
 
   useEffect(() => {
     const dialog = authDialogRef.current;
@@ -76,19 +109,99 @@ export const Profile: React.FC<ProfileProps> = ({
     }
   }, [authMode]);
 
+  useEffect(() => {
+    const dialog = editDialogRef.current;
+    if (!dialog) return;
+
+    if (editOpen && !dialog.open) {
+      dialog.showModal();
+    } else if (!editOpen && dialog.open) {
+      dialog.close();
+    }
+  }, [editOpen]);
+
   const isGuest = !currentUser || !currentUser.email;
+
+  const isValidEmailFormat = (value: string) => {
+    const trimmed = value.trim();
+    return trimmed.length > 0 && trimmed.length <= 255 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmed);
+  };
+
+  const authEmailInvalid =
+    authMode !== 'none' &&
+    emailTouched &&
+    email.trim().length > 0 &&
+    !isValidEmailFormat(email);
+
+  const editEmailInvalid =
+    editOpen &&
+    !isGuest &&
+    editEmailTouched &&
+    editEmail.trim().length > 0 &&
+    !isValidEmailFormat(editEmail);
+
+  const confirmMismatch =
+    authMode === 'signup' &&
+    confirmTouched &&
+    confirmPassword.length > 0 &&
+    confirmPassword !== password;
+
+  const editConfirmMismatch =
+    editOpen &&
+    editNewPassword.length > 0 &&
+    editConfirmTouched &&
+    editConfirmPassword !== editNewPassword;
 
   const closeAuthModal = () => {
     setAuthMode('none');
     setAuthError(null);
     setEmail('');
+    setEmailTouched(false);
     setPassword('');
+    setConfirmPassword('');
+    setConfirmTouched(false);
     setNickname('');
+  };
+
+  const openEditModal = () => {
+    setEditNickname(currentUser?.nickname || '');
+    setEditEmail(currentUser?.email || '');
+    setEditEmailTouched(false);
+    setEditCurrentPassword('');
+    setEditNewPassword('');
+    setEditConfirmPassword('');
+    setEditConfirmTouched(false);
+    setEditError(null);
+    setEditOpen(true);
+  };
+
+  const closeEditModal = () => {
+    setEditOpen(false);
+    setEditError(null);
+    setEditEmailTouched(false);
+    setEditCurrentPassword('');
+    setEditNewPassword('');
+    setEditConfirmPassword('');
+    setEditConfirmTouched(false);
   };
 
   const handleAuthSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setAuthError(null);
+
+    if (!isValidEmailFormat(email)) {
+      setEmailTouched(true);
+      setAuthError('Please enter a valid email address.');
+      return;
+    }
+
+    if (authMode === 'signup' && password !== confirmPassword) {
+      setConfirmTouched(true);
+      setAuthError('Passwords do not match. Please re-enter to confirm.');
+      confirmInputRef.current?.focus();
+      return;
+    }
+
     setIsSubmitting(true);
 
     try {
@@ -114,6 +227,68 @@ export const Profile: React.FC<ProfileProps> = ({
       setAuthError(msg);
     } finally {
       setIsSubmitting(false);
+    }
+  };
+
+  const trimmedEditEmail = editEmail.trim();
+  const isSensitiveProfileChange =
+    !isGuest &&
+    (trimmedEditEmail !== (currentUser?.email || '') || editNewPassword.length > 0);
+
+  const handleEditSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setEditError(null);
+
+    const trimmedNickname = editNickname.trim();
+    if (!trimmedNickname) {
+      setEditError('Nickname cannot be empty.');
+      return;
+    }
+    if (!isGuest && !isValidEmailFormat(trimmedEditEmail)) {
+      setEditEmailTouched(true);
+      setEditError('Please enter a valid email address.');
+      return;
+    }
+    if (!isGuest && editNewPassword.length > 0 && editNewPassword !== editConfirmPassword) {
+      setEditConfirmTouched(true);
+      setEditError('New passwords do not match.');
+      return;
+    }
+    if (isSensitiveProfileChange && !editCurrentPassword) {
+      setEditError('Please enter your current password to save email or password changes.');
+      return;
+    }
+
+    setIsUpdatingProfile(true);
+    try {
+      const payload: {
+        nickname?: string;
+        email?: string;
+        current_password?: string;
+        new_password?: string;
+      } = {
+        nickname: trimmedNickname,
+      };
+      if (!isGuest) {
+        if (trimmedEditEmail && trimmedEditEmail !== (currentUser?.email || '')) {
+          payload.email = trimmedEditEmail;
+        }
+        if (editNewPassword) {
+          payload.new_password = editNewPassword;
+        }
+        if (isSensitiveProfileChange) {
+          payload.current_password = editCurrentPassword;
+        }
+      }
+      const res = await api.updateProfile(payload);
+      onProfileUpdated(res.user, res.token);
+      showToast('Profile updated successfully!', 'success');
+      closeEditModal();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Failed to update profile.';
+      setEditError(msg);
+    } finally {
+      setIsUpdatingProfile(false);
     }
   };
 
@@ -147,28 +322,44 @@ export const Profile: React.FC<ProfileProps> = ({
                 </p>
               </div>
             </div>
-            {isGuest ? (
-              <button
-                type="button"
-                className="btn-cta-primary"
-                style={{ minHeight: '36px', padding: '6px 14px', borderRadius: '999px', fontSize: '0.75rem', flexShrink: 0 }}
-                onClick={() => {
-                  setAuthMode('signup');
-                  setAuthError(null);
-                }}
-              >
-                Sign In
-              </button>
-            ) : (
-              <button
-                type="button"
-                className="btn-cta-secondary"
-                style={{ minHeight: '36px', padding: '6px 14px', borderRadius: '999px', fontSize: '0.75rem', color: '#DC2626', flexShrink: 0 }}
-                onClick={onLogout}
-              >
-                Sign Out
-              </button>
-            )}
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0 }}>
+              {currentUser && (
+                <button
+                  type="button"
+                  className="btn-cta-secondary"
+                  style={{ minHeight: '36px', padding: '6px 12px', borderRadius: '999px', fontSize: '0.75rem', display: 'inline-flex', alignItems: 'center', gap: '5px' }}
+                  onClick={openEditModal}
+                  aria-label="Edit profile"
+                >
+                  <Pencil size={13} strokeWidth={1.85} aria-hidden="true" />
+                  <span>Edit</span>
+                </button>
+              )}
+              {isGuest ? (
+                <button
+                  type="button"
+                  className="btn-cta-primary"
+                  style={{ minHeight: '36px', padding: '6px 14px', borderRadius: '999px', fontSize: '0.75rem' }}
+                  onClick={() => {
+                    setAuthMode('signup');
+                    setAuthError(null);
+                    setConfirmPassword('');
+                    setConfirmTouched(false);
+                  }}
+                >
+                  Sign In
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className="btn-cta-secondary"
+                  style={{ minHeight: '36px', padding: '6px 14px', borderRadius: '999px', fontSize: '0.75rem', color: '#DC2626' }}
+                  onClick={onLogout}
+                >
+                  Sign Out
+                </button>
+              )}
+            </div>
           </div>
 
           <div className="profile-wallet-card">
@@ -224,6 +415,16 @@ export const Profile: React.FC<ProfileProps> = ({
           <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
             {/* Membership & Appearance */}
             <div className="settings-list">
+              {currentUser && (
+                <button type="button" className="settings-item" onClick={openEditModal}>
+                  <span>Account Profile</span>
+                  <span className="settings-item-value">
+                    <span>{isGuest ? 'Edit Nickname' : 'Nickname, Email & Password'}</span>
+                    <ChevronRight size={15} strokeWidth={1.8} aria-hidden="true" />
+                  </span>
+                </button>
+              )}
+
               <button type="button" className="settings-item" onClick={() => onNavigate('recharge')}>
                 <span style={{ display: 'inline-flex', alignItems: 'center', gap: '8px' }}>
                   <Crown size={16} strokeWidth={1.8} style={{ color: 'var(--accent-color)' }} aria-hidden="true" />
@@ -287,6 +488,14 @@ export const Profile: React.FC<ProfileProps> = ({
                 <span>Saved Library</span>
                 <span className="settings-item-value">
                   <span>{shelfBookIds.length} {shelfBookIds.length === 1 ? 'book' : 'books'}</span>
+                  <ChevronRight size={15} strokeWidth={1.8} aria-hidden="true" />
+                </span>
+              </button>
+
+              <button type="button" className="settings-item" onClick={() => onNavigate('shelf', { tab: 'recent' })}>
+                <span>Recently Read</span>
+                <span className="settings-item-value">
+                  <span>{recentBookCount} {recentBookCount === 1 ? 'book' : 'books'}</span>
                   <ChevronRight size={15} strokeWidth={1.8} aria-hidden="true" />
                 </span>
               </button>
@@ -437,6 +646,9 @@ export const Profile: React.FC<ProfileProps> = ({
             onClick={() => {
               setAuthMode('signup');
               setAuthError(null);
+              setEmailTouched(false);
+              setConfirmPassword('');
+              setConfirmTouched(false);
             }}
           >
             Sign Up
@@ -447,6 +659,9 @@ export const Profile: React.FC<ProfileProps> = ({
             onClick={() => {
               setAuthMode('login');
               setAuthError(null);
+              setEmailTouched(false);
+              setConfirmPassword('');
+              setConfirmTouched(false);
             }}
           >
             Sign In
@@ -468,12 +683,23 @@ export const Profile: React.FC<ProfileProps> = ({
               id={emailInputId}
               type="email"
               autoComplete="email"
+              spellCheck={false}
               className="sn-input"
               value={email}
+              maxLength={255}
               placeholder="name@example.com"
+              aria-invalid={authEmailInvalid}
+              aria-describedby={authEmailInvalid ? emailErrorId : undefined}
+              style={authEmailInvalid ? { borderColor: '#DC2626' } : undefined}
               onChange={(e) => setEmail(e.target.value)}
+              onBlur={() => setEmailTouched(true)}
               required
             />
+            {authEmailInvalid && (
+              <p id={emailErrorId} role="status" style={{ fontSize: '0.72rem', color: '#DC2626', marginTop: '4px', marginBottom: 0 }}>
+                Please enter a valid email address.
+              </p>
+            )}
           </div>
 
           <div>
@@ -490,24 +716,56 @@ export const Profile: React.FC<ProfileProps> = ({
               onChange={(e) => setPassword(e.target.value)}
               required
               minLength={6}
+              maxLength={72}
             />
           </div>
 
           {authMode === 'signup' && (
-            <div>
-              <label htmlFor={nicknameInputId} style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', display: 'block', marginBottom: '4px', fontWeight: 500 }}>
-                Nickname (Optional)
-              </label>
-              <input
-                id={nicknameInputId}
-                type="text"
-                autoComplete="nickname"
-                placeholder="Up to 50 characters"
-                className="sn-input"
-                value={nickname}
-                onChange={(e) => setNickname(e.target.value)}
-              />
-            </div>
+            <>
+              <div>
+                <label htmlFor={confirmPasswordInputId} style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', display: 'block', marginBottom: '4px', fontWeight: 500 }}>
+                  Confirm Password
+                </label>
+                <input
+                  ref={confirmInputRef}
+                  id={confirmPasswordInputId}
+                  type="password"
+                  autoComplete="new-password"
+                  className="sn-input"
+                  value={confirmPassword}
+                  placeholder="Re-enter password"
+                  aria-invalid={confirmMismatch}
+                  aria-describedby={confirmMismatch ? confirmErrorId : undefined}
+                  style={confirmMismatch ? { borderColor: '#DC2626' } : undefined}
+                  onChange={(e) => setConfirmPassword(e.target.value)}
+                  onBlur={() => setConfirmTouched(true)}
+                  required
+                  minLength={6}
+                  maxLength={72}
+                />
+                {confirmMismatch && (
+                  <p id={confirmErrorId} role="status" style={{ fontSize: '0.72rem', color: '#DC2626', marginTop: '4px', marginBottom: 0 }}>
+                    Passwords do not match.
+                  </p>
+                )}
+              </div>
+
+              <div>
+                <label htmlFor={nicknameInputId} style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', display: 'block', marginBottom: '4px', fontWeight: 500 }}>
+                  Nickname (Optional)
+                </label>
+                <input
+                  id={nicknameInputId}
+                  type="text"
+                  autoComplete="nickname"
+                  placeholder="Up to 50 characters"
+                  className="sn-input"
+                  value={nickname}
+                  maxLength={50}
+                  onChange={(e) => setNickname(e.target.value)}
+                />
+              </div>
+            </>
           )}
 
           {authError && (
@@ -546,6 +804,9 @@ export const Profile: React.FC<ProfileProps> = ({
                 onClick={() => {
                   setAuthMode('signup');
                   setAuthError(null);
+                  setEmailTouched(false);
+                  setConfirmPassword('');
+                  setConfirmTouched(false);
                 }}
                 style={{ background: 'none', border: 'none', color: 'var(--accent-text)', fontWeight: 600, cursor: 'pointer', padding: 0 }}
               >
@@ -560,6 +821,9 @@ export const Profile: React.FC<ProfileProps> = ({
                 onClick={() => {
                   setAuthMode('login');
                   setAuthError(null);
+                  setEmailTouched(false);
+                  setConfirmPassword('');
+                  setConfirmTouched(false);
                 }}
                 style={{ background: 'none', border: 'none', color: 'var(--accent-text)', fontWeight: 600, cursor: 'pointer', padding: 0 }}
               >
@@ -568,6 +832,191 @@ export const Profile: React.FC<ProfileProps> = ({
             </>
           )}
         </div>
+      </dialog>
+
+      {/* Edit Profile Modal (<dialog>) */}
+      <dialog
+        ref={editDialogRef}
+        className="sn-dialog"
+        aria-labelledby={editTitleId}
+        onCancel={(e) => {
+          e.preventDefault();
+          closeEditModal();
+        }}
+        onPointerDown={(e) => {
+          if (editDialogRef.current) {
+            pressedOutsideRef.current = isPointerOutside(e, editDialogRef.current);
+          }
+        }}
+        onPointerUp={(e) => {
+          if (editDialogRef.current && pressedOutsideRef.current && isPointerOutside(e, editDialogRef.current)) {
+            closeEditModal();
+          }
+          pressedOutsideRef.current = false;
+        }}
+        style={{ width: '100%', maxWidth: '400px', padding: '24px' }}
+      >
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '14px' }}>
+          <h2 id={editTitleId} style={{ fontFamily: 'var(--font-display)', fontSize: '1.25rem', fontWeight: 600 }}>
+            {isGuest ? 'Edit Nickname' : 'Edit Profile'}
+          </h2>
+          <button type="button" className="header-btn" onClick={closeEditModal} aria-label="Close dialog">
+            <X size={18} strokeWidth={1.8} aria-hidden="true" />
+          </button>
+        </div>
+
+        <p style={{ fontSize: '0.75rem', color: 'var(--text-tertiary)', marginBottom: '16px', lineHeight: 1.5 }}>
+          {isGuest
+            ? 'Update your display nickname. Bind an email address via Sign In anytime to secure your account.'
+            : 'Update your nickname, email address, or password. Changing email or password requires your current password.'}
+        </p>
+
+        <form onSubmit={handleEditSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+          <div>
+            <label htmlFor={editNicknameId} style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', display: 'block', marginBottom: '4px', fontWeight: 500 }}>
+              Nickname
+            </label>
+            <input
+              id={editNicknameId}
+              type="text"
+              autoComplete="nickname"
+              className="sn-input"
+              value={editNickname}
+              maxLength={50}
+              placeholder="Up to 50 characters"
+              onChange={(e) => setEditNickname(e.target.value)}
+              required
+            />
+          </div>
+
+          {!isGuest && (
+            <>
+              <div>
+                <label htmlFor={editEmailId} style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', display: 'block', marginBottom: '4px', fontWeight: 500 }}>
+                  Email Address
+                </label>
+                <input
+                  id={editEmailId}
+                  type="email"
+                  autoComplete="email"
+                  spellCheck={false}
+                  className="sn-input"
+                  value={editEmail}
+                  maxLength={255}
+                  placeholder="name@example.com"
+                  aria-invalid={editEmailInvalid}
+                  aria-describedby={editEmailInvalid ? editEmailErrorId : undefined}
+                  style={editEmailInvalid ? { borderColor: '#DC2626' } : undefined}
+                  onChange={(e) => setEditEmail(e.target.value)}
+                  onBlur={() => setEditEmailTouched(true)}
+                  required
+                />
+                {editEmailInvalid && (
+                  <p id={editEmailErrorId} role="status" style={{ fontSize: '0.72rem', color: '#DC2626', marginTop: '4px', marginBottom: 0 }}>
+                    Please enter a valid email address.
+                  </p>
+                )}
+              </div>
+
+              <div>
+                <label htmlFor={editNewPasswordId} style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', display: 'block', marginBottom: '4px', fontWeight: 500 }}>
+                  New Password (Optional, min. 6 characters)
+                </label>
+                <input
+                  id={editNewPasswordId}
+                  type="password"
+                  autoComplete="new-password"
+                  className="sn-input"
+                  value={editNewPassword}
+                  placeholder="Leave blank to keep current password"
+                  minLength={6}
+                  maxLength={72}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    setEditNewPassword(val);
+                    if (!val) {
+                      setEditConfirmPassword('');
+                      setEditConfirmTouched(false);
+                    }
+                  }}
+                />
+              </div>
+
+              {editNewPassword.length > 0 && (
+                <div>
+                  <label htmlFor={editConfirmPasswordId} style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', display: 'block', marginBottom: '4px', fontWeight: 500 }}>
+                    Confirm New Password
+                  </label>
+                  <input
+                    id={editConfirmPasswordId}
+                    type="password"
+                    autoComplete="new-password"
+                    className="sn-input"
+                    value={editConfirmPassword}
+                    placeholder="Re-enter new password"
+                    aria-invalid={editConfirmMismatch}
+                    aria-describedby={editConfirmMismatch ? editConfirmErrorId : undefined}
+                    style={editConfirmMismatch ? { borderColor: '#DC2626' } : undefined}
+                    minLength={6}
+                    maxLength={72}
+                    required
+                    onChange={(e) => setEditConfirmPassword(e.target.value)}
+                    onBlur={() => setEditConfirmTouched(true)}
+                  />
+                  {editConfirmMismatch && (
+                    <p id={editConfirmErrorId} role="status" style={{ fontSize: '0.72rem', color: '#DC2626', marginTop: '4px', marginBottom: 0 }}>
+                      New passwords do not match.
+                    </p>
+                  )}
+                </div>
+              )}
+
+              {isSensitiveProfileChange && (
+                <div>
+                  <label htmlFor={editCurrentPasswordId} style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', display: 'block', marginBottom: '4px', fontWeight: 500 }}>
+                    Current Password (required for email/password change)
+                  </label>
+                  <input
+                    id={editCurrentPasswordId}
+                    type="password"
+                    autoComplete="current-password"
+                    className="sn-input"
+                    value={editCurrentPassword}
+                    placeholder="Enter current password"
+                    required
+                    onChange={(e) => setEditCurrentPassword(e.target.value)}
+                  />
+                </div>
+              )}
+            </>
+          )}
+
+          {editError && (
+            <div
+              role="alert"
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '6px',
+                color: '#DC2626',
+                fontSize: '0.75rem',
+                marginTop: '2px',
+              }}
+            >
+              <AlertCircle size={14} strokeWidth={2} aria-hidden="true" style={{ flexShrink: 0 }} />
+              <span>{editError}</span>
+            </div>
+          )}
+
+          <button
+            type="submit"
+            disabled={isUpdatingProfile}
+            className="btn-cta-primary"
+            style={{ width: '100%', borderRadius: '999px', marginTop: '6px' }}
+          >
+            {isUpdatingProfile ? 'Saving...' : 'Save Changes'}
+          </button>
+        </form>
       </dialog>
 
       {/* Legal & Compliance Policy Modal */}

@@ -187,8 +187,8 @@ export const LegalModal: React.FC<LegalModalProps> = ({
             <h3 style={{ color: 'var(--text-primary)', fontWeight: 600, fontSize: '0.875rem', marginTop: '6px' }}>5. Contact &amp; Inquiries</h3>
             <p>
               For questions regarding these terms, please contact us at:{' '}
-              <a href="mailto:support@startsfic.com" style={{ color: 'var(--accent-text)', fontWeight: 600 }}>
-                support@startsfic.com
+              <a href="mailto:support@starsfic.com" style={{ color: 'var(--accent-text)', fontWeight: 600 }}>
+                support@starsfic.com
               </a>.
             </p>
           </div>
@@ -221,8 +221,8 @@ export const LegalModal: React.FC<LegalModalProps> = ({
             <h3 style={{ color: 'var(--text-primary)', fontWeight: 600, fontSize: '0.875rem', marginTop: '6px' }}>4. User Rights &amp; Data Deletion</h3>
             <p>
               You may request access to, correction, or deletion of your account and personal data at any time by contacting our privacy team at{' '}
-              <a href="mailto:support@startsfic.com" style={{ color: 'var(--accent-text)', fontWeight: 600 }}>
-                support@startsfic.com
+              <a href="mailto:support@starsfic.com" style={{ color: 'var(--accent-text)', fontWeight: 600 }}>
+                support@starsfic.com
               </a>.
             </p>
           </div>
@@ -251,8 +251,8 @@ export const LegalModal: React.FC<LegalModalProps> = ({
             <h3 style={{ color: 'var(--text-primary)', fontWeight: 600, fontSize: '0.875rem', marginTop: '6px' }}>3. How to Request Assistance</h3>
             <p>
               If you encounter any payment discrepancy, please submit a message via our <strong>Contact Us</strong> tab or email our support desk directly at{' '}
-              <a href="mailto:support@startsfic.com" style={{ color: 'var(--accent-text)', fontWeight: 600 }}>
-                support@startsfic.com
+              <a href="mailto:support@starsfic.com" style={{ color: 'var(--accent-text)', fontWeight: 600 }}>
+                support@starsfic.com
               </a>{' '}
               with:
             </p>
@@ -287,10 +287,10 @@ export const LegalModal: React.FC<LegalModalProps> = ({
                     Official Support Email
                   </span>
                   <a
-                    href="mailto:support@startsfic.com"
+                    href="mailto:support@starsfic.com"
                     style={{ fontSize: '0.875rem', fontWeight: 600, color: 'var(--accent-text)', textDecoration: 'none' }}
                   >
-                    support@startsfic.com
+                    support@starsfic.com
                   </a>
                 </div>
               </div>

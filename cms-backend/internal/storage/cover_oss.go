@@ -7,34 +7,21 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"image"
-	_ "image/jpeg"
-	_ "image/png"
-	"net/http"
+	"net/url"
 	"path"
 	"strings"
 	"time"
 
 	"github.com/aliyun/aliyun-oss-go-sdk/oss"
-	_ "golang.org/x/image/webp"
 	"star-novel-cms/internal/config"
 )
 
 const (
-	defaultCoverPrefix         = "covers"
-	defaultCoverMaxUploadBytes = 5 * 1024 * 1024
-	defaultCoverSignedTTLSec   = 3600
-	maxCoverImageDimension     = 4096
-	maxCoverImagePixels        = 4096 * 4096
+	defaultCoverPrefix       = "covers"
+	defaultCoverSignedTTLSec = 3600
 )
 
-var (
-	ErrCoverOSSDisabled     = errors.New("封面 OSS 存储未启用")
-	ErrCoverEmpty           = errors.New("请选择要上传的封面图片")
-	ErrCoverTooLarge        = errors.New("封面图片大小不能超过 5MB")
-	ErrCoverUnsupportedType = errors.New("仅支持 JPG、PNG、WebP 格式的封面图片")
-	ErrCoverInvalidImage    = errors.New("无效或损坏的图片文件，或尺寸超过 4096x4096 限制")
-)
+var ErrCoverOSSDisabled = errors.New("封面 OSS 存储未启用")
 
 type CoverSigner interface {
 	SignCoverURL(raw string) string
@@ -52,6 +39,8 @@ type CoverStore interface {
 
 type CoverOSSStore struct {
 	enabled          bool
+	publicRead       bool
+	publicBaseURL    string
 	prefix           string
 	maxUploadBytes   int64
 	signedTTL        int
@@ -93,8 +82,9 @@ func NewCoverOSSStore(cfg *config.Config) (*CoverOSSStore, error) {
 	if strings.TrimSpace(cfg.CoverOSSBucket) == "" {
 		return nil, errors.New("COVER_OSS_BUCKET is required when COVER_OSS_ENABLED=true")
 	}
-	if strings.TrimSpace(cfg.CoverOSSPublicBaseURL) == "" {
-		return nil, errors.New("COVER_OSS_PUBLIC_BASE_URL is required when COVER_OSS_ENABLED=true")
+	publicBase, err := normalizePublicBaseURL(cfg.CoverOSSPublicBaseURL)
+	if err != nil {
+		return nil, err
 	}
 	if strings.TrimSpace(cfg.CoverOSSAccessKeyID) == "" || strings.TrimSpace(cfg.CoverOSSAccessKeySecret) == "" {
 		return nil, errors.New("ALIBABA_CLOUD_ACCESS_KEY_ID and ALIBABA_CLOUD_ACCESS_KEY_SECRET are required when COVER_OSS_ENABLED=true")
@@ -119,24 +109,14 @@ func NewCoverOSSStore(cfg *config.Config) (*CoverOSSStore, error) {
 		return nil, fmt.Errorf("failed to get cover OSS write bucket %q: %w", cfg.CoverOSSBucket, err)
 	}
 
-	publicBase := strings.TrimRight(ensureHTTPScheme(cfg.CoverOSSPublicBaseURL), "/")
-	publicOpts := append(append([]oss.ClientOption{}, opts...), oss.UseCname(true))
-	publicClient, err := oss.New(publicBase, cfg.CoverOSSAccessKeyID, cfg.CoverOSSAccessKeySecret, publicOpts...)
-	if err != nil {
-		return nil, fmt.Errorf("failed to initialize cover OSS public CNAME client: %w", err)
-	}
-	publicBucket, err := publicClient.Bucket(cfg.CoverOSSBucket)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get cover OSS public bucket %q: %w", cfg.CoverOSSBucket, err)
-	}
-
 	store := &CoverOSSStore{
 		enabled:        true,
+		publicRead:     cfg.CoverOSSPublicRead,
+		publicBaseURL:  publicBase,
 		prefix:         prefix,
 		maxUploadBytes: maxBytes,
 		signedTTL:      ttl,
 		writeBucket:    writeBucket,
-		publicBucket:   publicBucket,
 		nowFunc:        time.Now,
 	}
 	store.putObjectFunc = func(ctx context.Context, objectKey string, data []byte, contentType string) error {
@@ -152,8 +132,21 @@ func NewCoverOSSStore(cfg *config.Config) (*CoverOSSStore, error) {
 	store.deleteObjectFunc = func(ctx context.Context, objectKey string) error {
 		return store.writeBucket.DeleteObject(objectKey, oss.WithContext(ctx))
 	}
-	store.signURLFunc = func(objectKey string, ttlSeconds int64) (string, error) {
-		return store.publicBucket.SignURL(objectKey, oss.HTTPGet, ttlSeconds)
+
+	if !cfg.CoverOSSPublicRead {
+		publicOpts := append(append([]oss.ClientOption{}, opts...), oss.UseCname(true))
+		publicClient, err := oss.New(publicBase, cfg.CoverOSSAccessKeyID, cfg.CoverOSSAccessKeySecret, publicOpts...)
+		if err != nil {
+			return nil, fmt.Errorf("failed to initialize cover OSS public CNAME client: %w", err)
+		}
+		publicBucket, err := publicClient.Bucket(cfg.CoverOSSBucket)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get cover OSS public bucket %q: %w", cfg.CoverOSSBucket, err)
+		}
+		store.publicBucket = publicBucket
+		store.signURLFunc = func(objectKey string, ttlSeconds int64) (string, error) {
+			return store.publicBucket.SignURL(objectKey, oss.HTTPGet, ttlSeconds)
+		}
 	}
 	return store, nil
 }
@@ -196,7 +189,13 @@ func (s *CoverOSSStore) SignCoverURL(raw string) string {
 		return raw
 	}
 	objectKey, ok := extractValidCoverKey(trimmed, "")
-	if !ok || s.signURLFunc == nil {
+	if !ok {
+		return raw
+	}
+	if s.publicRead {
+		return s.publicBaseURL + "/" + objectKey
+	}
+	if s.signURLFunc == nil {
 		return raw
 	}
 	signed, err := s.signURLFunc(objectKey, int64(s.signedTTL))
@@ -210,19 +209,19 @@ func (s *CoverOSSStore) UploadCover(ctx context.Context, data []byte) (string, s
 	if s == nil || !s.enabled {
 		return "", "", ErrCoverOSSDisabled
 	}
-	ct, ext, err := ValidateCoverImage(data, s.MaxUploadBytes())
+	encoded, ct, ext, err := ProcessCoverImage(data, s.MaxUploadBytes())
 	if err != nil {
 		return "", "", err
 	}
 
-	sum := sha256.Sum256(data)
+	sum := sha256.Sum256(encoded)
 	now := time.Now
 	if s.nowFunc != nil {
 		now = s.nowFunc
 	}
 	objectKey := fmt.Sprintf("%s/%s/%s%s", s.Prefix(), now().UTC().Format("2006/01"), hex.EncodeToString(sum[:12]), ext)
 
-	if err := s.putObjectFunc(ctx, objectKey, data, ct); err != nil {
+	if err := s.putObjectFunc(ctx, objectKey, encoded, ct); err != nil {
 		return "", "", fmt.Errorf("上传封面到 OSS 失败: %w", err)
 	}
 
@@ -241,45 +240,6 @@ func (s *CoverOSSStore) DeleteCover(ctx context.Context, rawRef string) error {
 	return s.deleteObjectFunc(ctx, objectKey)
 }
 
-// ValidateCoverImage validates raw bytes are a real JPEG, PNG, or WebP image within size/dimension limits.
-func ValidateCoverImage(data []byte, maxBytes int64) (contentType string, ext string, err error) {
-	if len(data) == 0 {
-		return "", "", ErrCoverEmpty
-	}
-	if maxBytes <= 0 {
-		maxBytes = defaultCoverMaxUploadBytes
-	}
-	if int64(len(data)) > maxBytes {
-		return "", "", ErrCoverTooLarge
-	}
-
-	ct := http.DetectContentType(data)
-	switch ct {
-	case "image/jpeg":
-		ext = ".jpg"
-	case "image/png":
-		ext = ".png"
-	case "image/webp":
-		ext = ".webp"
-	default:
-		return "", "", ErrCoverUnsupportedType
-	}
-
-	cfg, format, decodeErr := image.DecodeConfig(bytes.NewReader(data))
-	if decodeErr != nil || cfg.Width <= 0 || cfg.Height <= 0 ||
-		cfg.Width > maxCoverImageDimension || cfg.Height > maxCoverImageDimension ||
-		int64(cfg.Width)*int64(cfg.Height) > maxCoverImagePixels {
-		return "", "", ErrCoverInvalidImage
-	}
-
-	expectedFormat := strings.TrimPrefix(ct, "image/")
-	if format != expectedFormat {
-		return "", "", ErrCoverUnsupportedType
-	}
-
-	return ct, ext, nil
-}
-
 func normalizeCoverPrefix(prefix string) string {
 	cleaned := strings.Trim(strings.TrimSpace(prefix), "/")
 	if cleaned == "" {
@@ -294,6 +254,19 @@ func ensureHTTPScheme(endpoint string) string {
 		return "https://" + trimmed
 	}
 	return trimmed
+}
+
+func normalizePublicBaseURL(raw string) (string, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "", errors.New("COVER_OSS_PUBLIC_BASE_URL is required when COVER_OSS_ENABLED=true")
+	}
+	base := strings.TrimRight(ensureHTTPScheme(trimmed), "/")
+	parsed, err := url.Parse(base)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+		return "", errors.New("COVER_OSS_PUBLIC_BASE_URL must be a valid http:// or https:// URL")
+	}
+	return base, nil
 }
 
 func extractValidCoverKey(ref, requiredPrefix string) (string, bool) {

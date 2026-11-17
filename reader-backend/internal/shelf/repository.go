@@ -15,6 +15,7 @@ var ErrNovelUnavailable = errors.New("novel not found or unavailable")
 type Repository interface {
 	GetShelfItemsWithNovel(ctx context.Context, userID int64) ([]model.BookshelfWithNovel, error)
 	GetShelfPage(ctx context.Context, userID int64, limit int, after *shelfCursor) ([]model.BookshelfWithNovel, error)
+	GetRecentlyRead(ctx context.Context, userID int64, limit int) ([]model.BookshelfWithNovel, error)
 	GetShelfIDs(ctx context.Context, userID int64) ([]int64, error)
 	AddToShelf(ctx context.Context, userID int64, novelID int64) error
 	RemoveFromShelf(ctx context.Context, userID int64, novelIDs []int64) error
@@ -32,9 +33,11 @@ func NewDBRepository() Repository {
 const shelfActivity = `COALESCE(GREATEST(b.updated_at, b.shelf_added_at), TIMESTAMPTZ 'epoch')`
 const shelfFilter = `FROM bookshelves b JOIN novels n ON b.novel_id=n.id
 	WHERE b.user_id=$1 AND b.in_shelf=TRUE AND n.status<>'archived' AND n.publish_status='published'`
-const shelfSelect = `SELECT b.chapter_index, b.scroll_offset_percentage, b.in_shelf,
-	COALESCE(b.updated_at, TIMESTAMPTZ 'epoch'), b.progress_version,
-	n.id, n.title, n.author, n.cover_url, n.rating, n.status, n.publish_status, n.synopsis, n.genres, n.word_count, n.view_count,
+const shelfSelect = `SELECT COALESCE(b.chapter_index, 0), COALESCE(b.scroll_offset_percentage, 0), COALESCE(b.in_shelf, FALSE),
+	COALESCE(b.updated_at, TIMESTAMPTZ 'epoch'), COALESCE(b.progress_version, ''),
+	n.id, n.title, n.author, COALESCE(n.cover_url, ''), COALESCE(n.rating, 0), COALESCE(n.status, 'Ongoing'),
+	COALESCE(n.publish_status, 'published'), COALESCE(n.synopsis, ''), COALESCE(n.genres, '{}'),
+	COALESCE(n.word_count, 0), COALESCE(n.view_count, 0),
 	` + shelfActivity + ` ` + shelfFilter
 const shelfOrder = ` ORDER BY ` + shelfActivity + ` DESC, b.novel_id DESC`
 
@@ -48,6 +51,25 @@ func (r *dbRepository) GetShelfPage(ctx context.Context, userID int64, limit int
 	}
 	return queryShelf(ctx, userID, shelfSelect+` AND (`+shelfActivity+`, b.novel_id)<($3,$4)`+shelfOrder+` LIMIT $2`,
 		limit, after.activityAt, after.novelID)
+}
+
+func (r *dbRepository) GetRecentlyRead(ctx context.Context, userID int64, limit int) ([]model.BookshelfWithNovel, error) {
+	query := `
+		SELECT COALESCE(b.chapter_index, 0), COALESCE(b.scroll_offset_percentage, 0), COALESCE(b.in_shelf, FALSE),
+			COALESCE(b.updated_at, TIMESTAMPTZ 'epoch'), COALESCE(b.progress_version, ''),
+			n.id, n.title, n.author, COALESCE(n.cover_url, ''), COALESCE(n.rating, 0), COALESCE(n.status, 'Ongoing'),
+			COALESCE(n.publish_status, 'published'), COALESCE(n.synopsis, ''), COALESCE(n.genres, '{}'),
+			COALESCE(n.word_count, 0), COALESCE(n.view_count, 0),
+			b.updated_at
+		FROM bookshelves b
+		JOIN novels n ON b.novel_id = n.id
+		WHERE b.user_id = $1
+		  AND b.updated_at > TIMESTAMPTZ 'epoch'
+		  AND n.status <> 'archived'
+		  AND n.publish_status = 'published'
+		ORDER BY b.updated_at DESC, b.novel_id DESC
+		LIMIT $2`
+	return queryShelf(ctx, userID, query, limit)
 }
 
 func (r *dbRepository) GetShelfIDs(ctx context.Context, userID int64) ([]int64, error) {

@@ -104,3 +104,54 @@ export const feedbackApi = {
   updateFeedback: (id: number, data: { status: string; admin_reply: string }) =>
     apiRequest('PUT', `/feedback/${id}`, data),
 };
+
+export type RankingSortRule = 'views' | 'rating' | 'latest' | 'manual';
+export type RecommendationGroupName = 'editor_pick' | 'curated' | 'ranking';
+
+export interface RankingConfig {
+  sort_rule: RankingSortRule;
+  limit: number;
+}
+
+export interface RecommendationNovel {
+  id: number;
+  title: string;
+  author: string;
+  cover_url: string;
+  rating: number;
+  status: string;
+  publish_status: string;
+  view_count: number;
+  genres: string[];
+}
+
+export interface RecommendationEntry {
+  id?: number;
+  group_name: RecommendationGroupName;
+  novel_id: number;
+  sort_order: number;
+  scheduled_start?: string | null;
+  scheduled_end?: string | null;
+  novel?: RecommendationNovel;
+}
+
+export interface OperationsConfigResponse {
+  ranking_config: RankingConfig;
+  groups: Record<RecommendationGroupName, RecommendationEntry[]>;
+}
+
+export interface GroupItemInput {
+  novel_id: number;
+  sort_order: number;
+  scheduled_start?: string | null;
+  scheduled_end?: string | null;
+}
+
+export const operationsApi = {
+  getConfig: (): Promise<OperationsConfigResponse> => apiRequest('GET', '/operations'),
+  saveRankingConfig: (data: RankingConfig) => apiRequest('PUT', '/operations/ranking-config', data),
+  saveGroup: (group: RecommendationGroupName, items: GroupItemInput[]) =>
+    apiRequest('PUT', `/operations/groups/${group}`, { items }),
+  searchPublishedNovels: (search: string, page = 1, pageSize = 30, signal?: AbortSignal) =>
+    apiRequest('GET', `/novels?publish_status=published&page=${page}&page_size=${pageSize}&search=${encodeURIComponent(search)}`, undefined, false, signal),
+};

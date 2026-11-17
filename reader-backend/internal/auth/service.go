@@ -32,10 +32,12 @@ var (
 	ErrInvalidNickname = errors.New("Nickname must contain at most 50 characters")
 	ErrAlreadyBound    = errors.New("Account is already registered")
 	ErrEmailExists     = errors.New("Email is already registered")
-	ErrInvalidAuth     = errors.New("Invalid email or password")
-	ErrAccountBanned   = errors.New("This account has been banned")
-	ErrUserNotFound    = errors.New("User not found")
-	ErrInvalidPassword = errors.New("password must contain at least 6 characters and at most 72 bytes")
+	ErrInvalidAuth            = errors.New("Invalid email or password")
+	ErrAccountBanned          = errors.New("This account has been banned")
+	ErrUserNotFound           = errors.New("User not found")
+	ErrInvalidPassword        = errors.New("password must contain at least 6 characters and at most 72 bytes")
+	ErrInvalidCurrentPassword = errors.New("Current password is incorrect")
+	ErrBindRequired           = errors.New("Please bind an email before updating email or password")
 )
 
 type AuthService interface {
@@ -44,6 +46,7 @@ type AuthService interface {
 	Login(ctx context.Context, email, password string) (*model.User, string, error)
 	GetProfile(ctx context.Context, userID int64) (*model.User, error)
 	BindEmail(ctx context.Context, userID int64, email, password, nickname string) (*model.User, string, error)
+	UpdateProfile(ctx context.Context, userID int64, nickname *string, email *string, currentPassword, newPassword string) (*model.User, bool, error)
 }
 
 type authService struct {
@@ -316,4 +319,83 @@ func (s *authService) BindEmail(ctx context.Context, userID int64, email, passwo
 	}
 
 	return user, token, nil
+}
+
+func (s *authService) UpdateProfile(ctx context.Context, userID int64, nickname *string, email *string, currentPassword, newPassword string) (*model.User, bool, error) {
+	current, passwordHash, err := s.repo.GetUserAuthByID(ctx, userID)
+	if errors.Is(err, pgx.ErrNoRows) || current == nil {
+		return nil, false, ErrUserNotFound
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	if current.Status == 2 {
+		return nil, false, ErrAccountBanned
+	}
+
+	nextNickname := current.Nickname
+	if nickname != nil {
+		trimmed := strings.TrimSpace(*nickname)
+		if trimmed == "" || !validStoredText(trimmed, maxNicknameChars) {
+			return nil, false, ErrInvalidNickname
+		}
+		nextNickname = trimmed
+	}
+
+	var nextEmail *string
+	var nextPasswordHash *string
+	sensitiveChange := false
+
+	if email != nil {
+		trimmedEmail := strings.TrimSpace(*email)
+		if current.Email == nil {
+			if trimmedEmail != "" {
+				return nil, false, ErrBindRequired
+			}
+		} else if trimmedEmail != *current.Email {
+			if err := validateAccountFields(trimmedEmail, ""); err != nil {
+				return nil, false, err
+			}
+			exists, err := s.repo.EmailExists(ctx, trimmedEmail)
+			if err != nil {
+				return nil, false, err
+			}
+			if exists {
+				return nil, false, ErrEmailExists
+			}
+			nextEmail = &trimmedEmail
+			sensitiveChange = true
+		}
+	}
+
+	if newPassword != "" {
+		if current.Email == nil || passwordHash == "" {
+			return nil, false, ErrBindRequired
+		}
+		if utf8.RuneCountInString(newPassword) < 6 || len(newPassword) > 72 {
+			return nil, false, ErrInvalidPassword
+		}
+		hashed, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
+		if err != nil {
+			return nil, false, err
+		}
+		hashStr := string(hashed)
+		nextPasswordHash = &hashStr
+		sensitiveChange = true
+	}
+
+	if sensitiveChange {
+		if currentPassword == "" || len(currentPassword) > 72 {
+			return nil, false, ErrInvalidCurrentPassword
+		}
+		if err := bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(currentPassword)); err != nil {
+			return nil, false, ErrInvalidCurrentPassword
+		}
+	}
+
+	updated, err := s.repo.UpdateProfile(ctx, userID, nextNickname, nextEmail, nextPasswordHash, sensitiveChange)
+	if err != nil {
+		return nil, false, err
+	}
+	return updated, sensitiveChange, nil
 }

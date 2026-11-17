@@ -45,6 +45,7 @@ type Service interface {
 	GetNovels(ctx context.Context, genre, sortBy string, limit, offset int) ([]model.Novel, error)
 	SearchNovels(ctx context.Context, search string, limit, offset int) ([]model.Novel, error)
 	GetNovelDetail(ctx context.Context, id int64) (*model.Novel, error)
+	GetOperationsCatalog(ctx context.Context) (*OperationsCatalog, error)
 	GetChaptersList(ctx context.Context, userID int64, novelID int64, promoID int, utmSource, utmCampaign string) ([]model.Chapter, error)
 	GetChapterContent(ctx context.Context, userID int64, novelID int64, chapterIndex int, promoID int, utmSource, utmCampaign string) (*ChapterReadResult, error)
 }
@@ -123,6 +124,23 @@ func (s *service) GetNovels(ctx context.Context, genre, sortBy string, limit, of
 		novels[i].CoverURL = s.signCoverURL(novels[i].CoverURL)
 	}
 	return novels, nil
+}
+
+func (s *service) GetOperationsCatalog(ctx context.Context) (*OperationsCatalog, error) {
+	catalog, err := s.repo.GetOperationsCatalog(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for i := range catalog.Featured {
+		catalog.Featured[i].CoverURL = s.signCoverURL(catalog.Featured[i].CoverURL)
+	}
+	for i := range catalog.Curated {
+		catalog.Curated[i].CoverURL = s.signCoverURL(catalog.Curated[i].CoverURL)
+	}
+	for i := range catalog.Rankings {
+		catalog.Rankings[i].CoverURL = s.signCoverURL(catalog.Rankings[i].CoverURL)
+	}
+	return catalog, nil
 }
 
 func (s *service) SearchNovels(ctx context.Context, search string, limit, offset int) ([]model.Novel, error) {

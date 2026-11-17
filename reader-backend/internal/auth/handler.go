@@ -82,6 +82,7 @@ func (h *AuthHandler) RegisterRoutes(r *gin.RouterGroup) {
 		authGroup.POST("/login", GuestRateLimitMiddleware(0.2, 10), h.Login)
 		authGroup.POST("/bind", AuthMiddleware(), h.BindEmail)
 		authGroup.GET("/profile", AuthMiddleware(), h.GetProfile)
+		authGroup.PUT("/profile", AuthMiddleware(), h.UpdateProfile)
 	}
 }
 
@@ -299,4 +300,65 @@ func (h *AuthHandler) BindEmail(c *gin.Context) {
 		Token: token,
 		User:  *user,
 	})
+}
+
+type UpdateProfileRequest struct {
+	Nickname        *string `json:"nickname"`
+	Email           *string `json:"email"`
+	CurrentPassword string  `json:"current_password"`
+	NewPassword     string  `json:"new_password"`
+}
+
+func (h *AuthHandler) UpdateProfile(c *gin.Context) {
+	userIDVal, exists := c.Get("user_id")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		return
+	}
+	userID, ok := userIDVal.(int64)
+	if !ok {
+		if floatVal, ok := userIDVal.(float64); ok {
+			userID = int64(floatVal)
+		} else {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user ID type in context"})
+			return
+		}
+	}
+
+	var req UpdateProfileRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		httpx.Fail(c, http.StatusBadRequest, "invalid_request", "Invalid request fields", nil)
+		return
+	}
+
+	user, rotated, err := h.service.UpdateProfile(c.Request.Context(), userID, req.Nickname, req.Email, req.CurrentPassword, req.NewPassword)
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrInvalidNickname), errors.Is(err, ErrInvalidEmail):
+			httpx.Fail(c, http.StatusBadRequest, "invalid_account_fields", err.Error(), nil)
+		case errors.Is(err, ErrInvalidPassword):
+			httpx.Fail(c, http.StatusBadRequest, "invalid_password", err.Error(), nil)
+		case errors.Is(err, ErrInvalidCurrentPassword):
+			httpx.Fail(c, http.StatusBadRequest, "invalid_current_password", err.Error(), nil)
+		case errors.Is(err, ErrBindRequired):
+			httpx.Fail(c, http.StatusBadRequest, "bind_required", err.Error(), nil)
+		case errors.Is(err, ErrEmailExists):
+			httpx.Fail(c, http.StatusBadRequest, "email_exists", err.Error(), nil)
+		case errors.Is(err, ErrAccountBanned):
+			httpx.Fail(c, http.StatusForbidden, "account_banned", err.Error(), nil)
+		case errors.Is(err, ErrUserNotFound):
+			httpx.Fail(c, http.StatusNotFound, "user_not_found", err.Error(), nil)
+		default:
+			httpx.Fail(c, http.StatusInternalServerError, "internal_error", "Failed to update profile", err)
+		}
+		return
+	}
+
+	if rotated {
+		h.respondAuth(c, AuthResponse{User: *user})
+		return
+	}
+
+	c.Header("Cache-Control", "no-store")
+	c.JSON(http.StatusOK, gin.H{"user": *user})
 }

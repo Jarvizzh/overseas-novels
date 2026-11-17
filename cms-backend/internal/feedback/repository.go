@@ -48,7 +48,16 @@ func (r *repository) List(ctx context.Context, page, limit int, status, keyword 
 
 	offset := (page - 1) * limit
 	selectQuery := fmt.Sprintf(`
-		SELECT id, user_id, email, subject, content, status, admin_reply, created_at, updated_at
+		SELECT
+			id,
+			COALESCE(user_id, 0),
+			COALESCE(email, ''),
+			COALESCE(subject, ''),
+			content,
+			COALESCE(status, 'pending'),
+			COALESCE(admin_reply, ''),
+			COALESCE(created_at, CURRENT_TIMESTAMP),
+			COALESCE(updated_at, CURRENT_TIMESTAMP)
 		FROM feedback
 		WHERE %s
 		ORDER BY created_at DESC
@@ -62,7 +71,7 @@ func (r *repository) List(ctx context.Context, page, limit int, status, keyword 
 	}
 	defer rows.Close()
 
-	var list []Feedback
+	list := make([]Feedback, 0)
 	for rows.Next() {
 		var fb Feedback
 		if err := rows.Scan(
@@ -86,7 +95,16 @@ func (r *repository) List(ctx context.Context, page, limit int, status, keyword 
 
 func (r *repository) GetByID(ctx context.Context, id int64) (*Feedback, error) {
 	query := `
-		SELECT id, user_id, email, subject, content, status, admin_reply, created_at, updated_at
+		SELECT
+			id,
+			COALESCE(user_id, 0),
+			COALESCE(email, ''),
+			COALESCE(subject, ''),
+			content,
+			COALESCE(status, 'pending'),
+			COALESCE(admin_reply, ''),
+			COALESCE(created_at, CURRENT_TIMESTAMP),
+			COALESCE(updated_at, CURRENT_TIMESTAMP)
 		FROM feedback
 		WHERE id = $1
 	`

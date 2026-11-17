@@ -29,6 +29,7 @@ type Service interface {
 	GetProgress(ctx context.Context, userID, novelID int64) (*ProgressUpdate, error)
 	GetShelf(ctx context.Context, userID int64) ([]model.BookshelfWithNovel, error)
 	GetShelfPage(ctx context.Context, userID int64, limit int, after *shelfCursor) (*ShelfPage, error)
+	GetRecent(ctx context.Context, userID int64, limit int) ([]model.BookshelfWithNovel, error)
 	GetShelfIDs(ctx context.Context, userID int64) ([]int64, error)
 	AddToShelf(ctx context.Context, userID int64, novelID int64) error
 	RemoveFromShelf(ctx context.Context, userID int64, novelIDs []int64) error
@@ -63,6 +64,18 @@ func (s *service) GetProgress(ctx context.Context, userID, novelID int64) (*Prog
 
 func (s *service) GetShelf(ctx context.Context, userID int64) ([]model.BookshelfWithNovel, error) {
 	items, err := s.repo.GetShelfItemsWithNovel(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	s.signShelfCovers(items)
+	return items, nil
+}
+
+func (s *service) GetRecent(ctx context.Context, userID int64, limit int) ([]model.BookshelfWithNovel, error) {
+	if limit <= 0 || limit > MaxBatchSize {
+		limit = 20
+	}
+	items, err := s.repo.GetRecentlyRead(ctx, userID, limit)
 	if err != nil {
 		return nil, err
 	}

@@ -3,6 +3,7 @@ package storage
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 
 	"github.com/aliyun/aliyun-oss-go-sdk/oss"
@@ -17,10 +18,12 @@ type CoverSigner interface {
 }
 
 type CoverOSSSigner struct {
-	enabled      bool
-	signedTTL    int
-	publicBucket *oss.Bucket
-	signURLFunc  func(objectKey string, ttlSeconds int64) (string, error)
+	enabled       bool
+	publicRead    bool
+	publicBaseURL string
+	signedTTL     int
+	publicBucket  *oss.Bucket
+	signURLFunc   func(objectKey string, ttlSeconds int64) (string, error)
 }
 
 func NewCoverOSSSigner(cfg *config.Config) (*CoverOSSSigner, error) {
@@ -36,14 +39,25 @@ func NewCoverOSSSigner(cfg *config.Config) (*CoverOSSSigner, error) {
 		}, nil
 	}
 
+	publicBase, err := normalizePublicBaseURL(cfg.CoverOSSPublicBaseURL)
+	if err != nil {
+		return nil, err
+	}
+
+	if cfg.CoverOSSPublicRead {
+		return &CoverOSSSigner{
+			enabled:       true,
+			publicRead:    true,
+			publicBaseURL: publicBase,
+			signedTTL:     ttl,
+		}, nil
+	}
+
 	if strings.TrimSpace(cfg.CoverOSSRegion) == "" {
 		return nil, errors.New("COVER_OSS_REGION is required when COVER_OSS_ENABLED=true")
 	}
 	if strings.TrimSpace(cfg.CoverOSSBucket) == "" {
 		return nil, errors.New("COVER_OSS_BUCKET is required when COVER_OSS_ENABLED=true")
-	}
-	if strings.TrimSpace(cfg.CoverOSSPublicBaseURL) == "" {
-		return nil, errors.New("COVER_OSS_PUBLIC_BASE_URL is required when COVER_OSS_ENABLED=true")
 	}
 	if strings.TrimSpace(cfg.CoverOSSAccessKeyID) == "" || strings.TrimSpace(cfg.CoverOSSAccessKeySecret) == "" {
 		return nil, errors.New("ALIBABA_CLOUD_ACCESS_KEY_ID and ALIBABA_CLOUD_ACCESS_KEY_SECRET are required when COVER_OSS_ENABLED=true")
@@ -59,7 +73,6 @@ func NewCoverOSSSigner(cfg *config.Config) (*CoverOSSSigner, error) {
 		opts = append(opts, oss.SecurityToken(token))
 	}
 
-	publicBase := strings.TrimRight(ensureHTTPScheme(cfg.CoverOSSPublicBaseURL), "/")
 	publicClient, err := oss.New(publicBase, cfg.CoverOSSAccessKeyID, cfg.CoverOSSAccessKeySecret, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize reader cover OSS signer client: %w", err)
@@ -70,9 +83,10 @@ func NewCoverOSSSigner(cfg *config.Config) (*CoverOSSSigner, error) {
 	}
 
 	signer := &CoverOSSSigner{
-		enabled:      true,
-		signedTTL:    ttl,
-		publicBucket: publicBucket,
+		enabled:       true,
+		publicBaseURL: publicBase,
+		signedTTL:     ttl,
+		publicBucket:  publicBucket,
 	}
 	signer.signURLFunc = func(objectKey string, ttlSeconds int64) (string, error) {
 		return signer.publicBucket.SignURL(objectKey, oss.HTTPGet, ttlSeconds)
@@ -98,6 +112,9 @@ func (s *CoverOSSSigner) SignCoverURL(raw string) string {
 			return raw
 		}
 	}
+	if s.publicRead {
+		return s.publicBaseURL + "/" + objectKey
+	}
 	if s.signURLFunc == nil {
 		return raw
 	}
@@ -114,4 +131,17 @@ func ensureHTTPScheme(endpoint string) string {
 		return "https://" + trimmed
 	}
 	return trimmed
+}
+
+func normalizePublicBaseURL(raw string) (string, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "", errors.New("COVER_OSS_PUBLIC_BASE_URL is required when COVER_OSS_ENABLED=true")
+	}
+	base := strings.TrimRight(ensureHTTPScheme(trimmed), "/")
+	parsed, err := url.Parse(base)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+		return "", errors.New("COVER_OSS_PUBLIC_BASE_URL must be a valid http:// or https:// URL")
+	}
+	return base, nil
 }

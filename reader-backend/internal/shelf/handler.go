@@ -25,6 +25,7 @@ func (h *Handler) RegisterRoutes(r *gin.RouterGroup) {
 	{
 		shelfGroup.GET("", h.GetShelf)
 		shelfGroup.GET("/cursor", h.GetShelfPage)
+		shelfGroup.GET("/recent", h.GetRecent)
 		shelfGroup.GET("/ids", h.GetShelfIDs)
 		shelfGroup.GET("/progress/:novel_id", h.GetProgress)
 		shelfGroup.POST("/add", h.AddToShelf)
@@ -94,6 +95,24 @@ func (h *Handler) GetShelfPage(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, page)
+}
+
+func (h *Handler) GetRecent(c *gin.Context) {
+	userID := c.MustGet("user_id").(int64)
+	if !verifyShelfAccount(c, userID) {
+		return
+	}
+	limit, err := strconv.Atoi(c.DefaultQuery("limit", "20"))
+	if err != nil || limit < 1 || limit > httpx.MaxPageSize {
+		httpx.Fail(c, http.StatusBadRequest, "invalid_pagination", "Page size must be 1–100", nil)
+		return
+	}
+	items, err := h.service.GetRecent(c.Request.Context(), userID, limit)
+	if err != nil {
+		httpx.Fail(c, http.StatusInternalServerError, "internal_error", "Failed to load recently read books", err)
+		return
+	}
+	c.JSON(http.StatusOK, items)
 }
 
 func (h *Handler) GetShelfIDs(c *gin.Context) {

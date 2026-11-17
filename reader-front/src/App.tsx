@@ -13,7 +13,7 @@ import { Profile } from './pages/Profile';
 import { Rewards } from './pages/Rewards';
 import { Recharge } from './pages/Recharge';
 import { api, registerSessionRefreshHandler } from './utils/api';
-import type { Novel, User, Transaction, SubscriptionInfo, SavedProgress } from './utils/api';
+import type { BookshelfItem, Novel, User, Transaction, SubscriptionInfo, SavedProgress } from './utils/api';
 import { useProgressOutbox } from './utils/useProgressOutbox';
 import { useShelf } from './utils/useShelf';
 import { withRequestTimeout } from './utils/requestTimeout';
@@ -89,6 +89,12 @@ function AppContent() {
 
   const [novels, setNovels] = useState<Novel[]>([]);
   const [latestNovels, setLatestNovels] = useState<Novel[]>([]);
+  const [featuredNovels, setFeaturedNovels] = useState<Novel[]>([]);
+  const [curatedNovels, setCuratedNovels] = useState<Novel[]>([]);
+  const [rankedNovels, setRankedNovels] = useState<Novel[]>([]);
+  const [recentBooks, setRecentBooks] = useState<BookshelfItem[]>([]);
+  const [recentLoading, setRecentLoading] = useState(false);
+  const [recentRefreshTick, setRecentRefreshTick] = useState(0);
   const [novelsPage, setNovelsPage] = useState(1);
   const [hasMoreNovels, setHasMoreNovels] = useState(false);
   const [loadingMoreNovels, setLoadingMoreNovels] = useState(false);
@@ -104,7 +110,10 @@ function AppContent() {
   const [restoredEntry, setRestoredEntry] = useState('');
   const [progressRestoreError, setProgressRestoreError] = useState(false);
   const readingProgress = user ? positions[user.id] ?? {} : {};
-  const { enqueue, pending } = useProgressOutbox(user?.id, session?.token);
+  const handleProgressSynced = useCallback(() => {
+    setRecentRefreshTick((n) => n + 1);
+  }, []);
+  const { enqueue, pending } = useProgressOutbox(user?.id, session?.token, handleProgressSynced);
   const mergePosition = useCallback((userId: number, entry: SavedProgress, paragraphIndex?: number) => {
     const position = {
       chapterIndex: entry.chapter_index,
@@ -338,9 +347,10 @@ function AppContent() {
 
     const loadNovels = async () => {
       try {
-        const [popularList, newestList] = await Promise.all([
+        const [popularList, newestList, opsCatalog] = await Promise.all([
           api.getNovels({ sort: 'popular', page: 1, limit: 50 }),
           api.getNovels({ sort: 'latest', page: 1, limit: 12 }),
+          api.getOperationsCatalog().catch(() => null),
         ]);
         if (popularList) {
           setNovels(popularList);
@@ -349,6 +359,11 @@ function AppContent() {
         }
         if (newestList) {
           setLatestNovels(newestList);
+        }
+        if (opsCatalog) {
+          setFeaturedNovels(opsCatalog.featured || []);
+          setCuratedNovels(opsCatalog.curated || []);
+          setRankedNovels(opsCatalog.rankings || []);
         }
       } catch (err) {
         console.error('Failed to load novels catalog:', err);
@@ -374,6 +389,7 @@ function AppContent() {
       if (!event.newValue) {
         transactionRequest.current?.abort();
         setSession(null);
+        setRecentBooks([]);
         setUserCoins(0);
         setChargedCoins(0);
         setBonusCoins(0);
@@ -445,6 +461,9 @@ function AppContent() {
         }
       } else if (pageOrPath === 'shelf') {
         targetPath = '/shelf';
+        if (typeof params?.tab === 'string' && params.tab) {
+          mergedParams.set('tab', params.tab);
+        }
       } else if (pageOrPath === 'rewards') {
         targetPath = '/rewards';
       } else if (pageOrPath === 'profile') {
@@ -523,9 +542,34 @@ function AppContent() {
         chapter_index: chapterIndex,
         scroll_offset_percentage: scrollOffsetPercentage,
       });
-      if (update) mergePosition(user.id, update, paragraphIndex);
+      if (update) {
+        mergePosition(user.id, update, paragraphIndex);
+        setRecentBooks((prev) => {
+          const existing = prev.find((item) => item.novel_id === bookId && item.user_id === user.id);
+          const knownNovel =
+            existing?.novel ||
+            shelf.novels.find((n) => n.id === bookId) ||
+            novels.find((n) => n.id === bookId) ||
+            latestNovels.find((n) => n.id === bookId) ||
+            featuredNovels.find((n) => n.id === bookId) ||
+            curatedNovels.find((n) => n.id === bookId) ||
+            rankedNovels.find((n) => n.id === bookId);
+          if (!knownNovel) return prev;
+          const nextItem: BookshelfItem = {
+            user_id: user.id,
+            novel_id: bookId,
+            chapter_index: update.chapter_index,
+            scroll_offset_percentage: update.scroll_offset_percentage,
+            in_shelf: existing ? existing.in_shelf : shelf.ids.includes(bookId),
+            progress_version: update.version ?? '',
+            updated_at: update.updated_at,
+            novel: knownNovel,
+          };
+          return [nextItem, ...prev.filter((item) => item.user_id === user.id && item.novel_id !== bookId)].slice(0, 20);
+        });
+      }
     },
-    [enqueue, mergePosition, user?.id],
+    [curatedNovels, enqueue, featuredNovels, latestNovels, mergePosition, novels, rankedNovels, shelf.ids, shelf.novels, user?.id],
   );
 
   const handleAddCoins = useCallback(
@@ -613,6 +657,63 @@ function AppContent() {
   const ownerId = user?.id;
   const sessionToken = session?.token;
   const progressEntry = ownerId && entryNovelId > 0 ? `${ownerId}:${entryNovelId}` : '';
+
+  useEffect(() => {
+    if (!ownerId || !sessionToken) {
+      setRecentBooks([]);
+      setRecentLoading(false);
+      return;
+    }
+    setRecentBooks((prev) => prev.filter((item) => item.user_id === ownerId));
+    if (location.pathname !== '/' && location.pathname !== '/shelf' && location.pathname !== '/profile') {
+      return;
+    }
+    const controller = new AbortController();
+    setRecentLoading(true);
+    void api
+      .getRecentBooks(ownerId, 20, { authToken: sessionToken, signal: controller.signal })
+      .then((items) => {
+        if (controller.signal.aborted || localStorage.getItem('auth-token') !== sessionToken) return;
+        const list = items || [];
+        setRecentBooks((prev) => {
+          const mergedByNovel = new Map<number, BookshelfItem>();
+          for (const item of list) {
+            mergedByNovel.set(item.novel_id, item);
+          }
+          for (const local of prev) {
+            if (local.user_id !== ownerId) continue;
+            const remote = mergedByNovel.get(local.novel_id);
+            const localTime = Date.parse(local.updated_at);
+            const remoteTime = remote ? Date.parse(remote.updated_at) : -1;
+            if (!remote || localTime > remoteTime ||
+                (localTime === remoteTime && local.progress_version > remote.progress_version)) {
+              mergedByNovel.set(local.novel_id, local);
+            }
+          }
+          return [...mergedByNovel.values()]
+            .sort((a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at) || b.novel_id - a.novel_id)
+            .slice(0, 20);
+        });
+        for (const item of list) {
+          mergePosition(ownerId, {
+            novel_id: item.novel_id,
+            chapter_index: item.chapter_index,
+            scroll_offset_percentage: item.scroll_offset_percentage,
+            updated_at: item.updated_at,
+            version: item.progress_version,
+          });
+        }
+      })
+      .catch((err) => {
+        if (!controller.signal.aborted) {
+          console.error('Failed to load recently read books:', err);
+        }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setRecentLoading(false);
+      });
+    return () => controller.abort();
+  }, [location.pathname, mergePosition, ownerId, recentRefreshTick, sessionToken]);
 
   useEffect(() => {
     const owner = ownerId ?? 0;
@@ -707,6 +808,10 @@ function AppContent() {
               <Home
                 novels={novels}
                 latestNovels={latestNovels}
+                featuredNovels={featuredNovels}
+                curatedNovels={curatedNovels}
+                rankedNovels={rankedNovels}
+                recentBooks={recentBooks}
                 hasMore={hasMoreNovels}
                 loadingMore={loadingMoreNovels}
                 onLoadMore={handleLoadMoreNovels}
@@ -721,6 +826,9 @@ function AppContent() {
               <Shelf
                 key={user?.id}
                 novels={shelf.novels}
+                recentBooks={recentBooks}
+                recentLoading={recentLoading}
+                initialTab={searchParams.get('tab') === 'recent' ? 'recent' : 'shelf'}
                 loading={!authReady || shelf.initialLoading}
                 loadingMore={shelf.loadingMore}
                 hasMore={shelf.hasMore}
@@ -739,6 +847,7 @@ function AppContent() {
             element={
               <Profile
                 shelfBookIds={shelf.ids}
+                recentBookCount={recentBooks.length}
                 onNavigate={navigateTo}
                 userCoins={userCoins}
                 chargedCoins={chargedCoins}
@@ -761,12 +870,21 @@ function AppContent() {
                   await reloadWallet();
                   navigateTo('profile');
                 }}
+                onProfileUpdated={(updatedUser, nextToken) => {
+                  if (nextToken) {
+                    localStorage.setItem('auth-token', nextToken);
+                    setSession({ user: updatedUser, token: nextToken });
+                  } else {
+                    setSession((prev) => (prev ? { ...prev, user: updatedUser } : prev));
+                  }
+                }}
                 onLogout={async () => {
                   await api.logout();
                   transactionRequest.current?.abort();
                   transactionRequest.current = null;
                   localStorage.removeItem('auth-token');
                   setSession(null);
+                  setRecentBooks([]);
                   setPositions({});
                   setUserCoins(0);
                   setChargedCoins(0);

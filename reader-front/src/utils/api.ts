@@ -173,6 +173,13 @@ export interface ShelfPage {
   next_cursor?: string;
 }
 
+export interface OperationsCatalog {
+  featured: Novel[];
+  curated: Novel[];
+  rankings: Novel[];
+  ranking_rule: string;
+}
+
 type ShelfRequestOptions = { authToken?: string; signal?: AbortSignal };
 
 export interface Wallet {
@@ -288,7 +295,20 @@ export const api = {
   getProfile: (signal?: AbortSignal, authToken?: string) =>
     request<User>('/auth/profile', { signal, authToken }),
 
+  updateProfile: (body: {
+    nickname?: string;
+    email?: string;
+    current_password?: string;
+    new_password?: string;
+  }) =>
+    request<{ user: User; token?: string }>('/auth/profile', {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    }),
+
   // === NOVELS ===
+  getOperationsCatalog: (signal?: AbortSignal) =>
+    request<OperationsCatalog>('/novels/operations', { signal }),
   getNovels: (params: { genre?: string; sort?: 'popular' | 'latest'; page?: number; limit?: number } = {}) => {
     const query = new URLSearchParams();
     if (params.genre) query.set('genre', params.genre);
@@ -320,6 +340,9 @@ export const api = {
     if (cursor) query.set('cursor', cursor);
     return request<ShelfPage>(`/shelf/cursor?${query}`, { ...options, cache: 'no-store' });
   },
+
+  getRecentBooks: (userId: number, limit: number = 20, options: ShelfRequestOptions = {}) =>
+    request<BookshelfItem[]>(`/shelf/recent?user_id=${userId}&limit=${limit}`, { ...options, cache: 'no-store' }),
 
   getProgress: (novelId: number, userId: number, signal?: AbortSignal, authToken?: string) =>
     request<SavedProgress | null>(`/shelf/progress/${novelId}?user_id=${userId}`, { signal, authToken, cache: 'no-store' }),

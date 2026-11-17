@@ -25,6 +25,7 @@ type Config struct {
 	OSSBucket               string
 	OSSBasePath             string
 	CoverOSSEnabled         bool
+	CoverOSSPublicRead      bool
 	CoverOSSRegion          string
 	CoverOSSEndpoint        string
 	CoverOSSBucket          string
@@ -69,6 +70,7 @@ func LoadConfig() {
 		OSSBucket:               getEnv("OSS_BUCKET", ""),
 		OSSBasePath:             getEnv("OSS_BASE_PATH", "novels"),
 		CoverOSSEnabled:         getEnvBool("COVER_OSS_ENABLED", false),
+		CoverOSSPublicRead:      getEnvBool("COVER_OSS_PUBLIC_READ", false),
 		CoverOSSRegion:          getEnv("COVER_OSS_REGION", "us-west-1"),
 		CoverOSSEndpoint:        firstNonEmptyEnv("COVER_OSS_ENDPOINT", "OSS_ENDPOINT"),
 		CoverOSSBucket:          firstNonEmptyEnv("COVER_OSS_BUCKET", "OSS_BUCKET"),

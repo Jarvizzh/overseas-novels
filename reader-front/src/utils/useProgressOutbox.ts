@@ -7,9 +7,17 @@ const BATCH_SIZE = 100;
 const DELAY_MS = 2000;
 const MAX_RETRY_MS = 60_000;
 
-export function useProgressOutbox(userId: number | undefined, token: string | undefined) {
+export function useProgressOutbox(
+  userId: number | undefined,
+  token: string | undefined,
+  onSynced?: (owner: number) => void,
+) {
   const memory = useRef(new Map<number, Map<number, ProgressUpdate>>());
   const wake = useRef<() => void>(() => {});
+  const onSyncedRef = useRef(onSynced);
+  useEffect(() => {
+    onSyncedRef.current = onSynced;
+  }, [onSynced]);
   const lastTimestamp = useRef(0);
 
   const pending = useCallback(async (owner: number): Promise<{ entries: ProgressUpdate[]; storageFailed: boolean }> => {
@@ -90,6 +98,7 @@ export function useProgressOutbox(userId: number | undefined, token: string | un
           // Keep acknowledgement failures on the retry path, including when
           // the server has already committed this idempotent progress update.
           await progressOutbox.acknowledge(owner, batch);
+          onSyncedRef.current?.(owner);
         }
         if (storageFailed) throw new Error('Reading progress storage is temporarily unavailable');
         retry = 0;

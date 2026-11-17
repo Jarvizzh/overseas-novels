@@ -29,6 +29,7 @@ func (h *Handler) RegisterRoutes(r *gin.RouterGroup) {
 	readingLimit := auth.IPRateLimitMiddleware(40, 80, "Too many reading requests")
 	{
 		novelGroup.GET("", h.GetNovels)
+		novelGroup.GET("/operations", h.GetOperations)
 		novelGroup.GET("/search", h.SearchNovels)
 		novelGroup.GET("/:id", readingLimit, h.GetNovelDetail)
 		novelGroup.GET("/:id/chapters", readingLimit, h.GetChaptersList)
@@ -52,6 +53,15 @@ func (h *Handler) GetNovels(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, novels)
+}
+
+func (h *Handler) GetOperations(c *gin.Context) {
+	catalog, err := h.service.GetOperationsCatalog(c.Request.Context())
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch operations catalog"})
+		return
+	}
+	c.JSON(http.StatusOK, catalog)
 }
 
 func (h *Handler) SearchNovels(c *gin.Context) {

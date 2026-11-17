@@ -21,6 +21,7 @@ import (
 	"star-novel-cms/internal/feedback"
 	"star-novel-cms/internal/meta"
 	"star-novel-cms/internal/novel"
+	"star-novel-cms/internal/operations"
 	"star-novel-cms/internal/redis"
 	"star-novel-cms/internal/storage"
 	"star-novel-cms/internal/tracking"
@@ -183,6 +184,11 @@ func main() {
 		feedbackService := feedback.NewService(feedbackRepo)
 		feedbackHandler := feedback.NewHandler(feedbackService)
 		feedbackHandler.RegisterRoutes(api)
+
+		operationsRepo := operations.NewRepository()
+		operationsService := operations.NewService(operationsRepo, coverStore)
+		operationsHandler := operations.NewHandler(operationsService)
+		operationsHandler.RegisterRoutes(api)
 	}
 
 	// 7. Setup graceful shutdown server

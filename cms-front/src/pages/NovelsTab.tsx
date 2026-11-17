@@ -2,7 +2,7 @@ import { useEffect, useId, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { apiRequest, domainApi } from '../utils/api';
 import type { SystemDomain } from '../utils/api';
-import { Book, BookOpen, Plus, ArrowLeft, Upload, Edit, Trash, CheckCircle, Search, Settings, Link2, X } from 'lucide-react';
+import { Book, BookOpen, Plus, ArrowLeft, Upload, Edit, Trash, CheckCircle, Search, Settings, Link2, X, AlertCircle } from 'lucide-react';
 import { ChapterUploadFields, DEFAULT_CHAPTER_DELIMITER_REGEX } from '../components/novels/ChapterUploadFields';
 import { MAX_GENRES_LENGTH, NovelFormModal, type NovelFormData } from '../components/novels/NovelFormModal';
 import { PromotionLinkModal } from '../components/novels/PromotionLinkModal';
@@ -117,6 +117,11 @@ export default function NovelsTab() {
   // Preview states
   const [previewChapter, setPreviewChapter] = useState<Chapter | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewError, setPreviewError] = useState('');
+  const [previewTargetMeta, setPreviewTargetMeta] = useState<{ index: number; title: string; word_count: number; is_paid: boolean; price: number } | null>(null);
+  const previewAbortRef = useRef<AbortController | null>(null);
+  const previewFetchSeqRef = useRef(0);
+  const previewModalTitleId = useId();
 
   // Form states
   const [isCreating, setIsCreating] = useState(false);
@@ -410,10 +415,19 @@ export default function NovelsTab() {
     }
   };
 
+  const closePreviewModal = () => {
+    previewAbortRef.current?.abort();
+    previewAbortRef.current = null;
+    previewFetchSeqRef.current += 1;
+    setPreviewChapter(null);
+    setPreviewError('');
+    setPreviewTargetMeta(null);
+    setPreviewLoading(false);
+  };
+
   const resetDetailTransientState = () => {
     setIsEditing(false);
-    setPreviewChapter(null);
-    setPreviewLoading(false);
+    closePreviewModal();
     setImportFile(null);
     setImportMessage('');
     setImportError('');
@@ -432,16 +446,36 @@ export default function NovelsTab() {
     fetchChapters(novel.id);
   };
 
-  const handlePreviewChapter = async (index: number) => {
+  const handlePreviewChapter = async (ch: Chapter) => {
     if (!selectedNovel) return;
+    previewAbortRef.current?.abort();
+    const controller = new AbortController();
+    previewAbortRef.current = controller;
+    const seq = ++previewFetchSeqRef.current;
+
+    setPreviewChapter(null);
+    setPreviewError('');
+    setPreviewTargetMeta({
+      index: ch.chapter_index,
+      title: ch.title,
+      word_count: ch.word_count,
+      is_paid: ch.is_paid,
+      price: ch.price,
+    });
     setPreviewLoading(true);
     try {
-      const data = await apiRequest('GET', `/novels/${selectedNovel.id}/chapters/${index}`);
+      const data = await apiRequest('GET', `/novels/${selectedNovel.id}/chapters/${ch.chapter_index}`, undefined, false, controller.signal);
+      if (controller.signal.aborted || seq !== previewFetchSeqRef.current) return;
       setPreviewChapter(data);
-    } catch (e) {
-      window.showToast?.('加载章节预览失败: ' + e, 'error');
+    } catch (e: any) {
+      if (e?.name === 'AbortError' || controller.signal.aborted || seq !== previewFetchSeqRef.current) return;
+      const msg = e?.message || String(e) || '加载章节预览失败';
+      setPreviewError(msg);
+      window.showToast?.('加载章节预览失败: ' + msg, 'error');
     } finally {
-      setPreviewLoading(false);
+      if (seq === previewFetchSeqRef.current) {
+        setPreviewLoading(false);
+      }
     }
   };
 
@@ -1137,26 +1171,47 @@ export default function NovelsTab() {
                     display: 'flex',
                     justifyContent: 'space-between',
                     alignItems: 'center',
+                    gap: '12px',
                     padding: '12px 16px',
                     backgroundColor: 'hsl(var(--bg-card))',
                     border: '1px solid hsl(var(--border))',
                     borderRadius: '8px'
                   }}>
-                    <div>
-                      <span style={{ fontSize: '0.8rem', color: 'hsl(var(--text-muted))', marginRight: '8px' }}>第 {ch.chapter_index + 1} 章</span>
-                      <span style={{ fontSize: '0.9rem', fontWeight: 500 }}>{ch.title}</span>
-                      <span style={{ fontSize: '0.75rem', color: 'hsl(var(--text-muted))', display: 'block' }}>{ch.word_count} 字</span>
+                    <div style={{ minWidth: 0, flex: 1 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0 }}>
+                        <span style={{ fontSize: '0.8rem', color: 'hsl(var(--text-muted))', whiteSpace: 'nowrap', flexShrink: 0 }}>第 {ch.chapter_index + 1} 章</span>
+                        <span
+                          style={{
+                            fontSize: '0.9rem',
+                            fontWeight: 500,
+                            whiteSpace: 'nowrap',
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            minWidth: 0,
+                          }}
+                          title={ch.title}
+                        >
+                          {ch.title}
+                        </span>
+                      </div>
+                      <span style={{ fontSize: '0.75rem', color: 'hsl(var(--text-muted))', display: 'block', marginTop: '2px' }}>
+                        {ch.word_count.toLocaleString()} 字
+                        {ch.word_count === 0 && (
+                          <span style={{ color: '#f59e0b', marginLeft: '6px' }}>（正文为空）</span>
+                        )}
+                      </span>
                     </div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0 }}>
                       {ch.is_paid ? (
-                        <span className="badge badge-orange">{ch.price} 金币</span>
+                        <span className="badge badge-orange" style={{ whiteSpace: 'nowrap' }}>{ch.price} 金币</span>
                       ) : (
-                        <span className="badge badge-green">免费章节</span>
+                        <span className="badge badge-green" style={{ whiteSpace: 'nowrap' }}>免费章节</span>
                       )}
                       <button
-                        onClick={() => handlePreviewChapter(ch.chapter_index)}
+                        type="button"
+                        onClick={() => handlePreviewChapter(ch)}
                         className="btn-secondary"
-                        style={{ padding: '4px 8px', fontSize: '0.75rem', borderRadius: '6px' }}
+                        style={{ padding: '4px 10px', fontSize: '0.75rem', borderRadius: '6px', whiteSpace: 'nowrap', flexShrink: 0 }}
                       >
                         预览
                       </button>
@@ -1278,7 +1333,7 @@ export default function NovelsTab() {
         </div>
 
         {/* Chapter Preview Modal */}
-        {(previewChapter || previewLoading) && createPortal(
+        {(previewChapter || previewLoading || previewError) && createPortal(
           <div style={{
             position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
             backgroundColor: 'rgba(15, 23, 42, 0.35)',
@@ -1288,24 +1343,34 @@ export default function NovelsTab() {
             padding: '20px',
             overscrollBehavior: 'contain'
           }}>
-            <div className="glass-panel animate-fade-in" style={{
-              width: '100%', maxWidth: '640px', maxHeight: '80vh',
-              backgroundColor: 'hsl(var(--bg-surface))', border: '1px solid hsl(var(--border))',
-              borderRadius: '16px', display: 'flex', flexDirection: 'column',
-              boxShadow: 'var(--shadow-lg)', overflow: 'hidden'
-            }}>
+            <div
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby={previewModalTitleId}
+              className="glass-panel animate-fade-in"
+              style={{
+                width: '100%', maxWidth: '640px', maxHeight: '80vh',
+                backgroundColor: 'hsl(var(--bg-surface))', border: '1px solid hsl(var(--border))',
+                borderRadius: '16px', display: 'flex', flexDirection: 'column',
+                boxShadow: 'var(--shadow-lg)', overflow: 'hidden'
+              }}
+            >
 
               {/* Modal Header */}
               <div style={{
                 padding: '20px 24px', borderBottom: '1px solid hsl(var(--border))',
-                display: 'flex', justifyContent: 'space-between', alignItems: 'center'
+                display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '12px'
               }}>
-                <div>
-                  <span style={{ fontSize: '0.75rem', color: 'hsl(var(--text-muted))', display: 'block', marginBottom: '2px' }}>
+                <div style={{ minWidth: 0, flex: 1 }}>
+                  <span style={{ fontSize: '0.75rem', color: 'hsl(var(--text-muted))', display: 'block', marginBottom: '2px', overflowWrap: 'anywhere' }}>
                     {selectedNovel.title}
                   </span>
-                  <h3 style={{ fontSize: '1.25rem', fontWeight: 600 }}>
-                    {previewLoading ? '正在载入内容...' : `第 ${(previewChapter?.chapter_index ?? 0) + 1} 章: ${previewChapter?.title}`}
+                  <h3 id={previewModalTitleId} style={{ fontSize: '1.15rem', fontWeight: 600, margin: 0, overflowWrap: 'anywhere' }}>
+                    {previewChapter
+                      ? `第 ${previewChapter.chapter_index + 1} 章: ${previewChapter.title}`
+                      : previewTargetMeta
+                        ? `第 ${previewTargetMeta.index + 1} 章: ${previewTargetMeta.title}`
+                        : '正在载入章节...'}
                   </h3>
                 </div>
                 <button
@@ -1314,9 +1379,9 @@ export default function NovelsTab() {
                   style={{
                     background: 'transparent', border: 'none', padding: '6px',
                     borderRadius: '8px', color: 'hsl(var(--text-secondary))', cursor: 'pointer',
-                    display: 'inline-flex', alignItems: 'center', justifyContent: 'center'
+                    display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0
                   }}
-                  onClick={() => setPreviewChapter(null)}
+                  onClick={closePreviewModal}
                 >
                   <X size={20} aria-hidden="true" />
                 </button>
@@ -1328,10 +1393,56 @@ export default function NovelsTab() {
                   <div style={{ textAlign: 'center', color: 'hsl(var(--text-secondary))', padding: '40px 0' }}>
                     正在从服务器获取章节手稿文本...
                   </div>
+                ) : previewError ? (
+                  <div
+                    role="status"
+                    style={{
+                      display: 'flex',
+                      alignItems: 'flex-start',
+                      gap: '10px',
+                      padding: '14px 16px',
+                      borderRadius: '10px',
+                      backgroundColor: 'rgba(239, 68, 68, 0.08)',
+                      border: '1px solid rgba(239, 68, 68, 0.28)',
+                      color: '#f87171',
+                      fontSize: '0.88rem',
+                      lineHeight: 1.6,
+                    }}
+                  >
+                    <AlertCircle size={18} style={{ flexShrink: 0, marginTop: '2px' }} aria-hidden="true" />
+                    <div>
+                      <div style={{ fontWeight: 600, marginBottom: '4px' }}>章节内容加载失败</div>
+                      <div>{previewError}</div>
+                    </div>
+                  </div>
+                ) : (previewChapter?.content || '').trim() === '' ? (
+                  <div
+                    style={{
+                      display: 'flex',
+                      alignItems: 'flex-start',
+                      gap: '10px',
+                      padding: '16px',
+                      borderRadius: '10px',
+                      backgroundColor: 'rgba(245, 158, 11, 0.08)',
+                      border: '1px solid rgba(245, 158, 11, 0.25)',
+                      color: '#fbbf24',
+                      fontSize: '0.88rem',
+                      lineHeight: 1.65,
+                    }}
+                  >
+                    <AlertCircle size={18} style={{ flexShrink: 0, marginTop: '2px' }} aria-hidden="true" />
+                    <div>
+                      <div style={{ fontWeight: 600, marginBottom: '4px' }}>该章节暂无正文内容（字数：0 字）</div>
+                      <div style={{ color: 'hsl(var(--text-secondary))' }}>
+                        服务端当前存储的该章正文为空。这通常是由于原 TXT/ZIP 中该章缺少正文内容，或默认正则在正文中遇到行首的「Chapter X ...」时误拆出了空白章。请核对原手稿后在右侧重新批量导入。
+                      </div>
+                    </div>
+                  </div>
                 ) : (
                   <div style={{
                     fontSize: '0.95rem', lineHeight: 1.8, color: 'hsl(var(--text-primary))',
-                    whiteSpace: 'pre-wrap', fontFamily: 'system-ui, -apple-system, sans-serif'
+                    whiteSpace: 'pre-wrap', fontFamily: 'system-ui, -apple-system, sans-serif',
+                    overflowWrap: 'anywhere',
                   }}>
                     {previewChapter?.content}
                   </div>
@@ -1345,9 +1456,10 @@ export default function NovelsTab() {
                 backgroundColor: 'hsl(var(--bg-surface))'
               }}>
                 <span style={{ fontSize: '0.8rem', color: 'hsl(var(--text-muted))' }}>
-                  {!previewLoading && `总字数: ${previewChapter?.word_count} 字 | 订阅价: ${previewChapter?.is_paid ? `${previewChapter?.price} 金币` : '免费'}`}
+                  {!previewLoading && !previewError && previewChapter &&
+                    `总字数: ${previewChapter.word_count.toLocaleString()} 字 | 订阅价: ${previewChapter.is_paid ? `${previewChapter.price} 金币` : '免费'}`}
                 </span>
-                <button className="btn-primary" style={{ padding: '6px 16px', fontSize: '0.85rem' }} onClick={() => setPreviewChapter(null)}>
+                <button type="button" className="btn-primary" style={{ padding: '6px 16px', fontSize: '0.85rem' }} onClick={closePreviewModal}>
                   确认
                 </button>
               </div>

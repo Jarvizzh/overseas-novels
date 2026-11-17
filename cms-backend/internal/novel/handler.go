@@ -696,7 +696,7 @@ func (h *Handler) GetChapterDetail(c *gin.Context) {
 	}
 	indexStr := c.Param("index")
 	idx, err := strconv.Atoi(indexStr)
-	if err != nil {
+	if err != nil || idx < 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid chapter index"})
 		return
 	}
@@ -777,7 +777,7 @@ func (h *Handler) UpdateChapter(c *gin.Context) {
 	}
 	indexStr := c.Param("index")
 	idx, err := strconv.Atoi(indexStr)
-	if err != nil {
+	if err != nil || idx < 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid chapter index"})
 		return
 	}

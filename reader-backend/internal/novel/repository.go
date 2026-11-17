@@ -9,12 +9,20 @@ import (
 	"reader-backend/internal/model"
 )
 
+type OperationsCatalog struct {
+	Featured    []model.Novel `json:"featured"`
+	Curated     []model.Novel `json:"curated"`
+	Rankings    []model.Novel `json:"rankings"`
+	RankingRule string        `json:"ranking_rule"`
+}
+
 type Repository interface {
 	ReadSnapshot(ctx context.Context, userID, novelID int64, promoID int, index *int) (ReadSnapshot, error)
 	GetContentVersion(context.Context, int64) (int64, error)
 	GetNovels(ctx context.Context, genre, sortBy string, limit, offset int) ([]model.Novel, error)
 	SearchNovels(ctx context.Context, search string, limit, offset int) ([]model.Novel, error)
 	GetByID(ctx context.Context, id int64) (*model.Novel, error)
+	GetOperationsCatalog(ctx context.Context) (*OperationsCatalog, error)
 	GetChaptersList(ctx context.Context, novelID int64) ([]model.Chapter, error)
 	GetChapter(ctx context.Context, novelID int64, chapterIndex int) (*model.Chapter, error)
 	GetUnlockedChapterIndices(ctx context.Context, userID, novelID int64) ([]int, error)
@@ -59,7 +67,7 @@ func NewDBRepository() Repository {
 	return &dbRepository{}
 }
 
-const readerNovelSelectColumns = `id, title, author, cover_url, rating, status, publish_status, synopsis, genres, word_count, view_count, COALESCE(coin_cost_per_thousand, (SELECT value::integer FROM system_configs WHERE key = 'global_coin_cost_per_thousand'), 500) AS coin_cost_per_thousand, start_pay_chapter_index, created_at, content_version`
+const readerNovelSelectColumns = `id, title, author, COALESCE(cover_url, ''), COALESCE(rating, 0), COALESCE(status, 'Ongoing'), publish_status, COALESCE(synopsis, ''), COALESCE(genres, '{}'), COALESCE(word_count, 0), COALESCE(view_count, 0), COALESCE(coin_cost_per_thousand, (SELECT value::integer FROM system_configs WHERE key = 'global_coin_cost_per_thousand'), 500) AS coin_cost_per_thousand, COALESCE(start_pay_chapter_index, 3), created_at, content_version`
 
 func scanReaderNovel(scanner interface{ Scan(dest ...any) error }, n *model.Novel) error {
 	err := scanner.Scan(
@@ -298,4 +306,144 @@ func (r *dbRepository) GetContentVersion(ctx context.Context, id int64) (int64, 
 		return 0, nil
 	}
 	return version, err
+}
+
+func (r *dbRepository) GetOperationsCatalog(ctx context.Context) (*OperationsCatalog, error) {
+	rankingRule := "views"
+	rankingLimit := 20
+
+	cfgRows, err := db.DB.Query(ctx, `SELECT key, value FROM system_configs WHERE key IN ('ranking_sort_rule', 'ranking_limit')`)
+	if err != nil {
+		return nil, err
+	}
+	for cfgRows.Next() {
+		var k, v string
+		if err := cfgRows.Scan(&k, &v); err != nil {
+			cfgRows.Close()
+			return nil, err
+		}
+		switch k {
+		case "ranking_sort_rule":
+			switch v {
+			case "views", "rating", "latest", "manual":
+				rankingRule = v
+			}
+		case "ranking_limit":
+			var parsed int
+			if _, scanErr := fmt.Sscanf(v, "%d", &parsed); scanErr == nil && parsed >= 1 && parsed <= 100 {
+				rankingLimit = parsed
+			}
+		}
+	}
+	if err := cfgRows.Err(); err != nil {
+		cfgRows.Close()
+		return nil, err
+	}
+	cfgRows.Close()
+
+	recQuery := `
+		SELECT r.group_name, c.id, c.title, c.author, c.cover_url_safe, c.rating_safe, c.status_safe, c.publish_status,
+			c.synopsis_safe, c.genres_safe, c.word_count_safe, c.view_count_safe, c.coin_cost_per_thousand, c.start_pay_chapter_index_safe,
+			c.created_at, c.content_version
+		FROM recommendations r
+		JOIN (
+			SELECT id, title, author, COALESCE(cover_url, '') AS cover_url_safe, COALESCE(rating, 0) AS rating_safe,
+				COALESCE(status, 'Ongoing') AS status_safe, publish_status, COALESCE(synopsis, '') AS synopsis_safe,
+				COALESCE(genres, '{}') AS genres_safe, COALESCE(word_count, 0) AS word_count_safe,
+				COALESCE(view_count, 0) AS view_count_safe,
+				COALESCE(coin_cost_per_thousand, (SELECT value::integer FROM system_configs WHERE key = 'global_coin_cost_per_thousand'), 500) AS coin_cost_per_thousand,
+				COALESCE(start_pay_chapter_index, 3) AS start_pay_chapter_index_safe,
+				created_at, content_version
+			FROM novels WHERE status != 'archived' AND publish_status = 'published'
+		) c ON c.id = r.novel_id
+		WHERE r.group_name IN ('editor_pick', 'curated', 'ranking')
+		  AND (r.scheduled_start IS NULL OR r.scheduled_start <= NOW())
+		  AND (r.scheduled_end IS NULL OR r.scheduled_end >= NOW())
+		ORDER BY r.group_name ASC, r.sort_order ASC, r.id ASC
+	`
+
+	recRows, err := db.DB.Query(ctx, recQuery)
+	if err != nil {
+		return nil, err
+	}
+	defer recRows.Close()
+
+	catalog := &OperationsCatalog{
+		Featured:    []model.Novel{},
+		Curated:     []model.Novel{},
+		Rankings:    []model.Novel{},
+		RankingRule: rankingRule,
+	}
+	rankedIDs := make(map[int64]bool)
+
+	for recRows.Next() {
+		var group string
+		var n model.Novel
+		if err := recRows.Scan(
+			&group,
+			&n.ID, &n.Title, &n.Author, &n.CoverURL, &n.Rating, &n.Status, &n.PublishStatus,
+			&n.Synopsis, &n.Genres, &n.WordCount, &n.ViewCount,
+			&n.CoinCostPerThousand, &n.StartPayChapterIndex, &n.CreatedAt, &n.ContentVersion,
+		); err != nil {
+			return nil, err
+		}
+		if n.Genres == nil {
+			n.Genres = []string{}
+		}
+		switch group {
+		case "editor_pick":
+			catalog.Featured = append(catalog.Featured, n)
+		case "curated":
+			catalog.Curated = append(catalog.Curated, n)
+		case "ranking":
+			if len(catalog.Rankings) < rankingLimit {
+				catalog.Rankings = append(catalog.Rankings, n)
+				rankedIDs[n.ID] = true
+			}
+		}
+	}
+	if err := recRows.Err(); err != nil {
+		return nil, err
+	}
+
+	if len(catalog.Rankings) < rankingLimit && (rankingRule != "manual" || len(catalog.Rankings) == 0) {
+		orderSQL := "ORDER BY view_count DESC, created_at DESC, id DESC"
+		switch rankingRule {
+		case "rating":
+			orderSQL = "ORDER BY rating DESC, view_count DESC, id DESC"
+		case "latest":
+			orderSQL = "ORDER BY created_at DESC, id DESC"
+		}
+		remaining := rankingLimit - len(catalog.Rankings)
+		excluded := make([]int64, 0, len(rankedIDs))
+		for id := range rankedIDs {
+			excluded = append(excluded, id)
+		}
+		backfillQuery := fmt.Sprintf(`
+			SELECT %s
+			FROM novels
+			WHERE status != 'archived' AND publish_status = 'published'
+			  AND (cardinality($1::int[]) = 0 OR NOT (id = ANY($1::int[])))
+			%s
+			LIMIT $2
+		`, readerNovelSelectColumns, orderSQL)
+		fillRows, err := db.DB.Query(ctx, backfillQuery, excluded, remaining)
+		if err != nil {
+			return nil, err
+		}
+		defer fillRows.Close()
+
+		for fillRows.Next() {
+			var n model.Novel
+			if err := scanReaderNovel(fillRows, &n); err != nil {
+				return nil, err
+			}
+			catalog.Rankings = append(catalog.Rankings, n)
+		}
+		if err := fillRows.Err(); err != nil {
+			return nil, err
+		}
+	}
+
+	return catalog, nil
 }
