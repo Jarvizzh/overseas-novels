@@ -502,9 +502,9 @@ export const Profile: React.FC<ProfileProps> = ({
                 id={nicknameInputId}
                 type="text"
                 autoComplete="nickname"
+                placeholder="Up to 50 characters"
                 className="sn-input"
                 value={nickname}
-                placeholder="StarNovel Reader"
                 onChange={(e) => setNickname(e.target.value)}
               />
             </div>

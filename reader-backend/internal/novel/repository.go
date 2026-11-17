@@ -17,7 +17,7 @@ type Repository interface {
 	GetChaptersList(ctx context.Context, novelID int64) ([]model.Chapter, error)
 	GetChapter(ctx context.Context, novelID int64, chapterIndex int) (*model.Chapter, error)
 	GetUnlockedChapterIndices(ctx context.Context, userID, novelID int64) ([]int, error)
-	CheckChapterUnlocked(ctx context.Context, userID, novelID int64, chapterIndex int) (bool, error)
+	CheckChapterAccess(ctx context.Context, userID, novelID int64, chapterID string) (bool, bool, error)
 	HasActiveSubscription(ctx context.Context, userID int64) (bool, error)
 	HasWholeBook(context.Context, int64, int64) (bool, error)
 	GetEffectivePricingRule(ctx context.Context, userID int64, novelID int64, promoID int, utmSource, utmCampaign string) (int, int, error)
@@ -170,10 +170,10 @@ func (r *dbRepository) GetChaptersList(ctx context.Context, novelID int64) ([]mo
 		SELECT c.id, c.novel_id, c.chapter_index, c.title, c.word_count, c.is_paid, c.price, c.created_at
 		FROM chapters c
 		INNER JOIN novels n ON c.novel_id = n.id
-		WHERE c.novel_id = $1 AND n.status != 'archived' AND n.publish_status = 'published'
+		WHERE c.novel_id = $1 AND c.chapter_index IS NOT NULL AND ($2::bigint = 0 OR n.content_version = $2) AND n.status != 'archived' AND n.publish_status = 'published'
 		ORDER BY c.chapter_index ASC`
 
-	rows, err := db.DB.Query(ctx, query, novelID)
+	rows, err := db.DB.Query(ctx, query, novelID, contentVersion(ctx))
 	if err != nil {
 		return nil, err
 	}
@@ -196,14 +196,14 @@ func (r *dbRepository) GetChaptersList(ctx context.Context, novelID int64) ([]mo
 
 func (r *dbRepository) GetChapter(ctx context.Context, novelID int64, chapterIndex int) (*model.Chapter, error) {
 	query := `
-		SELECT c.id, c.novel_id, c.chapter_index, c.title, c.content, c.word_count, c.is_paid, c.price, c.created_at
+		SELECT c.id, c.novel_id, c.chapter_index, c.title, c.content, c.word_count, c.is_paid, c.price, c.created_at, COALESCE(c.content_object_key, ''), COALESCE(c.content_sha256, '')
 		FROM chapters c
 		INNER JOIN novels n ON c.novel_id = n.id
-		WHERE c.novel_id = $1 AND c.chapter_index = $2 AND n.status != 'archived' AND n.publish_status = 'published'`
+		WHERE c.novel_id = $1 AND c.chapter_index = $2 AND ($3::bigint = 0 OR n.content_version = $3) AND n.status != 'archived' AND n.publish_status = 'published'`
 
 	var c model.Chapter
-	err := db.DB.QueryRow(ctx, query, novelID, chapterIndex).Scan(
-		&c.ID, &c.NovelID, &c.ChapterIndex, &c.Title, &c.Content, &c.WordCount, &c.IsPaid, &c.Price, &c.CreatedAt,
+	err := db.DB.QueryRow(ctx, query, novelID, chapterIndex, contentVersion(ctx)).Scan(
+		&c.ID, &c.NovelID, &c.ChapterIndex, &c.Title, &c.Content, &c.WordCount, &c.IsPaid, &c.Price, &c.CreatedAt, &c.ObjectKey, &c.ContentHash,
 	)
 	if err != nil {
 		if err == pgx.ErrNoRows {
@@ -215,24 +215,20 @@ func (r *dbRepository) GetChapter(ctx context.Context, novelID int64, chapterInd
 	return &c, nil
 }
 
-// CheckChapterUnlocked queries the DB directly to verify if the user has unlocked the chapter
-func (r *dbRepository) CheckChapterUnlocked(ctx context.Context, userID, novelID int64, chapterIndex int) (bool, error) {
-	query := `
-		SELECT EXISTS(
-			SELECT 1 FROM unlock_records 
-			WHERE user_id = $1 AND novel_id = $2 AND chapter_index = $3
-		)`
-	var exists bool
-	err := db.DB.QueryRow(ctx, query, userID, novelID, chapterIndex).Scan(&exists)
-	return exists, err
+// CheckChapterAccess reports a resolved entitlement and whether older purchases still need an audit.
+func (r *dbRepository) CheckChapterAccess(ctx context.Context, userID, novelID int64, chapterID string) (bool, bool, error) {
+	var unlocked, needsReview bool
+	err := db.DB.QueryRow(ctx, `SELECT reader_has_chapter_unlock($1, $3),
+		EXISTS(SELECT 1 FROM unlock_records WHERE user_id=$1 AND novel_id=$2 AND chapter_id IS NULL)`,
+		userID, novelID, chapterID).Scan(&unlocked, &needsReview)
+	return unlocked, needsReview, err
 }
 
 func (r *dbRepository) GetUnlockedChapterIndices(ctx context.Context, userID, novelID int64) ([]int, error) {
 	query := `
-		SELECT chapter_index 
-		FROM unlock_records 
-		WHERE user_id = $1 AND novel_id = $2
-		ORDER BY chapter_index ASC`
+		SELECT chapter_index FROM chapters
+		WHERE novel_id = $2 AND chapter_index IS NOT NULL AND reader_has_chapter_unlock($1, id)
+		ORDER BY chapter_index`
 	rows, err := db.DB.Query(ctx, query, userID, novelID)
 	if err != nil {
 		return nil, err
@@ -268,8 +264,15 @@ func (r *dbRepository) HasActiveSubscription(ctx context.Context, userID int64) 
 }
 
 func (r *dbRepository) GetEffectivePricingRule(ctx context.Context, userID int64, novelID int64, promoID int, utmSource, utmCampaign string) (int, int, error) {
+	return ReadChapterPricing(ctx, db.DB, userID, novelID, promoID)
+}
+
+// ReadChapterPricing resolves the same rule for quotes and transactional settlement.
+func ReadChapterPricing(ctx context.Context, q interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}, userID, novelID int64, promoID int) (int, int, error) {
 	var start, cost int
-	err := db.DB.QueryRow(ctx, `
+	err := q.QueryRow(ctx, `
 		SELECT COALESCE(NULLIF(pl.start_pay_chapter_index, 0), NULLIF(n.start_pay_chapter_index, 0),
 			(SELECT value::int FROM system_configs WHERE key = 'global_start_pay_chapter_index'), 3),
 		       COALESCE(pl.coin_cost_per_thousand, n.coin_cost_per_thousand,
@@ -280,7 +283,11 @@ func (r *dbRepository) GetEffectivePricingRule(ctx context.Context, userID int64
 			FROM promotion_links p WHERE p.novel_id=n.id AND p.id=CASE WHEN $1::bigint>0
  THEN (SELECT id FROM reader_promotion_for_user($1)) ELSE resolve_reader_promotion($3,'','') END
 		) pl ON TRUE
-		WHERE n.id = $2 AND n.status <> 'archived' AND n.publish_status = 'published'`, userID, novelID, promoID).Scan(&start, &cost)
+		WHERE n.id = $2 AND n.status <> 'archived' AND n.publish_status = 'published'
+		AND ($4::bigint = 0 OR n.content_version = $4)`, userID, novelID, promoID, contentVersion(ctx)).Scan(&start, &cost)
+	if err == pgx.ErrNoRows && contentVersion(ctx) != 0 {
+		return 0, 0, ErrContentChanged
+	}
 	if err != nil {
 		return 0, 0, err
 	}

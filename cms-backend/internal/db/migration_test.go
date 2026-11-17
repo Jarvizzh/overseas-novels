@@ -82,3 +82,76 @@ func TestMigrationAtomicityAndVersionGate(t *testing.T) {
 		t.Fatal("older CMS accepted newer schema")
 	}
 }
+
+func TestMigrationSkipsBaselineOnUpgradeAndConcurrentRestart(t *testing.T) {
+	pool, _ := migrationPool(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	if _, err := pool.Exec(ctx, dbassets.SchemaSQL); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO novels(id,title,author) VALUES(1,'Book','Author');
+		INSERT INTO users(id) VALUES(1);
+		INSERT INTO chapters(id,novel_id,chapter_index,title,content,created_at)
+		VALUES('original',1,0,'Original','A',now()-interval '2 days')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO unlock_records(user_id,novel_id,chapter_index,created_at)
+		VALUES(1,1,0,clock_timestamp()),(1,1,1,clock_timestamp())`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO chapters(id,novel_id,chapter_index,title,content,created_at)
+		VALUES('replacement',1,1,'Replacement','B',now()-interval '2 days')`); err != nil {
+		t.Fatal(err)
+	}
+	var track string
+	if err := pool.QueryRow(ctx, "SHOW track_commit_timestamp").Scan(&track); err != nil {
+		t.Fatal(err)
+	}
+
+	original := dbassets.SchemaSQL
+	dbassets.SchemaSQL = "SELECT 1/0;"
+	t.Cleanup(func() { dbassets.SchemaSQL = original })
+	results := make(chan error, 3)
+	for range 3 {
+		go func() { results <- autoMigrate(ctx, pool) }()
+	}
+	for range 3 {
+		if err := <-results; err != nil {
+			t.Fatal(err)
+		}
+	}
+	var mapped, unresolved, versions int
+	err := pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM unlock_records WHERE chapter_id='original' AND identity_evidence IS NOT NULL),
+		(SELECT count(*) FROM unlock_records WHERE chapter_id IS NULL AND chapter_index=1),
+		(SELECT count(*) FROM reader_schema_migrations WHERE version=$1)`, RequiredSchemaVersion).
+		Scan(&mapped, &unresolved, &versions)
+	wantMapped := 0
+	if track == "on" {
+		wantMapped = 1
+	}
+	if err != nil || mapped != wantMapped || unresolved != 1 || versions != 1 {
+		t.Fatalf("migration evidence: resolved=%d unresolved=%d versions=%d error=%v", mapped, unresolved, versions, err)
+	}
+
+	blocker, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer blocker.Rollback(ctx)
+	if _, err := blocker.Exec(ctx, "LOCK TABLE transactions IN ACCESS EXCLUSIVE MODE"); err != nil {
+		t.Fatal(err)
+	}
+	restartCtx, stop := context.WithTimeout(ctx, 500*time.Millisecond)
+	defer stop()
+	if err := autoMigrate(restartCtx, pool); err != nil {
+		t.Fatalf("same-version migration tried to lock a business table: %v", err)
+	}
+	var title string
+	if err := pool.QueryRow(restartCtx, "SELECT title FROM novels WHERE id=1").Scan(&title); err != nil || title != "Book" {
+		t.Fatalf("reader query blocked: %q %v", title, err)
+	}
+}

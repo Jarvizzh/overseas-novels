@@ -117,26 +117,18 @@ cd backend
 docker-compose up -d
 ```
 
-### 2. 数据库迁移与初始种子注入
-如果需要干净的数据库数据重置，运行以下命令（直接通过管道输入 `psql` Stdin 避免 volume 缓存不一致）：
+### 2. 数据库迁移与初始数据
+
+在启动两个 API 服务前，用 CMS 配置执行一次迁移。
+
 ```bash
-docker exec -i novel_postgres psql -U postgres -d novel_db < db/schema.sql
-docker exec -i novel_postgres psql -U postgres -d novel_db < db/seed.sql
+cd cms-backend
+go run ./cmd/server -migrate
 ```
 
 ### 3. 运行 Go 后端服务
 
-#### 运行读者端服务 (端口 8080)
-```bash
-cd backend
-go run cmd/server/main.go
-```
-
-#### 运行 CMS 管理端服务 (端口 8081)
-```bash
-cd cms-backend
-go run main.go
-```
+分别在 `reader-backend` 与 `cms-backend` 运行 `go run ./cmd/server`。默认端口分别为 8080 和 8081。
 
 ### 4. 运行前端前端服务
 

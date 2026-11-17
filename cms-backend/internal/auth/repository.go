@@ -94,7 +94,7 @@ func (r *dbAdminRepository) ListAdmins(ctx context.Context) ([]Admin, error) {
 		}
 		admins = append(admins, a)
 	}
-	return admins, nil
+	return admins, rows.Err()
 }
 
 func (r *dbAdminRepository) UpdateAdmin(ctx context.Context, id, nickname, role, passwordHash string) error {

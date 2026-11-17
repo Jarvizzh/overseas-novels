@@ -14,15 +14,22 @@ var RDB *redis.Client
 
 func buildRedisOptions(raw string) *redis.Options {
 	trimmed := strings.TrimSpace(raw)
+	options := &redis.Options{Addr: trimmed}
 	if strings.Contains(trimmed, "://") {
-		if opt, err := redis.ParseURL(trimmed); err == nil && opt.Addr != "" {
-			return opt
+		if parsed, err := redis.ParseURL(trimmed); err == nil && parsed.Addr != "" {
+			options = parsed
 		}
 	}
-	return &redis.Options{
-		Addr: trimmed,
-		DB:   0,
-	}
+	options.ContextTimeoutEnabled = true
+	options.PoolSize = 32
+	options.MaxActiveConns = 32
+	options.DialTimeout = 150 * time.Millisecond
+	options.ReadTimeout = 120 * time.Millisecond
+	options.WriteTimeout = 120 * time.Millisecond
+	options.PoolTimeout = 100 * time.Millisecond
+	options.MaxRetries = -1
+	options.DialerRetries = 1
+	return options
 }
 
 func InitRedis() {

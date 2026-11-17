@@ -64,7 +64,7 @@ func (r *dbUserRepository) ListUsers(ctx context.Context, selectQuery string, ar
 		}
 		users = append(users, u)
 	}
-	return users, nil
+	return users, rows.Err()
 }
 
 func (r *dbUserRepository) GetUserBaseProfile(ctx context.Context, userID int64) (*User, error) {
@@ -173,7 +173,7 @@ func (r *dbUserRepository) GetBookshelfItems(ctx context.Context, userID int64) 
 		}
 		bookshelf = append(bookshelf, bi)
 	}
-	return bookshelf, nil
+	return bookshelf, rows.Err()
 }
 
 func (r *dbUserRepository) GetUserSubscriptions(ctx context.Context, userID int64) ([]UserSubscriptionItem, error) {
@@ -217,7 +217,7 @@ func (r *dbUserRepository) GetUserSubscriptions(ctx context.Context, userID int6
 		}
 		subs = append(subs, item)
 	}
-	return subs, nil
+	return subs, rows.Err()
 }
 
 func (r *dbUserRepository) UpdateUserStatusTx(ctx context.Context, tx pgx.Tx, userID int64, status int16) (int64, error) {

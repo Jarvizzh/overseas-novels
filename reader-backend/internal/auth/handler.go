@@ -113,9 +113,9 @@ func (h *AuthHandler) GuestLogin(c *gin.Context) {
 }
 
 type RegisterRequest struct {
-	Email    string `json:"email" binding:"required,email,max=255"`
+	Email    string `json:"email"`
 	Password string `json:"password" binding:"required,min=6,max=72"`
-	Nickname string `json:"nickname" binding:"max=100"`
+	Nickname string `json:"nickname"`
 }
 
 func (h *AuthHandler) Register(c *gin.Context) {
@@ -143,6 +143,10 @@ func (h *AuthHandler) Register(c *gin.Context) {
 
 	user, token, err := h.service.Register(ctx, req.Email, req.Password, req.Nickname, device, ipAddress, utmSource, utmCampaign, fbp, fbc, pixelID, userAgent, sourceURL, country)
 	if err != nil {
+		if errors.Is(err, ErrInvalidNickname) || errors.Is(err, ErrInvalidEmail) {
+			httpx.Fail(c, http.StatusBadRequest, "invalid_account_fields", err.Error(), nil)
+			return
+		}
 		if errors.Is(err, ErrInvalidPassword) {
 			httpx.Fail(c, 400, "invalid_password", ErrInvalidPassword.Error(), nil)
 			return
@@ -235,9 +239,9 @@ func (h *AuthHandler) GetProfile(c *gin.Context) {
 }
 
 type BindEmailRequest struct {
-	Email    string `json:"email" binding:"required,email,max=255"`
+	Email    string `json:"email"`
 	Password string `json:"password" binding:"required,min=6,max=72"`
-	Nickname string `json:"nickname" binding:"max=100"`
+	Nickname string `json:"nickname"`
 }
 
 func (h *AuthHandler) BindEmail(c *gin.Context) {
@@ -265,6 +269,10 @@ func (h *AuthHandler) BindEmail(c *gin.Context) {
 	ctx := promotionContext(c.Request.Context(), c.GetHeader("X-Promo-ID"))
 	user, token, err := h.service.BindEmail(ctx, userID, req.Email, req.Password, req.Nickname)
 	if err != nil {
+		if errors.Is(err, ErrInvalidNickname) || errors.Is(err, ErrInvalidEmail) {
+			httpx.Fail(c, http.StatusBadRequest, "invalid_account_fields", err.Error(), nil)
+			return
+		}
 		if errors.Is(err, ErrInvalidPassword) {
 			httpx.Fail(c, 400, "invalid_password", ErrInvalidPassword.Error(), nil)
 			return

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useRef, useCallback } from 'react';
 import { ChevronLeft, ChevronRight, List, Lock, BookOpen } from 'lucide-react';
 import { useToast } from '../context/toastStore';
 import { api, ApiError } from '../utils/api';
@@ -28,9 +28,9 @@ interface ReaderProps {
   };
   onSaveProgress: (bookId: number, chapterIndex: number, scrollOffsetPercentage: number, paragraphIndex?: number) => void;
   unlockedBookChapters: string[];
-  onMarkChapterUnlocked: (bookId: number, chapterIndex: number) => void;
-  onUnmarkChapterUnlocked: (bookId: number, chapterIndex: number) => void;
-  onUnlockChapter: (bookId: number, chapterIndex: number, price: number) => Promise<boolean>;
+  onMarkChapterUnlocked: (chapterId: string) => void;
+  onUnmarkChapterUnlocked: (chapterId: string) => void;
+  onUnlockChapter: (bookId: number, chapterIndex: number, price: number, chapterId: string, version: number) => Promise<boolean>;
   userCoins: number;
 }
 
@@ -84,6 +84,8 @@ export const Reader: React.FC<ReaderProps> = ({
   const [chapterDetail, setChapterDetail] = useState<Chapter | null>(null);
   const [chapterAccessType, setChapterAccessType] = useState<'free' | 'chapter' | 'pass' | null>(null);
   const [isLocked, setIsLocked] = useState<boolean>(false);
+  const [chapterVersion, setChapterVersion] = useState(0);
+  const [purchaseNeedsReview, setPurchaseNeedsReview] = useState(false);
   const [chapterPrice, setChapterPrice] = useState<number>(50);
   const [loading, setLoading] = useState(true);
   const [novelError, setNovelError] = useState(false);
@@ -91,6 +93,9 @@ export const Reader: React.FC<ReaderProps> = ({
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const isTransitioning = useRef(false);
+  const restoreScroll = useRef<{ index: number; offset: number } | null>(null);
+  const pendingScroll = useRef<{ index: number; offset: number } | null>(null);
+  const scrollTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const loadSeqRef = useRef(0);
   const currentActiveRef = useRef({ novelId, chapterIndex: initialChapterIndex });
 
@@ -221,23 +226,28 @@ export const Reader: React.FC<ReaderProps> = ({
       const uid = userIdRef.current;
       const knownChapter = chaptersRef.current.find((c) => c.novel_id === nId && c.chapter_index === cIdx);
       const isFreeChapter = knownChapter ? !knownChapter.is_paid : false;
-      const isLocallyUnlocked = unlockedBookChaptersRef.current.includes(`${nId}-${cIdx}`);
-      const cached = await readerCache.getCachedChapter(uid, nId, cIdx);
+      const isLocallyUnlocked = knownChapter && unlockedBookChaptersRef.current.includes(knownChapter.id);
+      const candidate = await readerCache.getCachedChapter(uid, nId, cIdx);
+      const cached = candidate && knownChapter && candidate.chapter.id === knownChapter.id &&
+        candidate.content_version === knownChapter.content_version ? candidate : null;
 
       // Strategy 1 & 2: Free, VIP, or verified locally unlocked chapters -> Cache-first + SWR
       if (cached && !cached.locked && (cached.access_type === 'free' ? isFreeChapter : cached.access_type === 'chapter' && isLocallyUnlocked)) {
         api
-          .getChapterContent(nId, cIdx)
+          .getChapterContent(nId, cIdx, uid)
           .then(async (fresh) => {
             if (!fresh) return;
             if (fresh.locked) {
               // Access expired or revoked on server: purge stale IndexedDB cache & relock if still viewing
               await readerCache.removeCachedChapter(uid, nId, cIdx);
-              onUnmarkChapterUnlockedRef.current(nId, cIdx);
+              onUnmarkChapterUnlockedRef.current(fresh.chapter.id);
               if (currentActiveRef.current.novelId === nId && currentActiveRef.current.chapterIndex === cIdx) {
                 setChapterDetail(fresh.chapter);
                 setIsLocked(true);
                 setChapterPrice(fresh.price ?? 0);
+                setChapterVersion(fresh.content_version);
+                setPurchaseNeedsReview(Boolean(fresh.purchase_needs_review));
+                setChapterAccessType(null);
               }
             } else {
               await readerCache.setCachedChapter(uid, nId, cIdx, fresh);
@@ -249,17 +259,18 @@ export const Reader: React.FC<ReaderProps> = ({
 
       // Strategy 3: Network-first for unverified / paid chapters
       try {
-        const fresh = await api.getChapterContent(nId, cIdx);
+        const fresh = await api.getChapterContent(nId, cIdx, uid);
         if (fresh && !fresh.locked) {
           await readerCache.setCachedChapter(uid, nId, cIdx, fresh);
           if (fresh.access_type === 'chapter') {
-            onMarkChapterUnlockedRef.current(nId, cIdx);
+            onMarkChapterUnlockedRef.current(fresh.chapter.id);
           }
         } else if (fresh?.locked) {
           await readerCache.removeCachedChapter(uid, nId, cIdx);
         }
         return fresh;
       } catch (err) {
+        if (err instanceof ApiError && err.status < 500) throw err;
         if (
           cached &&
           !cached.locked &&
@@ -321,13 +332,47 @@ export const Reader: React.FC<ReaderProps> = ({
       novelId,
       currentChIndex,
       chapters.length,
-      (nId, idx) => api.getChapterContent(nId, idx)
+      (nId, idx) => api.getChapterContent(nId, idx, userId)
     );
   }, [authReady, userId, novelId, currentChIndex, chapters.length]);
+
+  const flushScroll = useCallback(() => {
+    if (scrollTimeoutRef.current !== null) clearTimeout(scrollTimeoutRef.current);
+    scrollTimeoutRef.current = null;
+    const progress = pendingScroll.current;
+    pendingScroll.current = null;
+    if (progress) onSaveProgressRef.current(novelId, progress.index, progress.offset);
+  }, [novelId]);
+
+  const invalidateChapterLoad = useCallback(() => { loadSeqRef.current++; }, []);
+
+  useEffect(() => {
+    const onVisibility = () => {
+      if (document.visibilityState === 'hidden') flushScroll();
+    };
+    window.addEventListener('pagehide', flushScroll);
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      window.removeEventListener('pagehide', flushScroll);
+      document.removeEventListener('visibilitychange', onVisibility);
+      flushScroll();
+      invalidateChapterLoad();
+    };
+  }, [flushScroll, invalidateChapterLoad]);
+
+  useLayoutEffect(() => {
+    const progress = restoreScroll.current;
+    const container = scrollRef.current;
+    if (loading || !progress || !container || progress.index !== currentChIndex) return;
+    container.scrollTop = progress.offset * Math.max(0, container.scrollHeight - container.clientHeight);
+    restoreScroll.current = null;
+    isTransitioning.current = false;
+  }, [chapterDetail, currentChIndex, loading, novel]);
 
   // 2. Load specified chapter with sequence guard against rapid clicks
   const loadChapter = useCallback(
     async (targetIdx: number, restoreProgress = false) => {
+      flushScroll();
       const seq = ++loadSeqRef.current;
       setLoading(true);
       setChapterAccessType(null);
@@ -338,27 +383,29 @@ export const Reader: React.FC<ReaderProps> = ({
         let res = await fetchChapterData(novelId, targetIdx);
         if (seq !== loadSeqRef.current) return;
 
-        if (res.locked && autoUnlockRef.current && userCoinsRef.current >= res.price) {
+        if (res.locked && !res.purchase_needs_review && autoUnlockRef.current && userCoinsRef.current >= res.price) {
           try {
-            const success = await onUnlockChapterRef.current(novelId, targetIdx, res.price);
+            const success = await onUnlockChapterRef.current(novelId, targetIdx, res.price, res.chapter.id, res.content_version);
             if (seq !== loadSeqRef.current) return;
             if (success) {
               showToast(`Unlocked ${res.chapter.title || `Chapter ${targetIdx + 1}`}`, 'success');
-              res = await api.getChapterContent(novelId, targetIdx);
+              res = await api.getChapterContent(novelId, targetIdx, userIdRef.current);
               if (seq !== loadSeqRef.current) return;
               if (!res.locked) {
                 await readerCache.setCachedChapter(userIdRef.current, novelId, targetIdx, res);
                 if (res.access_type === 'chapter') {
-                  onMarkChapterUnlockedRef.current(novelId, targetIdx);
+                  onMarkChapterUnlockedRef.current(res.chapter.id);
                 }
               }
             }
           } catch (unlockErr) {
             if (seq !== loadSeqRef.current) return;
-            if (unlockErr instanceof ApiError && unlockErr.status === 409) {
-              res = await api.getChapterContent(novelId, targetIdx);
+            if (unlockErr instanceof ApiError && (unlockErr.code === 'purchase_needs_review' || unlockErr.code === 'account_changed')) {
+              showToast(unlockErr.message, 'error');
+            } else if (unlockErr instanceof ApiError && unlockErr.status === 409) {
+              res = await api.getChapterContent(novelId, targetIdx, userIdRef.current);
               if (seq !== loadSeqRef.current) return;
-              showToast('Chapter price was updated. Please confirm before unlocking.', 'info');
+              showToast('Chapter or price changed. Please confirm before unlocking.', 'info');
             }
           }
         }
@@ -369,27 +416,14 @@ export const Reader: React.FC<ReaderProps> = ({
         setChapterPrice(res.price ?? 0);
         setChapterAccessType(res.access_type ?? null);
 
-        requestAnimationFrame(() => {
-          if (seq !== loadSeqRef.current) return;
-          const container = scrollRef.current;
-          if (container) {
-            if (restoreProgress) {
-              const savedProgress = readingProgressRef.current[novelId];
-              if (savedProgress && savedProgress.chapterIndex === targetIdx) {
-                const maxScroll = container.scrollHeight - container.clientHeight;
-                if (maxScroll > 0) {
-                  container.scrollTop = savedProgress.scrollOffsetPercentage * maxScroll;
-                }
-              } else {
-                container.scrollTop = 0;
-              }
-            } else {
-              container.scrollTop = 0;
-              onSaveProgressRef.current(novelId, targetIdx, 0);
-            }
-          }
-          isTransitioning.current = false;
-        });
+        setChapterVersion(res.content_version);
+        setPurchaseNeedsReview(Boolean(res.purchase_needs_review));
+        const saved = readingProgressRef.current[novelId];
+        restoreScroll.current = {
+          index: targetIdx,
+          offset: restoreProgress && saved?.chapterIndex === targetIdx ? saved.scrollOffsetPercentage : 0,
+        };
+        if (!restoreProgress && !res.locked) onSaveProgressRef.current(novelId, targetIdx, 0);
       } catch (err) {
         if (seq !== loadSeqRef.current) return;
         console.error('Failed to load chapter content:', err);
@@ -401,7 +435,7 @@ export const Reader: React.FC<ReaderProps> = ({
         }
       }
     },
-    [novelId, fetchChapterData, showToast]
+    [novelId, fetchChapterData, flushScroll, showToast]
   );
 
   const mountedNovelId = useRef<number | null>(null);
@@ -439,55 +473,43 @@ export const Reader: React.FC<ReaderProps> = ({
     [novelId, onSyncChapterUrl, loadChapter]
   );
 
-  const scrollTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  useEffect(() => {
-    return () => {
-      if (scrollTimeoutRef.current) clearTimeout(scrollTimeoutRef.current);
-    };
-  }, []);
-
   const handleScroll = () => {
     if (isTransitioning.current || isLocked || loading) return;
     const container = scrollRef.current;
     if (!container) return;
-
-    if (scrollTimeoutRef.current) {
-      clearTimeout(scrollTimeoutRef.current);
-    }
-
-    scrollTimeoutRef.current = setTimeout(() => {
-      const { scrollTop, scrollHeight, clientHeight } = container;
-      const maxScroll = scrollHeight - clientHeight;
-      if (maxScroll > 0) {
-        const percentage = Math.min(1, Math.max(0, scrollTop / maxScroll));
-        onSaveProgressRef.current(novelId, currentChIndex, percentage);
-      }
-    }, 200);
+    const maxScroll = container.scrollHeight - container.clientHeight;
+    if (maxScroll <= 0) return;
+    const offset = Math.min(1, Math.max(0, container.scrollTop / maxScroll));
+    pendingScroll.current = { index: currentChIndex, offset };
+    if (scrollTimeoutRef.current !== null) clearTimeout(scrollTimeoutRef.current);
+    scrollTimeoutRef.current = setTimeout(flushScroll, 200);
   };
 
   const [isUnlocking, setIsUnlocking] = useState(false);
 
   const handleUnlockNow = async () => {
-    if (isUnlocking) return;
+    if (isUnlocking || purchaseNeedsReview || !chapterDetail || !chapterVersion) return;
     const unlockSeq = loadSeqRef.current;
     setIsUnlocking(true);
     try {
       if (userCoins >= chapterPrice) {
-        const success = await onUnlockChapter(novelId, currentChIndex, chapterPrice);
+        const success = await onUnlockChapter(novelId, currentChIndex, chapterPrice, chapterDetail.id, chapterVersion);
         if (unlockSeq !== loadSeqRef.current) return;
         if (success) {
           showToast('Chapter unlocked!', 'success');
-          const res = await api.getChapterContent(novelId, currentChIndex);
+          const res = await api.getChapterContent(novelId, currentChIndex, userId);
           if (unlockSeq !== loadSeqRef.current) return;
           if (!res.locked) {
             await readerCache.setCachedChapter(userId, novelId, currentChIndex, res);
             if (res.access_type === 'chapter') {
-              onMarkChapterUnlocked(novelId, currentChIndex);
+              onMarkChapterUnlocked(res.chapter.id);
             }
           }
           setChapterDetail(res.chapter);
           setIsLocked(res.locked);
           setChapterPrice(res.price ?? chapterPrice);
+          setChapterVersion(res.content_version);
+          setPurchaseNeedsReview(Boolean(res.purchase_needs_review));
           setChapterAccessType(res.access_type ?? null);
         }
       } else {
@@ -495,14 +517,18 @@ export const Reader: React.FC<ReaderProps> = ({
       }
     } catch (err) {
       if (unlockSeq !== loadSeqRef.current) return;
-      if (err instanceof ApiError && err.status === 409) {
-        showToast('Chapter price updated. Refreshing price...', 'info');
-        const refreshed = await api.getChapterContent(novelId, currentChIndex).catch(() => null);
+      if (err instanceof ApiError && (err.code === 'purchase_needs_review' || err.code === 'account_changed')) {
+        showToast(err.message, 'error');
+      } else if (err instanceof ApiError && err.status === 409) {
+        showToast('Chapter or price changed. Refreshing chapter...', 'info');
+        const refreshed = await api.getChapterContent(novelId, currentChIndex, userId).catch(() => null);
         if (unlockSeq !== loadSeqRef.current) return;
         if (refreshed) {
           setChapterDetail(refreshed.chapter);
           setIsLocked(refreshed.locked);
           setChapterPrice(refreshed.price ?? chapterPrice);
+          setChapterVersion(refreshed.content_version);
+          setPurchaseNeedsReview(Boolean(refreshed.purchase_needs_review));
           setChapterAccessType(refreshed.access_type ?? null);
         }
       } else if (err instanceof ApiError && err.status === 402) {
@@ -608,7 +634,7 @@ export const Reader: React.FC<ReaderProps> = ({
             const isCurrent = chIdx === currentChIndex;
             const isChPaid = ch.is_paid !== undefined ? ch.is_paid : chIdx >= 2;
             const hasPassAccess = isVip || chapterAccessType === 'pass' || (isChPaid && ch.price === 0);
-            const isChLocked = !hasPassAccess && isChPaid && !unlockedBookChapters.includes(`${novelId}-${chIdx}`);
+            const isChLocked = !hasPassAccess && isChPaid && !unlockedBookChapters.includes(ch.id);
             return (
               <button
                 type="button"
@@ -689,95 +715,101 @@ export const Reader: React.FC<ReaderProps> = ({
                   <Lock size={20} strokeWidth={1.8} aria-hidden="true" />
                 </div>
                 <h2 style={{ fontFamily: 'var(--font-display)', fontSize: '1.1875rem', fontWeight: 600, color: 'var(--reader-text)' }}>
-                  Unlock to Continue Reading
+                  {purchaseNeedsReview ? 'Earlier purchase needs review' : 'Unlock to Continue Reading'}
                 </h2>
                 <p style={{ fontSize: '0.8125rem', color: 'var(--reader-muted)' }}>
                   Full chapter length: {(chapterDetail?.word_count || 0).toLocaleString()} words
                 </p>
 
-                <div
-                  style={{
-                    width: '100%',
-                    maxWidth: '300px',
-                    borderTop: '1px solid var(--reader-border)',
-                    paddingTop: '12px',
-                    display: 'flex',
-                    flexDirection: 'column',
-                    gap: '8px',
-                    fontSize: '0.8125rem',
-                  }}
-                >
-                  <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                    <span style={{ color: 'var(--reader-muted)' }}>Chapter Price</span>
-                    <span className="tabular-nums" style={{ fontWeight: 600, color: 'var(--reader-text)', display: 'inline-flex', alignItems: 'center', gap: '5px' }}>
-                      <GoldCoin size={14} />
-                      <span>{chapterPrice} Coins</span>
-                    </span>
-                  </div>
-                  <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                    <span style={{ color: 'var(--reader-muted)' }}>Your Balance</span>
-                    <span
-                      className="tabular-nums"
+                {purchaseNeedsReview ? (
+                  <p style={{ fontSize: '0.8125rem', color: 'var(--reader-muted)' }}>
+                    Contact support to verify your earlier purchase before buying another chapter in this book.
+                  </p>
+                ) : (
+                  <>
+                    <div
                       style={{
-                        fontWeight: 600,
-                        color: userCoins >= chapterPrice ? '#16a34a' : '#dc2626',
+                        width: '100%',
+                        maxWidth: '300px',
+                        borderTop: '1px solid var(--reader-border)',
+                        paddingTop: '12px',
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: '8px',
+                        fontSize: '0.8125rem',
                       }}
                     >
-                      {userCoins.toLocaleString()} Coins
-                    </span>
-                  </div>
-                </div>
+                      <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                        <span style={{ color: 'var(--reader-muted)' }}>Chapter Price</span>
+                        <span className="tabular-nums" style={{ fontWeight: 600, color: 'var(--reader-text)', display: 'inline-flex', alignItems: 'center', gap: '5px' }}>
+                          <GoldCoin size={14} />
+                          <span>{chapterPrice} Coins</span>
+                        </span>
+                      </div>
+                      <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                        <span style={{ color: 'var(--reader-muted)' }}>Your Balance</span>
+                        <span
+                          className="tabular-nums"
+                          style={{
+                            fontWeight: 600,
+                            color: userCoins >= chapterPrice ? '#16a34a' : '#dc2626',
+                          }}
+                        >
+                          {userCoins.toLocaleString()} Coins
+                        </span>
+                      </div>
+                    </div>
 
-                <label
-                  htmlFor="auto-unlock-checkbox"
-                  style={{
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    gap: '8px',
-                    fontSize: '0.8125rem',
-                    color: 'var(--reader-muted)',
-                    cursor: 'pointer',
-                    marginTop: '2px',
-                  }}
-                >
-                  <input
-                    type="checkbox"
-                    id="auto-unlock-checkbox"
-                    checked={autoUnlock}
-                    onChange={(e) => setAutoUnlock(e.target.checked)}
-                    style={{ width: '16px', height: '16px', cursor: 'pointer' }}
-                  />
-                  <span>Auto-unlock next chapters</span>
-                </label>
+                    <label
+                      htmlFor="auto-unlock-checkbox"
+                      style={{
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: '8px',
+                        fontSize: '0.8125rem',
+                        color: 'var(--reader-muted)',
+                        cursor: 'pointer',
+                        marginTop: '2px',
+                      }}
+                    >
+                      <input
+                        type="checkbox"
+                        id="auto-unlock-checkbox"
+                        checked={autoUnlock}
+                        onChange={(e) => setAutoUnlock(e.target.checked)}
+                        style={{ width: '16px', height: '16px', cursor: 'pointer' }}
+                      />
+                      <span>Auto-unlock next chapters</span>
+                    </label>
 
-                <button
-                  type="button"
-                  onClick={handleUnlockNow}
-                  disabled={isUnlocking}
-                  style={{
-                    width: '100%',
-                    maxWidth: '300px',
-                    minHeight: '46px',
-                    borderRadius: '999px',
-                    border: 'none',
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    gap: '8px',
-                    fontSize: '0.9375rem',
-                    fontWeight: 600,
-                    cursor: isUnlocking ? 'not-allowed' : 'pointer',
-                    marginTop: '4px',
-                    backgroundColor: 'var(--reader-cta-bg)',
-                    color: 'var(--reader-cta-text)',
-                  }}
-                >
-                  {isUnlocking ? (
-                    <span>Unlocking...</span>
-                  ) : userCoins >= chapterPrice ? (
-                    <>
-                      <span>Unlock Chapter</span>
-                      <span className="tabular-nums" style={{ opacity: 0.85 }}>· {chapterPrice} Coins</span>
+                    <button
+                      type="button"
+                      onClick={handleUnlockNow}
+                      disabled={isUnlocking}
+                      style={{
+                        width: '100%',
+                        maxWidth: '300px',
+                        minHeight: '46px',
+                        borderRadius: '999px',
+                        border: 'none',
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        gap: '8px',
+                        fontSize: '0.9375rem',
+                        fontWeight: 600,
+                        cursor: isUnlocking ? 'not-allowed' : 'pointer',
+                        marginTop: '4px',
+                        backgroundColor: 'var(--reader-cta-bg)',
+                        color: 'var(--reader-cta-text)',
+                      }}
+                    >
+                      {isUnlocking ? (
+                        <span>Unlocking...</span>
+                      ) : userCoins >= chapterPrice ? (
+                        <>
+                          <span>Unlock Chapter</span>
+                          <span className="tabular-nums" style={{ opacity: 0.85 }}>· {chapterPrice} Coins</span>
                     </>
                   ) : (
                     <>
@@ -786,6 +818,8 @@ export const Reader: React.FC<ReaderProps> = ({
                     </>
                   )}
                 </button>
+                  </>
+                )}
               </div>
             )}
 

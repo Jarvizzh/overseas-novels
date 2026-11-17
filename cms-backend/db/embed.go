@@ -11,3 +11,8 @@ var SchemaSQL string
 //
 //go:embed seed.sql
 var SeedSQL string
+
+// ChapterPublicationSQL upgrades the immutable 2026111701 baseline.
+//
+//go:embed migrations/2026111702.sql
+var ChapterPublicationSQL string

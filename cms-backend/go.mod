@@ -3,6 +3,7 @@ module star-novel-cms
 go 1.25.0
 
 require (
+	golang.org/x/sync v0.21.0
 	github.com/aliyun/aliyun-oss-go-sdk v3.0.2+incompatible // indirect
 	github.com/bytedance/gopkg v0.1.3 // indirect
 	github.com/bytedance/sonic v1.15.0 // indirect
@@ -42,7 +43,6 @@ require (
 	golang.org/x/crypto v0.53.0 // indirect
 	golang.org/x/image v0.16.0 // indirect
 	golang.org/x/net v0.55.0 // indirect
-	golang.org/x/sync v0.21.0 // indirect
 	golang.org/x/sys v0.46.0 // indirect
 	golang.org/x/text v0.38.0 // indirect
 	golang.org/x/time v0.15.0 // indirect

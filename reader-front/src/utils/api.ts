@@ -2,10 +2,12 @@ const BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8080/api
 
 export class ApiError extends Error {
   status: number;
-  constructor(message: string, status: number) {
+  readonly code?: string;
+  constructor(message: string, status: number, code?: string) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
+    this.code = code;
   }
 }
 
@@ -61,8 +63,8 @@ function buildHeaders(options: RequestInit, tokenOverride?: string | null): Head
 
   if (fbp) headers.set('X-FB-FBP', fbp);
   if (fbc) headers.set('X-FB-FBC', fbc);
-  if (utmSource) headers.set('X-UTM-Source', utmSource);
-  if (utmCampaign) headers.set('X-UTM-Campaign', utmCampaign);
+  if (utmSource && /^[\x20-\x7e]{1,100}$/.test(utmSource)) headers.set('X-UTM-Source', utmSource);
+  if (utmCampaign && /^[\x20-\x7e]{1,100}$/.test(utmCampaign)) headers.set('X-UTM-Campaign', utmCampaign);
   if (pixelId) headers.set('X-FB-Pixel-ID', pixelId);
   if (templateId) headers.set('X-Recharge-Template-ID', templateId);
   if (promoId) headers.set('X-Promo-ID', promoId);
@@ -71,12 +73,13 @@ function buildHeaders(options: RequestInit, tokenOverride?: string | null): Head
   return headers;
 }
 
-async function request<T>(endpoint: string, options: RequestInit = {}, retried = false): Promise<T> {
-  const headers = buildHeaders(options);
+async function request<T>(endpoint: string, options: RequestInit & { authToken?: string } = {}, retried = false): Promise<T> {
+  const { authToken, ...init } = options;
+  const headers = buildHeaders(init, authToken);
   const response = await fetch(`${BASE_URL}${endpoint}`, {
-    ...options,
+    ...init,
     headers,
-    credentials: 'include',
+    credentials: authToken ? 'omit' : 'include',
   });
 
   const isAuthCredentialEndpoint =
@@ -85,16 +88,19 @@ async function request<T>(endpoint: string, options: RequestInit = {}, retried =
     endpoint.startsWith('/auth/guest') ||
     endpoint.startsWith('/auth/refresh');
 
-  if (response.status === 401 && !isAuthCredentialEndpoint && !retried) {
-    const newToken = await runSingleFlightRefresh();
-    if (newToken) {
+  if (response.status === 401 && !isAuthCredentialEndpoint && !retried &&
+      (!authToken || authToken === localStorage.getItem('auth-token'))) {
+    if (authToken) {
+      // Scoped work waits for the app to verify the refreshed session's owner.
+      void runSingleFlightRefresh().catch(() => {});
+    } else if (await runSingleFlightRefresh()) {
       return request<T>(endpoint, options, true);
     }
   }
 
   if (!response.ok) {
     const errorBody = await response.json().catch(() => ({}));
-    throw new ApiError(errorBody.error || `HTTP error! Status: ${response.status}`, response.status);
+    throw new ApiError(errorBody.error || `HTTP error! Status: ${response.status}`, response.status, errorBody.code);
   }
 
   if (response.status === 204) {
@@ -129,6 +135,7 @@ export interface Novel {
 }
 
 export interface Chapter {
+  content_version?: number;
   id: string;
   novel_id: number;
   chapter_index: number;
@@ -140,12 +147,23 @@ export interface Chapter {
   created_at: string;
 }
 
+export interface ProgressUpdate {
+  novel_id: number;
+  chapter_index: number;
+  scroll_offset_percentage: number;
+  updated_at: string;
+  version: string;
+}
+
+export type SavedProgress = Omit<ProgressUpdate, 'version'> & { version?: string };
+
 export interface BookshelfItem {
   user_id: number;
   novel_id: number;
   chapter_index: number;
   scroll_offset_percentage: number;
   in_shelf: boolean;
+  progress_version: string;
   updated_at: string;
   novel: Novel;
 }
@@ -175,6 +193,8 @@ export interface TransactionPage {
 }
 
 export interface ChapterContentResponse {
+  content_version: number;
+  purchase_needs_review?: boolean;
   chapter: Chapter;
   locked: boolean;
   price: number;
@@ -258,8 +278,8 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
-  getProfile: () =>
-    request<User>('/auth/profile'),
+  getProfile: (signal?: AbortSignal, authToken?: string) =>
+    request<User>('/auth/profile', { signal, authToken }),
 
   // === NOVELS ===
   getNovels: (params: { genre?: string; sort?: 'popular' | 'latest'; page?: number; limit?: number } = {}) => {
@@ -281,12 +301,15 @@ export const api = {
   getChaptersList: (id: number) =>
     request<Chapter[]>(`/novels/${id}/chapters`),
 
-  getChapterContent: (id: number, index: number) =>
-    request<ChapterContentResponse>(`/novels/${id}/chapters/${index}`),
+  getChapterContent: (id: number, index: number, userId: number) =>
+    request<ChapterContentResponse>(`/novels/${id}/chapters/${index}?user_id=${userId}`),
 
   // === SHELF ===
   getShelf: () =>
     request<BookshelfItem[]>('/shelf'),
+
+  getProgress: (novelId: number, userId: number, signal?: AbortSignal, authToken?: string) =>
+    request<SavedProgress | null>(`/shelf/progress/${novelId}?user_id=${userId}`, { signal, authToken, cache: 'no-store' }),
 
   addToShelf: (novelId: number) =>
     request<{ message: string }>('/shelf/add', {
@@ -303,8 +326,8 @@ export const api = {
     ),
 
   syncProgress: (
-    updates: Array<{ novel_id: number; chapter_index: number; scroll_offset_percentage: number; updated_at: string }>,
-    options: { keepalive?: boolean } = {},
+    updates: SavedProgress[],
+    options: { userId: number; keepalive?: boolean; signal?: AbortSignal; authToken?: string },
   ) =>
     sendShelfBatches(
       updates,
@@ -312,7 +335,9 @@ export const api = {
         request<{ message: string }>('/shelf/sync', {
           method: 'POST',
           keepalive: options.keepalive,
-          body: JSON.stringify({ progress_updates: batch }),
+          signal: options.signal,
+          authToken: options.authToken,
+          body: JSON.stringify({ user_id: options.userId, progress_updates: batch }),
         }),
       options.keepalive,
     ),
@@ -327,10 +352,11 @@ export const api = {
     return request<TransactionPage>(`/wallet/history/cursor?${params}`, { signal });
   },
 
-  unlockChapter: (novelId: number, chapterIndex: number, price: number) =>
+  unlockChapter: (novelId: number, chapterIndex: number, price: number, chapterId: string, contentVersion: number, userId: number, authToken: string) =>
     request<{ message: string }>('/wallet/unlock', {
       method: 'POST',
-      body: JSON.stringify({ novel_id: novelId, chapter_index: chapterIndex, price }),
+      authToken,
+      body: JSON.stringify({ novel_id: novelId, chapter_index: chapterIndex, price, chapter_id: chapterId, content_version: contentVersion, user_id: userId }),
     }),
 
   initiateCheckout: (amountCents: number, coinsAmount: number) =>

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"log"
 	"net/http"
 	"os"
@@ -29,6 +30,8 @@ import (
 var buildVersion = "dev"
 
 func main() {
+	migrate := flag.Bool("migrate", false, "apply pending database migrations and exit")
+	flag.Parse()
 	// 1. Load config
 	config.LoadConfig()
 
@@ -38,8 +41,11 @@ func main() {
 	}
 
 	// 3. Connect to DB and Redis
-	db.InitDB()
+	db.InitDB(*migrate)
 	defer db.CloseDB()
+	if *migrate {
+		return
+	}
 
 	redis.InitRedis()
 	defer redis.CloseRedis()
@@ -98,6 +104,19 @@ func main() {
 			log.Fatalf("Failed to initialize content storage: %v", err)
 		}
 		log.Printf("CMS Content Storage initialized with driver: %s", contentStorage.StorageType())
+
+		if ossStorage, ok := contentStorage.(*storage.AliyunOSSStorage); ok {
+			cleanupCtx, stopCleanup := context.WithCancel(context.Background())
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				ossStorage.RunChapterCleanup(cleanupCtx, db.DB)
+			}()
+			defer func() {
+				stopCleanup()
+				<-done
+			}()
+		}
 
 		coverStore, err := storage.NewCoverOSSStore(config.AppConfig)
 		if err != nil {

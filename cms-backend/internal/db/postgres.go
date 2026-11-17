@@ -16,7 +16,7 @@ import (
 
 var DB *pgxpool.Pool
 
-func InitDB() {
+func InitDB(migrate bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 
@@ -42,14 +42,20 @@ func InitDB() {
 	log.Println("CMS Database connection pool initialized successfully")
 	DB = pool
 
-	// Execute safe, idempotent auto-migration (No DROP TABLE, CREATE IF NOT EXISTS only)
-	if err := autoMigrate(ctx, pool); err != nil {
+	check := CheckSchema
+	if migrate {
+		check = func(ctx context.Context) error { return autoMigrate(ctx, pool) }
+	}
+	if err := check(ctx); err != nil {
 		pool.Close()
-		log.Fatalf("Database migration failed: %v", err)
+		log.Fatalf("Database schema check failed: %v", err)
 	}
 }
 
-const RequiredSchemaVersion int64 = 2026111701
+const (
+	baselineSchemaVersion int64 = 2026111701
+	RequiredSchemaVersion int64 = 2026111702
+)
 
 func autoMigrate(ctx context.Context, pool *pgxpool.Pool) error {
 	tx, err := pool.Begin(ctx)
@@ -57,15 +63,21 @@ func autoMigrate(ctx context.Context, pool *pgxpool.Pool) error {
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, "SET LOCAL statement_timeout = '60s'"); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock(2026111701)"); err != nil {
 		return err
 	}
-	var ledger *string
-	if err := tx.QueryRow(ctx, "SELECT to_regclass('reader_schema_migrations')::text").Scan(&ledger); err != nil {
+	if _, err := tx.Exec(ctx, "SET LOCAL lock_timeout = '3s'"); err != nil {
 		return err
 	}
+	var ledger *string
+	if err := tx.QueryRow(ctx, "SELECT to_regclass(format('%I.reader_schema_migrations', current_schema()))::text").Scan(&ledger); err != nil {
+		return err
+	}
+	var version int64
 	if ledger != nil {
-		var version int64
 		if err := tx.QueryRow(ctx, "SELECT COALESCE(max(version),0) FROM reader_schema_migrations").Scan(&version); err != nil {
 			return err
 		}
@@ -74,6 +86,21 @@ func autoMigrate(ctx context.Context, pool *pgxpool.Pool) error {
 		}
 	}
 
+	if version == RequiredSchemaVersion {
+		return tx.Commit(ctx)
+	}
+	if version < baselineSchemaVersion {
+		if err := applyBaseline(ctx, tx); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec(ctx, dbassets.ChapterPublicationSQL); err != nil {
+		return fmt.Errorf("schema migration %d: %w", RequiredSchemaVersion, err)
+	}
+	return tx.Commit(ctx)
+}
+
+func applyBaseline(ctx context.Context, tx pgx.Tx) error {
 	log.Println("Running safe database auto-migration...")
 
 	// 1. Execute full schema DDL (Idempotent table and index creation)
@@ -88,7 +115,7 @@ func autoMigrate(ctx context.Context, pool *pgxpool.Pool) error {
 
 	// 2. Seed initial data if tables are empty (admin account, configs, domains, templates, novels)
 	var adminCount int
-	err = tx.QueryRow(ctx, "SELECT COUNT(*) FROM admins").Scan(&adminCount)
+	err := tx.QueryRow(ctx, "SELECT COUNT(*) FROM admins").Scan(&adminCount)
 	if err != nil {
 		return fmt.Errorf("read admins: %w", err)
 	}
@@ -121,7 +148,7 @@ func autoMigrate(ctx context.Context, pool *pgxpool.Pool) error {
 	if err := syncSequences(ctx, tx); err != nil {
 		return err
 	}
-	return tx.Commit(ctx)
+	return nil
 }
 
 type sequenceSpec struct {

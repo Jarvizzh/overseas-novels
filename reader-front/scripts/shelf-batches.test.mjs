@@ -58,9 +58,9 @@ test('exit progress schedules all bounded requests before awaiting responses', a
       scroll_offset_percentage: 0,
       updated_at: '2026-11-17T00:00:00Z',
     }));
-    const pending = api.syncProgress(updates, { keepalive: true });
+    const pending = api.syncProgress(updates, { userId: 7, keepalive: true });
     assert.equal(calls.length, 3);
-    assert.ok(calls.every((call) => call.keepalive));
+    assert.ok(calls.every((call) => call.keepalive && JSON.parse(call.body).user_id === 7));
     const batches = calls.map((call) => JSON.parse(call.body).progress_updates);
     assert.deepEqual(
       batches.map((batch) => batch.length),

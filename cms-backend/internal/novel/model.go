@@ -3,6 +3,7 @@ package novel
 import "time"
 
 type Novel struct {
+	ContentVersion               int64     `json:"content_version"`
 	ID                           int64     `json:"id"`
 	Title                        string    `json:"title"`
 	Author                       string    `json:"author"`
@@ -23,6 +24,8 @@ type Novel struct {
 }
 
 type Chapter struct {
+	ObjectKey    string    `json:"-"`
+	ContentHash  string    `json:"-"`
 	ID           string    `json:"id"`
 	NovelID      int64     `json:"novel_id"`
 	ChapterIndex int       `json:"chapter_index"`

@@ -4,10 +4,13 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -20,18 +23,22 @@ import (
 
 type fakeTx struct {
 	pgx.Tx
-	novelID          int64
-	stagedWordCount  *int
-	stagedChapters   map[int]*Chapter
-	stagedSettings   map[string]string
-	repo             *fakeNovelRepo
-	committed        bool
-	rolledBack       bool
+	novelID         int64
+	stagedNovel     *Novel
+	stagedWordCount *int
+	stagedChapters  map[int]*Chapter
+	stagedSettings  map[string]string
+	repo            *fakeNovelRepo
+	committed       bool
+	rolledBack      bool
 }
 
 func (t *fakeTx) Commit(context.Context) error {
 	t.committed = true
 	if t.repo != nil && t.novelID != 0 {
+		if t.stagedNovel != nil {
+			t.repo.novels[t.novelID] = t.stagedNovel
+		}
 		if t.stagedChapters != nil {
 			t.repo.chapters[t.novelID] = t.stagedChapters
 		}
@@ -57,19 +64,19 @@ func (t *fakeTx) Rollback(context.Context) error {
 }
 
 type fakeNovelRepo struct {
-	novels                map[int64]*Novel
-	chapters              map[int64]map[int]*Chapter
-	settings              map[string]string
-	promoLinks            map[int]*PromotionLink
-	lastListSelectQuery   string
-	lastListArgs          []interface{}
-	batchAllCalled        bool
-	batchCoinCostCalls    int
-	batchStartPayCalls    int
-	batchInheritedCalls   int
-	batchErr              error
-	nextID                int64
-	nextPromoID           int
+	novels              map[int64]*Novel
+	chapters            map[int64]map[int]*Chapter
+	settings            map[string]string
+	promoLinks          map[int]*PromotionLink
+	lastListSelectQuery string
+	lastListArgs        []interface{}
+	batchAllCalled      bool
+	batchCoinCostCalls  int
+	batchStartPayCalls  int
+	batchInheritedCalls int
+	batchErr            error
+	nextID              int64
+	nextPromoID         int
 }
 
 func newFakeNovelRepo() *fakeNovelRepo {
@@ -147,6 +154,23 @@ func (r *fakeNovelRepo) CreateNovel(_ context.Context, n *Novel) error {
 	n.UpdatedAt = now
 	copyN := *n
 	r.novels[n.ID] = &copyN
+	return nil
+}
+func (r *fakeNovelRepo) CreateNovelTx(_ context.Context, tx pgx.Tx, n *Novel) error {
+	ftx := tx.(*fakeTx)
+	n.ID = r.nextID
+	r.nextID++
+	if n.Genres == nil {
+		n.Genres = []string{}
+	}
+	now := time.Now().UTC()
+	if n.CreatedAt.IsZero() {
+		n.CreatedAt = now
+	}
+	n.UpdatedAt = now
+	copyN := *n
+	ftx.novelID = n.ID
+	ftx.stagedNovel = &copyN
 	return nil
 }
 func (r *fakeNovelRepo) UpdateNovel(_ context.Context, n *Novel) error {
@@ -240,7 +264,6 @@ func (r *fakeNovelRepo) GetChapter(_ context.Context, novelID int64, idx int) (*
 	}
 	return nil, nil
 }
-func (r *fakeNovelRepo) CreateChapter(context.Context, *Chapter) error { return nil }
 func (r *fakeNovelRepo) CreateChapterTx(_ context.Context, tx pgx.Tx, c *Chapter) error {
 	ftx := tx.(*fakeTx)
 	if ftx.novelID == 0 {
@@ -253,7 +276,6 @@ func (r *fakeNovelRepo) CreateChapterTx(_ context.Context, tx pgx.Tx, c *Chapter
 	ftx.stagedChapters[c.ChapterIndex] = &copyCh
 	return nil
 }
-func (r *fakeNovelRepo) UpdateChapter(context.Context, *Chapter) error { return nil }
 func (r *fakeNovelRepo) UpdateChapterTx(_ context.Context, tx pgx.Tx, c *Chapter) (int64, error) {
 	ftx := tx.(*fakeTx)
 	if ftx.novelID == 0 {
@@ -267,6 +289,7 @@ func (r *fakeNovelRepo) UpdateChapterTx(_ context.Context, tx pgx.Tx, c *Chapter
 		return 0, nil
 	}
 	existing.Title = c.Title
+	existing.ContentHash, existing.ObjectKey = c.ContentHash, c.ObjectKey
 	existing.Content = c.Content
 	existing.WordCount = c.WordCount
 	existing.IsPaid = c.IsPaid
@@ -286,11 +309,40 @@ func (r *fakeNovelRepo) SyncNovelWordCountTx(_ context.Context, tx pgx.Tx, novel
 	ftx.stagedWordCount = &sum
 	return nil
 }
-func (r *fakeNovelRepo) DeleteChaptersByNovelIDTx(_ context.Context, tx pgx.Tx, novelID int64) error {
+func (r *fakeNovelRepo) LockPublication(context.Context, pgx.Tx, int64, int64) error { return nil }
+func (r *fakeNovelRepo) StageChapterObjects(context.Context, []Chapter) error        { return nil }
+func (r *fakeNovelRepo) ListChapterIdentities(_ context.Context, novelID int64) ([]ChapterIdentity, error) {
+	var ids []ChapterIdentity
+	for index, chapter := range r.chapters[novelID] {
+		ids = append(ids, ChapterIdentity{ID: chapter.ID, Index: &index, Title: chapter.Title, Hash: chapter.ContentHash})
+	}
+	return ids, nil
+}
+func (r *fakeNovelRepo) ReplaceChaptersTx(ctx context.Context, tx pgx.Tx, novelID int64, chapters []Chapter, _ []ChapterIdentity, _ map[string]string) error {
 	ftx := tx.(*fakeTx)
 	ftx.novelID = novelID
 	ftx.stagedChapters = map[int]*Chapter{}
+	for _, chapter := range chapters {
+		if err := r.CreateChapterTx(ctx, tx, &chapter); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+func (r *fakeNovelRepo) GetSettingsTx(ctx context.Context, _ pgx.Tx) (map[string]string, error) {
+	return r.GetSettings(ctx)
+}
+func (r *fakeNovelRepo) LockSettings(context.Context, pgx.Tx) error { return nil }
+func (r *fakeNovelRepo) ApplyPricingSettingsTx(_ context.Context, _ pgx.Tx, _ int, explicit *int, reset bool, start int) error {
+	if explicit != nil || reset {
+		r.batchCoinCostCalls++
+	} else if start == 0 {
+		r.batchInheritedCalls++
+	}
+	if start > 0 {
+		r.batchStartPayCalls++
+	}
+	return r.batchErr
 }
 func (r *fakeNovelRepo) GetSettings(context.Context) (map[string]string, error) {
 	out := map[string]string{}
@@ -307,7 +359,7 @@ func (r *fakeNovelRepo) UpdateSettingTx(_ context.Context, tx pgx.Tx, key, val s
 	ftx.stagedSettings[key] = val
 	return nil
 }
-func (r *fakeNovelRepo) ListPromotionLinks(context.Context) ([]PromotionLink, error)  { return nil, nil }
+func (r *fakeNovelRepo) ListPromotionLinks(context.Context) ([]PromotionLink, error) { return nil, nil }
 func (r *fakeNovelRepo) CreatePromotionLink(_ context.Context, link *PromotionLink) (int, error) {
 	id := r.nextPromoID
 	r.nextPromoID++
@@ -325,9 +377,9 @@ func (r *fakeNovelRepo) UpdatePromotionLinkURL(_ context.Context, id int, genera
 func (r *fakeNovelRepo) UpdatePromotionLink(context.Context, int, string, int, string, string, string, *int, *int, *int, *int, *int, string) error {
 	return nil
 }
-func (r *fakeNovelRepo) DeletePromotionLink(context.Context, int) error           { return nil }
-func (r *fakeNovelRepo) ListFBPixels(context.Context) ([]FBPixel, error)          { return nil, nil }
-func (r *fakeNovelRepo) CreateFBPixel(context.Context, *FBPixel) (int, error)     { return 0, nil }
+func (r *fakeNovelRepo) DeletePromotionLink(context.Context, int) error       { return nil }
+func (r *fakeNovelRepo) ListFBPixels(context.Context) ([]FBPixel, error)      { return nil, nil }
+func (r *fakeNovelRepo) CreateFBPixel(context.Context, *FBPixel) (int, error) { return 0, nil }
 func (r *fakeNovelRepo) UpdateFBPixel(context.Context, int, string, string, string) error {
 	return nil
 }
@@ -497,6 +549,8 @@ func TestParseChaptersFromZIP_ZeroBasedSorted(t *testing.T) {
 }
 
 type fakeOSSContentStorage struct {
+	mu                   sync.Mutex
+	revisions            map[string]string
 	batchPutErr          error
 	putErr               error
 	deletedFromCallCount int
@@ -517,8 +571,8 @@ func (s *fakeOSSContentStorage) PutContent(_ context.Context, _ int64, idx int, 
 func (s *fakeOSSContentStorage) GetContent(_ context.Context, _ int64, idx int) (string, error) {
 	return s.stored[idx], nil
 }
-func (s *fakeOSSContentStorage) DeleteContent(context.Context, int64, int) error      { return nil }
-func (s *fakeOSSContentStorage) DeleteNovelContent(context.Context, int64) error      { return nil }
+func (s *fakeOSSContentStorage) DeleteContent(context.Context, int64, int) error { return nil }
+func (s *fakeOSSContentStorage) DeleteNovelContent(context.Context, int64) error { return nil }
 func (s *fakeOSSContentStorage) DeleteNovelContentFrom(_ context.Context, _ int64, idx int) error {
 	s.deletedFromCallCount++
 	s.lastDeletedFromIdx = idx
@@ -535,6 +589,24 @@ func (s *fakeOSSContentStorage) BatchPutContent(_ context.Context, _ int64, item
 		s.stored[it.ChapterIndex] = it.Content
 	}
 	return nil
+}
+func (s *fakeOSSContentStorage) WriteChapterRevision(_ context.Context, key, _ string, content string) error {
+	if err := errors.Join(s.batchPutErr, s.putErr); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.revisions == nil {
+		s.revisions = make(map[string]string)
+	}
+	s.revisions[key] = content
+	return nil
+}
+func (s *fakeOSSContentStorage) ReadLegacyChapter(ctx context.Context, id int64, idx int) (string, error) {
+	return s.GetContent(ctx, id, idx)
+}
+func (s *fakeOSSContentStorage) ReadChapterRevision(_ context.Context, key, _ string) (string, error) {
+	return s.revisions[key], nil
 }
 func (s *fakeOSSContentStorage) StorageType() string { return "oss" }
 
@@ -571,7 +643,7 @@ func TestPublishLifecycleSoftDeleteAndListFilter(t *testing.T) {
 	}
 
 	// Adding chapter updates novel word_count and allows publishing
-	ch, err := svc.CreateChapter(ctx, created.ID, 0, "Chapter 1", "Hello world", false, 0)
+	ch, err := svc.CreateChapter(ctx, created.ID, 0, "Chapter 1", "Hello world")
 	if err != nil || ch.WordCount != 10 {
 		t.Fatalf("CreateChapter failed: ch=%+v err=%v", ch, err)
 	}
@@ -616,7 +688,7 @@ func TestBulkImportOSSAtomicRollbackAndSettingsPropagation(t *testing.T) {
 	ctx := context.Background()
 
 	// OSS failure must roll back DB delete/insert cleanly
-	_, err := svc.BulkImportChapters(ctx, 10000001, []byte("Chapter 1: New\nNew body\nChapter 2: Two\nTwo body\n"), "single_txt", "")
+	_, err := svc.BulkImportChapters(ctx, 10000001, []byte("Chapter 1: New\nNew body\nChapter 2: Two\nTwo body\n"), "single_txt", "", ChapterImportMapping{Retire: []string{"old"}})
 	if err == nil {
 		t.Fatalf("expected error when OSS upload fails")
 	}
@@ -626,12 +698,12 @@ func TestBulkImportOSSAtomicRollbackAndSettingsPropagation(t *testing.T) {
 
 	// Succeeding OSS upload commits and cleans leftover chapters >= len(parsedChapters)
 	ossStore.batchPutErr = nil
-	res, err := svc.BulkImportChapters(ctx, 10000001, []byte("Chapter 1: New\nNew body\nChapter 2: Two\nTwo body\n"), "single_txt", "")
+	res, err := svc.BulkImportChapters(ctx, 10000001, []byte("Chapter 1: New\nNew body\nChapter 2: Two\nTwo body\n"), "single_txt", "", ChapterImportMapping{Retire: []string{"old"}})
 	if err != nil || res.ChaptersCount != 2 {
 		t.Fatalf("BulkImportChapters failed: res=%+v err=%v", res, err)
 	}
-	if ossStore.deletedFromCallCount != 1 || ossStore.lastDeletedFromIdx != 2 {
-		t.Fatalf("expected DeleteNovelContentFrom(novelID, 2), got count=%d idx=%d", ossStore.deletedFromCallCount, ossStore.lastDeletedFromIdx)
+	if ossStore.deletedFromCallCount != 0 || repo.chapters[10000001][0].ObjectKey == "" {
+		t.Fatal("expected a committed immutable reference without synchronous object deletion")
 	}
 
 	// UpdateSettings with apply_to_all_novels=false updates inherited novels and propagates error
@@ -902,5 +974,184 @@ func TestListNovelsFiltersAndBatchPublishStatus(t *testing.T) {
 	}
 	if repo.novels[101].PublishStatus != "offline" || repo.novels[103].PublishStatus != "offline" {
 		t.Fatalf("expected 101 and 103 offline, got %q / %q", repo.novels[101].PublishStatus, repo.novels[103].PublishStatus)
+	}
+}
+
+func TestBatchImportNovelsEndpoint(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	config.AppConfig = &config.Config{JWTSecret: "unit-test-secret"}
+
+	repo := newFakeNovelRepo()
+	repo.settings["global_coin_cost_per_thousand"] = "500"
+	repo.settings["global_start_pay_chapter_index"] = "3"
+	svc := NewNovelService(repo, nil, fakeCoverStore{})
+	h := NewHandler(svc)
+	r := gin.New()
+	h.RegisterRoutes(r.Group("/api/v1/admin"))
+
+	buyerToken, _ := auth.GenerateToken("buyer-1", "MediaBuyer")
+	editorToken, _ := auth.GenerateToken("editor-1", "Editor")
+
+	buildReq := func(manifestJSON string, files map[string][]byte, filenames map[string]string, token string) *http.Request {
+		var body bytes.Buffer
+		w := multipart.NewWriter(&body)
+		if manifestJSON != "" {
+			_ = w.WriteField("manifest", manifestJSON)
+		}
+		for field, content := range files {
+			fname := filenames[field]
+			if fname == "" {
+				fname = field + ".bin"
+			}
+			fw, _ := w.CreateFormFile(field, fname)
+			_, _ = fw.Write(content)
+		}
+		_ = w.Close()
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/novels/batch-import", &body)
+		req.Header.Set("Content-Type", w.FormDataContentType())
+		req.Header.Set("Authorization", "Bearer "+token)
+		return req
+	}
+
+	// MediaBuyer is forbidden from batch importing novels
+	reqBuyer := buildReq(`[{"title":"X","author":"Y","cover_url":"oss://covers/2026/11/abc.png","chapter_field":"c0"}]`, map[string][]byte{
+		"c0": []byte("Chapter 1\nBody"),
+	}, nil, buyerToken)
+	wBuyer := httptest.NewRecorder()
+	r.ServeHTTP(wBuyer, reqBuyer)
+	if wBuyer.Code != http.StatusForbidden {
+		t.Fatalf("expected MediaBuyer POST /novels/batch-import=403, got %d", wBuyer.Code)
+	}
+
+	manifest := `[
+		{
+			"title": "Alpha Draft",
+			"author": "Alice",
+			"cover_field": "cover_0",
+			"chapter_field": "txt_0",
+			"start_pay_chapter_index": 3
+		},
+		{
+			"title": "Broken TXT Book",
+			"author": "Bob",
+			"cover_url": "oss://covers/2026/11/abc.png",
+			"chapter_field": "txt_1",
+			"start_pay_chapter_index": 2
+		},
+		{
+			"title": "Chinese Book",
+			"author": "Carol",
+			"cover_url": "oss://covers/2026/11/abc.png",
+			"chapter_field": "txt_2",
+			"status": "Completed",
+			"genres": ["Contemporary", "Romance"],
+			"start_pay_chapter_index": 2
+		}
+	]`
+
+	files := map[string][]byte{
+		"cover_0": []byte("fake-cover-image"),
+		"txt_0":   []byte("Chapter 1: Free One\nFirst chapter body\nChapter 2: Free Two\nSecond chapter body\nChapter 3: Paid Three\nThird chapter paid body here"),
+		"txt_1":   []byte("No valid chapter headers anywhere in this text"),
+		"txt_2":   []byte("第一章 开始\n第一段正文\n第二章 付费\n第二段正文内容较多用于计费"),
+	}
+	filenames := map[string]string{
+		"cover_0": "cover0.png",
+		"txt_0":   "alpha.txt",
+		"txt_1":   "broken.txt",
+		"txt_2":   "chinese.txt",
+	}
+
+	wMixed := httptest.NewRecorder()
+	r.ServeHTTP(wMixed, buildReq(manifest, files, filenames, editorToken))
+	if wMixed.Code != http.StatusOK {
+		t.Fatalf("expected 200 for mixed batch import, got %d: %s", wMixed.Code, wMixed.Body.String())
+	}
+
+	var res BatchImportNovelsResult
+	if err := json.Unmarshal(wMixed.Body.Bytes(), &res); err != nil {
+		t.Fatalf("unmarshal batch import response: %v", err)
+	}
+	if res.Total != 3 || res.CreatedCount != 2 || res.FailedCount != 1 {
+		t.Fatalf("unexpected batch counts: %+v", res)
+	}
+	if res.Results[0].Status != "created" || res.Results[0].ChaptersCount != 3 || res.Results[0].Novel == nil {
+		t.Fatalf("unexpected item 0 result: %+v", res.Results[0])
+	}
+	firstNovel := res.Results[0].Novel
+	if firstNovel.PublishStatus != "draft" || firstNovel.StartPayChapterIndex != 3 || len(firstNovel.Genres) != 3 {
+		t.Fatalf("unexpected item 0 novel defaults: %+v", firstNovel)
+	}
+	firstChapters := repo.chapters[firstNovel.ID]
+	if len(firstChapters) != 3 || firstChapters[0].IsPaid || firstChapters[1].IsPaid || !firstChapters[2].IsPaid || firstChapters[2].Price <= 0 {
+		t.Fatalf("unexpected paywall flags for item 0: ch0=%+v ch1=%+v ch2=%+v", firstChapters[0], firstChapters[1], firstChapters[2])
+	}
+	if res.Results[1].Status != "failed" || res.Results[1].Error == "" {
+		t.Fatalf("expected item 1 failed result, got %+v", res.Results[1])
+	}
+	if len(repo.novels) != 2 {
+		t.Fatalf("failed item must not leave orphan novel in DB; len(novels)=%d", len(repo.novels))
+	}
+	if res.Results[2].Status != "created" || res.Results[2].ChaptersCount != 2 || res.Results[2].Novel.Status != "Completed" {
+		t.Fatalf("unexpected item 2 result: %+v", res.Results[2])
+	}
+	if !repo.chapters[res.Results[2].Novel.ID][1].IsPaid || repo.chapters[res.Results[2].Novel.ID][0].IsPaid {
+		t.Fatalf("unexpected paywall split at chapter 2 for item 2: %+v", repo.chapters[res.Results[2].Novel.ID])
+	}
+
+	// All-failed batch returns HTTP 400 with itemized errors
+	wAllFail := httptest.NewRecorder()
+	r.ServeHTTP(wAllFail, buildReq(`[{"title":"BadUTF8","author":"Bob","cover_url":"oss://covers/2026/11/abc.png","chapter_field":"txt_bad"}]`, map[string][]byte{
+		"txt_bad": {0xff, 0xfe, 0x00},
+	}, nil, editorToken))
+	if wAllFail.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 when all items fail, got %d: %s", wAllFail.Code, wAllFail.Body.String())
+	}
+
+	// Reject ambiguous dual cover_field + cover_url, over-length title/author, and ZIP containing NUL byte
+	var zipBuf bytes.Buffer
+	zw := zip.NewWriter(&zipBuf)
+	zf, _ := zw.Create("001_Ch1.txt")
+	_, _ = zf.Write([]byte("hello\x00world"))
+	_ = zw.Close()
+
+	edgeManifest := `[
+		{"title":"BothCovers","author":"A","cover_url":"oss://covers/2026/11/abc.png","cover_field":"c0","chapter_field":"t0"},
+		{"title":"` + strings.Repeat("a", 151) + `","author":"A","cover_url":"oss://covers/2026/11/abc.png","chapter_field":"t0"},
+		{"title":"OkTitle","author":"` + strings.Repeat("b", 101) + `","cover_url":"oss://covers/2026/11/abc.png","chapter_field":"t0"},
+		{"title":"ZipNul","author":"A","cover_url":"oss://covers/2026/11/abc.png","chapter_field":"z0","import_type":"zip"}
+	]`
+	wEdges := httptest.NewRecorder()
+	r.ServeHTTP(wEdges, buildReq(edgeManifest, map[string][]byte{
+		"c0": []byte("img"),
+		"t0": []byte("Chapter 1\nBody"),
+		"z0": zipBuf.Bytes(),
+	}, nil, editorToken))
+	if wEdges.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for edge validation batch, got %d: %s", wEdges.Code, wEdges.Body.String())
+	}
+	var edgeRes BatchImportNovelsResult
+	if err := json.Unmarshal(wEdges.Body.Bytes(), &edgeRes); err != nil {
+		t.Fatalf("unmarshal edge response: %v", err)
+	}
+	if edgeRes.FailedCount != 4 || edgeRes.CreatedCount != 0 {
+		t.Fatalf("expected all 4 edge cases to fail cleanly, got %+v", edgeRes)
+	}
+
+	// Uploaded OSS cover must be cleaned up if stageChapters/DB fails before commit and no book references it
+	freshRepo := newFakeNovelRepo()
+	var cleanedCovers []string
+	ossFailSvc := NewNovelService(freshRepo, &fakeOSSContentStorage{batchPutErr: errors.New("oss stage error")}, fakeCoverStore{deletedRefs: &cleanedCovers})
+	batchRes, err := ossFailSvc.BatchImportNovels(context.Background(), []BatchImportNovelInput{
+		{
+			Title:        "FailAfterCover",
+			Author:       "A",
+			CoverBytes:   []byte("cover-bytes"),
+			ChapterBytes: []byte("Chapter 1\nBody"),
+		},
+	})
+	if err != nil || batchRes.FailedCount != 1 || len(cleanedCovers) != 1 || cleanedCovers[0] != "oss://covers/2026/11/abc.png" {
+		t.Fatalf("expected unreferenced cover cleanup on rollback, res=%+v cleaned=%v err=%v", batchRes, cleanedCovers, err)
 	}
 }

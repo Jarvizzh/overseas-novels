@@ -3,6 +3,7 @@ package shelf
 import (
 	"errors"
 	"net/http"
+	"strconv"
 
 	"github.com/gin-gonic/gin"
 	"reader-backend/internal/auth"
@@ -23,6 +24,7 @@ func (h *Handler) RegisterRoutes(r *gin.RouterGroup) {
 	shelfGroup := r.Group("/shelf", auth.AuthMiddleware())
 	{
 		shelfGroup.GET("", h.GetShelf)
+		shelfGroup.GET("/progress/:novel_id", h.GetProgress)
 		shelfGroup.POST("/add", h.AddToShelf)
 		shelfGroup.POST("/remove", h.RemoveFromShelf)
 		shelfGroup.POST("/sync", h.SyncProgress)
@@ -40,6 +42,26 @@ func (h *Handler) GetShelf(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, items)
+}
+
+func (h *Handler) GetProgress(c *gin.Context) {
+	userID := c.MustGet("user_id").(int64)
+	if c.Query("user_id") != strconv.FormatInt(userID, 10) {
+		httpx.Fail(c, http.StatusConflict, "account_changed", "Reading progress belongs to a different account", nil)
+		return
+	}
+	novelID, err := strconv.ParseInt(c.Param("novel_id"), 10, 32)
+	if err != nil || novelID <= 0 {
+		httpx.Fail(c, http.StatusBadRequest, "invalid_novel_id", "Invalid novel ID", nil)
+		return
+	}
+	progress, err := h.service.GetProgress(c.Request.Context(), userID, novelID)
+	if err != nil {
+		httpx.Fail(c, http.StatusInternalServerError, "internal_error", "Failed to load reading progress", err)
+		return
+	}
+	c.Header("Cache-Control", "private, no-store")
+	c.JSON(http.StatusOK, progress)
 }
 
 type AddRequest struct {
@@ -95,6 +117,7 @@ func (h *Handler) RemoveFromShelf(c *gin.Context) {
 }
 
 type SyncRequest struct {
+	UserID          int64            `json:"user_id" binding:"required,gt=0"`
 	ProgressUpdates []ProgressUpdate `json:"progress_updates" binding:"required,min=1,max=100,dive"`
 }
 
@@ -103,6 +126,11 @@ func (h *Handler) SyncProgress(c *gin.Context) {
 	var req SyncRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		httpx.Fail(c, http.StatusBadRequest, "invalid_request", "Invalid request fields", nil)
+		return
+	}
+
+	if req.UserID != userID {
+		httpx.Fail(c, http.StatusConflict, "account_changed", "Reading progress belongs to a different account", nil)
 		return
 	}
 

@@ -2,9 +2,15 @@ package shelf
 
 import (
 	"context"
-	"reader-backend/internal/testdb"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/gin-gonic/gin"
+	"reader-backend/internal/testdb"
 )
 
 func TestProgressWritesAreMonotonic(t *testing.T) {
@@ -65,4 +71,67 @@ func TestProgressBatchDeduplicatesAndCommitsAtomically(t *testing.T) {
 	if err != nil || first == nil || first.ChapterIndex != 5 {
 		t.Fatalf("partially committed failing batch: %+v %v", first, err)
 	}
+}
+
+func TestProgressEndpointDoesNotRequireFavoriteOrAcceptAnotherAccount(t *testing.T) {
+	p := testdb.Open(t)
+	ctx := context.Background()
+	if _, err := p.Exec(ctx, `INSERT INTO users(id) VALUES(1),(2); INSERT INTO novels(id,title,author,cover_url,synopsis)
+		VALUES(1,'Book','Author','','')`); err != nil {
+		t.Fatal(err)
+	}
+	repo := NewDBRepository()
+	service := NewService(repo, nil)
+	handler := NewHandler(service)
+	router := gin.New()
+	router.Use(func(c *gin.Context) { c.Set("user_id", int64(1)) })
+	router.POST("/sync", handler.SyncProgress)
+	router.GET("/progress/:novel_id", handler.GetProgress)
+
+	now := time.Now().Truncate(time.Millisecond)
+	request := func(method, path, body string, want int) *httptest.ResponseRecorder {
+		t.Helper()
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		router.ServeHTTP(w, req)
+		if w.Code != want {
+			t.Fatalf("%s %s: got %d want %d: %s", method, path, w.Code, want, w.Body)
+		}
+		return w
+	}
+	post := func(owner, chapter int, version string, want int) {
+		t.Helper()
+		body, err := json.Marshal(map[string]any{"user_id": owner, "progress_updates": []ProgressUpdate{{
+			NovelID: 1, ChapterIndex: chapter, ScrollOffsetPercentage: .6, UpdatedAt: now, Version: version,
+		}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		request("POST", "/sync", string(body), want)
+	}
+	post(2, 9, "9", http.StatusConflict)
+	post(1, 8, "2", http.StatusOK)
+	post(1, 2, "1", http.StatusOK)
+	if items, err := service.GetShelf(ctx, 1); err != nil || len(items) != 0 {
+		t.Fatalf("reading created a favorite: %v %v", items, err)
+	}
+	request("GET", "/progress/1?user_id=2", "", http.StatusConflict)
+	check := func() {
+		t.Helper()
+		response := request("GET", "/progress/1?user_id=1", "", http.StatusOK)
+		var saved ProgressUpdate
+		if err := json.Unmarshal(response.Body.Bytes(), &saved); err != nil ||
+			saved.ChapterIndex != 8 || saved.ScrollOffsetPercentage != .6 || saved.Version != "2" {
+			t.Fatalf("wrong restored progress: %+v %v", saved, err)
+		}
+	}
+	check()
+	if err := service.AddToShelf(ctx, 1, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.RemoveFromShelf(ctx, 1, []int64{1}); err != nil {
+		t.Fatal(err)
+	}
+	check()
 }

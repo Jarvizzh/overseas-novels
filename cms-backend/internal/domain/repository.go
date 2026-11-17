@@ -48,7 +48,7 @@ func (r *pgRepository) ListDomains(ctx context.Context) ([]*SystemDomain, error)
 		}
 		list = append(list, &d)
 	}
-	return list, nil
+	return list, rows.Err()
 }
 
 func (r *pgRepository) CreateDomain(ctx context.Context, name, domainStr, domainType string, isDefault bool) (*SystemDomain, error) {

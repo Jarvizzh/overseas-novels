@@ -30,7 +30,7 @@ type Repository interface {
 	GetWallet(ctx context.Context, userID int64) (*model.Wallet, error)
 	GetTransactions(ctx context.Context, userID int64, limit, offset int) ([]model.Transaction, error)
 	getTransactionsAfter(ctx context.Context, userID int64, limit int, after *historyCursor) ([]model.Transaction, error)
-	UnlockChapterTx(ctx context.Context, userID int64, novelID int64, chapterIndex int, price int, chapterTitle string) error
+	UnlockChapterTx(ctx context.Context, userID int64, novelID int64, chapterIndex, promoID int, quote ChapterQuote) error
 	AddCoins(ctx context.Context, userID int64, amount int, isBonus bool, bizType string, description string) error
 	CheckIn(context.Context, int64, bool) (*CheckInState, error)
 	GetUserEmail(ctx context.Context, userID int64) (string, error)
@@ -122,7 +122,7 @@ func queryTransactions(ctx context.Context, query string, args ...any) ([]model.
 	return txs, rows.Err()
 }
 
-func (r *dbRepository) UnlockChapterTx(ctx context.Context, userID int64, novelID int64, chapterIndex int, price int, chapterTitle string) error {
+func (r *dbRepository) UnlockChapterTx(ctx context.Context, userID int64, novelID int64, chapterIndex, promoID int, quote ChapterQuote) error {
 	txCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
@@ -140,15 +140,44 @@ func (r *dbRepository) UnlockChapterTx(ctx context.Context, userID int64, novelI
 		return err
 	}
 
-	// 2. Check if already unlocked inside the locked transaction
-	var exists bool
-	checkQuery := `SELECT EXISTS(SELECT 1 FROM unlock_records WHERE user_id = $1 AND novel_id = $2 AND chapter_index = $3)`
-	err = tx.QueryRow(txCtx, checkQuery, userID, novelID, chapterIndex).Scan(&exists)
+	var chapterID, chapterTitle string
+	var version int64
+	var wordCount int
+	err = tx.QueryRow(txCtx, `
+		SELECT c.id, c.title, c.word_count, n.content_version
+		FROM novels n JOIN chapters c ON c.novel_id = n.id AND c.chapter_index = $2
+		WHERE n.id = $1 AND n.status <> 'archived' AND n.publish_status = 'published'
+		FOR SHARE OF n`, novelID, chapterIndex).Scan(&chapterID, &chapterTitle, &wordCount, &version)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrPriceChanged
+	}
+	if err != nil {
+		return err
+	}
+	if chapterID != quote.ID || version != quote.Version {
+		return ErrPriceChanged
+	}
+	start, cost, err := novel.ReadChapterPricing(txCtx, tx, userID, novelID, promoID)
+	if err != nil {
+		return err
+	}
+	price := novel.CalculateChapterPrice(wordCount, cost)
+	if chapterIndex < start-1 || cost == 0 || price != quote.Price {
+		return ErrPriceChanged
+	}
+
+	var exists, unresolved bool
+	err = tx.QueryRow(txCtx, `SELECT reader_has_chapter_unlock($1, $3),
+		EXISTS(SELECT 1 FROM unlock_records WHERE user_id=$1 AND novel_id=$2 AND chapter_id IS NULL)`,
+		userID, novelID, chapterID).Scan(&exists, &unresolved)
 	if err != nil {
 		return err
 	}
 	if exists {
 		return ErrAlreadyUnlocked
+	}
+	if unresolved {
+		return ErrPurchaseNeedsReview
 	}
 
 	err = tx.QueryRow(txCtx, `SELECT EXISTS(SELECT 1 FROM user_subscriptions WHERE user_id=$1 AND `+novel.PaidSubscriptionPredicate+`)
@@ -191,9 +220,9 @@ func (r *dbRepository) UnlockChapterTx(ctx context.Context, userID int64, novelI
 
 	// 5. Create unlock record
 	insertUnlockQuery := `
-		INSERT INTO unlock_records (user_id, novel_id, chapter_index)
-		VALUES ($1, $2, $3)`
-	_, err = tx.Exec(txCtx, insertUnlockQuery, userID, novelID, chapterIndex)
+		INSERT INTO unlock_records (user_id, novel_id, chapter_index, chapter_id, identity_evidence, identity_resolved_at, created_at)
+		VALUES ($1, $2, $3, $4, 'stable chapter purchase', clock_timestamp(), clock_timestamp())`
+	_, err = tx.Exec(txCtx, insertUnlockQuery, userID, novelID, chapterIndex, chapterID)
 	if err != nil {
 		return err
 	}

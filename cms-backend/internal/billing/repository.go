@@ -68,7 +68,7 @@ func (r *dbBillingRepository) ListOrders(ctx context.Context, selectQuery string
 		}
 		orders = append(orders, o)
 	}
-	return orders, nil
+	return orders, rows.Err()
 }
 
 func (r *dbBillingRepository) GetOrderForUpdateTx(ctx context.Context, tx pgx.Tx, orderID string) (*Order, error) {
@@ -167,7 +167,7 @@ func (r *dbBillingRepository) ListRechargeTemplates(ctx context.Context) ([]Rech
 		}
 		templates = append(templates, t)
 	}
-	return templates, nil
+	return templates, rows.Err()
 }
 
 func (r *dbBillingRepository) GetRechargeSlots(ctx context.Context, templateID int) ([]RechargeSlot, error) {
@@ -191,7 +191,7 @@ func (r *dbBillingRepository) GetRechargeSlots(ctx context.Context, templateID i
 		}
 		slots = append(slots, s)
 	}
-	return slots, nil
+	return slots, rows.Err()
 }
 
 func (r *dbBillingRepository) ClearDefaultTemplatesTx(ctx context.Context, tx pgx.Tx) error {

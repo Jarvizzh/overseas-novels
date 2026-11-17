@@ -45,11 +45,23 @@ func Open(t *testing.T) *pgxpool.Pool {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for range 2 {
-		if _, err = pool.Exec(ctx, string(sql)); err != nil {
-			t.Fatal(err)
-		}
+	if _, err = pool.Exec(ctx, string(sql)); err != nil {
+		t.Fatal(err)
 	}
+	applyChapterMigration(t, pool)
+
 	db.DB = pool
 	return pool
+}
+
+// applyChapterMigration applies the current chapter publication release to a baseline test database.
+func applyChapterMigration(t *testing.T, pool *pgxpool.Pool) {
+	t.Helper()
+	sql, err := os.ReadFile("../../../cms-backend/db/migrations/2026111702.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(context.Background(), string(sql)); err != nil {
+		t.Fatal(err)
+	}
 }

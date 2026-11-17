@@ -150,6 +150,8 @@ docker-compose up -d
 
 ### 6.3 启动后端 API 服务 (Backend Services)
 
+数据库启动后，进入 `cms-backend` 运行 `go run ./cmd/server -migrate` 初始化或升级数据库。两个 API 服务启动时会校验 Schema 版本。
+
 #### 启动读者端后端服务 (Port 8080)：
 ```bash
 cd reader-backend

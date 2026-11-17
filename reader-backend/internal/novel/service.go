@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math"
+	"time"
 
 	"golang.org/x/sync/singleflight"
 	"reader-backend/internal/model"
@@ -12,7 +12,9 @@ import (
 )
 
 var (
-	ErrNovelNotFound = errors.New("novel not found")
+	ErrContentChanged = errors.New("chapter publication changed; reload and retry")
+	ErrContentBusy    = errors.New("chapter content temporarily unavailable")
+	ErrNovelNotFound  = errors.New("novel not found")
 )
 
 // IsNovelPublished reports whether a novel is active and published for reader access.
@@ -25,14 +27,17 @@ func CalculateChapterPrice(wordCount, effectiveCost int) int {
 	if wordCount <= 0 || effectiveCost <= 0 {
 		return 0
 	}
-	return int(math.Round((float64(wordCount) / 1000.0) * float64(effectiveCost)))
+	// PostgreSQL numeric ROUND rounds a positive half up. Keep the same result in Go.
+	return int((int64(wordCount)*int64(effectiveCost) + 500) / 1000)
 }
 
 type ChapterReadResult struct {
-	Chapter    *model.Chapter `json:"chapter"`
-	Locked     bool           `json:"locked"`
-	Price      int            `json:"price"`
-	AccessType string         `json:"access_type,omitempty"`
+	PurchaseNeedsReview bool           `json:"purchase_needs_review,omitempty"`
+	ContentVersion      int64          `json:"content_version"`
+	Chapter             *model.Chapter `json:"chapter"`
+	Locked              bool           `json:"locked"`
+	Price               int            `json:"price"`
+	AccessType          string         `json:"access_type,omitempty"`
 }
 
 type Service interface {
@@ -49,6 +54,7 @@ type service struct {
 	storage     storage.ContentStorage
 	coverSigner storage.CoverSigner
 	sf          singleflight.Group
+	loads       chan struct{}
 }
 
 func NewService(repo Repository, cache Cache, storage storage.ContentStorage, coverSigner storage.CoverSigner) Service {
@@ -57,6 +63,30 @@ func NewService(repo Repository, cache Cache, storage storage.ContentStorage, co
 		cache:       cache,
 		storage:     storage,
 		coverSigner: coverSigner,
+		loads:       make(chan struct{}, 12),
+	}
+}
+
+func (s *service) load(ctx context.Context, key string, fn func(context.Context) (any, error)) (any, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	result := s.sf.DoChan(key, func() (any, error) {
+		select {
+		case s.loads <- struct{}{}:
+			defer func() { <-s.loads }()
+		default:
+			return nil, ErrContentBusy
+		}
+		loadCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 4*time.Second)
+		defer cancel()
+		return fn(loadCtx)
+	})
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case item := <-result:
+		return item.Val, item.Err
 	}
 }
 
@@ -115,13 +145,16 @@ func (s *service) GetNovelDetail(ctx context.Context, id int64) (*model.Novel, e
 	}
 
 	sfKey := fmt.Sprintf("sf:novel:detail:%d:%d", id, contentVersion(ctx))
-	val, err, _ := s.sf.Do(sfKey, func() (interface{}, error) {
+	val, err := s.load(ctx, sfKey, func(ctx context.Context) (any, error) {
 		if cached, _ := s.cache.GetNovel(ctx, id); cached != nil && cached.PublishStatus != "" {
 			return cached, nil
 		}
 		nDB, errDB := s.repo.GetByID(ctx, id)
 		if errDB != nil || nDB == nil {
-			return nDB, errDB
+			return nil, errDB
+		}
+		if nDB.ContentVersion != contentVersion(ctx) {
+			return nil, ErrContentChanged
 		}
 		_ = s.cache.SetNovel(ctx, id, nDB)
 		return nDB, nil
@@ -155,7 +188,7 @@ func (s *service) GetChaptersList(ctx context.Context, userID int64, novelID int
 	list, err := s.cache.GetChaptersList(ctx, novelID)
 	if err != nil || len(list) == 0 {
 		sfKey := fmt.Sprintf("sf:novel:chapters:%d:%d", novelID, contentVersion(ctx))
-		val, errSF, _ := s.sf.Do(sfKey, func() (interface{}, error) {
+		val, errSF := s.load(ctx, sfKey, func(ctx context.Context) (any, error) {
 			if cached, _ := s.cache.GetChaptersList(ctx, novelID); len(cached) > 0 {
 				return cached, nil
 			}
@@ -194,7 +227,8 @@ func (s *service) GetChaptersList(ctx context.Context, userID int64, novelID int
 		if isPaid && !hasPass {
 			price = CalculateChapterPrice(ch.WordCount, effectiveCost)
 		}
-		ch.IsPaid = isPaid
+		ch.PublicationVersion = n.ContentVersion
+		ch.IsPaid = isPaid && effectiveCost > 0
 		ch.Price = price
 		resultList[i] = ch
 	}
@@ -215,7 +249,7 @@ func (s *service) GetChapterContent(ctx context.Context, userID int64, novelID i
 	ch, err := s.cache.GetChapter(ctx, novelID, chapterIndex)
 	if err != nil || ch == nil {
 		sfKey := fmt.Sprintf("sf:chapter:%d:%d:%d", novelID, chapterIndex, contentVersion(ctx))
-		val, errSF, _ := s.sf.Do(sfKey, func() (interface{}, error) {
+		val, errSF := s.load(ctx, sfKey, func(ctx context.Context) (any, error) {
 			if cached, _ := s.cache.GetChapter(ctx, novelID, chapterIndex); cached != nil {
 				return cached, nil
 			}
@@ -224,16 +258,34 @@ func (s *service) GetChapterContent(ctx context.Context, userID int64, novelID i
 				return nil, errDB
 			}
 
-			// If storage is provided and (chDB.Content is empty or storage is OSS), load content from storage
-			if s.storage != nil && (chDB.Content == "" || s.storage.StorageType() == "oss") {
-				content, errStorage := s.storage.GetContent(ctx, novelID, chapterIndex)
-				if errStorage != nil {
-					return nil, errStorage
+			switch {
+			case chDB.ObjectKey != "":
+				store, ok := s.storage.(interface {
+					ReadChapterRevision(context.Context, string, string) (string, error)
+				})
+				if !ok {
+					return nil, errors.New("chapter storage does not support immutable objects")
 				}
-				if content == "" {
-					return nil, storage.ErrContentNotFound
+				content, err := store.ReadChapterRevision(ctx, chDB.ObjectKey, chDB.ContentHash)
+				if err != nil {
+					return nil, err
 				}
 				chDB.Content = content
+			case chDB.Content == "" && s.storage != nil && s.storage.StorageType() == "oss":
+				store, ok := s.storage.(interface {
+					ReadLegacyChapter(context.Context, int64, int) (string, error)
+				})
+				if !ok {
+					return nil, errors.New("chapter storage does not support legacy reads")
+				}
+				content, err := store.ReadLegacyChapter(ctx, novelID, chapterIndex)
+				if err != nil {
+					return nil, err
+				}
+				chDB.Content = content
+			}
+			if chDB.Content == "" {
+				return nil, storage.ErrContentNotFound
 			}
 
 			_ = s.cache.SetChapter(ctx, novelID, chapterIndex, chDB)
@@ -243,7 +295,11 @@ func (s *service) GetChapterContent(ctx context.Context, userID int64, novelID i
 			return nil, errSF
 		}
 		if val == nil {
-			return nil, nil
+			current, err := s.repo.GetContentVersion(ctx, novelID)
+			if err == nil && current != 0 && current != n.ContentVersion {
+				return nil, ErrContentChanged
+			}
+			return nil, err
 		}
 		ch = val.(*model.Chapter)
 	}
@@ -260,10 +316,10 @@ func (s *service) GetChapterContent(ctx context.Context, userID int64, novelID i
 	}
 
 	result := &ChapterReadResult{
-		Price: price,
+		Price: price, ContentVersion: n.ContentVersion,
 	}
 
-	if !isPaid {
+	if !isPaid || effectiveCost == 0 {
 		clone := *ch
 		clone.IsPaid = false
 		clone.Price = 0
@@ -298,14 +354,14 @@ func (s *service) GetChapterContent(ctx context.Context, userID int64, novelID i
 		return result, nil
 	}
 
-	unlocked, err := s.cache.IsChapterUnlocked(ctx, userID, novelID, chapterIndex)
+	unlocked, err := s.cache.IsChapterUnlocked(ctx, userID, novelID, ch.ID)
 	if err != nil || !unlocked {
-		unlocked, err = s.repo.CheckChapterUnlocked(ctx, userID, novelID, chapterIndex)
+		unlocked, result.PurchaseNeedsReview, err = s.repo.CheckChapterAccess(ctx, userID, novelID, ch.ID)
 		if err != nil {
 			return nil, err
 		}
 		if unlocked {
-			_ = s.cache.SetChapterUnlocked(ctx, userID, novelID, chapterIndex)
+			_ = s.cache.SetChapterUnlocked(ctx, userID, novelID, ch.ID)
 		}
 	}
 	if unlocked {
@@ -315,6 +371,7 @@ func (s *service) GetChapterContent(ctx context.Context, userID int64, novelID i
 		result.Chapter = &clone
 		result.Locked = false
 		result.AccessType = "chapter"
+		result.PurchaseNeedsReview = false
 	} else {
 		preview := getLockedPreview(ch)
 		preview.IsPaid = true

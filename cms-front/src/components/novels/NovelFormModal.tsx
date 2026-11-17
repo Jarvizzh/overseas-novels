@@ -539,16 +539,17 @@ export const NovelFormModal: React.FC<NovelFormModalProps> = ({
                   千字付费金币数 (留空跟随全局)
                 </label>
                 <p id={costHintId} style={{ fontSize: '0.72rem', color: 'hsl(var(--text-muted))', marginBottom: '6px' }}>
-                  留空将自动继承全局默认单价（当前 {globalCoinCost || 500} 金币/千字）。
+                  留空继承全局单价（当前 {globalCoinCost} 金币/千字），输入 0 免费。
                 </p>
                 <input
                   id={costId}
                   name="coin_cost_per_thousand"
                   type="number"
                   className="input-field"
-                  placeholder={`跟随全局（${globalCoinCost || 500} 金币）`}
+                  placeholder={`跟随全局（${globalCoinCost} 金币）`}
                   aria-describedby={costHintId}
-                  min={1}
+                  min={0}
+                  max={2147483647}
                   value={formData.coin_cost_per_thousand}
                   onChange={(e) =>
                     setFormData((prev) => ({

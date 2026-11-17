@@ -104,14 +104,26 @@ flowchart TD
 ### 3.1 阿里云 RDS PostgreSQL 配置
 1. **白名单配置**：在 RDS 控制台 【白名单与安全组】 中，将 VPC 内网网段（如 `172.16.0.0/24`）加入白名单；
 2. **账号与数据库创建**：创建高权限账号 `star_admin`，创建数据库 `star_novel`，字符集选择 `UTF8`；
-3. **执行 Schema 结构初始化**：
-   在本地或网关机上执行：
+3. **初始化或升级 Schema**。使用本次发布的 CMS 镜像，通过同一份 CMS 环境配置运行迁移命令。
    ```bash
-   psql -h <RDS内网地址> -p <端口> -U star_admin -d star_novel -f cms-backend/db/schema.sql
+   docker run --rm --env-file cms-backend/.env star-cms-backend:latest -migrate
    ```
-   *说明：初始化脚本已包含 `CREATE EXTENSION IF NOT EXISTS pg_trgm;` 以及所有核心业务表、GIN 索引与偏唯一索引。*
+   `schema.sql` 是版本 `2026111701` 的基线。迁移命令根据数据库版本依次执行尚未应用的 SQL，新库同时写入初始化数据。同版本的 CMS 和 Reader 启动与健康检查只读取版本账本。迁移失败会回滚并返回非零退出码。使用 `CREATE INDEX CONCURRENTLY` 的查询索引脚本仍单独在事务外执行。
 
-   部署新版支付前，先执行共用数据库 schema，再配套更新 CMS、Reader API 与 Reader H5。为 Reader 设置当前 PayPal 应用对应的 `PAYPAL_WEBHOOK_ID`（若用 Linux 配置生成脚本，则设置 `payment.paypal_webhook_id`）。注册订单批准、扣款完成、支付和订阅状态、退款完成的通知。Stripe 接口当前返回停用。CMS 必须配置独立的 `CMS_JWT_SECRET`（Linux 配置生成脚本读取 `cms.jwt_secret`），切换后 CMS 管理员需重新登录。 完成迁移后，可从 CMS 订单接口的 `reconciliation_note` 定位待核对的历史订单或账期。核实存量 PayPal 交易和退款凭证后再补发权益。
+   **章节发布升级 `2026111702`**。安排一次短维护窗口，先停止旧 CMS 的发布写入和旧 Reader 的扣费流量。运行迁移后配套启动新版 CMS、Reader API 和 H5，确认各服务通过健康检查再恢复流量。迁移等待业务表锁最多 3 秒，单条 SQL 和迁移进程分别有 60 秒和 90 秒上限。出现锁超时先解除业务锁再重试。新版开始发布后，旧程序无法读取不可变正文引用。回退须协调应用与数据库共同恢复。
+
+   历史单章权益通过 `unlock_records.chapter_id` 迁移。仅在 PostgreSQL 能证明当前章节行已在购买前提交时自动关联。未启用或已缺失提交时间记录的数据库，需要从原始证据复核。恢复扣费流量前导出并处理下列记录。对每条记录，应根据购买时间的正文版本、备份或其他原始购买证据确认章节身份。确认后在短事务中锁住对应的 `novels` 行，填写同一小说的稳定 `chapter_id`、包含证据位置和审核人的 `identity_evidence`，以及 `identity_resolved_at`。同一用户已有该章节的有效记录时，先核对重复扣款再处置。待复核期间，读者仍可使用已确认权益，新的单章购买会提示联系支持。
+
+   ```sql
+   SELECT id, user_id, novel_id, chapter_index, created_at
+   FROM unlock_records
+   WHERE chapter_id IS NULL
+   ORDER BY novel_id, id;
+   ```
+
+   OSS 切换沿用原有 bucket 和 base path。CMS 需要正文的写、读和删除权限。旧版正文保持可读，内容被替换后，未引用对象进入延迟清理。可按 `chapter_content_objects.state`、`attempts`、`last_error` 检查清理状态。
+
+   部署新版支付前，先执行 CMS 迁移命令，再配套更新 CMS、Reader API 与 Reader H5。为 Reader 设置当前 PayPal 应用对应的 `PAYPAL_WEBHOOK_ID`（若用 Linux 配置生成脚本，则设置 `payment.paypal_webhook_id`）。注册订单批准、扣款完成、支付和订阅状态、退款完成的通知。Stripe 接口当前返回停用。CMS 必须配置独立的 `CMS_JWT_SECRET`（Linux 配置生成脚本读取 `cms.jwt_secret`），切换后 CMS 管理员需重新登录。 完成迁移后，可从 CMS 订单接口的 `reconciliation_note` 定位待核对的历史订单或账期。核实存量 PayPal 交易和退款凭证后再补发权益。
 
 
    支付修复升级还需确认以下事项。

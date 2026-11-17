@@ -1,7 +1,7 @@
 import type { ChapterContentResponse } from './api';
 
 const DB_NAME = 'StarNovelReaderCacheDB';
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 const STORE_NAME = 'chapters';
 
 function openDB(): Promise<IDBDatabase> {

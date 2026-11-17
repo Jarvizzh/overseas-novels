@@ -84,6 +84,10 @@ func (h *Handler) GetNovelDetail(c *gin.Context) {
 
 	novel, err := h.service.GetNovelDetail(ctx, id)
 	if err != nil {
+		if errors.Is(err, ErrContentChanged) || errors.Is(err, ErrContentBusy) {
+			httpx.Fail(c, http.StatusServiceUnavailable, "content_unavailable", err.Error(), nil)
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch novel details"})
 		return
 	}
@@ -131,6 +135,10 @@ func (h *Handler) GetChaptersList(c *gin.Context) {
 
 	chapters, err := h.service.GetChaptersList(ctx, userID, id, promoID, utmSource, utmCampaign)
 	if err != nil {
+		if errors.Is(err, ErrContentChanged) || errors.Is(err, ErrContentBusy) {
+			httpx.Fail(c, http.StatusServiceUnavailable, "content_unavailable", err.Error(), nil)
+			return
+		}
 		if errors.Is(err, ErrNovelNotFound) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "Novel not found"})
 			return
@@ -162,6 +170,12 @@ func (h *Handler) GetChapterContent(c *gin.Context) {
 		userID = val.(int64)
 	}
 
+	if expected, present := c.GetQuery("user_id"); present && expected != strconv.FormatInt(userID, 10) {
+		httpx.Fail(c, http.StatusConflict, "account_changed", "The signed-in account changed. Reload before reading.", nil)
+		return
+	}
+	c.Header("Cache-Control", "private, no-store")
+
 	promoIDStr := c.GetHeader("X-Promo-ID")
 	if promoIDStr == "" {
 		promoIDStr = c.Query("link_id")
@@ -183,6 +197,10 @@ func (h *Handler) GetChapterContent(c *gin.Context) {
 	ctx := c.Request.Context()
 	result, err := h.service.GetChapterContent(ctx, userID, id, chapterIndex, promoID, utmSource, utmCampaign)
 	if err != nil {
+		if errors.Is(err, ErrContentChanged) || errors.Is(err, ErrContentBusy) {
+			httpx.Fail(c, http.StatusServiceUnavailable, "content_unavailable", err.Error(), nil)
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch chapter content"})
 		return
 	}

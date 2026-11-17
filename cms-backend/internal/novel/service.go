@@ -27,20 +27,61 @@ const maxGenresTotalChars = 2048
 
 var (
 	ErrNovelNotFound           = errors.New("Novel not found")
+	ErrInvalidImportFile       = errors.New("无效的章节文件")
 	ErrChapterNotFound         = errors.New("Chapter not found")
 	ErrInvalidCover            = errors.New("请先上传书籍封面图片，不允许直接填写外部 URL")
 	ErrInvalidDelimiterRegex   = errors.New("无效的章节分割正则表达式")
 	ErrInvalidPublishStatus    = errors.New("无效的上架状态，仅支持 draft、published 或 offline")
 	ErrCannotPublishEmptyNovel = errors.New("书籍暂无章节内容，请先导入章节后再上架发布")
 	ErrInvalidSettingValue     = errors.New("无效的全局配置参数")
+	ErrInvalidNovelPricing     = errors.New("小说千字单价必须为 0 到 2147483647 的整数")
 	ErrInvalidPromoPricing     = errors.New("无效的推广链接计费参数")
 	ErrInvalidGenres           = errors.New("分类标签总长度不能超过 2048 个字符")
 	ErrInvalidFilterParam      = errors.New("无效的查询筛选参数")
 	ErrInvalidBatchNovelIDs    = errors.New("请至少选择一本有效书籍")
 	ErrBatchLimitExceeded      = errors.New("单次批量操作最多支持 200 本书籍")
+	ErrInvalidBatchImport      = errors.New("无效的批量新建书籍请求")
 )
 
-const maxBatchPublishIDs = 200
+const (
+	maxBatchPublishIDs   = 200
+	maxBatchImportNovels = 50
+)
+
+type BatchImportNovelInput struct {
+	Title                string
+	Author               string
+	CoverURL             string
+	CoverBytes           []byte
+	Status               string
+	PublishStatus        string
+	Synopsis             string
+	Genres               []string
+	Rating               *float64
+	CoinCostPerThousand  *int
+	StartPayChapterIndex int
+	ImportType           string
+	DelimiterRegex       string
+	ChapterBytes         []byte
+	PreError             string
+}
+
+type BatchImportNovelItemResult struct {
+	Index          int    `json:"index"`
+	Title          string `json:"title"`
+	Status         string `json:"status"`
+	Novel          *Novel `json:"novel,omitempty"`
+	ChaptersCount  int    `json:"chapters_count,omitempty"`
+	TotalWordCount int    `json:"total_word_count,omitempty"`
+	Error          string `json:"error,omitempty"`
+}
+
+type BatchImportNovelsResult struct {
+	Total        int                          `json:"total"`
+	CreatedCount int                          `json:"created_count"`
+	FailedCount  int                          `json:"failed_count"`
+	Results      []BatchImportNovelItemResult `json:"results"`
+}
 
 type NovelListFilter struct {
 	Status        string
@@ -75,6 +116,7 @@ type NovelService interface {
 	ListNovels(ctx context.Context, page, pageSize int, filter NovelListFilter) ([]Novel, int, error)
 	GetNovel(ctx context.Context, id int64) (*Novel, error)
 	CreateNovel(ctx context.Context, n *Novel) (*Novel, error)
+	BatchImportNovels(ctx context.Context, items []BatchImportNovelInput) (*BatchImportNovelsResult, error)
 	UpdateNovel(ctx context.Context, id int64, title, author, coverURL, status, publishStatus, synopsis string, genres []string, rating float64, coinCost *int, startPayIndex int) (*Novel, error)
 	UpdatePublishStatus(ctx context.Context, id int64, publishStatus string) (*Novel, error)
 	BatchUpdatePublishStatus(ctx context.Context, ids []int64, publishStatus string) (*BatchPublishResult, error)
@@ -83,10 +125,11 @@ type NovelService interface {
 	MaxCoverUploadBytes() int64
 
 	ListChapters(ctx context.Context, novelID int64) ([]Chapter, error)
+	GetChapterIdentities(ctx context.Context, novelID int64) ([]ChapterIdentity, error)
 	GetChapterDetail(ctx context.Context, novelID int64, chapterIndex int) (*Chapter, error)
-	CreateChapter(ctx context.Context, novelID int64, chapterIndex int, title, content string, isPaid bool, price int) (*Chapter, error)
-	UpdateChapter(ctx context.Context, novelID int64, chapterIndex int, title, content string, isPaid bool, price int) error
-	BulkImportChapters(ctx context.Context, novelID int64, zipData []byte, importType string, delimiterRegex string) (*BulkImportResult, error)
+	CreateChapter(ctx context.Context, novelID int64, chapterIndex int, title, content string) (*Chapter, error)
+	UpdateChapter(ctx context.Context, novelID int64, chapterIndex int, title, content string, expectedID string) error
+	BulkImportChapters(ctx context.Context, novelID int64, zipData []byte, importType string, delimiterRegex string, mappings ...ChapterImportMapping) (*BulkImportResult, error)
 
 	GetSettings(ctx context.Context) (map[string]string, error)
 	UpdateSettings(ctx context.Context, configs map[string]string) error
@@ -180,16 +223,19 @@ func isValidPublishStatus(s string) bool {
 	return s == "draft" || s == "published" || s == "offline"
 }
 
-func (s *novelService) resolveDefaultStartPay(ctx context.Context) int {
-	if configs, err := s.repo.GetSettings(ctx); err == nil {
-		if val, ok := configs["global_start_pay_chapter_index"]; ok {
-			var parsed int
-			if _, scanErr := fmt.Sscanf(val, "%d", &parsed); scanErr == nil && parsed > 0 {
-				return parsed
-			}
-		}
+func (s *novelService) resolveDefaultStartPay(ctx context.Context) (int, error) {
+	configs, err := s.repo.GetSettings(ctx)
+	if err != nil {
+		return 0, err
 	}
-	return 3
+	return pricingSetting(configs, "global_start_pay_chapter_index", 1, 3)
+}
+
+func pricingSetting(configs map[string]string, key string, minimum, fallback int) (int, error) {
+	if value, ok := configs[key]; ok {
+		return validateSettingInt(value, minimum, key)
+	}
+	return fallback, nil
 }
 
 func parseNovelTimeBound(raw string, endOfDay bool) (*time.Time, error) {
@@ -375,11 +421,14 @@ func (s *novelService) CreateNovel(ctx context.Context, n *Novel) (*Novel, error
 		return nil, ErrCannotPublishEmptyNovel
 	}
 
-	if n.CoinCostPerThousand != nil && *n.CoinCostPerThousand <= 0 {
-		n.CoinCostPerThousand = nil
+	if n.CoinCostPerThousand != nil && (*n.CoinCostPerThousand < 0 || *n.CoinCostPerThousand > math.MaxInt32) {
+		return nil, ErrInvalidNovelPricing
 	}
 	if n.StartPayChapterIndex <= 0 {
-		n.StartPayChapterIndex = s.resolveDefaultStartPay(ctx)
+		n.StartPayChapterIndex, err = s.resolveDefaultStartPay(ctx)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	err = s.repo.CreateNovel(ctx, n)
@@ -388,6 +437,273 @@ func (s *novelService) CreateNovel(ctx context.Context, n *Novel) (*Novel, error
 	}
 	s.applyCoverDisplay(n)
 	return n, nil
+}
+
+func defaultBatchNovelGenres() []string {
+	return []string{"Contemporary", "Romance", "Cheating"}
+}
+
+func validateCleanUTF8Text(val, fieldName string) error {
+	if !utf8.ValidString(val) || strings.ContainsRune(val, '\x00') {
+		return fmt.Errorf("%s 包含无效编码或非法控制字符（仅支持 UTF-8 文本）", fieldName)
+	}
+	return nil
+}
+
+func (s *novelService) cleanupUnreferencedCover(ctx context.Context, coverRef string, excludeNovelID int64) {
+	if s.coverStore == nil || !s.coverStore.IsValidCoverRef(coverRef) {
+		return
+	}
+	if refCount, countErr := s.repo.CountNovelsByCoverURL(ctx, coverRef, excludeNovelID); countErr == nil && refCount == 0 {
+		if delErr := s.coverStore.DeleteCover(ctx, coverRef); delErr != nil {
+			log.Printf("[WARN] failed to delete unreferenced OSS cover %q: %v", coverRef, delErr)
+		}
+	}
+}
+
+func (s *novelService) importNovelAtomically(ctx context.Context, item BatchImportNovelInput) (*Novel, int, int, error) {
+	if item.PreError != "" {
+		return nil, 0, 0, errors.New(item.PreError)
+	}
+
+	title := strings.TrimSpace(item.Title)
+	author := strings.TrimSpace(item.Author)
+	if title == "" {
+		return nil, 0, 0, errors.New("书名 title 不能为空")
+	}
+	if err := validateCleanUTF8Text(title, "书名 title"); err != nil {
+		return nil, 0, 0, err
+	}
+	if utf8.RuneCountInString(title) > 150 {
+		return nil, 0, 0, errors.New("书名 title 不能超过 150 个字符")
+	}
+	if author == "" {
+		return nil, 0, 0, errors.New("作者 author 不能为空")
+	}
+	if err := validateCleanUTF8Text(author, "作者 author"); err != nil {
+		return nil, 0, 0, err
+	}
+	if utf8.RuneCountInString(author) > 100 {
+		return nil, 0, 0, errors.New("作者 author 不能超过 100 个字符")
+	}
+	if err := validateCleanUTF8Text(item.Synopsis, "简介 synopsis"); err != nil {
+		return nil, 0, 0, err
+	}
+
+	status := strings.TrimSpace(item.Status)
+	if status == "" {
+		status = "Ongoing"
+	}
+	if status != "Ongoing" && status != "Completed" {
+		return nil, 0, 0, errors.New("连载状态 status 仅支持 Ongoing 或 Completed")
+	}
+
+	publishStatus := strings.TrimSpace(item.PublishStatus)
+	if publishStatus == "" {
+		publishStatus = "draft"
+	}
+	if !isValidPublishStatus(publishStatus) {
+		return nil, 0, 0, ErrInvalidPublishStatus
+	}
+
+	genres, err := normalizeAndValidateGenres(item.Genres)
+	if err != nil {
+		return nil, 0, 0, err
+	}
+	if len(genres) == 0 {
+		genres = defaultBatchNovelGenres()
+	}
+
+	rating := 4.5
+	if item.Rating != nil {
+		rating = *item.Rating
+		if math.IsNaN(rating) || rating < 0 || rating > 5 {
+			return nil, 0, 0, errors.New("评分 rating 必须在 0 到 5 之间")
+		}
+	}
+
+	if item.CoinCostPerThousand != nil && (*item.CoinCostPerThousand < 0 || *item.CoinCostPerThousand > math.MaxInt32) {
+		return nil, 0, 0, ErrInvalidNovelPricing
+	}
+	if item.StartPayChapterIndex < 0 || item.StartPayChapterIndex > math.MaxInt32 {
+		return nil, 0, 0, errors.New("起始收费章节 start_pay_chapter_index 无效")
+	}
+
+	importType := strings.TrimSpace(item.ImportType)
+	if importType == "" {
+		importType = "single_txt"
+	}
+	if importType != "single_txt" && importType != "zip" {
+		return nil, 0, 0, errors.New("import_type 仅支持 single_txt 或 zip")
+	}
+	if len(item.ChapterBytes) == 0 {
+		return nil, 0, 0, fmt.Errorf("%w: 章节文件内容不能为空", ErrInvalidImportFile)
+	}
+	if importType == "single_txt" && (!utf8.Valid(item.ChapterBytes) || bytes.IndexByte(item.ChapterBytes, 0) >= 0) {
+		return nil, 0, 0, fmt.Errorf("%w: 单个 TXT 文件必须使用无 NUL 字符的 UTF-8 编码", ErrInvalidImportFile)
+	}
+
+	var parsedChapters []zipFileItem
+	if importType == "zip" {
+		parsedChapters, err = parseChaptersFromZIP(item.ChapterBytes)
+	} else {
+		parsedChapters, err = parseChaptersFromSingleTXT(item.ChapterBytes, item.DelimiterRegex)
+	}
+	if err != nil {
+		return nil, 0, 0, fmt.Errorf("%w: %w", ErrInvalidImportFile, err)
+	}
+	for _, parsed := range parsedChapters {
+		if err := validateCleanUTF8Text(parsed.Title, fmt.Sprintf("第 %d 章标题", parsed.Index+1)); err != nil {
+			return nil, 0, 0, fmt.Errorf("%w: %w", ErrInvalidImportFile, err)
+		}
+		if err := validateCleanUTF8Text(parsed.Content, fmt.Sprintf("第 %d 章正文", parsed.Index+1)); err != nil {
+			return nil, 0, 0, fmt.Errorf("%w: %w", ErrInvalidImportFile, err)
+		}
+	}
+
+	n := &Novel{
+		Title:                title,
+		Author:               author,
+		Rating:               rating,
+		Status:               status,
+		PublishStatus:        publishStatus,
+		Synopsis:             item.Synopsis,
+		Genres:               genres,
+		CoinCostPerThousand:  item.CoinCostPerThousand,
+		StartPayChapterIndex: item.StartPayChapterIndex,
+	}
+
+	if n.CoinCostPerThousand == nil || n.StartPayChapterIndex <= 0 {
+		settings, err := s.repo.GetSettings(ctx)
+		if err != nil {
+			return nil, 0, 0, fmt.Errorf("read chapter pricing settings: %w", err)
+		}
+		if _, _, err := importPricing(n, settings); err != nil {
+			return nil, 0, 0, err
+		}
+	}
+
+	coverRef := strings.TrimSpace(item.CoverURL)
+	uploadedNewCover := false
+	if len(item.CoverBytes) > 0 {
+		if coverRef != "" {
+			return nil, 0, 0, errors.New("不能同时提供封面图片字节流与 cover_url，请二选一")
+		}
+		coverKey, _, uploadErr := s.UploadCover(ctx, item.CoverBytes)
+		if uploadErr != nil {
+			return nil, 0, 0, uploadErr
+		}
+		coverRef = coverKey
+		uploadedNewCover = true
+	} else if !s.isValidNewCoverRef(coverRef) {
+		return nil, 0, 0, ErrInvalidCover
+	}
+
+	committed := false
+	defer func() {
+		if !committed && uploadedNewCover {
+			s.cleanupUnreferencedCover(ctx, coverRef, 0)
+		}
+	}()
+
+	chapters := make([]Chapter, 0, len(parsedChapters))
+	totalWords := 0
+	for _, parsed := range parsedChapters {
+		words := countCharacters(parsed.Content)
+		totalWords += words
+		chapters = append(chapters, Chapter{
+			ID:           uuid.NewString(),
+			ChapterIndex: parsed.Index,
+			Title:        parsed.Title,
+			Content:      parsed.Content,
+			ContentHash:  chapterDigest(parsed.Content),
+			WordCount:    words,
+		})
+	}
+	if err := s.stageChapters(ctx, chapters); err != nil {
+		return nil, 0, 0, err
+	}
+
+	tx, err := s.repo.BeginTx(ctx)
+	if err != nil {
+		return nil, 0, 0, err
+	}
+	defer tx.Rollback(ctx)
+
+	if err := s.repo.LockSettings(ctx, tx); err != nil {
+		return nil, 0, 0, err
+	}
+
+	n.CoverURL = coverRef
+
+	startPay, costPerThousand, err := s.publicationPricing(ctx, tx, n)
+	if err != nil {
+		return nil, 0, 0, err
+	}
+	n.StartPayChapterIndex = startPay
+
+	if err := s.repo.CreateNovelTx(ctx, tx, n); err != nil {
+		return nil, 0, 0, err
+	}
+
+	for i := range chapters {
+		ch := &chapters[i]
+		ch.NovelID = n.ID
+		if err := setChapterPrice(ch, startPay, costPerThousand); err != nil {
+			return nil, 0, 0, err
+		}
+	}
+	if err := s.repo.ReplaceChaptersTx(ctx, tx, n.ID, chapters, nil, nil); err != nil {
+		return nil, 0, 0, err
+	}
+	if err := s.repo.SyncNovelWordCountTx(ctx, tx, n.ID); err != nil {
+		return nil, 0, 0, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, 0, 0, err
+	}
+	committed = true
+
+	n.WordCount = totalWords
+	s.applyCoverDisplay(n)
+	return n, len(chapters), totalWords, nil
+}
+
+func (s *novelService) BatchImportNovels(ctx context.Context, items []BatchImportNovelInput) (*BatchImportNovelsResult, error) {
+	if len(items) == 0 {
+		return nil, fmt.Errorf("%w: manifest 不能为空", ErrInvalidBatchImport)
+	}
+	if len(items) > maxBatchImportNovels {
+		return nil, fmt.Errorf("%w: 单次最多批量导入 %d 本书籍", ErrInvalidBatchImport, maxBatchImportNovels)
+	}
+
+	result := &BatchImportNovelsResult{
+		Total:   len(items),
+		Results: make([]BatchImportNovelItemResult, 0, len(items)),
+	}
+	for i, item := range items {
+		created, chaptersCount, totalWords, err := s.importNovelAtomically(ctx, item)
+		if err != nil {
+			result.FailedCount++
+			result.Results = append(result.Results, BatchImportNovelItemResult{
+				Index:  i,
+				Title:  strings.TrimSpace(item.Title),
+				Status: "failed",
+				Error:  err.Error(),
+			})
+			continue
+		}
+		result.CreatedCount++
+		result.Results = append(result.Results, BatchImportNovelItemResult{
+			Index:          i,
+			Title:          created.Title,
+			Status:         "created",
+			Novel:          created,
+			ChaptersCount:  chaptersCount,
+			TotalWordCount: totalWords,
+		})
+	}
+	return result, nil
 }
 
 func (s *novelService) UpdateNovel(ctx context.Context, id int64, title, author, coverURL, status, publishStatus, synopsis string, genres []string, rating float64, coinCost *int, startPayIndex int) (*Novel, error) {
@@ -430,11 +746,14 @@ func (s *novelService) UpdateNovel(ctx context.Context, id int64, title, author,
 		}
 	}
 
-	if coinCost != nil && *coinCost <= 0 {
-		coinCost = nil
+	if coinCost != nil && (*coinCost < 0 || *coinCost > math.MaxInt32) {
+		return nil, ErrInvalidNovelPricing
 	}
 	if startPayIndex <= 0 {
-		startPayIndex = s.resolveDefaultStartPay(ctx)
+		startPayIndex, err = s.resolveDefaultStartPay(ctx)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	n := &Novel{
@@ -456,22 +775,13 @@ func (s *novelService) UpdateNovel(ctx context.Context, id int64, title, author,
 		return nil, err
 	}
 
-	// Update all chapters of this novel to reflect new pay rules
-	if err := s.repo.UpdateChapterPrices(ctx, startPayIndex, coinCost, id); err != nil {
-		return nil, err
-	}
-
 	// Invalidate reader page cache
 	s.invalidateNovelCache(ctx, id)
 	s.invalidateAllChaptersCache(ctx, id)
 
 	// Best-effort cleanup of replaced OSS cover when no other active novel shares the hash key.
-	if existing.CoverURL != coverURL && s.coverStore != nil && s.coverStore.IsValidCoverRef(existing.CoverURL) {
-		if refCount, countErr := s.repo.CountNovelsByCoverURL(ctx, existing.CoverURL, id); countErr == nil && refCount == 0 {
-			if delErr := s.coverStore.DeleteCover(ctx, existing.CoverURL); delErr != nil {
-				log.Printf("[WARN] failed to delete replaced OSS cover %q for novel %d: %v", existing.CoverURL, id, delErr)
-			}
-		}
+	if existing.CoverURL != coverURL {
+		s.cleanupUnreferencedCover(ctx, existing.CoverURL, id)
 	}
 
 	s.applyCoverDisplay(n)
@@ -606,13 +916,18 @@ func (s *novelService) DeleteNovel(ctx context.Context, id int64) error {
 	s.invalidateNovelCache(ctx, id)
 	s.invalidateAllChaptersCache(ctx, id)
 
-	if s.storage != nil {
-		if err := s.storage.DeleteNovelContent(ctx, id); err != nil {
-			log.Printf("[WARN] failed to clean chapter content in storage for deleted novel %d: %v", id, err)
-		}
-	}
-
 	return nil
+}
+
+func (s *novelService) GetChapterIdentities(ctx context.Context, novelID int64) ([]ChapterIdentity, error) {
+	n, err := s.repo.GetNovel(ctx, novelID)
+	if err != nil {
+		return nil, err
+	}
+	if n == nil {
+		return nil, ErrNovelNotFound
+	}
+	return s.repo.ListChapterIdentities(ctx, novelID)
 }
 
 func (s *novelService) ListChapters(ctx context.Context, novelID int64) ([]Chapter, error) {
@@ -650,93 +965,61 @@ func (s *novelService) GetChapterDetail(ctx context.Context, novelID int64, chap
 		return nil, ErrChapterNotFound
 	}
 
-	if s.storage != nil && (c.Content == "" || s.storage.StorageType() == "oss") {
-		content, err := s.storage.GetContent(ctx, novelID, chapterIndex)
-		if err == nil && content != "" {
-			c.Content = content
-		}
+	c.Content, err = s.readChapterBody(ctx, c)
+	if err != nil {
+		return nil, err
 	}
 
 	return c, nil
 }
 
-func (s *novelService) CreateChapter(ctx context.Context, novelID int64, chapterIndex int, title, content string, isPaid bool, price int) (*Chapter, error) {
-	n, err := s.repo.GetNovel(ctx, novelID)
-	if err != nil {
+func (s *novelService) CreateChapter(ctx context.Context, novelID int64, chapterIndex int, title, content string) (*Chapter, error) {
+	ch := &Chapter{
+		ID: uuid.NewString(), NovelID: novelID, ChapterIndex: chapterIndex,
+		Title: title, Content: content,
+	}
+	if err := s.publishChapter(ctx, ch, false, ""); err != nil {
 		return nil, err
 	}
-	if n == nil {
-		return nil, ErrNovelNotFound
-	}
-
-	dbContent := content
-	if s.storage != nil && s.storage.StorageType() == "oss" {
-		dbContent = ""
-	}
-
-	c := &Chapter{
-		ID:           strings.ReplaceAll(uuid.New().String(), "-", ""),
-		NovelID:      novelID,
-		ChapterIndex: chapterIndex,
-		Title:        title,
-		Content:      dbContent,
-		WordCount:    countCharacters(content),
-		IsPaid:       isPaid,
-		Price:        price,
-	}
-
-	tx, err := s.repo.BeginTx(ctx)
-	if err != nil {
-		return nil, err
-	}
-	defer tx.Rollback(ctx)
-
-	if err := s.repo.CreateChapterTx(ctx, tx, c); err != nil {
-		return nil, err
-	}
-	if err := s.repo.SyncNovelWordCountTx(ctx, tx, novelID); err != nil {
-		return nil, err
-	}
-
-	if s.storage != nil && s.storage.StorageType() == "oss" {
-		if err := s.storage.PutContent(ctx, novelID, chapterIndex, content); err != nil {
-			return nil, fmt.Errorf("failed to store chapter content to OSS: %w", err)
-		}
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return nil, err
-	}
-
-	c.Content = content
-	s.invalidateNovelCache(ctx, novelID)
-	s.invalidateChapterCache(ctx, novelID, chapterIndex)
-	return c, nil
+	ch.Content = content
+	return ch, nil
 }
 
-func (s *novelService) UpdateChapter(ctx context.Context, novelID int64, chapterIndex int, title, content string, isPaid bool, price int) error {
-	n, err := s.repo.GetNovel(ctx, novelID)
+func (s *novelService) UpdateChapter(ctx context.Context, novelID int64, chapterIndex int, title, content string, expectedID string) error {
+	ch := &Chapter{
+		NovelID: novelID, ChapterIndex: chapterIndex, Title: title, Content: content,
+	}
+	return s.publishChapter(ctx, ch, true, expectedID)
+}
+
+func (s *novelService) publishChapter(ctx context.Context, ch *Chapter, update bool, expectedID string) error {
+	n, err := s.repo.GetNovel(ctx, ch.NovelID)
 	if err != nil {
 		return err
 	}
 	if n == nil {
 		return ErrNovelNotFound
 	}
-
-	dbContent := content
-	if s.storage != nil && s.storage.StorageType() == "oss" {
-		dbContent = ""
+	if update {
+		current, err := s.repo.GetChapter(ctx, ch.NovelID, ch.ChapterIndex)
+		if err != nil {
+			return err
+		}
+		if current == nil {
+			return ErrChapterNotFound
+		}
+		if expectedID != "" && current.ID != expectedID {
+			return ErrPublicationChanged
+		}
+		ch.ID = current.ID
 	}
-
-	c := &Chapter{
-		NovelID:      novelID,
-		ChapterIndex: chapterIndex,
-		Title:        title,
-		Content:      dbContent,
-		WordCount:    countCharacters(content),
-		IsPaid:       isPaid,
-		Price:        price,
+	ch.ContentHash = chapterDigest(ch.Content)
+	ch.WordCount = countCharacters(ch.Content)
+	staged := []Chapter{*ch}
+	if err := s.stageChapters(ctx, staged); err != nil {
+		return err
 	}
+	*ch = staged[0]
 
 	tx, err := s.repo.BeginTx(ctx)
 	if err != nil {
@@ -744,30 +1027,31 @@ func (s *novelService) UpdateChapter(ctx context.Context, novelID int64, chapter
 	}
 	defer tx.Rollback(ctx)
 
-	affected, err := s.repo.UpdateChapterTx(ctx, tx, c)
+	if err := s.repo.LockPublication(ctx, tx, n.ID, n.ContentVersion); err != nil {
+		return err
+	}
+	startPay, cost, err := s.publicationPricing(ctx, tx, n)
 	if err != nil {
 		return err
 	}
-	if affected == 0 {
-		return ErrChapterNotFound
-	}
-	if err := s.repo.SyncNovelWordCountTx(ctx, tx, novelID); err != nil {
+	if err := setChapterPrice(ch, startPay, cost); err != nil {
 		return err
 	}
-
-	if s.storage != nil && s.storage.StorageType() == "oss" {
-		if err := s.storage.PutContent(ctx, novelID, chapterIndex, content); err != nil {
-			return fmt.Errorf("failed to update chapter content in OSS: %w", err)
+	if update {
+		affected, err := s.repo.UpdateChapterTx(ctx, tx, ch)
+		if err != nil {
+			return err
 		}
-	}
-
-	if err := tx.Commit(ctx); err != nil {
+		if affected == 0 {
+			return ErrChapterNotFound
+		}
+	} else if err := s.repo.CreateChapterTx(ctx, tx, ch); err != nil {
 		return err
 	}
-
-	s.invalidateNovelCache(ctx, novelID)
-	s.invalidateChapterCache(ctx, novelID, chapterIndex)
-	return nil
+	if err := s.repo.SyncNovelWordCountTx(ctx, tx, n.ID); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 type zipFileItem struct {
@@ -930,7 +1214,7 @@ func parseChaptersFromSingleTXT(rawData []byte, delimiterRegex string) ([]zipFil
 	return parsed, nil
 }
 
-func (s *novelService) BulkImportChapters(ctx context.Context, novelID int64, zipData []byte, importType string, delimiterRegex string) (*BulkImportResult, error) {
+func (s *novelService) BulkImportChapters(ctx context.Context, novelID int64, zipData []byte, importType string, delimiterRegex string, mappings ...ChapterImportMapping) (*BulkImportResult, error) {
 	novel, err := s.repo.GetNovel(ctx, novelID)
 	if err != nil {
 		return nil, err
@@ -939,34 +1223,14 @@ func (s *novelService) BulkImportChapters(ctx context.Context, novelID int64, zi
 		return nil, ErrNovelNotFound
 	}
 
-	var configs map[string]string
-	if novel.CoinCostPerThousand == nil || novel.StartPayChapterIndex <= 0 {
-		configs, err = s.repo.GetSettings(ctx)
+	inheritsPricing := novel.CoinCostPerThousand == nil || novel.StartPayChapterIndex <= 0
+	if inheritsPricing {
+		configs, err := s.repo.GetSettings(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("read import pricing settings: %w", err)
 		}
-	}
-
-	costPerThousand := 500
-	if novel.CoinCostPerThousand != nil {
-		costPerThousand = *novel.CoinCostPerThousand
-	} else if val, ok := configs["global_coin_cost_per_thousand"]; ok {
-		costPerThousand, err = validateSettingInt(val, 0, "global_coin_cost_per_thousand")
-		if err != nil {
+		if _, _, err := importPricing(novel, configs); err != nil {
 			return nil, err
-		}
-	}
-
-	startPay := novel.StartPayChapterIndex
-	if startPay <= 0 {
-		if val, ok := configs["global_start_pay_chapter_index"]; ok {
-			startPay, err = validateSettingInt(val, 1, "global_start_pay_chapter_index")
-			if err != nil {
-				return nil, err
-			}
-		}
-		if startPay <= 0 {
-			startPay = 3
 		}
 	}
 
@@ -977,6 +1241,35 @@ func (s *novelService) BulkImportChapters(ctx context.Context, novelID int64, zi
 		parsedChapters, err = parseChaptersFromSingleTXT(zipData, delimiterRegex)
 	}
 	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrInvalidImportFile, err)
+	}
+
+	var mapping ChapterImportMapping
+	if len(mappings) > 0 {
+		mapping = mappings[0]
+		if mapping.Version != novel.ContentVersion {
+			return nil, ErrPublicationChanged
+		}
+	}
+	identities, err := s.importIdentities(ctx, novelID)
+	if err != nil {
+		return nil, err
+	}
+	chapters := make([]Chapter, 0, len(parsedChapters))
+	totalWords := 0
+	for _, item := range parsedChapters {
+		words := countCharacters(item.Content)
+		totalWords += words
+		chapters = append(chapters, Chapter{
+			NovelID: novelID, ChapterIndex: item.Index, Title: item.Title,
+			Content: item.Content, ContentHash: chapterDigest(item.Content), WordCount: words,
+		})
+	}
+	retired, splits, err := assignChapterIdentities(chapters, identities, mapping)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.stageChapters(ctx, chapters); err != nil {
 		return nil, err
 	}
 
@@ -985,81 +1278,28 @@ func (s *novelService) BulkImportChapters(ctx context.Context, novelID int64, zi
 		return nil, err
 	}
 	defer tx.Rollback(ctx)
-
-	// Clean existing chapters first
-	err = s.repo.DeleteChaptersByNovelIDTx(ctx, tx, novelID)
+	if err := s.repo.LockPublication(ctx, tx, novelID, novel.ContentVersion); err != nil {
+		return nil, err
+	}
+	startPay, costPerThousand, err := s.publicationPricing(ctx, tx, novel)
 	if err != nil {
 		return nil, err
 	}
-
-	// Insert parsed chapters
-	var totalWords int = 0
-	var storageItems []storage.ChapterContentItem
-
-	for _, item := range parsedChapters {
-		words := countCharacters(item.Content)
-		totalWords += words
-		isPaid := item.Index >= (startPay - 1)
-		price := 0
-		if isPaid {
-			price = int(math.Round((float64(words) / 1000.0) * float64(costPerThousand)))
-		}
-
-		dbContent := item.Content
-		if s.storage != nil && s.storage.StorageType() == "oss" {
-			dbContent = ""
-		}
-
-		ch := &Chapter{
-			ID:           strings.ReplaceAll(uuid.New().String(), "-", ""),
-			NovelID:      novelID,
-			ChapterIndex: item.Index,
-			Title:        item.Title,
-			Content:      dbContent,
-			WordCount:    words,
-			IsPaid:       isPaid,
-			Price:        price,
-		}
-
-		err = s.repo.CreateChapterTx(ctx, tx, ch)
-		if err != nil {
+	for i := range chapters {
+		ch := &chapters[i]
+		if err := setChapterPrice(ch, startPay, costPerThousand); err != nil {
 			return nil, err
 		}
-
-		storageItems = append(storageItems, storage.ChapterContentItem{
-			ChapterIndex: item.Index,
-			Content:      item.Content,
-		})
 	}
-
-	// Update word count in novel
-	err = s.repo.SyncNovelWordCountTx(ctx, tx, novelID)
-	if err != nil {
+	if err := s.repo.ReplaceChaptersTx(ctx, tx, novelID, chapters, retired, splits); err != nil {
 		return nil, err
 	}
-
-	// Upload chapter contents to OSS before committing DB transaction so any OSS failure rolls back DB cleanly.
-	if s.storage != nil && s.storage.StorageType() == "oss" {
-		if err := s.storage.BatchPutContent(ctx, novelID, storageItems); err != nil {
-			return nil, fmt.Errorf("failed to upload chapter contents to storage: %w", err)
-		}
-	}
-
-	err = tx.Commit(ctx)
-	if err != nil {
+	if err := s.repo.SyncNovelWordCountTx(ctx, tx, novelID); err != nil {
 		return nil, err
 	}
-
-	// Remove stale chapter objects from a previously larger import (non-fatal cleanup)
-	if s.storage != nil && s.storage.StorageType() == "oss" {
-		if err := s.storage.DeleteNovelContentFrom(ctx, novelID, len(parsedChapters)); err != nil {
-			log.Printf("[WARN] failed to delete stale OSS chapters for novel %d from index %d: %v", novelID, len(parsedChapters), err)
-		}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
 	}
-
-	// Invalidate reader page cache
-	s.invalidateNovelCache(ctx, novelID)
-	s.invalidateAllChaptersCache(ctx, novelID)
 
 	return &BulkImportResult{
 		ChaptersCount:  len(parsedChapters),
@@ -1073,26 +1313,42 @@ func (s *novelService) GetSettings(ctx context.Context) (map[string]string, erro
 
 func validateSettingInt(val string, minVal int, fieldName string) (int, error) {
 	parsed, err := strconv.Atoi(strings.TrimSpace(val))
-	if err != nil || parsed < minVal {
-		return 0, fmt.Errorf("%w: %s 必须为 >= %d 的整数", ErrInvalidSettingValue, fieldName, minVal)
+	if err != nil || parsed < minVal || parsed > math.MaxInt32 {
+		return 0, fmt.Errorf("%w：%s 必须为 %d 到 %d 的整数", ErrInvalidSettingValue, fieldName, minVal, math.MaxInt32)
 	}
 	return parsed, nil
 }
 
 func (s *novelService) UpdateSettings(ctx context.Context, configs map[string]string) error {
-	if val, ok := configs["global_coin_cost_per_thousand"]; ok {
-		normalized, err := validateSettingInt(val, 0, "global_coin_cost_per_thousand")
+	coin, coinUpdated := configs["global_coin_cost_per_thousand"]
+	cost := 0
+	var err error
+	if coinUpdated {
+		cost, err = validateSettingInt(coin, 0, "global_coin_cost_per_thousand")
 		if err != nil {
 			return err
 		}
-		configs["global_coin_cost_per_thousand"] = strconv.Itoa(normalized)
+		configs["global_coin_cost_per_thousand"] = strconv.Itoa(cost)
 	}
-	if val, ok := configs["global_start_pay_chapter_index"]; ok {
-		normalized, err := validateSettingInt(val, 1, "global_start_pay_chapter_index")
+	start, startUpdated := configs["global_start_pay_chapter_index"]
+	startPay := 0
+	if startUpdated {
+		startPay, err = validateSettingInt(start, 1, "global_start_pay_chapter_index")
 		if err != nil {
 			return err
 		}
-		configs["global_start_pay_chapter_index"] = strconv.Itoa(normalized)
+		configs["global_start_pay_chapter_index"] = strconv.Itoa(startPay)
+	}
+	scope := func(key string) bool {
+		if flag, ok := configs[key]; ok {
+			return strings.TrimSpace(flag) == "true"
+		}
+		return strings.TrimSpace(configs["apply_to_all_novels"]) == "true"
+	}
+	applyStart := startUpdated && scope("apply_start_pay_to_all_novels")
+	resetCost := configs["reset_novel_coin_cost"] == "true"
+	if resetCost && coinUpdated && scope("apply_coin_cost_to_all_novels") {
+		return ErrInvalidSettingValue
 	}
 
 	tx, err := s.repo.BeginTx(ctx)
@@ -1100,86 +1356,41 @@ func (s *novelService) UpdateSettings(ctx context.Context, configs map[string]st
 		return err
 	}
 	defer tx.Rollback(ctx)
-
-	for k, v := range configs {
-		if k == "apply_to_all_novels" || k == "apply_coin_cost_to_all_novels" || k == "apply_start_pay_to_all_novels" {
-			continue
+	if err := s.repo.LockSettings(ctx, tx); err != nil {
+		return err
+	}
+	if (applyStart || resetCost) && !coinUpdated {
+		all, err := s.repo.GetSettingsTx(ctx, tx)
+		if err != nil {
+			return fmt.Errorf("read pricing settings: %w", err)
 		}
-		err := s.repo.UpdateSettingTx(ctx, tx, k, v)
+		cost, err = pricingSetting(all, "global_coin_cost_per_thousand", 0, 500)
 		if err != nil {
 			return err
 		}
 	}
-
-	err = tx.Commit(ctx)
-	if err != nil {
-		return err
-	}
-
-	coinVal, coinUpdated := configs["global_coin_cost_per_thousand"]
-	startPayVal, startPayUpdated := configs["global_start_pay_chapter_index"]
-
-	costPerThousand := 500
-	if coinUpdated {
-		costPerThousand, _ = strconv.Atoi(coinVal)
-	} else {
-		allSettings, _ := s.repo.GetSettings(ctx)
-		if dbVal, ok := allSettings["global_coin_cost_per_thousand"]; ok {
-			if parsed, convErr := strconv.Atoi(strings.TrimSpace(dbVal)); convErr == nil && parsed >= 0 {
-				costPerThousand = parsed
-			}
+	for k, v := range configs {
+		switch k {
+		case "apply_to_all_novels", "apply_coin_cost_to_all_novels", "apply_start_pay_to_all_novels", "reset_novel_coin_cost":
+			continue
 		}
-	}
-
-	startPay := 3
-	if startPayUpdated {
-		startPay, _ = strconv.Atoi(startPayVal)
-	} else {
-		allSettings, _ := s.repo.GetSettings(ctx)
-		if dbVal, ok := allSettings["global_start_pay_chapter_index"]; ok {
-			if parsed, convErr := strconv.Atoi(strings.TrimSpace(dbVal)); convErr == nil && parsed > 0 {
-				startPay = parsed
-			}
-		}
-	}
-
-	parseScopeFlag := func(specificKey string) bool {
-		if v, ok := configs[specificKey]; ok {
-			return strings.TrimSpace(v) == "true"
-		}
-		if v, ok := configs["apply_to_all_novels"]; ok {
-			return strings.TrimSpace(v) == "true"
-		}
-		return false
-	}
-
-	if coinUpdated {
-		if parseScopeFlag("apply_coin_cost_to_all_novels") {
-			if err := s.repo.BatchUpdateAllNovelCoinCost(ctx, costPerThousand); err != nil {
-				return err
-			}
-		} else {
-			if err := s.repo.BatchUpdateInheritedNovelChapterPrices(ctx, costPerThousand); err != nil {
-				return err
-			}
-		}
-	}
-
-	if startPayUpdated && parseScopeFlag("apply_start_pay_to_all_novels") && startPay > 0 {
-		if err := s.repo.BatchUpdateAllNovelStartPayChapter(ctx, startPay, costPerThousand); err != nil {
+		if err := s.repo.UpdateSettingTx(ctx, tx, k, v); err != nil {
 			return err
 		}
 	}
-
-	// Invalidate Redis Cache safely using SCAN iterator
-	if redisclient.RDB != nil {
-		iter := redisclient.RDB.Scan(ctx, 0, "novel:*", 100).Iterator()
-		for iter.Next(ctx) {
-			redisclient.RDB.Del(ctx, iter.Val())
+	if coinUpdated || applyStart || resetCost {
+		var explicitCost *int
+		if coinUpdated && scope("apply_coin_cost_to_all_novels") {
+			explicitCost = &cost
+		}
+		if !applyStart {
+			startPay = 0
+		}
+		if err := s.repo.ApplyPricingSettingsTx(ctx, tx, cost, explicitCost, resetCost, startPay); err != nil {
+			return err
 		}
 	}
-
-	return nil
+	return tx.Commit(ctx)
 }
 
 func validatePromoPricing(coinCost, startPayIndex *int) error {

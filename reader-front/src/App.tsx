@@ -13,7 +13,9 @@ import { Profile } from './pages/Profile';
 import { Rewards } from './pages/Rewards';
 import { Recharge } from './pages/Recharge';
 import { api, registerSessionRefreshHandler } from './utils/api';
-import type { Novel, User, Transaction, SubscriptionInfo } from './utils/api';
+import type { Novel, User, Transaction, SubscriptionInfo, SavedProgress } from './utils/api';
+import { useProgressOutbox } from './utils/useProgressOutbox';
+import { withRequestTimeout } from './utils/requestTimeout';
 import { ToastProvider } from './context/ToastContext';
 import { ConfirmProvider } from './context/ConfirmContext';
 import {
@@ -39,7 +41,7 @@ const TX_PAGE_SIZE = 30;
 function loadScopedUnlockedChapters(userId: number | null): string[] {
   if (!userId) return [];
   try {
-    const raw = localStorage.getItem(`unlocked-chapters-u:${userId}`);
+    const raw = localStorage.getItem(`unlocked-chapter-ids-u:${userId}`);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     return Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === 'string') : [];
@@ -51,7 +53,7 @@ function loadScopedUnlockedChapters(userId: number | null): string[] {
 function saveScopedUnlockedChapters(userId: number | null, list: string[]): void {
   if (!userId) return;
   try {
-    localStorage.setItem(`unlocked-chapters-u:${userId}`, JSON.stringify(list));
+    localStorage.setItem(`unlocked-chapter-ids-u:${userId}`, JSON.stringify(list));
   } catch {
     // Ignore storage errors
   }
@@ -80,7 +82,8 @@ function AppContent() {
   const location = useLocation();
   const [searchParams] = useSearchParams();
 
-  const [user, setUser] = useState<User | null>(null);
+  const [session, setSession] = useState<{ user: User; token: string } | null>(null);
+  const user = session?.user ?? null;
   const [authReady, setAuthReady] = useState(false);
 
   const [novels, setNovels] = useState<Novel[]>([]);
@@ -93,9 +96,35 @@ function AppContent() {
   const [shelfBookIds, setShelfBookIds] = useState<number[]>([]);
   const [shelfNovelsList, setShelfNovelsList] = useState<Novel[]>([]);
 
-  const [readingProgress, setReadingProgress] = useState<{
-    [bookId: number]: { chapterIndex: number; scrollOffsetPercentage: number; paragraphIndex?: number };
-  }>({});
+  type ReadingPosition = {
+    chapterIndex: number;
+    scrollOffsetPercentage: number;
+    paragraphIndex?: number;
+    updatedAt: number;
+    version: string;
+  };
+  const [positions, setPositions] = useState<Record<number, Record<number, ReadingPosition>>>({});
+  const [restoredEntry, setRestoredEntry] = useState('');
+  const readingProgress = user ? positions[user.id] ?? {} : {};
+  const { enqueue, pending } = useProgressOutbox(user?.id, session?.token);
+  const mergePosition = useCallback((userId: number, entry: SavedProgress, paragraphIndex?: number) => {
+    const position = {
+      chapterIndex: entry.chapter_index,
+      scrollOffsetPercentage: entry.scroll_offset_percentage,
+      paragraphIndex,
+      updatedAt: Date.parse(entry.updated_at),
+      version: entry.version ?? '',
+    };
+    setPositions((previous) => {
+      const owner = previous[userId] ?? {};
+      const current = owner[entry.novel_id];
+      if (current && (current.updatedAt > position.updatedAt ||
+          (current.updatedAt === position.updatedAt && current.version >= position.version))) {
+        return previous;
+      }
+      return { ...previous, [userId]: { ...owner, [entry.novel_id]: position } };
+    });
+  }, []);
 
   const [themePreference, setThemePreference] = useState<ThemePreference>(getStoredThemePreference);
   const [systemTheme, setSystemTheme] = useState<'light' | 'dark'>(getSystemTheme);
@@ -112,11 +141,7 @@ function AppContent() {
   const [loadingMoreTransactions, setLoadingMoreTransactions] = useState(false);
   const transactionRequest = useRef<AbortController | null>(null);
 
-  const syncTimeouts = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const guestLoginPromiseRef = useRef<Promise<string | null> | null>(null);
-  const pendingProgressRef = useRef<
-    Record<string, { novel_id: number; chapter_index: number; scroll_offset_percentage: number; updated_at: string }>
-  >({});
 
   useEffect(() => {
     if (user?.id) {
@@ -171,14 +196,9 @@ function AppContent() {
       setShelfBookIds(shelfItems.map((item) => item.novel_id));
       setShelfNovelsList(shelfItems.map((item) => item.novel).filter(Boolean));
 
-      const progressMap: { [bookId: number]: { chapterIndex: number; scrollOffsetPercentage: number } } = {};
-      shelfItems.forEach((item) => {
-        progressMap[item.novel_id] = {
-          chapterIndex: item.chapter_index,
-          scrollOffsetPercentage: item.scroll_offset_percentage,
-        };
-      });
-      setReadingProgress(progressMap);
+      for (const item of shelfItems) {
+        mergePosition(item.user_id, { ...item, version: item.progress_version });
+      }
 
       setTransactionHistory(txs.items);
       setNextTransactionCursor(txs.next_cursor);
@@ -195,7 +215,7 @@ function AppContent() {
         setShelfLoading(false);
       }
     }
-  }, []);
+  }, [mergePosition]);
 
   const handleLoadMoreTransactions = useCallback(async () => {
     if (!nextTransactionCursor || transactionRequest.current) return;
@@ -237,7 +257,7 @@ function AppContent() {
             }
           }
           localStorage.setItem('auth-token', res.token);
-          setUser(res.user);
+          setSession({ user: res.user, token: res.token });
           await reloadWalletAndShelf();
           return res.token;
         } catch (err) {
@@ -295,17 +315,28 @@ function AppContent() {
   useEffect(() => {
     registerSessionRefreshHandler(triggerGuestLogin);
 
+    let authenticating = false;
+    let disposed = false;
     const initAuth = async () => {
+      if (authenticating) return;
+      authenticating = true;
+      try {
+        await restoreSession();
+      } finally {
+        authenticating = false;
+        if (!disposed) setAuthReady(true);
+      }
+    };
+
+    const restoreSession = async () => {
       const tokenBefore = localStorage.getItem('auth-token');
       if (!tokenBefore) {
         await triggerGuestLogin();
       } else {
         try {
           const u = await api.getProfile();
-          setUser(u);
-          const tokenAfter = localStorage.getItem('auth-token');
-          // Only reload if 401 refresh didn't already execute reloadWalletAndShelf
-          if (tokenAfter === tokenBefore) {
+          if (!disposed && localStorage.getItem('auth-token') === tokenBefore) {
+            setSession({ user: u, token: tokenBefore });
             await reloadWalletAndShelf();
           }
         } catch (err) {
@@ -313,7 +344,6 @@ function AppContent() {
           await triggerGuestLogin();
         }
       }
-      setAuthReady(true);
     };
 
     const loadNovels = async () => {
@@ -335,35 +365,53 @@ function AppContent() {
       }
     };
 
-    initAuth();
-    loadNovels();
+    void initAuth();
+    void loadNovels();
+    window.addEventListener('online', initAuth);
 
-    const flushPendingProgress = () => {
-      const pending = Object.values(pendingProgressRef.current);
-      if (pending.length === 0) return;
-      Object.values(syncTimeouts.current).forEach(clearTimeout);
-      syncTimeouts.current = {};
-      pendingProgressRef.current = {};
-      api.syncProgress(pending, { keepalive: true }).catch(() => {});
-    };
-
-    const handleVisibilityChange = () => {
-      if (document.visibilityState === 'hidden') {
-        flushPendingProgress();
-      }
-    };
-
-    window.addEventListener('pagehide', flushPendingProgress);
-    document.addEventListener('visibilitychange', handleVisibilityChange);
-
-    const timeoutsMap = syncTimeouts.current;
     return () => {
+      disposed = true;
+      window.removeEventListener('online', initAuth);
       registerSessionRefreshHandler(null);
-      window.removeEventListener('pagehide', flushPendingProgress);
-      document.removeEventListener('visibilitychange', handleVisibilityChange);
-      Object.values(timeoutsMap).forEach(clearTimeout);
     };
   }, [triggerGuestLogin, reloadWalletAndShelf]);
+
+  useEffect(() => {
+    let request: AbortController | undefined;
+    const onAccountChange = (event: StorageEvent) => {
+      if (event.key !== 'auth-token') return;
+      request?.abort();
+      if (!event.newValue) {
+        transactionRequest.current?.abort();
+        setSession(null);
+        setShelfBookIds([]);
+        setShelfNovelsList([]);
+        setUserCoins(0);
+        setChargedCoins(0);
+        setBonusCoins(0);
+        setIsVip(false);
+        setSubscription(null);
+        setTransactionHistory([]);
+        setNextTransactionCursor(undefined);
+        setLoadingMoreTransactions(false);
+        setShelfLoading(false);
+        return;
+      }
+      const token = event.newValue;
+      const controller = new AbortController();
+      request = controller;
+      void api.getProfile(controller.signal, token).then((profile) => {
+        if (controller.signal.aborted || localStorage.getItem('auth-token') !== token) return;
+        setSession({ user: profile, token });
+        void reloadWalletAndShelf();
+      }).catch(() => {});
+    };
+    window.addEventListener('storage', onAccountChange);
+    return () => {
+      request?.abort();
+      window.removeEventListener('storage', onAccountChange);
+    };
+  }, [reloadWalletAndShelf]);
 
   useEffect(() => {
     if (location.pathname === '/content' || location.pathname === '/detail') {
@@ -532,35 +580,15 @@ function AppContent() {
 
   const handleSaveProgress = useCallback(
     (bookId: number, chapterIndex: number, scrollOffsetPercentage: number, paragraphIndex?: number) => {
-      setReadingProgress((prev) => ({
-        ...prev,
-        [bookId]: { chapterIndex, scrollOffsetPercentage, paragraphIndex },
-      }));
-
-      const payload = {
+      if (!user?.id) return;
+      const update = enqueue({
         novel_id: bookId,
         chapter_index: chapterIndex,
         scroll_offset_percentage: scrollOffsetPercentage,
-        updated_at: new Date().toISOString(),
-      };
-      pendingProgressRef.current[bookId] = payload;
-
-      if (syncTimeouts.current[bookId]) {
-        clearTimeout(syncTimeouts.current[bookId]);
-      }
-
-      syncTimeouts.current[bookId] = setTimeout(async () => {
-        const latest = pendingProgressRef.current[bookId] || payload;
-        delete pendingProgressRef.current[bookId];
-        delete syncTimeouts.current[bookId];
-        try {
-          await api.syncProgress([latest]);
-        } catch (err) {
-          console.error('Reading progress sync failed:', err);
-        }
-      }, 2000);
+      });
+      if (update) mergePosition(user.id, update, paragraphIndex);
     },
-    []
+    [enqueue, mergePosition, user?.id],
   );
 
   const handleAddCoins = useCallback(
@@ -571,8 +599,8 @@ function AppContent() {
   );
 
   const markChapterUnlocked = useCallback(
-    (bookId: number, chapterIndex: number) => {
-      const key = `${bookId}-${chapterIndex}`;
+    (chapterId: string) => {
+      const key = chapterId;
       setUnlockedBookChapters((prev) => {
         if (prev.includes(key)) return prev;
         const next = [...prev, key];
@@ -584,8 +612,8 @@ function AppContent() {
   );
 
   const unmarkChapterUnlocked = useCallback(
-    (bookId: number, chapterIndex: number) => {
-      const key = `${bookId}-${chapterIndex}`;
+    (chapterId: string) => {
+      const key = chapterId;
       setUnlockedBookChapters((prev) => {
         if (!prev.includes(key)) return prev;
         const next = prev.filter((k) => k !== key);
@@ -597,12 +625,13 @@ function AppContent() {
   );
 
   const handleUnlockChapter = useCallback(
-    async (bookId: number, chapterIndex: number, price: number): Promise<boolean> => {
-      await api.unlockChapter(bookId, chapterIndex, price);
+    async (bookId: number, chapterIndex: number, price: number, chapterId: string, version: number): Promise<boolean> => {
+      if (!session || localStorage.getItem('auth-token') !== session.token) return false;
+      await api.unlockChapter(bookId, chapterIndex, price, chapterId, version, session.user.id, session.token);
       await reloadWalletAndShelf();
       return true;
     },
-    [reloadWalletAndShelf]
+    [reloadWalletAndShelf, session]
   );
 
   const getActiveTab = (): NavTabType | null => {
@@ -643,6 +672,34 @@ function AppContent() {
   const readerChapterIndex = Number.isFinite(parsedChapterOneBased)
     ? Math.max(0, parsedChapterOneBased - 1)
     : readingProgress[readerNovelId]?.chapterIndex ?? 0;
+  const entryNovelId = location.pathname === '/content' || location.pathname === '/detail' ? readerNovelId : 0;
+  const ownerId = user?.id;
+  const sessionToken = session?.token;
+  const progressEntry = ownerId && entryNovelId > 0 ? `${ownerId}:${entryNovelId}` : '';
+
+  useEffect(() => {
+    const owner = ownerId ?? 0;
+    if (!progressEntry || !owner) {
+      setRestoredEntry('');
+      return;
+    }
+    const controller = new AbortController();
+    async function restore() {
+      // Read the queue first so a concurrent acknowledgement can only make the
+      // subsequent server snapshot newer.
+      const cached = await pending(owner);
+      const remote = await withRequestTimeout(controller.signal, 4_000, (signal) =>
+        api.getProgress(entryNovelId, owner, signal, sessionToken),
+      ).catch(() => null);
+      if (controller.signal.aborted) return;
+      if (remote) mergePosition(owner, remote);
+      const local = cached.find((entry) => entry.novel_id === entryNovelId);
+      if (local) mergePosition(owner, local);
+      setRestoredEntry(progressEntry);
+    }
+    void restore();
+    return () => controller.abort();
+  }, [entryNovelId, mergePosition, ownerId, pending, progressEntry, sessionToken]);
   const searchGenre = searchParams.get('genre') || undefined;
 
   return (
@@ -717,7 +774,7 @@ function AppContent() {
                   setTransactionHistory([]);
                   setNextTransactionCursor(undefined);
                   localStorage.setItem('auth-token', token);
-                  setUser(u);
+                  setSession({ user: u, token });
                   setShelfLoading(true);
                   await reloadWalletAndShelf();
                   navigateTo('profile');
@@ -727,10 +784,10 @@ function AppContent() {
                   transactionRequest.current?.abort();
                   transactionRequest.current = null;
                   localStorage.removeItem('auth-token');
-                  setUser(null);
+                  setSession(null);
                   setShelfBookIds([]);
                   setShelfNovelsList([]);
-                  setReadingProgress({});
+                  setPositions({});
                   setUserCoins(0);
                   setChargedCoins(0);
                   setBonusCoins(0);
@@ -766,8 +823,9 @@ function AppContent() {
             path="/content"
             element={
               <Reader
+                key={`${user?.id ?? 0}:${readerNovelId}`}
                 userId={user?.id ?? 0}
-                authReady={authReady}
+                authReady={authReady && (!progressEntry || restoredEntry === progressEntry)}
                 isVip={isVip}
                 novelId={readerNovelId}
                 chapterIndex={readerChapterIndex}

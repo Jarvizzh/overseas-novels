@@ -16,10 +16,10 @@ type fakeWalletRepo struct {
 	chargedPrice   int
 }
 
-func (r *fakeWalletRepo) UnlockChapterTx(_ context.Context, _ int64, novelID int64, chapterIndex int, price int, _ string) error {
+func (r *fakeWalletRepo) UnlockChapterTx(_ context.Context, _ int64, novelID int64, chapterIndex int, _ int, quote ChapterQuote) error {
 	r.chargedNovelID = novelID
 	r.chargedIdx = chapterIndex
-	r.chargedPrice = price
+	r.chargedPrice = quote.Price
 	return nil
 }
 
@@ -55,8 +55,8 @@ func (r *fakeWalletNovelRepo) GetChapter(_ context.Context, novelID int64, chapt
 	copyCh := *ch
 	return &copyCh, nil
 }
-func (r *fakeWalletNovelRepo) CheckChapterUnlocked(context.Context, int64, int64, int) (bool, error) {
-	return false, nil
+func (r *fakeWalletNovelRepo) CheckChapterAccess(context.Context, int64, int64, string) (bool, bool, error) {
+	return false, false, nil
 }
 func (r *fakeWalletNovelRepo) GetUnlockedChapterIndices(context.Context, int64, int64) ([]int, error) {
 	return nil, nil
@@ -70,7 +70,9 @@ func (r *fakeWalletNovelRepo) GetEffectivePricingRule(context.Context, int64, in
 
 type fakeWalletNovelCache struct{ novel.Cache }
 
-func (fakeWalletNovelCache) SetChapterUnlocked(context.Context, int64, int64, int) error { return nil }
+func (fakeWalletNovelCache) SetChapterUnlocked(context.Context, int64, int64, string) error {
+	return nil
+}
 
 func TestUnlockChapter_EnforcesPublishedAndUnifiedPrice(t *testing.T) {
 	ctx := context.Background()
@@ -92,13 +94,13 @@ func TestUnlockChapter_EnforcesPublishedAndUnifiedPrice(t *testing.T) {
 	svc := NewService(wRepo, nRepo, fakeWalletNovelCache{}, nil, nil)
 
 	for _, hiddenID := range []int64{1, 2} {
-		err := svc.UnlockChapter(ctx, 42, hiddenID, 2, 0, "", "")
+		err := svc.UnlockChapter(ctx, 42, hiddenID, 2, 0, "", "", ChapterQuote{})
 		if !errors.Is(err, novel.ErrNovelNotFound) {
 			t.Fatalf("expected ErrNovelNotFound for hidden novel %d, got %v", hiddenID, err)
 		}
 	}
 
-	if err := svc.UnlockChapter(ctx, 42, 3, 2, 0, "", ""); err != nil {
+	if err := svc.UnlockChapter(ctx, 42, 3, 2, 0, "", "", ChapterQuote{ID: "c3", Version: 1}); err != nil {
 		t.Fatalf("UnlockChapter failed: %v", err)
 	}
 	if wRepo.chargedNovelID != 3 || wRepo.chargedIdx != 2 || wRepo.chargedPrice != 0 {
@@ -120,13 +122,13 @@ func TestUnlockChapterDoesNotDebitPaidVIP(t *testing.T) {
 	novels := subscribedNovelRepository{&fakeWalletNovelRepo{
 		novels: map[int64]*model.Novel{1: {ID: 1, Status: "Ongoing", ContentVersion: 1, PublishStatus: "published"}},
 		chapters: map[int64]map[int]*model.Chapter{
-			1: {2: {NovelID: 1, ChapterIndex: 2, WordCount: 1000}},
+			1: {2: {ID: "ch-vip", NovelID: 1, ChapterIndex: 2, WordCount: 1000}},
 		},
 		startPay: 3, effectiveCost: 500,
 	}}
 	repo := &fakeWalletRepo{}
 	service := NewService(repo, novels, fakeWalletNovelCache{}, nil, nil)
-	if err := service.UnlockChapter(context.Background(), 42, 1, 2, 0, "", "", 500); err != nil {
+	if err := service.UnlockChapter(context.Background(), 42, 1, 2, 0, "", "", ChapterQuote{ID: "ch-vip", Version: 1, Price: 500}); err != nil {
 		t.Fatal(err)
 	}
 	if repo.chargedNovelID != 0 {

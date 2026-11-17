@@ -29,8 +29,8 @@ type Cache interface {
 	GetChapter(ctx context.Context, novelID int64, chapterIndex int) (*model.Chapter, error)
 	SetChapter(ctx context.Context, novelID int64, chapterIndex int, chapter *model.Chapter) error
 
-	IsChapterUnlocked(ctx context.Context, userID, novelID int64, chapterIndex int) (bool, error)
-	SetChapterUnlocked(ctx context.Context, userID, novelID int64, chapterIndex int) error
+	IsChapterUnlocked(ctx context.Context, userID, novelID int64, chapterID string) (bool, error)
+	SetChapterUnlocked(ctx context.Context, userID, novelID int64, chapterID string) error
 }
 
 type redisCache struct{}
@@ -40,6 +40,8 @@ func NewRedisCache() Cache {
 }
 
 func (c *redisCache) GetNovel(ctx context.Context, id int64) (*model.Novel, error) {
+	ctx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
+	defer cancel()
 	key := fmt.Sprintf("novel:v%d:detail:%d", contentVersion(ctx), id)
 	val, err := redisclient.RDB.Get(ctx, key).Result()
 	if err == redis.Nil {
@@ -57,6 +59,8 @@ func (c *redisCache) GetNovel(ctx context.Context, id int64) (*model.Novel, erro
 }
 
 func (c *redisCache) SetNovel(ctx context.Context, id int64, novel *model.Novel) error {
+	ctx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
+	defer cancel()
 	key := fmt.Sprintf("novel:v%d:detail:%d", contentVersion(ctx), id)
 	data, err := json.Marshal(novel)
 	if err != nil {
@@ -67,6 +71,8 @@ func (c *redisCache) SetNovel(ctx context.Context, id int64, novel *model.Novel)
 }
 
 func (c *redisCache) GetChaptersList(ctx context.Context, novelID int64) ([]model.Chapter, error) {
+	ctx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
+	defer cancel()
 	key := fmt.Sprintf("novel:v%d:chapters:%d", contentVersion(ctx), novelID)
 	val, err := redisclient.RDB.Get(ctx, key).Result()
 	if err == redis.Nil {
@@ -84,6 +90,8 @@ func (c *redisCache) GetChaptersList(ctx context.Context, novelID int64) ([]mode
 }
 
 func (c *redisCache) SetChaptersList(ctx context.Context, novelID int64, chapters []model.Chapter) error {
+	ctx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
+	defer cancel()
 	key := fmt.Sprintf("novel:v%d:chapters:%d", contentVersion(ctx), novelID)
 	data, err := json.Marshal(chapters)
 	if err != nil {
@@ -94,7 +102,9 @@ func (c *redisCache) SetChaptersList(ctx context.Context, novelID int64, chapter
 }
 
 func (c *redisCache) GetChapter(ctx context.Context, novelID int64, chapterIndex int) (*model.Chapter, error) {
-	key := fmt.Sprintf("novel:v%d:chapter:%d:%d", contentVersion(ctx), novelID, chapterIndex)
+	ctx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
+	defer cancel()
+	key := fmt.Sprintf("novel:v%d:chapter-revision:%d:%d", contentVersion(ctx), novelID, chapterIndex)
 	val, err := redisclient.RDB.Get(ctx, key).Result()
 	if err == redis.Nil {
 		return nil, nil
@@ -111,7 +121,9 @@ func (c *redisCache) GetChapter(ctx context.Context, novelID int64, chapterIndex
 }
 
 func (c *redisCache) SetChapter(ctx context.Context, novelID int64, chapterIndex int, chapter *model.Chapter) error {
-	key := fmt.Sprintf("novel:v%d:chapter:%d:%d", contentVersion(ctx), novelID, chapterIndex)
+	ctx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
+	defer cancel()
+	key := fmt.Sprintf("novel:v%d:chapter-revision:%d:%d", contentVersion(ctx), novelID, chapterIndex)
 	data, err := json.Marshal(chapter)
 	if err != nil {
 		return err
@@ -120,19 +132,23 @@ func (c *redisCache) SetChapter(ctx context.Context, novelID int64, chapterIndex
 	return redisclient.RDB.Set(ctx, key, data, getJitterTTL(2*time.Hour)).Err()
 }
 
-func (c *redisCache) IsChapterUnlocked(ctx context.Context, userID, novelID int64, chapterIndex int) (bool, error) {
-	key := fmt.Sprintf("user:unlocks:%d:%d", userID, novelID)
-	isMember, err := redisclient.RDB.SIsMember(ctx, key, chapterIndex).Result()
+func (c *redisCache) IsChapterUnlocked(ctx context.Context, userID, novelID int64, chapterID string) (bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
+	defer cancel()
+	key := fmt.Sprintf("user:unlocks:chapter-id:%d:%d", userID, novelID)
+	isMember, err := redisclient.RDB.SIsMember(ctx, key, chapterID).Result()
 	if err != nil {
 		return false, err
 	}
 	return isMember, nil
 }
 
-func (c *redisCache) SetChapterUnlocked(ctx context.Context, userID, novelID int64, chapterIndex int) error {
-	key := fmt.Sprintf("user:unlocks:%d:%d", userID, novelID)
+func (c *redisCache) SetChapterUnlocked(ctx context.Context, userID, novelID int64, chapterID string) error {
+	ctx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
+	defer cancel()
+	key := fmt.Sprintf("user:unlocks:chapter-id:%d:%d", userID, novelID)
 	pipe := redisclient.RDB.Pipeline()
-	pipe.SAdd(ctx, key, chapterIndex)
+	pipe.SAdd(ctx, key, chapterID)
 	pipe.Expire(ctx, key, 24*time.Hour) // Extend expiration on activity
 	_, err := pipe.Exec(ctx)
 	return err

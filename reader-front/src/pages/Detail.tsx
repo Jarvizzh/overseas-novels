@@ -104,7 +104,7 @@ export const Detail: React.FC<DetailProps> = ({
       className="btn-cta-primary"
       style={{ flex: 1 }}
       disabled={chapters.length === 0}
-      onClick={() => onNavigate('reader', { id: novel.id, chapterIndex: lastReadChapterIndex })}
+      onClick={() => onNavigate('reader', { id: novel.id })}
     >
       <BookOpen size={17} strokeWidth={1.8} aria-hidden="true" />
       <span>

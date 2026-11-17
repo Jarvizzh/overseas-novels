@@ -1,13 +1,19 @@
 package auth
 
 import (
+	"bytes"
 	"context"
-	"github.com/gin-gonic/gin"
+	"encoding/json"
+	"net/http"
 	"net/http/httptest"
-	"reader-backend/internal/config"
-	"reader-backend/internal/testdb"
+	"strconv"
 	"strings"
 	"testing"
+	"unicode/utf8"
+
+	"github.com/gin-gonic/gin"
+	"reader-backend/internal/config"
+	"reader-backend/internal/testdb"
 )
 
 func TestAccountSessionAndBinding(t *testing.T) {
@@ -105,5 +111,73 @@ func TestUntrustedForwardedHeadersDoNotBypassLimiter(t *testing.T) {
 		if w.Code != want {
 			t.Fatalf("status=%d want %d", w.Code, want)
 		}
+	}
+}
+
+func TestAccountInputsMatchStorageAcrossRegistrationAndBinding(t *testing.T) {
+	pool := testdb.Open(t)
+	config.AppConfig = &config.Config{JWTSecret: "test-account-fields"}
+	handler := NewAuthHandler(NewAuthService(NewUserRepository()))
+	router := gin.New()
+	router.POST("/guest", handler.GuestLogin)
+	router.POST("/register", handler.Register)
+	router.POST("/bind/:user", func(c *gin.Context) {
+		id, err := strconv.ParseInt(c.Param("user"), 10, 64)
+		if err != nil {
+			t.Fatal(err)
+		}
+		c.Set("user_id", id)
+	}, handler.BindEmail)
+	nick := strings.Repeat("阅", 50)
+	ua := strings.Repeat("阅", 256)
+	longEmail := strings.Repeat("a", 55) + "@" + strings.Repeat("b", 49) + ".example"
+	call := func(path string, body any, status int) AuthResponse {
+		t.Helper()
+		encoded, err := json.Marshal(body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(encoded))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("User-Agent", ua)
+		req.Header.Set("X-UTM-Source", strings.Repeat("x", 101))
+		req.Header.Set("X-UTM-Campaign", strings.Repeat("y", 100))
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+		if w.Code != status {
+			t.Fatalf("%s: got %d want %d: %s", path, w.Code, status, w.Body)
+		}
+		var response AuthResponse
+		if status == http.StatusOK {
+			if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return response
+	}
+	guest := call("/guest", nil, 200)
+	var device, source, campaign string
+	if err := pool.QueryRow(context.Background(), "SELECT device,utm_source,utm_campaign FROM users WHERE id=$1", guest.User.ID).Scan(&device, &source, &campaign); err != nil ||
+		utf8.RuneCountInString(device) != 255 || source != "" || len(campaign) != 100 {
+		t.Fatalf("bad stored diagnostic and attribution lengths: %d %d %d %v", utf8.RuneCountInString(device), len(source), len(campaign), err)
+	}
+	call("/register", RegisterRequest{Email: longEmail, Password: "Test-password", Nickname: nick + "阅"}, 400)
+	created := call("/register", RegisterRequest{Email: longEmail, Password: "Test-password", Nickname: nick}, 200)
+	if created.User.Email == nil || *created.User.Email != longEmail || created.User.Nickname != nick {
+		t.Fatalf("valid account input was not preserved: %+v", created.User)
+	}
+	boundaryEmail := strings.Repeat("c", 60) + "@" + strings.Repeat("d", 63) + "." +
+		strings.Repeat("e", 63) + "." + strings.Repeat("f", 59) + ".sample"
+	boundary := call("/register", RegisterRequest{Email: boundaryEmail, Password: "Test-password"}, 200)
+	if boundary.User.Email == nil || *boundary.User.Email != boundaryEmail {
+		t.Fatalf("valid 255-character email did not round-trip: %+v", boundary.User.Email)
+	}
+	call("/register", RegisterRequest{Email: "c" + boundaryEmail, Password: "Test-password"}, 400)
+
+	bind := "/bind/" + strconv.FormatInt(guest.User.ID, 10)
+	call(bind, BindEmailRequest{Email: "guest+" + longEmail, Password: "Test-password", Nickname: strings.Repeat("🙂", 51)}, 400)
+	bound := call(bind, BindEmailRequest{Email: "guest+" + longEmail, Password: "Test-password", Nickname: strings.Repeat("🙂", 50)}, 200)
+	if bound.User.ID != guest.User.ID || utf8.RuneCountInString(bound.User.Nickname) != 50 {
+		t.Fatalf("binding changed account identity or lost Unicode nickname: %+v", bound.User)
 	}
 }

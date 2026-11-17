@@ -2,6 +2,9 @@ package storage
 
 import (
 	"context"
+	"crypto/md5"
+	"crypto/sha256"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -87,7 +90,7 @@ func (s *AliyunOSSStorage) PutContent(ctx context.Context, novelID int64, chapte
 
 func (s *AliyunOSSStorage) GetContent(ctx context.Context, novelID int64, chapterIndex int) (string, error) {
 	objectKey := s.formatObjectKey(novelID, chapterIndex)
-	body, err := s.bucket.GetObject(objectKey)
+	body, err := s.bucket.GetObject(objectKey, oss.WithContext(ctx))
 	if err != nil {
 		// If object is not found in OSS and a fallback DB is provided, check PostgreSQL
 		var ossErr oss.ServiceError
@@ -258,4 +261,58 @@ func (s *AliyunOSSStorage) BatchPutContent(ctx context.Context, novelID int64, i
 	}
 
 	return nil
+}
+
+// ReadChapterRevision reads only the referenced object and verifies its published digest.
+func (s *AliyunOSSStorage) ReadChapterRevision(ctx context.Context, key, digest string) (string, error) {
+	objectKey := s.basePath + "/" + key
+	body, err := s.bucket.GetObject(objectKey, oss.WithContext(ctx))
+	if err != nil {
+		return "", fmt.Errorf("read chapter object %q: %w", key, err)
+	}
+	defer body.Close()
+	data, err := io.ReadAll(body)
+	if err != nil {
+		return "", fmt.Errorf("read chapter object %q: %w", key, err)
+	}
+	if fmt.Sprintf("%x", sha256.Sum256(data)) != digest {
+		return "", fmt.Errorf("chapter object %q failed content verification", key)
+	}
+	return string(data), nil
+}
+
+func (s *AliyunOSSStorage) WriteChapterRevision(ctx context.Context, key, digest, content string) error {
+	objectKey := s.basePath + "/" + key
+	checksum := md5.Sum([]byte(content))
+	if err := s.bucket.PutObject(objectKey, strings.NewReader(content),
+		oss.ContentMD5(base64.StdEncoding.EncodeToString(checksum[:])),
+		oss.SetHeader("x-oss-forbid-overwrite", "true"), oss.WithContext(ctx)); err != nil {
+		return fmt.Errorf("upload chapter object %q: %w", key, err)
+	}
+	_, err := s.ReadChapterRevision(ctx, key, digest)
+	return err
+}
+
+func (s *AliyunOSSStorage) DeleteChapterRevision(ctx context.Context, key string) error {
+	return s.bucket.DeleteObject(s.basePath+"/"+key, oss.WithContext(ctx))
+}
+
+// ReadLegacyChapter reads an index-keyed object used by chapters published before
+// immutable references. The caller already holds the corresponding DB row.
+func (s *AliyunOSSStorage) ReadLegacyChapter(ctx context.Context, novelID int64, chapterIndex int) (string, error) {
+	key := s.formatObjectKey(novelID, chapterIndex)
+	body, err := s.bucket.GetObject(key, oss.WithContext(ctx))
+	if err != nil {
+		var serviceErr oss.ServiceError
+		if errors.As(err, &serviceErr) && serviceErr.StatusCode == 404 {
+			return "", ErrContentNotFound
+		}
+		return "", fmt.Errorf("read legacy chapter %q: %w", key, err)
+	}
+	defer body.Close()
+	data, err := io.ReadAll(body)
+	if err != nil {
+		return "", fmt.Errorf("read legacy chapter %q: %w", key, err)
+	}
+	return string(data), nil
 }

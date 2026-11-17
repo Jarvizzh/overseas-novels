@@ -14,14 +14,20 @@ func TestSchemaReadinessGate(t *testing.T) {
 	if err := db.CheckSchema(ctx); err != nil {
 		t.Fatal(err)
 	}
-	for _, version := range []int64{0, db.RequiredSchemaVersion + 1} {
-		if _, err := pool.Exec(ctx, "UPDATE reader_schema_migrations SET version=$1", version); err != nil {
-			t.Fatal(err)
-		}
-		if err := db.CheckSchema(ctx); err == nil {
-			t.Fatalf("schema %d accepted", version)
-		}
+	if _, err := pool.Exec(ctx, "DELETE FROM reader_schema_migrations WHERE version = $1", db.RequiredSchemaVersion); err != nil {
+		t.Fatal(err)
 	}
+	if err := db.CheckSchema(ctx); err == nil {
+		t.Fatal("older schema accepted")
+	}
+	newer := db.RequiredSchemaVersion + 1
+	if _, err := pool.Exec(ctx, "INSERT INTO reader_schema_migrations(version) VALUES($1)", newer); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CheckSchema(ctx); err == nil {
+		t.Fatalf("schema %d accepted", newer)
+	}
+
 	if _, err := pool.Exec(ctx, "ALTER TABLE reader_schema_migrations RENAME TO missing_ledger; CREATE TABLE reader_schema_migrations(unrelated int)"); err != nil {
 		t.Fatal(err)
 	}

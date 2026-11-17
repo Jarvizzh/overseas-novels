@@ -23,28 +23,28 @@ type NovelRepository interface {
 	GetNovel(ctx context.Context, id int64) (*Novel, error)
 	GetNovelsWithChapterCounts(ctx context.Context, ids []int64) ([]NovelPublishCandidate, error)
 	CreateNovel(ctx context.Context, n *Novel) error
+	CreateNovelTx(ctx context.Context, tx pgx.Tx, n *Novel) error
 	UpdateNovel(ctx context.Context, n *Novel) error
 	UpdatePublishStatus(ctx context.Context, id int64, publishStatus string) (*Novel, error)
 	BatchUpdatePublishStatus(ctx context.Context, ids []int64, publishStatus string) ([]int64, error)
 	DeleteNovel(ctx context.Context, id int64) (int64, error)
 	CountNovelsByCoverURL(ctx context.Context, coverURL string, excludeNovelID int64) (int, error)
 	CountChapters(ctx context.Context, novelID int64) (int, error)
-	UpdateChapterPrices(ctx context.Context, startIdx int, cost *int, novelID int64) error
-	BatchUpdateAllNovelChapterPrices(ctx context.Context, startPayChapterIndex int, coinCostPerThousand int) error
-	BatchUpdateAllNovelCoinCost(ctx context.Context, coinCostPerThousand int) error
-	BatchUpdateAllNovelStartPayChapter(ctx context.Context, startPayChapterIndex int, defaultCoinCostPerThousand int) error
-	BatchUpdateInheritedNovelChapterPrices(ctx context.Context, coinCostPerThousand int) error
+	ApplyPricingSettingsTx(ctx context.Context, tx pgx.Tx, defaultCost int, explicitCost *int, resetCost bool, startPay int) error
+	LockSettings(ctx context.Context, tx pgx.Tx) error
 
 	ListChapters(ctx context.Context, novelID int64) ([]Chapter, error)
 	GetChapter(ctx context.Context, novelID int64, chapterIndex int) (*Chapter, error)
-	CreateChapter(ctx context.Context, c *Chapter) error
 	CreateChapterTx(ctx context.Context, tx pgx.Tx, c *Chapter) error
-	UpdateChapter(ctx context.Context, c *Chapter) error
 	UpdateChapterTx(ctx context.Context, tx pgx.Tx, c *Chapter) (int64, error)
 	SyncNovelWordCountTx(ctx context.Context, tx pgx.Tx, novelID int64) error
-	DeleteChaptersByNovelIDTx(ctx context.Context, tx pgx.Tx, novelID int64) error
+	LockPublication(ctx context.Context, tx pgx.Tx, novelID, version int64) error
+	ListChapterIdentities(ctx context.Context, novelID int64) ([]ChapterIdentity, error)
+	StageChapterObjects(ctx context.Context, chapters []Chapter) error
+	ReplaceChaptersTx(ctx context.Context, tx pgx.Tx, novelID int64, chapters []Chapter, retired []ChapterIdentity, splits map[string]string) error
 
 	GetSettings(ctx context.Context) (map[string]string, error)
+	GetSettingsTx(ctx context.Context, tx pgx.Tx) (map[string]string, error)
 	UpdateSettingTx(ctx context.Context, tx pgx.Tx, key, value string) error
 
 	ListPromotionLinks(ctx context.Context) ([]PromotionLink, error)
@@ -75,13 +75,13 @@ func (r *dbNovelRepository) CountNovels(ctx context.Context, whereSQL string, ar
 	return total, err
 }
 
-const novelSelectColumns = `id, title, author, cover_url, rating, status, publish_status, synopsis, genres, word_count, view_count, coin_cost_per_thousand, COALESCE(coin_cost_per_thousand, (SELECT value::integer FROM system_configs WHERE key = 'global_coin_cost_per_thousand'), 500) AS effective_coin_cost_per_thousand, start_pay_chapter_index, created_at, COALESCE(updated_at, created_at) AS updated_at`
+const novelSelectColumns = `id, title, author, cover_url, rating, status, publish_status, synopsis, genres, word_count, view_count, coin_cost_per_thousand, COALESCE(coin_cost_per_thousand, (SELECT value::integer FROM system_configs WHERE key = 'global_coin_cost_per_thousand'), 500) AS effective_coin_cost_per_thousand, COALESCE(start_pay_chapter_index, 0), created_at, COALESCE(updated_at, created_at) AS updated_at, content_version`
 
 func scanNovelRow(scanner interface{ Scan(dest ...any) error }, n *Novel) error {
 	err := scanner.Scan(
 		&n.ID, &n.Title, &n.Author, &n.CoverURL, &n.Rating,
 		&n.Status, &n.PublishStatus, &n.Synopsis, &n.Genres, &n.WordCount, &n.ViewCount,
-		&n.CoinCostPerThousand, &n.EffectiveCoinCostPerThousand, &n.StartPayChapterIndex, &n.CreatedAt, &n.UpdatedAt,
+		&n.CoinCostPerThousand, &n.EffectiveCoinCostPerThousand, &n.StartPayChapterIndex, &n.CreatedAt, &n.UpdatedAt, &n.ContentVersion,
 	)
 	if err != nil {
 		return err
@@ -131,7 +131,7 @@ func (r *dbNovelRepository) GetNovelsWithChapterCounts(ctx context.Context, ids 
 	query := `
 		SELECT n.id, n.title, n.publish_status, COUNT(c.id)::int AS chapter_count
 		FROM novels n
-		LEFT JOIN chapters c ON c.novel_id = n.id
+		LEFT JOIN chapters c ON c.novel_id = n.id AND c.chapter_index IS NOT NULL
 		WHERE n.id = ANY($1) AND n.status != 'archived'
 		GROUP BY n.id, n.title, n.publish_status`
 	rows, err := db.DB.Query(ctx, query, ids)
@@ -151,34 +151,60 @@ func (r *dbNovelRepository) GetNovelsWithChapterCounts(ctx context.Context, ids 
 	return items, rows.Err()
 }
 
+const insertNovelSQL = `
+	INSERT INTO novels (title, author, cover_url, rating, status, publish_status, synopsis, genres, word_count, view_count, coin_cost_per_thousand, start_pay_chapter_index, updated_at)
+	VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 0, 0, $9, $10, NOW())
+	RETURNING ` + novelSelectColumns
+
+func insertNovelWithQueryer(ctx context.Context, q interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}, n *Novel) error {
+	return scanNovelRow(q.QueryRow(ctx, insertNovelSQL, n.Title, n.Author, n.CoverURL, n.Rating, n.Status, n.PublishStatus, n.Synopsis, n.Genres, n.CoinCostPerThousand, n.StartPayChapterIndex), n)
+}
+
 func (r *dbNovelRepository) CreateNovel(ctx context.Context, n *Novel) error {
-	query := `
-		INSERT INTO novels (title, author, cover_url, rating, status, publish_status, synopsis, genres, word_count, view_count, coin_cost_per_thousand, start_pay_chapter_index, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 0, 0, $9, $10, NOW())
-		RETURNING ` + novelSelectColumns
-
-	execInsert := func() error {
-		return scanNovelRow(db.DB.QueryRow(ctx, query, n.Title, n.Author, n.CoverURL, n.Rating, n.Status, n.PublishStatus, n.Synopsis, n.Genres, n.CoinCostPerThousand, n.StartPayChapterIndex), n)
-	}
-
-	err := execInsert()
+	err := insertNovelWithQueryer(ctx, db.DB, n)
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == "novels_pkey" {
 		if syncErr := db.SyncSequence(ctx, "novels", "id", "novels_id_seq"); syncErr == nil {
-			return execInsert()
+			return insertNovelWithQueryer(ctx, db.DB, n)
 		}
 	}
 	return err
 }
 
+func (r *dbNovelRepository) CreateNovelTx(ctx context.Context, tx pgx.Tx, n *Novel) error {
+	return insertNovelWithQueryer(ctx, tx, n)
+}
+
 func (r *dbNovelRepository) UpdateNovel(ctx context.Context, n *Novel) error {
+	tx, err := r.BeginTx(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if err := r.LockSettings(ctx, tx); err != nil {
+		return err
+	}
 	query := `
 		UPDATE novels
 		SET title = $1, author = $2, cover_url = $3, rating = $4, status = $5, publish_status = $6, synopsis = $7, genres = $8, coin_cost_per_thousand = $9, start_pay_chapter_index = $10, updated_at = NOW()
 		WHERE id = $11 AND status != 'archived'
 		RETURNING ` + novelSelectColumns
 
-	return scanNovelRow(db.DB.QueryRow(ctx, query, n.Title, n.Author, n.CoverURL, n.Rating, n.Status, n.PublishStatus, n.Synopsis, n.Genres, n.CoinCostPerThousand, n.StartPayChapterIndex, n.ID), n)
+	if err := scanNovelRow(tx.QueryRow(ctx, query, n.Title, n.Author, n.CoverURL, n.Rating, n.Status, n.PublishStatus, n.Synopsis, n.Genres, n.CoinCostPerThousand, n.StartPayChapterIndex, n.ID), n); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE chapters SET is_paid = $3::int > 0 AND chapter_index >= $2 - 1,
+		    price = CASE WHEN chapter_index >= $2 - 1 THEN ROUND(word_count::numeric * $3::int / 1000)::int ELSE 0 END
+		WHERE novel_id = $1 AND chapter_index IS NOT NULL`, n.ID, n.StartPayChapterIndex, n.EffectiveCoinCostPerThousand); err != nil {
+		return err
+	}
+	if err := tx.QueryRow(ctx, "SELECT content_version FROM novels WHERE id = $1", n.ID).Scan(&n.ContentVersion); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func (r *dbNovelRepository) UpdatePublishStatus(ctx context.Context, id int64, publishStatus string) (*Novel, error) {
@@ -232,7 +258,7 @@ func (r *dbNovelRepository) DeleteNovel(ctx context.Context, id int64) (int64, e
 
 func (r *dbNovelRepository) CountChapters(ctx context.Context, novelID int64) (int, error) {
 	var total int
-	err := db.DB.QueryRow(ctx, "SELECT COUNT(*) FROM chapters WHERE novel_id = $1", novelID).Scan(&total)
+	err := db.DB.QueryRow(ctx, "SELECT COUNT(*) FROM chapters WHERE novel_id = $1 AND chapter_index IS NOT NULL", novelID).Scan(&total)
 	return total, err
 }
 
@@ -242,142 +268,36 @@ func (r *dbNovelRepository) CountNovelsByCoverURL(ctx context.Context, coverURL 
 	return total, err
 }
 
-func (r *dbNovelRepository) UpdateChapterPrices(ctx context.Context, startIdx int, cost *int, novelID int64) error {
-	// startIdx is 1-based (e.g. Chapter 3 means chapter_index >= 2 is paid)
-	_, err := db.DB.Exec(ctx, `
-		UPDATE chapters
-		SET 
-			is_paid = (chapter_index >= ($1 - 1)),
-			price = CASE 
-				WHEN (chapter_index >= ($1 - 1)) 
-				THEN ROUND((word_count::decimal / 1000.0) * COALESCE($2, (SELECT value::integer FROM system_configs WHERE key = 'global_coin_cost_per_thousand'), 500))::integer 
-				ELSE 0 
-			END
-		WHERE novel_id = $3
-	`, startIdx, cost, novelID)
+func (r *dbNovelRepository) LockSettings(ctx context.Context, tx pgx.Tx) error {
+	_, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock(2026111702)")
 	return err
 }
 
-func (r *dbNovelRepository) BatchUpdateAllNovelChapterPrices(ctx context.Context, startPayChapterIndex int, coinCostPerThousand int) error {
-	tx, err := db.DB.Begin(ctx)
-	if err != nil {
+func (r *dbNovelRepository) ApplyPricingSettingsTx(ctx context.Context, tx pgx.Tx, defaultCost int, explicitCost *int, resetCost bool, startPay int) error {
+	// Acquire novel locks before modifying any chapters, in a consistent order.
+	if _, err := tx.Exec(ctx, `
+		SELECT id FROM novels WHERE status <> 'archived'
+		AND ($1 OR $2::int IS NOT NULL OR $3::int > 0 OR coin_cost_per_thousand IS NULL)
+		ORDER BY id FOR UPDATE`, resetCost, explicitCost, startPay); err != nil {
 		return err
 	}
-	defer tx.Rollback(ctx)
-
-	_, err = tx.Exec(ctx, `
-		UPDATE novels 
-		SET 
-			start_pay_chapter_index = $1, 
-			coin_cost_per_thousand = $2
-		WHERE status != 'archived'
-	`, startPayChapterIndex, coinCostPerThousand)
-	if err != nil {
-		return err
+	if resetCost || explicitCost != nil || startPay > 0 {
+		if _, err := tx.Exec(ctx, `
+			UPDATE novels SET coin_cost_per_thousand = CASE WHEN $1 THEN NULL ELSE COALESCE($2::int, coin_cost_per_thousand) END,
+			    start_pay_chapter_index = COALESCE(NULLIF($3::int, 0), start_pay_chapter_index)
+			WHERE status <> 'archived'`, resetCost, explicitCost, startPay); err != nil {
+			return err
+		}
 	}
-
-	_, err = tx.Exec(ctx, `
+	_, err := tx.Exec(ctx, `
 		UPDATE chapters c
-		SET 
-			is_paid = (c.chapter_index >= ($1 - 1)),
-			price = CASE 
-				WHEN (c.chapter_index >= ($1 - 1)) 
-				THEN ROUND((c.word_count::decimal / 1000.0) * $2)::integer 
-				ELSE 0 
-			END
-		FROM novels n
-		WHERE c.novel_id = n.id AND n.status != 'archived'
-	`, startPayChapterIndex, coinCostPerThousand)
-	if err != nil {
-		return err
-	}
-
-	return tx.Commit(ctx)
-}
-
-func (r *dbNovelRepository) BatchUpdateAllNovelCoinCost(ctx context.Context, coinCostPerThousand int) error {
-	tx, err := db.DB.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback(ctx)
-
-	_, err = tx.Exec(ctx, `
-		UPDATE novels
-		SET coin_cost_per_thousand = $1
-		WHERE status != 'archived'
-	`, coinCostPerThousand)
-	if err != nil {
-		return err
-	}
-
-	_, err = tx.Exec(ctx, `
-		UPDATE chapters c
-		SET
-			is_paid = (c.chapter_index >= (n.start_pay_chapter_index - 1)),
-			price = CASE
-				WHEN (c.chapter_index >= (n.start_pay_chapter_index - 1))
-				THEN ROUND((c.word_count::decimal / 1000.0) * $1)::integer
-				ELSE 0
-			END
-		FROM novels n
-		WHERE c.novel_id = n.id AND n.status != 'archived'
-	`, coinCostPerThousand)
-	if err != nil {
-		return err
-	}
-
-	return tx.Commit(ctx)
-}
-
-func (r *dbNovelRepository) BatchUpdateAllNovelStartPayChapter(ctx context.Context, startPayChapterIndex int, defaultCoinCostPerThousand int) error {
-	tx, err := db.DB.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback(ctx)
-
-	_, err = tx.Exec(ctx, `
-		UPDATE novels
-		SET start_pay_chapter_index = $1
-		WHERE status != 'archived'
-	`, startPayChapterIndex)
-	if err != nil {
-		return err
-	}
-
-	_, err = tx.Exec(ctx, `
-		UPDATE chapters c
-		SET
-			is_paid = (c.chapter_index >= ($1 - 1)),
-			price = CASE
-				WHEN (c.chapter_index >= ($1 - 1))
-				THEN ROUND((c.word_count::decimal / 1000.0) * COALESCE(n.coin_cost_per_thousand, $2))::integer
-				ELSE 0
-			END
-		FROM novels n
-		WHERE c.novel_id = n.id AND n.status != 'archived'
-	`, startPayChapterIndex, defaultCoinCostPerThousand)
-	if err != nil {
-		return err
-	}
-
-	return tx.Commit(ctx)
-}
-
-func (r *dbNovelRepository) BatchUpdateInheritedNovelChapterPrices(ctx context.Context, coinCostPerThousand int) error {
-	_, err := db.DB.Exec(ctx, `
-		UPDATE chapters c
-		SET
-			is_paid = (c.chapter_index >= (n.start_pay_chapter_index - 1)),
-			price = CASE
-				WHEN (c.chapter_index >= (n.start_pay_chapter_index - 1))
-				THEN ROUND((c.word_count::decimal / 1000.0) * $1)::integer
-				ELSE 0
-			END
-		FROM novels n
-		WHERE c.novel_id = n.id AND n.status != 'archived' AND n.coin_cost_per_thousand IS NULL
-	`, coinCostPerThousand)
+		SET is_paid = COALESCE(n.coin_cost_per_thousand, $1::int) > 0 AND c.chapter_index >= COALESCE(NULLIF(n.start_pay_chapter_index, 0),
+		    (SELECT value::int FROM system_configs WHERE key = 'global_start_pay_chapter_index'), 3) - 1,
+		    price = CASE WHEN c.chapter_index >= COALESCE(NULLIF(n.start_pay_chapter_index, 0),
+		    (SELECT value::int FROM system_configs WHERE key = 'global_start_pay_chapter_index'), 3) - 1
+		    THEN ROUND(c.word_count::numeric * COALESCE(n.coin_cost_per_thousand, $1::int) / 1000)::int ELSE 0 END
+		FROM novels n WHERE n.id = c.novel_id AND n.status <> 'archived' AND c.chapter_index IS NOT NULL
+		AND ($2 OR n.coin_cost_per_thousand IS NULL)`, defaultCost, resetCost || explicitCost != nil || startPay > 0)
 	return err
 }
 
@@ -385,7 +305,7 @@ func (r *dbNovelRepository) ListChapters(ctx context.Context, novelID int64) ([]
 	query := `
 		SELECT id, novel_id, chapter_index, title, '' AS content, word_count, is_paid, price, created_at
 		FROM chapters
-		WHERE novel_id = $1
+		WHERE novel_id = $1 AND chapter_index IS NOT NULL
 		ORDER BY chapter_index ASC`
 	rows, err := db.DB.Query(ctx, query, novelID)
 	if err != nil {
@@ -410,13 +330,13 @@ func (r *dbNovelRepository) ListChapters(ctx context.Context, novelID int64) ([]
 
 func (r *dbNovelRepository) GetChapter(ctx context.Context, novelID int64, chapterIndex int) (*Chapter, error) {
 	query := `
-		SELECT id, novel_id, chapter_index, title, content, word_count, is_paid, price, created_at
+		SELECT id, novel_id, chapter_index, title, content, word_count, is_paid, price, created_at, COALESCE(content_object_key, ''), COALESCE(content_sha256, '')
 		FROM chapters
 		WHERE novel_id = $1 AND chapter_index = $2`
 
 	var c Chapter
 	err := db.DB.QueryRow(ctx, query, novelID, chapterIndex).Scan(
-		&c.ID, &c.NovelID, &c.ChapterIndex, &c.Title, &c.Content, &c.WordCount, &c.IsPaid, &c.Price, &c.CreatedAt,
+		&c.ID, &c.NovelID, &c.ChapterIndex, &c.Title, &c.Content, &c.WordCount, &c.IsPaid, &c.Price, &c.CreatedAt, &c.ObjectKey, &c.ContentHash,
 	)
 	if err != nil {
 		if err == pgx.ErrNoRows {
@@ -427,59 +347,49 @@ func (r *dbNovelRepository) GetChapter(ctx context.Context, novelID int64, chapt
 	return &c, nil
 }
 
-func (r *dbNovelRepository) CreateChapter(ctx context.Context, c *Chapter) error {
-	query := `
-		INSERT INTO chapters (id, novel_id, chapter_index, title, content, word_count, is_paid, price)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-		RETURNING id, created_at`
-	return db.DB.QueryRow(ctx, query, c.ID, c.NovelID, c.ChapterIndex, c.Title, c.Content, c.WordCount, c.IsPaid, c.Price).Scan(&c.ID, &c.CreatedAt)
+const insertChapter = `
+	INSERT INTO chapters (id, novel_id, chapter_index, title, content, word_count, is_paid, price, content_object_key, content_sha256)
+	VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULLIF($9, ''), NULLIF($10, ''))`
+
+func chapterArgs(c *Chapter) []any {
+	return []any{c.ID, c.NovelID, c.ChapterIndex, c.Title, c.Content, c.WordCount, c.IsPaid, c.Price, c.ObjectKey, c.ContentHash}
 }
 
 func (r *dbNovelRepository) CreateChapterTx(ctx context.Context, tx pgx.Tx, c *Chapter) error {
-	query := `
-		INSERT INTO chapters (id, novel_id, chapter_index, title, content, word_count, is_paid, price)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-		RETURNING id, created_at`
-	return tx.QueryRow(ctx, query, c.ID, c.NovelID, c.ChapterIndex, c.Title, c.Content, c.WordCount, c.IsPaid, c.Price).Scan(&c.ID, &c.CreatedAt)
-}
-
-func (r *dbNovelRepository) UpdateChapter(ctx context.Context, c *Chapter) error {
-	query := `
-		UPDATE chapters
-		SET title = $1, content = $2, word_count = $3, is_paid = $4, price = $5
-		WHERE novel_id = $6 AND chapter_index = $7`
-	_, err := db.DB.Exec(ctx, query, c.Title, c.Content, c.WordCount, c.IsPaid, c.Price, c.NovelID, c.ChapterIndex)
-	return err
+	return tx.QueryRow(ctx, insertChapter+" RETURNING created_at", chapterArgs(c)...).Scan(&c.CreatedAt)
 }
 
 func (r *dbNovelRepository) UpdateChapterTx(ctx context.Context, tx pgx.Tx, c *Chapter) (int64, error) {
-	query := `
+	tag, err := tx.Exec(ctx, `
 		UPDATE chapters
-		SET title = $1, content = $2, word_count = $3, is_paid = $4, price = $5
-		WHERE novel_id = $6 AND chapter_index = $7`
-	tag, err := tx.Exec(ctx, query, c.Title, c.Content, c.WordCount, c.IsPaid, c.Price, c.NovelID, c.ChapterIndex)
-	if err != nil {
-		return 0, err
-	}
-	return tag.RowsAffected(), nil
+		SET title = $1, content = $2, word_count = $3, is_paid = $4, price = $5,
+		    content_object_key = NULLIF($6, ''), content_sha256 = NULLIF($7, '')
+		WHERE novel_id = $8 AND chapter_index = $9 AND id = $10`,
+		c.Title, c.Content, c.WordCount, c.IsPaid, c.Price, c.ObjectKey, c.ContentHash, c.NovelID, c.ChapterIndex, c.ID)
+	return tag.RowsAffected(), err
 }
 
 func (r *dbNovelRepository) SyncNovelWordCountTx(ctx context.Context, tx pgx.Tx, novelID int64) error {
 	_, err := tx.Exec(ctx, `
 		UPDATE novels
-		SET word_count = COALESCE((SELECT SUM(word_count) FROM chapters WHERE novel_id = $1), 0),
+		SET word_count = COALESCE((SELECT SUM(word_count) FROM chapters WHERE novel_id = $1 AND chapter_index IS NOT NULL), 0),
 		    updated_at = NOW()
 		WHERE id = $1`, novelID)
 	return err
 }
 
-func (r *dbNovelRepository) DeleteChaptersByNovelIDTx(ctx context.Context, tx pgx.Tx, novelID int64) error {
-	_, err := tx.Exec(ctx, "DELETE FROM chapters WHERE novel_id = $1", novelID)
-	return err
+func (r *dbNovelRepository) GetSettings(ctx context.Context) (map[string]string, error) {
+	return readSettings(ctx, db.DB)
 }
 
-func (r *dbNovelRepository) GetSettings(ctx context.Context) (map[string]string, error) {
-	rows, err := db.DB.Query(ctx, "SELECT key, value FROM system_configs")
+func (r *dbNovelRepository) GetSettingsTx(ctx context.Context, tx pgx.Tx) (map[string]string, error) {
+	return readSettings(ctx, tx)
+}
+
+func readSettings(ctx context.Context, q interface {
+	Query(context.Context, string, ...any) (pgx.Rows, error)
+}) (map[string]string, error) {
+	rows, err := q.Query(ctx, "SELECT key, value FROM system_configs")
 	if err != nil {
 		return nil, err
 	}

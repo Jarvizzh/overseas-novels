@@ -18,9 +18,10 @@ import (
 )
 
 var (
-	ErrPriceChanged    = errors.New("Chapter price changed. Refresh before confirming.")
-	ErrStripeDisabled  = errors.New("Stripe payments are disabled")
-	ErrChapterNotFound = errors.New("chapter not found")
+	ErrPriceChanged        = errors.New("Chapter or price changed. Refresh before confirming.")
+	ErrStripeDisabled      = errors.New("Stripe payments are disabled")
+	ErrChapterNotFound     = errors.New("chapter not found")
+	ErrPurchaseNeedsReview = errors.New("An older chapter purchase for this book needs review. Contact support before buying another chapter.")
 )
 
 type Service interface {
@@ -28,7 +29,7 @@ type Service interface {
 	GetWallet(ctx context.Context, userID int64) (*model.Wallet, error)
 	GetHistory(ctx context.Context, userID int64, limit, offset int) ([]model.Transaction, error)
 	GetHistoryPage(ctx context.Context, userID int64, limit int, after *historyCursor) (*HistoryPage, error)
-	UnlockChapter(ctx context.Context, userID int64, novelID int64, chapterIndex int, promoID int, utmSource, utmCampaign string, quotedPrice ...int) error
+	UnlockChapter(ctx context.Context, userID int64, novelID int64, chapterIndex int, promoID int, utmSource, utmCampaign string, quoted ChapterQuote) error
 	InitiateCheckout(ctx context.Context, userID int64, amountCents int64, coinsAmount int, fbp, fbc, pixelID, ip, ua, sourceURL, country string) error
 	CreateStripeIntent(ctx context.Context, userID int64, amountCents int64, coinsAmount int, fbp, fbc, pixelID, ip, ua, sourceURL, country string) (string, error)
 	CreatePayPalOrder(context.Context, int64, int, int64, string, string, checkoutAttribution) (string, string, error)
@@ -82,7 +83,13 @@ func (s *service) GetHistory(ctx context.Context, userID int64, limit, offset in
 	return s.repo.GetTransactions(ctx, userID, limit, offset)
 }
 
-func (s *service) UnlockChapter(ctx context.Context, userID int64, novelID int64, chapterIndex int, promoID int, utmSource, utmCampaign string, quotedPrice ...int) error {
+type ChapterQuote struct {
+	ID      string
+	Version int64
+	Price   int
+}
+
+func (s *service) UnlockChapter(ctx context.Context, userID int64, novelID int64, chapterIndex int, promoID int, utmSource, utmCampaign string, quoted ChapterQuote) error {
 	n, err := s.novelRepo.GetByID(ctx, novelID)
 	if err != nil {
 		return err
@@ -104,26 +111,25 @@ func (s *service) UnlockChapter(ctx context.Context, userID int64, novelID int64
 		return err
 	}
 
-	isPaid := (chapterIndex >= (effectiveStartPay - 1))
-	if !isPaid {
+	price := 0
+	if chapterIndex >= effectiveStartPay-1 {
+		price = novel.CalculateChapterPrice(ch.WordCount, effectiveCost)
+	}
+	quote := ChapterQuote{ID: ch.ID, Version: n.ContentVersion, Price: price}
+	if quote.ID == "" || quoted != quote {
+		return ErrPriceChanged
+	}
+	if effectiveCost == 0 || chapterIndex < effectiveStartPay-1 {
 		return nil
 	}
-
 	hasPass, err := novel.HasReadingPass(ctx, s.novelRepo, userID, novelID)
 	if err != nil || hasPass {
 		return err
 	}
-	price := novel.CalculateChapterPrice(ch.WordCount, effectiveCost)
-	if len(quotedPrice) != 0 && quotedPrice[0] != price {
-		return ErrPriceChanged
-	}
-
-	err = s.repo.UnlockChapterTx(ctx, userID, novelID, chapterIndex, price, ch.Title)
-	if err != nil {
+	if err := s.repo.UnlockChapterTx(ctx, userID, novelID, chapterIndex, promoID, quote); err != nil {
 		return err
 	}
-
-	_ = s.novelCache.SetChapterUnlocked(ctx, userID, novelID, chapterIndex)
+	_ = s.novelCache.SetChapterUnlocked(ctx, userID, novelID, ch.ID)
 	return nil
 }
 

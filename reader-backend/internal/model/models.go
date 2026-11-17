@@ -38,19 +38,23 @@ type Novel struct {
 
 // Chapter represents a chapter of a novel
 type Chapter struct {
-	ID           string    `json:"id" db:"id"`
-	NovelID      int64     `json:"novel_id" db:"novel_id"`
-	ChapterIndex int       `json:"chapter_index" db:"chapter_index"`
-	Title        string    `json:"title" db:"title"`
-	Content      string    `json:"content,omitempty" db:"content"` // Omitted in lists
-	WordCount    int       `json:"word_count" db:"word_count"`
-	IsPaid       bool      `json:"is_paid" db:"is_paid"`
-	Price        int       `json:"price" db:"price"`
-	CreatedAt    time.Time `json:"created_at" db:"created_at"`
+	PublicationVersion int64     `json:"content_version,omitempty"`
+	ObjectKey          string    `json:"-"`
+	ContentHash        string    `json:"-"`
+	ID                 string    `json:"id" db:"id"`
+	NovelID            int64     `json:"novel_id" db:"novel_id"`
+	ChapterIndex       int       `json:"chapter_index" db:"chapter_index"`
+	Title              string    `json:"title" db:"title"`
+	Content            string    `json:"content,omitempty" db:"content"` // Omitted in lists
+	WordCount          int       `json:"word_count" db:"word_count"`
+	IsPaid             bool      `json:"is_paid" db:"is_paid"`
+	Price              int       `json:"price" db:"price"`
+	CreatedAt          time.Time `json:"created_at" db:"created_at"`
 }
 
 // Bookshelf represents a user's saved novel and reading progress
 type Bookshelf struct {
+	ProgressVersion        string    `json:"progress_version"`
 	ID                     int64     `json:"-" db:"id"`
 	UserID                 int64     `json:"user_id" db:"user_id"`
 	NovelID                int64     `json:"novel_id" db:"novel_id"`

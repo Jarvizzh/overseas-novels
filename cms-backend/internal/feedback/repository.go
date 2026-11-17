@@ -81,7 +81,7 @@ func (r *repository) List(ctx context.Context, page, limit int, status, keyword 
 		list = append(list, fb)
 	}
 
-	return list, total, nil
+	return list, total, rows.Err()
 }
 
 func (r *repository) GetByID(ctx context.Context, id int64) (*Feedback, error) {

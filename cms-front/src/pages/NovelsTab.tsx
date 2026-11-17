@@ -21,6 +21,7 @@ interface Novel {
   word_count: number;
   view_count: number;
   coin_cost_per_thousand?: number | null;
+  content_version: number;
   effective_coin_cost_per_thousand?: number;
   start_pay_chapter_index?: number;
   created_at?: string;
@@ -58,6 +59,12 @@ function formatNovelDateTime(value?: string, withSeconds = false): string {
     ...(withSeconds ? { second: '2-digit' } : {}),
     hour12: false,
   });
+}
+
+interface ChapterIdentity {
+  id: string;
+  title: string;
+  chapter_index: number | null;
 }
 
 interface Chapter {
@@ -136,6 +143,8 @@ export default function NovelsTab() {
   const [regex, setRegex] = useState(DEFAULT_CHAPTER_DELIMITER_REGEX);
   const [importMessage, setImportMessage] = useState('');
   const [importError, setImportError] = useState('');
+  const [chapterMapping, setChapterMapping] = useState('');
+  const [chapterIdentities, setChapterIdentities] = useState<ChapterIdentity[]>([]);
   const [importLoading, setImportLoading] = useState(false);
   const titleOrIdInputId = useId();
   const authorInputId = useId();
@@ -197,6 +206,7 @@ export default function NovelsTab() {
   const [globalCoinCost, setGlobalCoinCost] = useState(500);
   const [globalStartPayChapter, setGlobalStartPayChapter] = useState(3);
   const [applyCoinCostToAll, setApplyCoinCostToAll] = useState(false);
+  const [resetNovelCoinCost, setResetNovelCoinCost] = useState(false);
   const [applyStartPayToAll, setApplyStartPayToAll] = useState(false);
   const [activeGlobalPanel, setActiveGlobalPanel] = useState<'coin' | 'chapter' | null>(null);
   const [savingGlobalSetting, setSavingGlobalSetting] = useState(false);
@@ -415,6 +425,8 @@ export default function NovelsTab() {
   const handleNovelClick = (novel: Novel) => {
     resetDetailTransientState();
     setSelectedNovel(novel);
+    setChapterMapping('');
+    setChapterIdentities([]);
     setChapters([]);
     setChapterPage(1); // Reset chapter page on select
     fetchChapters(novel.id);
@@ -564,10 +576,19 @@ export default function NovelsTab() {
     const payload = {
       global_coin_cost_per_thousand: String(costNum),
       apply_coin_cost_to_all_novels: applyCoinCostToAll ? 'true' : 'false',
+      reset_novel_coin_cost: resetNovelCoinCost ? 'true' : 'false',
     };
     const msg = applyCoinCostToAll
       ? `全局金币单价已保存，并将全部在库书籍重置为千字 ${costNum} 币（各书起付章节保持不变）！`
-      : '全局金币单价保存成功！已同步继承全局单价的书籍。';
+      : resetNovelCoinCost
+        ? '已将全部在库书籍改为继承全局单价。'
+        : '全局金币单价保存成功！已同步继承全局单价的书籍。';
+
+    if (resetNovelCoinCost && window.showConfirm) {
+      window.showConfirm('将清除全部未归档书籍的独立单价，并统一继承全局单价，确认继续？',
+        () => { void saveGlobalSetting(payload, msg); });
+      return;
+    }
 
     if (applyCoinCostToAll && window.showConfirm) {
       window.showConfirm(
@@ -775,6 +796,11 @@ export default function NovelsTab() {
       formData.append('file', importFile);
       formData.append('import_type', importType);
       formData.append('delimiter_regex', regex);
+      if (chapterMapping.trim()) {
+        const mapping = JSON.parse(chapterMapping);
+        formData.append('chapter_mapping', JSON.stringify({ ...mapping, version: selectedNovel.content_version }));
+      }
+
 
       const data = await apiRequest('POST', `/novels/${selectedNovel.id}/chapters/bulk-import`, formData, true);
       const isPublished = selectedNovel.publish_status === 'published';
@@ -784,6 +810,7 @@ export default function NovelsTab() {
           : `导入成功！共提取并导入了 ${data.chapters_count} 个章节（总字数 ${data.total_word_count} 字）。当前书籍处于未上架状态，核对无误后请点击右上角「上架发布」。`
       );
       setImportFile(null);
+      setChapterMapping('');
       if (importFileInputRef.current) {
         importFileInputRef.current.value = '';
       }
@@ -799,12 +826,21 @@ export default function NovelsTab() {
     }
   };
 
+  const loadChapterIdentities = async (novelId: number) => {
+    try {
+      const identities = await apiRequest('GET', `/novels/${novelId}/chapters/identities`);
+      setChapterIdentities(identities ?? []);
+    } catch {
+      setImportError('无法加载章节标识，请刷新后重试。');
+    }
+  };
+
   const handleBulkImport = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!importFile || !selectedNovel) return;
     if (chapters.length > 0 && window.showConfirm) {
       window.showConfirm(
-        '覆盖导入会清空现有章节并从第 1 章重新编号，可能影响已有读者的阅读进度与已解锁章节序号，确定继续吗？',
+        '导入将替换目录并重新编号。读者购买权益随章节 ID 保留。确认发布本次导入？',
         () => { void executeBulkImport(); }
       );
       return;
@@ -1196,6 +1232,33 @@ export default function NovelsTab() {
                 />
               </div>
 
+              {canEditNovels && (
+                <details style={{ marginBottom: '16px' }}>
+                  <summary>章节映射</summary>
+                  <p>正文完全一致的唯一章节会自动保留 ID。改写、拆分或下架章节时，请填写对应 ID。新章节序号从 1 开始。</p>
+                  <label htmlFor="chapter-import-mapping">保留、拆分及下架映射（JSON）</label>
+                  <textarea
+                    id="chapter-import-mapping"
+                    className="input-field"
+                    rows={3}
+                    value={chapterMapping}
+                    disabled={importLoading}
+                    placeholder={'{"keep":{"2":"原章节ID"},"split_from":{"3":"原章节ID"},"retire":[]}'}
+                    onChange={(event) => setChapterMapping(event.target.value)}
+                  />
+                  <details onToggle={(event) => {
+                    if (event.currentTarget.open) void loadChapterIdentities(selectedNovel.id);
+                  }}>
+                    <summary>现有及已下架的章节 ID</summary>
+                    <ul>{chapterIdentities.map((chapter) => (
+                      <li key={chapter.id}>
+                        {chapter.chapter_index === null ? '已下架' : chapter.chapter_index + 1} · {chapter.title} · <code>{chapter.id}</code>
+                      </li>
+                    ))}</ul>
+                  </details>
+                </details>
+              )}
+
               {canEditNovels ? (
                 <button
                   type="submit"
@@ -1463,6 +1526,7 @@ export default function NovelsTab() {
                       type="checkbox"
                       id={isCoin ? globalCoinApplyAllId : globalChapterApplyAllId}
                       checked={isCoin ? applyCoinCostToAll : applyStartPayToAll}
+                      disabled={isCoin && resetNovelCoinCost}
                       onChange={(e) =>
                         isCoin
                           ? setApplyCoinCostToAll(e.target.checked)
@@ -1479,6 +1543,17 @@ export default function NovelsTab() {
                         : `同步覆盖所有已有书籍起付章节（勾选后将把全部未归档书籍统一更新为第 ${globalStartPayChapter} 章起付费；不勾选则仅作为后续新建书籍默认值，不影响千字金币单价）`}
                     </label>
                   </div>
+                  {isCoin && (
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={resetNovelCoinCost}
+                        disabled={applyCoinCostToAll}
+                        onChange={(event) => setResetNovelCoinCost(event.target.checked)}
+                      />
+                      将全部在库书籍改为继承全局单价
+                    </label>
+                  )}
                 </div>
 
                 <div

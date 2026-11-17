@@ -100,9 +100,12 @@ func (h *Handler) GetHistoryPage(c *gin.Context) {
 }
 
 type UnlockRequest struct {
-	NovelID      int64 `json:"novel_id" binding:"required,gt=0"`
-	ChapterIndex int   `json:"chapter_index" binding:"gte=0"`
-	Price        *int  `json:"price" binding:"required,gte=0"`
+	UserID         int64  `json:"user_id"`
+	ChapterID      string `json:"chapter_id" binding:"max=64"`
+	ContentVersion int64  `json:"content_version"`
+	NovelID        int64  `json:"novel_id" binding:"required,gt=0"`
+	ChapterIndex   int    `json:"chapter_index" binding:"gte=0"`
+	Price          *int   `json:"price" binding:"required,gte=0"`
 }
 
 func (h *Handler) UnlockChapter(c *gin.Context) {
@@ -110,6 +113,16 @@ func (h *Handler) UnlockChapter(c *gin.Context) {
 	var req UnlockRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		httpx.Fail(c, http.StatusBadRequest, "invalid_request", "Invalid request fields", nil)
+		return
+	}
+
+	if req.ChapterID == "" || req.ContentVersion <= 0 {
+		httpx.Fail(c, http.StatusConflict, "price_changed", ErrPriceChanged.Error(), nil)
+		return
+	}
+
+	if req.UserID != userID {
+		httpx.Fail(c, http.StatusConflict, "account_changed", "The signed-in account changed. Reload before unlocking.", nil)
 		return
 	}
 
@@ -132,10 +145,14 @@ func (h *Handler) UnlockChapter(c *gin.Context) {
 	}
 
 	ctx := c.Request.Context()
-	err := h.service.UnlockChapter(ctx, userID, req.NovelID, req.ChapterIndex, promoID, utmSource, utmCampaign, *req.Price)
+	err := h.service.UnlockChapter(ctx, userID, req.NovelID, req.ChapterIndex, promoID, utmSource, utmCampaign, ChapterQuote{ID: req.ChapterID, Version: req.ContentVersion, Price: *req.Price})
 	if err != nil {
 		if errors.Is(err, novel.ErrNovelNotFound) || errors.Is(err, ErrChapterNotFound) {
 			httpx.Fail(c, 404, "resource_unavailable", "Resource unavailable", nil)
+			return
+		}
+		if errors.Is(err, ErrPurchaseNeedsReview) {
+			httpx.Fail(c, http.StatusConflict, "purchase_needs_review", err.Error(), nil)
 			return
 		}
 		if errors.Is(err, ErrPriceChanged) {

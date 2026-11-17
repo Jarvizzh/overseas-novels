@@ -3,8 +3,8 @@ package tracking
 import (
 	"context"
 	"fmt"
-	"strconv"
 	"star-novel-cms/internal/db"
+	"strconv"
 )
 
 type Repository interface {
@@ -94,5 +94,5 @@ func (r *pgRepository) ListLogs(ctx context.Context, page, pageSize int, pixelID
 		logs = append(logs, log)
 	}
 
-	return logs, total, nil
+	return logs, total, rows.Err()
 }

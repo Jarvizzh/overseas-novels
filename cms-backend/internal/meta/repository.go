@@ -139,11 +139,12 @@ func (r *Repository) GetAccounts(ctx context.Context) ([]AdAccount, error) {
 	var accs []AdAccount
 	for rows.Next() {
 		var a AdAccount
-		if err := rows.Scan(&a.ID, &a.Name, &a.Currency, &a.Timezone, &a.Status, &a.BmID, &a.UpdatedAt); err == nil {
-			accs = append(accs, a)
+		if err := rows.Scan(&a.ID, &a.Name, &a.Currency, &a.Timezone, &a.Status, &a.BmID, &a.UpdatedAt); err != nil {
+			return nil, err
 		}
+		accs = append(accs, a)
 	}
-	return accs, nil
+	return accs, rows.Err()
 }
 
 func (r *Repository) GetCampaignsByAccountID(ctx context.Context, accountID string) ([]Campaign, error) {
@@ -156,11 +157,12 @@ func (r *Repository) GetCampaignsByAccountID(ctx context.Context, accountID stri
 	var camps []Campaign
 	for rows.Next() {
 		var c Campaign
-		if err := rows.Scan(&c.ID, &c.AccountID, &c.Name, &c.Objective, &c.Status, &c.UpdatedAt); err == nil {
-			camps = append(camps, c)
+		if err := rows.Scan(&c.ID, &c.AccountID, &c.Name, &c.Objective, &c.Status, &c.UpdatedAt); err != nil {
+			return nil, err
 		}
+		camps = append(camps, c)
 	}
-	return camps, nil
+	return camps, rows.Err()
 }
 
 func (r *Repository) GetAdSetsByCampaignID(ctx context.Context, campaignID string) ([]AdSet, error) {
@@ -173,11 +175,12 @@ func (r *Repository) GetAdSetsByCampaignID(ctx context.Context, campaignID strin
 	var sets []AdSet
 	for rows.Next() {
 		var s AdSet
-		if err := rows.Scan(&s.ID, &s.CampaignID, &s.AccountID, &s.Name, &s.DailyBudget, &s.Status, &s.UpdatedAt); err == nil {
-			sets = append(sets, s)
+		if err := rows.Scan(&s.ID, &s.CampaignID, &s.AccountID, &s.Name, &s.DailyBudget, &s.Status, &s.UpdatedAt); err != nil {
+			return nil, err
 		}
+		sets = append(sets, s)
 	}
-	return sets, nil
+	return sets, rows.Err()
 }
 
 func (r *Repository) GetAdsByAdSetID(ctx context.Context, adSetID string) ([]Ad, error) {
@@ -190,11 +193,12 @@ func (r *Repository) GetAdsByAdSetID(ctx context.Context, adSetID string) ([]Ad,
 	var ads []Ad
 	for rows.Next() {
 		var a Ad
-		if err := rows.Scan(&a.ID, &a.AdSetID, &a.CampaignID, &a.AccountID, &a.Name, &a.Status, &a.CreatedTime, &a.UpdatedAt); err == nil {
-			ads = append(ads, a)
+		if err := rows.Scan(&a.ID, &a.AdSetID, &a.CampaignID, &a.AccountID, &a.Name, &a.Status, &a.CreatedTime, &a.UpdatedAt); err != nil {
+			return nil, err
 		}
+		ads = append(ads, a)
 	}
-	return ads, nil
+	return ads, rows.Err()
 }
 
 func (r *Repository) GetInsights(ctx context.Context, level, entityID, startDate, endDate string) ([]DailyInsight, error) {
@@ -223,11 +227,12 @@ func (r *Repository) GetInsights(ctx context.Context, level, entityID, startDate
 			&di.CostPerInitiateCheckout, &di.CompleteRegistrationCount, &di.CostPerCompleteRegistration,
 			&di.PurchaseCount, &di.CostPerPurchase, &di.PurchaseValue, &di.PurchaseROAS, &di.CreatedAt, &di.UpdatedAt,
 		)
-		if err == nil {
-			list = append(list, di)
+		if err != nil {
+			return nil, err
 		}
+		list = append(list, di)
 	}
-	return list, nil
+	return list, rows.Err()
 }
 
 func (r *Repository) GetInsightsByLevel(ctx context.Context, level, startDate, endDate string) ([]DailyInsight, error) {
@@ -257,9 +262,10 @@ func (r *Repository) GetInsightsByLevel(ctx context.Context, level, startDate, e
 			&di.CostPerInitiateCheckout, &di.CompleteRegistrationCount, &di.CostPerCompleteRegistration,
 			&di.PurchaseCount, &di.CostPerPurchase, &di.PurchaseValue, &di.PurchaseROAS, &di.CreatedAt, &di.UpdatedAt,
 		)
-		if err == nil {
-			list = append(list, di)
+		if err != nil {
+			return nil, err
 		}
+		list = append(list, di)
 	}
-	return list, nil
+	return list, rows.Err()
 }

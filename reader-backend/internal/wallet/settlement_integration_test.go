@@ -4,44 +4,25 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
-	"reader-backend/internal/db"
 	"reader-backend/internal/model"
 	"reader-backend/internal/novel"
 	"reader-backend/internal/payment"
+	"reader-backend/internal/testdb"
 )
 
 func TestPaymentSettlementIntegration(t *testing.T) {
-	dsn := os.Getenv("STAR_NOVEL_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("requires an empty disposable PostgreSQL database")
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	pool, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer pool.Close()
-	db.DB = pool
-	defer func() { db.DB = nil }()
-	schema, err := os.ReadFile("../../../cms-backend/db/schema.sql")
-	if err != nil {
-		t.Fatal(err)
-	}
+	pool := testdb.Open(t)
+	ctx := context.Background()
 	exec := func(query string, args ...any) {
 		t.Helper()
 		if _, err := pool.Exec(ctx, query, args...); err != nil {
 			t.Fatal(err)
 		}
 	}
-	exec(string(schema))
-	exec(string(schema)) // Re-running the shared migration must be safe.
 	exec(`INSERT INTO users(id,utm_source,utm_campaign) VALUES (101,'source','campaign'),(102,'','')`)
 	exec(`INSERT INTO novels(id,title,author,publish_status) VALUES(101,'Test novel','Test author','published')`)
 	exec(`INSERT INTO recharge_templates(id,name,is_default) VALUES (101,'Test',true)`)
@@ -96,7 +77,9 @@ func TestPaymentSettlementIntegration(t *testing.T) {
 	if err != nil || w.BonusCoins != 7 {
 		t.Fatalf("credited wallet: %+v, %v", w, err)
 	}
-	exec(`INSERT INTO unlock_records(user_id,novel_id,chapter_index) VALUES(101,101,2)`)
+	exec(`INSERT INTO chapters(id,novel_id,chapter_index,title,content) VALUES('purchased',101,2,'Chapter','Body');
+		INSERT INTO unlock_records(user_id,novel_id,chapter_index,chapter_id,identity_evidence,identity_resolved_at)
+		VALUES(101,101,2,'purchased','fixture',now())`)
 	exec(`UPDATE wallets SET bonus_coins=3 WHERE user_id=101`)
 	exec(`INSERT INTO payment_refunds(order_id,request_id)
 		SELECT id,gen_random_uuid() FROM recharge_orders WHERE external_ref_id=$1`, capture.OrderID)
