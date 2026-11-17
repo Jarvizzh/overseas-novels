@@ -585,7 +585,7 @@ export const NovelFormModal: React.FC<NovelFormModalProps> = ({
                   </legend>
                   <div style={{ display: 'flex', gap: '16px', flexWrap: 'wrap', alignItems: 'center' }}>
                     {[
-                      { value: 'draft', label: '草稿（未上架）', disabled: false },
+                      { value: 'draft', label: '草稿（待上架）', disabled: false },
                       { value: 'published', label: hasChapters ? '已上架（书城可见）' : '已上架（需先导入章节）', disabled: !hasChapters },
                       { value: 'offline', label: '已下架（书城隐藏）', disabled: false },
                     ].map((opt) => (
@@ -615,7 +615,7 @@ export const NovelFormModal: React.FC<NovelFormModalProps> = ({
                 </fieldset>
               ) : (
                 <div style={{ gridColumn: 'span 2', padding: '10px 12px', borderRadius: '8px', backgroundColor: 'hsl(var(--bg-card))', border: '1px solid hsl(var(--border))', fontSize: '0.8rem', color: 'hsl(var(--text-secondary))' }}>
-                  新建书籍默认保存为 <strong>草稿（未上架）</strong>，不会立即暴露在书城；请上传书籍章节后创建并返回列表，核对无误再点击「上架发布」。
+                  新建书籍默认保存为 <strong>草稿（待上架）</strong>，不会立即暴露在书城；请上传书籍章节后创建并返回列表，核对无误再点击「上架发布」。
                 </div>
               )}
               <div style={{ gridColumn: 'span 2' }}>
