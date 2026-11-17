@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/google/uuid"
@@ -34,7 +35,36 @@ var (
 	ErrInvalidSettingValue     = errors.New("无效的全局配置参数")
 	ErrInvalidPromoPricing     = errors.New("无效的推广链接计费参数")
 	ErrInvalidGenres           = errors.New("分类标签总长度不能超过 2048 个字符")
+	ErrInvalidFilterParam      = errors.New("无效的查询筛选参数")
+	ErrInvalidBatchNovelIDs    = errors.New("请至少选择一本有效书籍")
+	ErrBatchLimitExceeded      = errors.New("单次批量操作最多支持 200 本书籍")
 )
+
+const maxBatchPublishIDs = 200
+
+type NovelListFilter struct {
+	Status        string
+	PublishStatus string
+	Genre         string
+	Search        string
+	TitleOrID     string
+	Author        string
+	CreatedStart  string
+	CreatedEnd    string
+}
+
+type BatchPublishSkippedItem struct {
+	ID     int64  `json:"id"`
+	Title  string `json:"title,omitempty"`
+	Reason string `json:"reason"`
+}
+
+type BatchPublishResult struct {
+	PublishStatus string                    `json:"publish_status"`
+	UpdatedCount  int                       `json:"updated_count"`
+	UpdatedIDs    []int64                   `json:"updated_ids"`
+	Skipped       []BatchPublishSkippedItem `json:"skipped,omitempty"`
+}
 
 type BulkImportResult struct {
 	ChaptersCount  int `json:"chapters_count"`
@@ -42,11 +72,12 @@ type BulkImportResult struct {
 }
 
 type NovelService interface {
-	ListNovels(ctx context.Context, page, pageSize int, status, publishStatus, genre, search string) ([]Novel, int, error)
+	ListNovels(ctx context.Context, page, pageSize int, filter NovelListFilter) ([]Novel, int, error)
 	GetNovel(ctx context.Context, id int64) (*Novel, error)
 	CreateNovel(ctx context.Context, n *Novel) (*Novel, error)
 	UpdateNovel(ctx context.Context, id int64, title, author, coverURL, status, publishStatus, synopsis string, genres []string, rating float64, coinCost *int, startPayIndex int) (*Novel, error)
 	UpdatePublishStatus(ctx context.Context, id int64, publishStatus string) (*Novel, error)
+	BatchUpdatePublishStatus(ctx context.Context, ids []int64, publishStatus string) (*BatchPublishResult, error)
 	DeleteNovel(ctx context.Context, id int64) error
 	UploadCover(ctx context.Context, data []byte) (string, string, error)
 	MaxCoverUploadBytes() int64
@@ -161,7 +192,27 @@ func (s *novelService) resolveDefaultStartPay(ctx context.Context) int {
 	return 3
 }
 
-func (s *novelService) ListNovels(ctx context.Context, page, pageSize int, status, publishStatus, genre, search string) ([]Novel, int, error) {
+func parseNovelTimeBound(raw string, endOfDay bool) (*time.Time, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return nil, nil
+	}
+	if t, err := time.Parse(time.RFC3339Nano, trimmed); err == nil {
+		return &t, nil
+	}
+	if t, err := time.Parse(time.RFC3339, trimmed); err == nil {
+		return &t, nil
+	}
+	if d, err := time.Parse("2006-01-02", trimmed); err == nil {
+		if endOfDay {
+			d = d.Add(24*time.Hour - time.Nanosecond)
+		}
+		return &d, nil
+	}
+	return nil, fmt.Errorf("%w: invalid timestamp %q", ErrInvalidFilterParam, trimmed)
+}
+
+func (s *novelService) ListNovels(ctx context.Context, page, pageSize int, filter NovelListFilter) ([]Novel, int, error) {
 	if page < 1 {
 		page = 1
 	}
@@ -174,6 +225,13 @@ func (s *novelService) ListNovels(ctx context.Context, page, pageSize int, statu
 	var args []interface{}
 	argCount := 1
 
+	status := strings.TrimSpace(filter.Status)
+	publishStatus := strings.TrimSpace(filter.PublishStatus)
+	genre := strings.TrimSpace(filter.Genre)
+	search := strings.TrimSpace(filter.Search)
+	titleOrID := strings.TrimSpace(filter.TitleOrID)
+	author := strings.TrimSpace(filter.Author)
+
 	if status != "" {
 		whereClauses = append(whereClauses, fmt.Sprintf("status = $%d", argCount))
 		args = append(args, status)
@@ -183,6 +241,9 @@ func (s *novelService) ListNovels(ctx context.Context, page, pageSize int, statu
 	}
 
 	if publishStatus != "" {
+		if !isValidPublishStatus(publishStatus) {
+			return nil, 0, ErrInvalidPublishStatus
+		}
 		whereClauses = append(whereClauses, fmt.Sprintf("publish_status = $%d", argCount))
 		args = append(args, publishStatus)
 		argCount++
@@ -194,10 +255,44 @@ func (s *novelService) ListNovels(ctx context.Context, page, pageSize int, statu
 		argCount++
 	}
 
+	if titleOrID != "" {
+		whereClauses = append(whereClauses, fmt.Sprintf("(title ILIKE $%d OR CAST(id AS TEXT) = $%d)", argCount, argCount+1))
+		args = append(args, "%"+titleOrID+"%", titleOrID)
+		argCount += 2
+	}
+
+	if author != "" {
+		whereClauses = append(whereClauses, fmt.Sprintf("author ILIKE $%d", argCount))
+		args = append(args, "%"+author+"%")
+		argCount++
+	}
+
 	if search != "" {
 		whereClauses = append(whereClauses, fmt.Sprintf("(title ILIKE $%d OR author ILIKE $%d OR CAST(id AS TEXT) = $%d)", argCount, argCount, argCount+1))
-		args = append(args, "%"+search+"%", strings.TrimSpace(search))
+		args = append(args, "%"+search+"%", search)
 		argCount += 2
+	}
+
+	startTime, err := parseNovelTimeBound(filter.CreatedStart, false)
+	if err != nil {
+		return nil, 0, err
+	}
+	endTime, err := parseNovelTimeBound(filter.CreatedEnd, true)
+	if err != nil {
+		return nil, 0, err
+	}
+	if startTime != nil && endTime != nil && startTime.After(*endTime) {
+		return nil, 0, fmt.Errorf("%w: created_start cannot be after created_end", ErrInvalidFilterParam)
+	}
+	if startTime != nil {
+		whereClauses = append(whereClauses, fmt.Sprintf("created_at >= $%d", argCount))
+		args = append(args, *startTime)
+		argCount++
+	}
+	if endTime != nil {
+		whereClauses = append(whereClauses, fmt.Sprintf("created_at <= $%d", argCount))
+		args = append(args, *endTime)
+		argCount++
 	}
 
 	whereSQL := ""
@@ -419,6 +514,84 @@ func (s *novelService) UpdatePublishStatus(ctx context.Context, id int64, publis
 	s.invalidateAllChaptersCache(ctx, id)
 	s.applyCoverDisplay(updated)
 	return updated, nil
+}
+
+func (s *novelService) BatchUpdatePublishStatus(ctx context.Context, ids []int64, publishStatus string) (*BatchPublishResult, error) {
+	publishStatus = strings.TrimSpace(publishStatus)
+	if !isValidPublishStatus(publishStatus) {
+		return nil, ErrInvalidPublishStatus
+	}
+
+	seen := make(map[int64]struct{}, len(ids))
+	dedupIDs := make([]int64, 0, len(ids))
+	for _, id := range ids {
+		if id <= 0 {
+			continue
+		}
+		if _, exists := seen[id]; exists {
+			continue
+		}
+		seen[id] = struct{}{}
+		dedupIDs = append(dedupIDs, id)
+	}
+	if len(dedupIDs) == 0 {
+		return nil, ErrInvalidBatchNovelIDs
+	}
+	if len(dedupIDs) > maxBatchPublishIDs {
+		return nil, ErrBatchLimitExceeded
+	}
+
+	candidates, err := s.repo.GetNovelsWithChapterCounts(ctx, dedupIDs)
+	if err != nil {
+		return nil, err
+	}
+	candidateMap := make(map[int64]NovelPublishCandidate, len(candidates))
+	for _, item := range candidates {
+		candidateMap[item.ID] = item
+	}
+
+	eligibleIDs := make([]int64, 0, len(dedupIDs))
+	var skipped []BatchPublishSkippedItem
+	emptyNovelSkipped := false
+	for _, id := range dedupIDs {
+		item, ok := candidateMap[id]
+		if !ok {
+			skipped = append(skipped, BatchPublishSkippedItem{ID: id, Reason: "书籍不存在或已归档"})
+			continue
+		}
+		if publishStatus == "published" && item.ChapterCount <= 0 {
+			emptyNovelSkipped = true
+			skipped = append(skipped, BatchPublishSkippedItem{ID: id, Title: item.Title, Reason: "暂无章节内容，无法上架"})
+			continue
+		}
+		eligibleIDs = append(eligibleIDs, id)
+	}
+
+	if len(eligibleIDs) == 0 {
+		if emptyNovelSkipped {
+			return nil, ErrCannotPublishEmptyNovel
+		}
+		return nil, ErrNovelNotFound
+	}
+
+	updatedIDs, err := s.repo.BatchUpdatePublishStatus(ctx, eligibleIDs, publishStatus)
+	if err != nil {
+		return nil, err
+	}
+	if len(updatedIDs) == 0 {
+		return nil, ErrNovelNotFound
+	}
+	for _, id := range updatedIDs {
+		s.invalidateNovelCache(ctx, id)
+		s.invalidateAllChaptersCache(ctx, id)
+	}
+
+	return &BatchPublishResult{
+		PublishStatus: publishStatus,
+		UpdatedCount:  len(updatedIDs),
+		UpdatedIDs:    updatedIDs,
+		Skipped:       skipped,
+	}, nil
 }
 
 func (s *novelService) DeleteNovel(ctx context.Context, id int64) error {

@@ -69,13 +69,16 @@ CREATE TABLE IF NOT EXISTS novels (
     view_count BIGINT DEFAULT 0,
     coin_cost_per_thousand INT DEFAULT 500,
     start_pay_chapter_index INT DEFAULT 3,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
 -- 增量补齐字段
 ALTER TABLE novels ADD COLUMN IF NOT EXISTS coin_cost_per_thousand INT DEFAULT 500;
 ALTER TABLE novels ADD COLUMN IF NOT EXISTS start_pay_chapter_index INT DEFAULT 3;
 ALTER TABLE novels ADD COLUMN IF NOT EXISTS publish_status VARCHAR(20) NOT NULL DEFAULT 'published';
+ALTER TABLE novels ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP;
+UPDATE novels SET updated_at = COALESCE(created_at, CURRENT_TIMESTAMP) WHERE updated_at IS NULL;
 UPDATE novels SET publish_status = 'offline' WHERE status = 'archived' AND publish_status != 'offline';
 DO $$
 BEGIN

@@ -9,14 +9,23 @@ import (
 	"star-novel-cms/internal/db"
 )
 
+type NovelPublishCandidate struct {
+	ID            int64
+	Title         string
+	PublishStatus string
+	ChapterCount  int
+}
+
 type NovelRepository interface {
 	BeginTx(ctx context.Context) (pgx.Tx, error)
 	CountNovels(ctx context.Context, whereSQL string, args []interface{}) (int, error)
 	ListNovels(ctx context.Context, selectQuery string, args []interface{}) ([]Novel, error)
 	GetNovel(ctx context.Context, id int64) (*Novel, error)
+	GetNovelsWithChapterCounts(ctx context.Context, ids []int64) ([]NovelPublishCandidate, error)
 	CreateNovel(ctx context.Context, n *Novel) error
 	UpdateNovel(ctx context.Context, n *Novel) error
 	UpdatePublishStatus(ctx context.Context, id int64, publishStatus string) (*Novel, error)
+	BatchUpdatePublishStatus(ctx context.Context, ids []int64, publishStatus string) ([]int64, error)
 	DeleteNovel(ctx context.Context, id int64) (int64, error)
 	CountNovelsByCoverURL(ctx context.Context, coverURL string, excludeNovelID int64) (int, error)
 	CountChapters(ctx context.Context, novelID int64) (int, error)
@@ -66,13 +75,13 @@ func (r *dbNovelRepository) CountNovels(ctx context.Context, whereSQL string, ar
 	return total, err
 }
 
-const novelSelectColumns = `id, title, author, cover_url, rating, status, publish_status, synopsis, genres, word_count, view_count, coin_cost_per_thousand, COALESCE(coin_cost_per_thousand, (SELECT value::integer FROM system_configs WHERE key = 'global_coin_cost_per_thousand'), 500) AS effective_coin_cost_per_thousand, start_pay_chapter_index, created_at`
+const novelSelectColumns = `id, title, author, cover_url, rating, status, publish_status, synopsis, genres, word_count, view_count, coin_cost_per_thousand, COALESCE(coin_cost_per_thousand, (SELECT value::integer FROM system_configs WHERE key = 'global_coin_cost_per_thousand'), 500) AS effective_coin_cost_per_thousand, start_pay_chapter_index, created_at, COALESCE(updated_at, created_at) AS updated_at`
 
 func scanNovelRow(scanner interface{ Scan(dest ...any) error }, n *Novel) error {
 	err := scanner.Scan(
 		&n.ID, &n.Title, &n.Author, &n.CoverURL, &n.Rating,
 		&n.Status, &n.PublishStatus, &n.Synopsis, &n.Genres, &n.WordCount, &n.ViewCount,
-		&n.CoinCostPerThousand, &n.EffectiveCoinCostPerThousand, &n.StartPayChapterIndex, &n.CreatedAt,
+		&n.CoinCostPerThousand, &n.EffectiveCoinCostPerThousand, &n.StartPayChapterIndex, &n.CreatedAt, &n.UpdatedAt,
 	)
 	if err != nil {
 		return err
@@ -115,10 +124,34 @@ func (r *dbNovelRepository) GetNovel(ctx context.Context, id int64) (*Novel, err
 	return &n, nil
 }
 
+func (r *dbNovelRepository) GetNovelsWithChapterCounts(ctx context.Context, ids []int64) ([]NovelPublishCandidate, error) {
+	query := `
+		SELECT n.id, n.title, n.publish_status, COUNT(c.id)::int AS chapter_count
+		FROM novels n
+		LEFT JOIN chapters c ON c.novel_id = n.id
+		WHERE n.id = ANY($1) AND n.status != 'archived'
+		GROUP BY n.id, n.title, n.publish_status`
+	rows, err := db.DB.Query(ctx, query, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var items []NovelPublishCandidate
+	for rows.Next() {
+		var item NovelPublishCandidate
+		if err := rows.Scan(&item.ID, &item.Title, &item.PublishStatus, &item.ChapterCount); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
 func (r *dbNovelRepository) CreateNovel(ctx context.Context, n *Novel) error {
 	query := `
-		INSERT INTO novels (title, author, cover_url, rating, status, publish_status, synopsis, genres, word_count, view_count, coin_cost_per_thousand, start_pay_chapter_index)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 0, 0, $9, $10)
+		INSERT INTO novels (title, author, cover_url, rating, status, publish_status, synopsis, genres, word_count, view_count, coin_cost_per_thousand, start_pay_chapter_index, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 0, 0, $9, $10, NOW())
 		RETURNING ` + novelSelectColumns
 
 	execInsert := func() error {
@@ -138,7 +171,7 @@ func (r *dbNovelRepository) CreateNovel(ctx context.Context, n *Novel) error {
 func (r *dbNovelRepository) UpdateNovel(ctx context.Context, n *Novel) error {
 	query := `
 		UPDATE novels
-		SET title = $1, author = $2, cover_url = $3, rating = $4, status = $5, publish_status = $6, synopsis = $7, genres = $8, coin_cost_per_thousand = $9, start_pay_chapter_index = $10
+		SET title = $1, author = $2, cover_url = $3, rating = $4, status = $5, publish_status = $6, synopsis = $7, genres = $8, coin_cost_per_thousand = $9, start_pay_chapter_index = $10, updated_at = NOW()
 		WHERE id = $11 AND status != 'archived'
 		RETURNING ` + novelSelectColumns
 
@@ -148,7 +181,7 @@ func (r *dbNovelRepository) UpdateNovel(ctx context.Context, n *Novel) error {
 func (r *dbNovelRepository) UpdatePublishStatus(ctx context.Context, id int64, publishStatus string) (*Novel, error) {
 	query := `
 		UPDATE novels
-		SET publish_status = $1
+		SET publish_status = $1, updated_at = NOW()
 		WHERE id = $2 AND status != 'archived'
 		RETURNING ` + novelSelectColumns
 
@@ -163,8 +196,31 @@ func (r *dbNovelRepository) UpdatePublishStatus(ctx context.Context, id int64, p
 	return &n, nil
 }
 
+func (r *dbNovelRepository) BatchUpdatePublishStatus(ctx context.Context, ids []int64, publishStatus string) ([]int64, error) {
+	query := `
+		UPDATE novels
+		SET publish_status = $1, updated_at = NOW()
+		WHERE id = ANY($2) AND status != 'archived'
+		RETURNING id`
+	rows, err := db.DB.Query(ctx, query, publishStatus, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var updatedIDs []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		updatedIDs = append(updatedIDs, id)
+	}
+	return updatedIDs, rows.Err()
+}
+
 func (r *dbNovelRepository) DeleteNovel(ctx context.Context, id int64) (int64, error) {
-	tag, err := db.DB.Exec(ctx, "UPDATE novels SET status = 'archived', publish_status = 'offline' WHERE id = $1 AND status != 'archived'", id)
+	tag, err := db.DB.Exec(ctx, "UPDATE novels SET status = 'archived', publish_status = 'offline', updated_at = NOW() WHERE id = $1 AND status != 'archived'", id)
 	if err != nil {
 		return 0, err
 	}
@@ -405,7 +461,8 @@ func (r *dbNovelRepository) UpdateChapterTx(ctx context.Context, tx pgx.Tx, c *C
 func (r *dbNovelRepository) SyncNovelWordCountTx(ctx context.Context, tx pgx.Tx, novelID int64) error {
 	_, err := tx.Exec(ctx, `
 		UPDATE novels
-		SET word_count = COALESCE((SELECT SUM(word_count) FROM chapters WHERE novel_id = $1), 0)
+		SET word_count = COALESCE((SELECT SUM(word_count) FROM chapters WHERE novel_id = $1), 0),
+		    updated_at = NOW()
 		WHERE id = $1`, novelID)
 	return err
 }

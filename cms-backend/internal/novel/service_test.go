@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5"
@@ -61,6 +62,7 @@ type fakeNovelRepo struct {
 	settings              map[string]string
 	promoLinks            map[int]*PromotionLink
 	lastListSelectQuery   string
+	lastListArgs          []interface{}
 	batchAllCalled        bool
 	batchCoinCostCalls    int
 	batchStartPayCalls    int
@@ -96,8 +98,9 @@ func (r *fakeNovelRepo) BeginTx(context.Context) (pgx.Tx, error) {
 func (r *fakeNovelRepo) CountNovels(context.Context, string, []interface{}) (int, error) {
 	return len(r.novels), nil
 }
-func (r *fakeNovelRepo) ListNovels(_ context.Context, selectQuery string, _ []interface{}) ([]Novel, error) {
+func (r *fakeNovelRepo) ListNovels(_ context.Context, selectQuery string, args []interface{}) ([]Novel, error) {
 	r.lastListSelectQuery = selectQuery
+	r.lastListArgs = args
 	out := make([]Novel, 0, len(r.novels))
 	for _, n := range r.novels {
 		if n.Status == "archived" {
@@ -115,12 +118,33 @@ func (r *fakeNovelRepo) GetNovel(_ context.Context, id int64) (*Novel, error) {
 	copyN := *n
 	return &copyN, nil
 }
+func (r *fakeNovelRepo) GetNovelsWithChapterCounts(_ context.Context, ids []int64) ([]NovelPublishCandidate, error) {
+	out := make([]NovelPublishCandidate, 0, len(ids))
+	for _, id := range ids {
+		n, ok := r.novels[id]
+		if !ok || n.Status == "archived" {
+			continue
+		}
+		out = append(out, NovelPublishCandidate{
+			ID:            n.ID,
+			Title:         n.Title,
+			PublishStatus: n.PublishStatus,
+			ChapterCount:  len(r.chapters[n.ID]),
+		})
+	}
+	return out, nil
+}
 func (r *fakeNovelRepo) CreateNovel(_ context.Context, n *Novel) error {
 	n.ID = r.nextID
 	r.nextID++
 	if n.Genres == nil {
 		n.Genres = []string{}
 	}
+	now := time.Now().UTC()
+	if n.CreatedAt.IsZero() {
+		n.CreatedAt = now
+	}
+	n.UpdatedAt = now
 	copyN := *n
 	r.novels[n.ID] = &copyN
 	return nil
@@ -132,6 +156,8 @@ func (r *fakeNovelRepo) UpdateNovel(_ context.Context, n *Novel) error {
 	}
 	copyN := *n
 	copyN.WordCount = existing.WordCount
+	copyN.CreatedAt = existing.CreatedAt
+	copyN.UpdatedAt = time.Now().UTC()
 	if copyN.Genres == nil {
 		copyN.Genres = []string{}
 	}
@@ -144,8 +170,23 @@ func (r *fakeNovelRepo) UpdatePublishStatus(_ context.Context, id int64, publish
 		return nil, nil
 	}
 	n.PublishStatus = publishStatus
+	n.UpdatedAt = time.Now().UTC()
 	copyN := *n
 	return &copyN, nil
+}
+func (r *fakeNovelRepo) BatchUpdatePublishStatus(_ context.Context, ids []int64, publishStatus string) ([]int64, error) {
+	var updated []int64
+	now := time.Now().UTC()
+	for _, id := range ids {
+		n, ok := r.novels[id]
+		if !ok || n.Status == "archived" {
+			continue
+		}
+		n.PublishStatus = publishStatus
+		n.UpdatedAt = now
+		updated = append(updated, id)
+	}
+	return updated, nil
 }
 func (r *fakeNovelRepo) DeleteNovel(_ context.Context, id int64) (int64, error) {
 	n, ok := r.novels[id]
@@ -544,7 +585,7 @@ func TestPublishLifecycleSoftDeleteAndListFilter(t *testing.T) {
 	}
 
 	// ListNovels SQL excludes archived by default
-	_, _, err = svc.ListNovels(ctx, 1, 10, "", "", "", "")
+	_, _, err = svc.ListNovels(ctx, 1, 10, NovelListFilter{})
 	if err != nil || !strings.Contains(repo.lastListSelectQuery, "status != 'archived'") {
 		t.Fatalf("expected ListNovels SQL to exclude archived, got %q (err=%v)", repo.lastListSelectQuery, err)
 	}
@@ -763,5 +804,103 @@ func TestCoverCleanupSettingsValidationAndPromoLinkGuards(t *testing.T) {
 	}
 	if repo.batchStartPayCalls != 1 || repo.batchCoinCostCalls != 1 {
 		t.Fatalf("expected 1 startPay batch call without re-running coin batch, got coin=%d startPay=%d", repo.batchCoinCostCalls, repo.batchStartPayCalls)
+	}
+}
+
+func TestListNovelsFiltersAndBatchPublishStatus(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	config.AppConfig = &config.Config{JWTSecret: "unit-test-secret"}
+
+	repo := newFakeNovelRepo()
+	repo.novels[101] = &Novel{ID: 101, Title: "Alpha Moon", Author: "WriterA", Status: "Ongoing", PublishStatus: "draft"}
+	repo.novels[102] = &Novel{ID: 102, Title: "Beta Empty", Author: "WriterB", Status: "Ongoing", PublishStatus: "draft"}
+	repo.novels[103] = &Novel{ID: 103, Title: "Gamma Live", Author: "WriterA", Status: "Completed", PublishStatus: "published"}
+	repo.chapters[101] = map[int]*Chapter{0: {ID: "c1", NovelID: 101, ChapterIndex: 0, Title: "Ch 1", WordCount: 100}}
+	repo.chapters[103] = map[int]*Chapter{0: {ID: "c2", NovelID: 103, ChapterIndex: 0, Title: "Ch 1", WordCount: 100}}
+
+	svc := NewNovelService(repo, nil, fakeCoverStore{})
+	h := NewHandler(svc)
+	r := gin.New()
+	h.RegisterRoutes(r.Group("/api/v1/admin"))
+
+	buyerToken, _ := auth.GenerateToken("buyer-1", "MediaBuyer")
+	editorToken, _ := auth.GenerateToken("editor-1", "Editor")
+
+	// Structured filters on GET /novels build expected SQL predicates
+	reqFilter := httptest.NewRequest(http.MethodGet, "/api/v1/admin/novels?title_or_id=Alpha&author=WriterA&publish_status=draft&created_start=2026-11-01&created_end=2026-11-17", nil)
+	reqFilter.Header.Set("Authorization", "Bearer "+editorToken)
+	wFilter := httptest.NewRecorder()
+	r.ServeHTTP(wFilter, reqFilter)
+	if wFilter.Code != http.StatusOK {
+		t.Fatalf("expected GET /novels filtered 200, got %d: %s", wFilter.Code, wFilter.Body.String())
+	}
+	for _, wantSQL := range []string{
+		"publish_status = $1",
+		"(title ILIKE $2 OR CAST(id AS TEXT) = $3)",
+		"author ILIKE $4",
+		"created_at >= $5",
+		"created_at <= $6",
+	} {
+		if !strings.Contains(repo.lastListSelectQuery, wantSQL) {
+			t.Fatalf("expected SQL clause %q in %q", wantSQL, repo.lastListSelectQuery)
+		}
+	}
+
+	// Inverted date range returns 400
+	reqBadDate := httptest.NewRequest(http.MethodGet, "/api/v1/admin/novels?created_start=2026-11-18&created_end=2026-11-17", nil)
+	reqBadDate.Header.Set("Authorization", "Bearer "+editorToken)
+	wBadDate := httptest.NewRecorder()
+	r.ServeHTTP(wBadDate, reqBadDate)
+	if wBadDate.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for inverted date range, got %d", wBadDate.Code)
+	}
+
+	// MediaBuyer cannot batch publish/offline
+	reqBuyerBatch := httptest.NewRequest(http.MethodPatch, "/api/v1/admin/novels/batch-publish-status", strings.NewReader(`{"ids":[101],"publish_status":"published"}`))
+	reqBuyerBatch.Header.Set("Authorization", "Bearer "+buyerToken)
+	reqBuyerBatch.Header.Set("Content-Type", "application/json")
+	wBuyerBatch := httptest.NewRecorder()
+	r.ServeHTTP(wBuyerBatch, reqBuyerBatch)
+	if wBuyerBatch.Code != http.StatusForbidden {
+		t.Fatalf("expected MediaBuyer batch-publish-status=403, got %d", wBuyerBatch.Code)
+	}
+
+	// Publishing only an empty novel fails with 400 ErrCannotPublishEmptyNovel
+	reqEmptyPub := httptest.NewRequest(http.MethodPatch, "/api/v1/admin/novels/batch-publish-status", strings.NewReader(`{"ids":[102],"publish_status":"published"}`))
+	reqEmptyPub.Header.Set("Authorization", "Bearer "+editorToken)
+	reqEmptyPub.Header.Set("Content-Type", "application/json")
+	wEmptyPub := httptest.NewRecorder()
+	r.ServeHTTP(wEmptyPub, reqEmptyPub)
+	if wEmptyPub.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 publishing empty novel 102, got %d: %s", wEmptyPub.Code, wEmptyPub.Body.String())
+	}
+
+	// Mixed batch publish updates eligible novel 101 and skips empty novel 102
+	reqMixedPub := httptest.NewRequest(http.MethodPatch, "/api/v1/admin/novels/batch-publish-status", strings.NewReader(`{"ids":[101,102,101],"publish_status":"published"}`))
+	reqMixedPub.Header.Set("Authorization", "Bearer "+editorToken)
+	reqMixedPub.Header.Set("Content-Type", "application/json")
+	wMixedPub := httptest.NewRecorder()
+	r.ServeHTTP(wMixedPub, reqMixedPub)
+	if wMixedPub.Code != http.StatusOK {
+		t.Fatalf("expected 200 mixed batch publish, got %d: %s", wMixedPub.Code, wMixedPub.Body.String())
+	}
+	if repo.novels[101].PublishStatus != "published" || repo.novels[102].PublishStatus != "draft" {
+		t.Fatalf("unexpected publish states after batch publish: 101=%q 102=%q", repo.novels[101].PublishStatus, repo.novels[102].PublishStatus)
+	}
+	if repo.novels[101].UpdatedAt.IsZero() {
+		t.Fatalf("expected updated_at populated after batch publish")
+	}
+
+	// Batch offline succeeds for both 101 and 103
+	reqBatchOffline := httptest.NewRequest(http.MethodPatch, "/api/v1/admin/novels/batch-publish-status", strings.NewReader(`{"ids":[101,103],"publish_status":"offline"}`))
+	reqBatchOffline.Header.Set("Authorization", "Bearer "+editorToken)
+	reqBatchOffline.Header.Set("Content-Type", "application/json")
+	wBatchOffline := httptest.NewRecorder()
+	r.ServeHTTP(wBatchOffline, reqBatchOffline)
+	if wBatchOffline.Code != http.StatusOK {
+		t.Fatalf("expected 200 batch offline, got %d: %s", wBatchOffline.Code, wBatchOffline.Body.String())
+	}
+	if repo.novels[101].PublishStatus != "offline" || repo.novels[103].PublishStatus != "offline" {
+		t.Fatalf("expected 101 and 103 offline, got %q / %q", repo.novels[101].PublishStatus, repo.novels[103].PublishStatus)
 	}
 }

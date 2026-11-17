@@ -23,6 +23,39 @@ interface Novel {
   coin_cost_per_thousand?: number | null;
   effective_coin_cost_per_thousand?: number;
   start_pay_chapter_index?: number;
+  created_at?: string;
+  updated_at?: string;
+}
+
+interface NovelListFilterDraft {
+  titleOrId: string;
+  author: string;
+  publishStatus: '' | 'published' | 'draft' | 'offline';
+  createdStart: string;
+  createdEnd: string;
+}
+
+const EMPTY_NOVEL_FILTER: NovelListFilterDraft = {
+  titleOrId: '',
+  author: '',
+  publishStatus: '',
+  createdStart: '',
+  createdEnd: '',
+};
+
+function formatNovelDateTime(value?: string, withSeconds = false): string {
+  if (!value) return '-';
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return '-';
+  return parsed.toLocaleString('zh-CN', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    ...(withSeconds ? { second: '2-digit' } : {}),
+    hour12: false,
+  });
 }
 
 interface Chapter {
@@ -56,17 +89,16 @@ export default function NovelsTab() {
   const [selectedNovel, setSelectedNovel] = useState<Novel | null>(null);
   const [chapters, setChapters] = useState<Chapter[]>([]);
   const [publishUpdatingId, setPublishUpdatingId] = useState<number | null>(null);
+  const [selectedNovelIds, setSelectedNovelIds] = useState<number[]>([]);
+  const [batchPublishUpdating, setBatchPublishUpdating] = useState(false);
 
-  // Novels server pagination & filter states (single unified query to prevent debounce double-fetch)
-  const [novelQuery, setNovelQuery] = useState<{
-    page: number;
-    search: string;
-    publishStatus: '' | 'published' | 'draft' | 'offline';
-  }>({
+  // Novels server pagination & filter states (single unified query to prevent stale/duplicate fetches)
+  const [novelQuery, setNovelQuery] = useState<NovelListFilterDraft & { page: number }>({
     page: 1,
-    search: '',
-    publishStatus: '',
+    ...EMPTY_NOVEL_FILTER,
   });
+  const [filterDraft, setFilterDraft] = useState<NovelListFilterDraft>(EMPTY_NOVEL_FILTER);
+  const [dateFilterError, setDateFilterError] = useState('');
   const pageSize = 10;
 
   // Chapters pagination states
@@ -103,9 +135,14 @@ export default function NovelsTab() {
   const [importMessage, setImportMessage] = useState('');
   const [importError, setImportError] = useState('');
   const [importLoading, setImportLoading] = useState(false);
-  const [searchQuery, setSearchQuery] = useState('');
-  const searchInputId = useId();
-  const searchDebounceTimerRef = useRef<number | null>(null);
+  const titleOrIdInputId = useId();
+  const authorInputId = useId();
+  const statusSelectId = useId();
+  const createdStartInputId = useId();
+  const createdEndInputId = useId();
+  const dateFilterErrorId = useId();
+  const createdStartRef = useRef<HTMLInputElement>(null);
+  const selectAllCheckboxRef = useRef<HTMLInputElement>(null);
   const novelsAbortRef = useRef<AbortController | null>(null);
   const novelsFetchSeqRef = useRef(0);
 
@@ -166,20 +203,6 @@ export default function NovelsTab() {
   const globalChapterInputId = useId();
   const globalChapterApplyAllId = useId();
 
-  useEffect(() => {
-    const trimmed = searchQuery.trim();
-    searchDebounceTimerRef.current = window.setTimeout(() => {
-      searchDebounceTimerRef.current = null;
-      setNovelQuery((prev) => (prev.search === trimmed ? prev : { ...prev, page: 1, search: trimmed }));
-    }, 300);
-    return () => {
-      if (searchDebounceTimerRef.current !== null) {
-        window.clearTimeout(searchDebounceTimerRef.current);
-        searchDebounceTimerRef.current = null;
-      }
-    };
-  }, [searchQuery]);
-
   const currentPage = novelQuery.page;
   const totalPages = Math.max(1, Math.ceil(totalNovels / pageSize));
   const startIndex = (currentPage - 1) * pageSize;
@@ -188,21 +211,25 @@ export default function NovelsTab() {
   const startChIndex = (chapterPage - 1) * chapterPageSize;
   const paginatedChapters = chapters.slice(startChIndex, startChIndex + chapterPageSize);
 
-  const [colWidths, setColWidths] = useState<number[]>([
-    80, // 书籍 ID
-    70, // 封面
-    210, // 书名
-    85, // 作者
-    100, // 分类标签
-    95, // 上架状态
-    85, // 连载状态
-    95, // 总字数
-    125, // 千字收费
-    70, // 评分
-    130 // 操作
-  ]);
+  const [colWidths, setColWidths] = useState<Record<string, number>>({
+    select: 44,
+    id: 78,
+    cover: 64,
+    title: 185,
+    author: 95,
+    genres: 105,
+    publish_status: 84,
+    status: 80,
+    word_count: 90,
+    coin_cost_per_thousand: 112,
+    rating: 64,
+    created_at: 146,
+    updated_at: 146,
+    actions: 158,
+  });
 
   const columns = [
+    ...(canEditNovels ? [{ label: '', key: 'select', resizable: false }] : []),
     { label: '书籍 ID', key: 'id' },
     { label: '封面', key: 'cover' },
     { label: '书名', key: 'title' },
@@ -213,6 +240,8 @@ export default function NovelsTab() {
     { label: '总字数', key: 'word_count' },
     { label: '千字收费', key: 'coin_cost_per_thousand' },
     { label: '评分', key: 'rating' },
+    { label: '创建时间', key: 'created_at' },
+    { label: '更新时间', key: 'updated_at' },
     { label: '操作', key: 'actions', align: 'right' }
   ];
 
@@ -224,20 +253,21 @@ export default function NovelsTab() {
         return { label: '已下架', badgeClass: 'badge-red' };
       case 'draft':
       default:
-        return { label: '草稿(未上架)', badgeClass: 'badge-orange' };
+        return { label: '草稿', badgeClass: 'badge-orange' };
     }
   };
 
-  const handleMouseDown = (index: number, e: React.MouseEvent) => {
+  const handleMouseDown = (colKey: string, e: React.MouseEvent) => {
     e.preventDefault();
     const startX = e.clientX;
-    const startWidth = colWidths[index];
+    const startWidth = colWidths[colKey] || 100;
 
     const handleMouseMove = (moveEvent: MouseEvent) => {
       const deltaX = moveEvent.clientX - startX;
-      const newWidths = [...colWidths];
-      newWidths[index] = Math.max(50, startWidth + deltaX);
-      setColWidths(newWidths);
+      setColWidths((prev) => ({
+        ...prev,
+        [colKey]: Math.max(50, startWidth + deltaX),
+      }));
     };
 
     const handleMouseUp = () => {
@@ -309,13 +339,27 @@ export default function NovelsTab() {
         page: String(targetQuery.page),
         page_size: String(pageSize),
       });
-      if (targetQuery.search) query.set('search', targetQuery.search);
+      if (targetQuery.titleOrId) query.set('title_or_id', targetQuery.titleOrId);
+      if (targetQuery.author) query.set('author', targetQuery.author);
       if (targetQuery.publishStatus) query.set('publish_status', targetQuery.publishStatus);
+      if (targetQuery.createdStart) {
+        query.set('created_start', new Date(`${targetQuery.createdStart}T00:00:00`).toISOString());
+      }
+      if (targetQuery.createdEnd) {
+        query.set('created_end', new Date(`${targetQuery.createdEnd}T23:59:59.999`).toISOString());
+      }
       const data = await apiRequest('GET', `/novels?${query.toString()}`, undefined, false, controller.signal);
       if (controller.signal.aborted || seq !== novelsFetchSeqRef.current) return;
 
-      setNovels(data.novels || []);
+      const nextNovels: Novel[] = data.novels || [];
+      setNovels(nextNovels);
       setTotalNovels(data.total || 0);
+      setSelectedNovelIds((prev) => {
+        if (prev.length === 0) return prev;
+        const currentIds = new Set(nextNovels.map((n) => n.id));
+        const filtered = prev.filter((id) => currentIds.has(id));
+        return filtered.length === prev.length ? prev : filtered;
+      });
       setHasLoadedOnce(true);
     } catch (e: any) {
       if (e?.name === 'AbortError' || controller.signal.aborted) return;
@@ -329,11 +373,21 @@ export default function NovelsTab() {
   };
 
   useEffect(() => {
+    setSelectedNovelIds([]);
     void fetchNovels(novelQuery);
     return () => {
       novelsAbortRef.current?.abort();
     };
   }, [novelQuery]);
+
+  const allSelectedOnPage = novels.length > 0 && novels.every((n) => selectedNovelIds.includes(n.id));
+  const someSelectedOnPage = novels.some((n) => selectedNovelIds.includes(n.id));
+
+  useEffect(() => {
+    if (selectAllCheckboxRef.current) {
+      selectAllCheckboxRef.current.indeterminate = someSelectedOnPage && !allSelectedOnPage;
+    }
+  }, [someSelectedOnPage, allSelectedOnPage]);
 
   const fetchChapters = async (novelID: number) => {
     try {
@@ -595,6 +649,98 @@ export default function NovelsTab() {
       return;
     }
     void runUpdate();
+  };
+
+  const handleToggleSelectNovel = (id: number) => {
+    setSelectedNovelIds((prev) =>
+      prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id]
+    );
+  };
+
+  const handleToggleSelectAllOnPage = (checked: boolean) => {
+    if (!checked) {
+      setSelectedNovelIds([]);
+      return;
+    }
+    setSelectedNovelIds(novels.map((n) => n.id));
+  };
+
+  const handleBatchPublishStatus = (targetStatus: 'published' | 'offline') => {
+    if (selectedNovelIds.length === 0 || batchPublishUpdating) return;
+    const count = selectedNovelIds.length;
+    const idsSnapshot = [...selectedNovelIds];
+
+    const runBatch = async () => {
+      setBatchPublishUpdating(true);
+      try {
+        const res = await apiRequest('PATCH', '/novels/batch-publish-status', {
+          ids: idsSnapshot,
+          publish_status: targetStatus,
+        });
+        const updatedCount = res?.updated_count ?? idsSnapshot.length;
+        const skippedList: Array<{ id: number; title?: string; reason: string }> = res?.skipped || [];
+        if (skippedList.length > 0) {
+          const skippedNames = skippedList
+            .slice(0, 3)
+            .map((item) => (item.title ? `《${item.title}》` : `#${item.id}`))
+            .join('、');
+          const suffix = skippedList.length > 3 ? ` 等 ${skippedList.length} 本` : '';
+          window.showToast?.(
+            `已${targetStatus === 'published' ? '上架' : '下架'} ${updatedCount} 本书籍；另有 ${skippedList.length} 本已跳过（${skippedNames}${suffix}：${skippedList[0].reason}）`,
+            'info'
+          );
+        } else {
+          window.showToast?.(
+            targetStatus === 'published'
+              ? `已成功批量上架 ${updatedCount} 本书籍！`
+              : `已成功批量下架 ${updatedCount} 本书籍！`,
+            'success'
+          );
+        }
+        setSelectedNovelIds([]);
+        void fetchNovels(novelQuery);
+      } catch (err: any) {
+        window.showToast?.(err.message || '批量更新上架状态失败', 'error');
+      } finally {
+        setBatchPublishUpdating(false);
+      }
+    };
+
+    if (targetStatus === 'offline' && window.showConfirm) {
+      window.showConfirm(
+        `确定将选中的 ${count} 本书籍全部下架吗？下架后书城、搜索、书架与推广链接均会拦截访问。`,
+        () => { void runBatch(); }
+      );
+      return;
+    }
+    void runBatch();
+  };
+
+  const handleSearchSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (filterDraft.createdStart && filterDraft.createdEnd && filterDraft.createdStart > filterDraft.createdEnd) {
+      setDateFilterError('开始日期不能晚于结束日期');
+      createdStartRef.current?.focus();
+      return;
+    }
+    setDateFilterError('');
+    setNovelQuery({
+      page: 1,
+      titleOrId: filterDraft.titleOrId.trim(),
+      author: filterDraft.author.trim(),
+      publishStatus: filterDraft.publishStatus,
+      createdStart: filterDraft.createdStart,
+      createdEnd: filterDraft.createdEnd,
+    });
+  };
+
+  const handleResetFilters = () => {
+    setDateFilterError('');
+    setFilterDraft(EMPTY_NOVEL_FILTER);
+    setNovelQuery({
+      page: 1,
+      ...EMPTY_NOVEL_FILTER,
+    });
   };
 
   const handleDeleteNovel = async (id: number, e: React.MouseEvent) => {
@@ -1381,77 +1527,254 @@ export default function NovelsTab() {
         submitError={createModalError}
       />
 
-      {/* Search & Publish Status Filter Bar */}
-      <search>
+      {/* Compact Multi-Field Search & Filter Bar */}
+      <search style={{ display: 'block', marginBottom: '16px' }}>
         <form
-          onSubmit={(e) => {
-            e.preventDefault();
-            if (searchDebounceTimerRef.current !== null) {
-              window.clearTimeout(searchDebounceTimerRef.current);
-              searchDebounceTimerRef.current = null;
-            }
-            const trimmed = searchQuery.trim();
-            setNovelQuery((prev) => ({ ...prev, page: 1, search: trimmed }));
+          onSubmit={handleSearchSubmit}
+          className="glass-panel"
+          style={{
+            padding: '14px 16px',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '10px',
           }}
-          style={{ display: 'flex', gap: '16px', marginBottom: '20px', alignItems: 'center', flexWrap: 'wrap' }}
         >
-          <div style={{ position: 'relative', flex: '1 1 320px' }}>
-            <label htmlFor={searchInputId} className="visually-hidden">搜索书籍</label>
-            <span style={{ position: 'absolute', left: '12px', top: '12px', color: 'hsl(var(--text-muted))' }}>
-              <Search size={16} aria-hidden="true" />
-            </span>
-            <input
-              id={searchInputId}
-              name="search"
-              type="search"
-              className="input-field"
-              style={{ paddingLeft: '38px' }}
-              placeholder="输入书名、作者或书籍 ID 搜索全库..."
-              value={searchQuery}
-              onChange={(e) => {
-                setSearchQuery(e.target.value);
-              }}
-            />
+          <div style={{ display: 'flex', gap: '12px', alignItems: 'flex-end', flexWrap: 'wrap' }}>
+            <div style={{ flex: '1 1 170px', maxWidth: '220px' }}>
+              <label
+                htmlFor={titleOrIdInputId}
+                style={{ display: 'block', fontSize: '0.76rem', color: 'hsl(var(--text-secondary))', marginBottom: '4px', fontWeight: 500 }}
+              >
+                书名 / ID
+              </label>
+              <div style={{ position: 'relative' }}>
+                <span style={{ position: 'absolute', left: '10px', top: '50%', transform: 'translateY(-50%)', color: 'hsl(var(--text-muted))', pointerEvents: 'none', display: 'inline-flex' }}>
+                  <Search size={14} aria-hidden="true" />
+                </span>
+                <input
+                  id={titleOrIdInputId}
+                  name="title_or_id"
+                  type="search"
+                  className="input-field"
+                  style={{ paddingLeft: '32px' }}
+                  placeholder="书名或书籍 ID"
+                  autoCorrect="off"
+                  autoCapitalize="none"
+                  spellCheck={false}
+                  enterKeyHint="search"
+                  value={filterDraft.titleOrId}
+                  onChange={(e) => setFilterDraft((prev) => ({ ...prev, titleOrId: e.target.value }))}
+                />
+              </div>
+            </div>
+
+            <div style={{ flex: '1 1 140px', maxWidth: '175px' }}>
+              <label
+                htmlFor={authorInputId}
+                style={{ display: 'block', fontSize: '0.76rem', color: 'hsl(var(--text-secondary))', marginBottom: '4px', fontWeight: 500 }}
+              >
+                作者
+              </label>
+              <input
+                id={authorInputId}
+                name="author"
+                type="text"
+                className="input-field"
+                placeholder="输入作者名"
+                autoCorrect="off"
+                autoCapitalize="none"
+                spellCheck={false}
+                enterKeyHint="search"
+                value={filterDraft.author}
+                onChange={(e) => setFilterDraft((prev) => ({ ...prev, author: e.target.value }))}
+              />
+            </div>
+
+            <div style={{ flex: '0 1 124px', minWidth: '116px' }}>
+              <label
+                htmlFor={statusSelectId}
+                style={{ display: 'block', fontSize: '0.76rem', color: 'hsl(var(--text-secondary))', marginBottom: '4px', fontWeight: 500 }}
+              >
+                状态
+              </label>
+              <select
+                id={statusSelectId}
+                name="publish_status"
+                className="input-field"
+                value={filterDraft.publishStatus}
+                onChange={(e) =>
+                  setFilterDraft((prev) => ({
+                    ...prev,
+                    publishStatus: e.target.value as '' | 'published' | 'draft' | 'offline',
+                  }))
+                }
+              >
+                <option value="">全部</option>
+                <option value="published">已上架</option>
+                <option value="draft">草稿</option>
+                <option value="offline">已下架</option>
+              </select>
+            </div>
+
+            <div style={{ flex: '0 1 148px' }}>
+              <label
+                htmlFor={createdStartInputId}
+                style={{ display: 'block', fontSize: '0.76rem', color: 'hsl(var(--text-secondary))', marginBottom: '4px', fontWeight: 500 }}
+              >
+                创建时间 (起)
+              </label>
+              <input
+                ref={createdStartRef}
+                id={createdStartInputId}
+                name="created_start"
+                type="date"
+                className="input-field"
+                aria-invalid={dateFilterError ? 'true' : 'false'}
+                aria-describedby={dateFilterError ? dateFilterErrorId : undefined}
+                value={filterDraft.createdStart}
+                onChange={(e) => {
+                  setDateFilterError('');
+                  setFilterDraft((prev) => ({ ...prev, createdStart: e.target.value }));
+                }}
+              />
+            </div>
+
+            <div style={{ flex: '0 1 148px' }}>
+              <label
+                htmlFor={createdEndInputId}
+                style={{ display: 'block', fontSize: '0.76rem', color: 'hsl(var(--text-secondary))', marginBottom: '4px', fontWeight: 500 }}
+              >
+                创建时间 (止)
+              </label>
+              <input
+                id={createdEndInputId}
+                name="created_end"
+                type="date"
+                className="input-field"
+                aria-invalid={dateFilterError ? 'true' : 'false'}
+                aria-describedby={dateFilterError ? dateFilterErrorId : undefined}
+                value={filterDraft.createdEnd}
+                onChange={(e) => {
+                  setDateFilterError('');
+                  setFilterDraft((prev) => ({ ...prev, createdEnd: e.target.value }));
+                }}
+              />
+            </div>
+
+            <div style={{ display: 'flex', gap: '8px', alignItems: 'center', marginLeft: 'auto' }}>
+              <button
+                type="submit"
+                className="btn-primary"
+                style={{ height: '38px', padding: '0 16px', fontSize: '0.8rem', whiteSpace: 'nowrap', gap: '6px' }}
+              >
+                <Search size={14} aria-hidden="true" /> 查询
+              </button>
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={handleResetFilters}
+                style={{ height: '38px', padding: '0 14px', fontSize: '0.8rem', whiteSpace: 'nowrap' }}
+              >
+                重置
+              </button>
+            </div>
           </div>
-          <fieldset style={{ border: 'none', margin: 0, padding: 0, display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' }}>
-            <legend className="visually-hidden">按上架状态筛选</legend>
-            {[
-              { value: '', label: '全部' },
-              { value: 'published', label: '已上架' },
-              { value: 'draft', label: '草稿(未上架)' },
-              { value: 'offline', label: '已下架' },
-            ].map((opt) => {
-              const active = novelQuery.publishStatus === opt.value;
-              return (
-                <button
-                  key={opt.value || 'all'}
-                  type="button"
-                  aria-pressed={active}
-                  className={active ? 'btn-primary' : 'btn-secondary'}
-                  style={{ padding: '8px 14px', fontSize: '0.82rem' }}
-                  onClick={() => {
-                    const nextStatus = opt.value as '' | 'published' | 'draft' | 'offline';
-                    setNovelQuery((prev) =>
-                      prev.publishStatus === nextStatus && prev.page === 1
-                        ? prev
-                        : { ...prev, page: 1, publishStatus: nextStatus }
-                    );
-                  }}
-                >
-                  {opt.label}
-                </button>
-              );
-            })}
-          </fieldset>
+
+          {dateFilterError && (
+            <p
+              id={dateFilterErrorId}
+              role="status"
+              aria-live="polite"
+              style={{ margin: 0, fontSize: '0.76rem', color: '#ef4444' }}
+            >
+              {dateFilterError}
+            </p>
+          )}
         </form>
       </search>
 
+      {/* Batch Operations Toolbar */}
+      {canEditNovels && (
+        <div
+          className="glass-panel"
+          style={{
+            padding: '10px 14px',
+            marginBottom: '12px',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: '12px',
+            flexWrap: 'wrap',
+            borderColor: selectedNovelIds.length > 0 ? 'hsl(var(--primary) / 0.35)' : undefined,
+          }}
+        >
+          <span style={{ fontSize: '0.8rem', color: 'hsl(var(--text-secondary))' }}>
+            {selectedNovelIds.length > 0
+              ? `已选 ${selectedNovelIds.length} 本书籍`
+              : '勾选下方书籍后可批量上架或下架'}
+          </span>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+            {selectedNovelIds.length > 0 && (
+              <button
+                type="button"
+                className="btn-secondary"
+                disabled={batchPublishUpdating}
+                onClick={() => setSelectedNovelIds([])}
+                style={{ padding: '4px 10px', fontSize: '0.75rem', whiteSpace: 'nowrap' }}
+              >
+                取消勾选
+              </button>
+            )}
+            <button
+              type="button"
+              className="btn-secondary"
+              disabled={selectedNovelIds.length === 0 || batchPublishUpdating}
+              onClick={() => handleBatchPublishStatus('published')}
+              style={{
+                padding: '4px 12px',
+                fontSize: '0.75rem',
+                whiteSpace: 'nowrap',
+                color: selectedNovelIds.length > 0 ? '#10b981' : undefined,
+                borderColor: selectedNovelIds.length > 0 ? 'rgba(16, 185, 129, 0.35)' : undefined,
+                opacity: selectedNovelIds.length === 0 || batchPublishUpdating ? 0.5 : 1,
+                cursor: selectedNovelIds.length === 0 || batchPublishUpdating ? 'not-allowed' : 'pointer',
+              }}
+            >
+              {batchPublishUpdating ? '处理中...' : '批量上架'}
+            </button>
+            <button
+              type="button"
+              className="btn-secondary"
+              disabled={selectedNovelIds.length === 0 || batchPublishUpdating}
+              onClick={() => handleBatchPublishStatus('offline')}
+              style={{
+                padding: '4px 12px',
+                fontSize: '0.75rem',
+                whiteSpace: 'nowrap',
+                color: selectedNovelIds.length > 0 ? '#f87171' : undefined,
+                borderColor: selectedNovelIds.length > 0 ? 'rgba(239, 68, 68, 0.3)' : undefined,
+                opacity: selectedNovelIds.length === 0 || batchPublishUpdating ? 0.5 : 1,
+                cursor: selectedNovelIds.length === 0 || batchPublishUpdating ? 'not-allowed' : 'pointer',
+              }}
+            >
+              {batchPublishUpdating ? '处理中...' : '批量下架'}
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Books List Table */}
-      <div className="glass-panel" style={{ padding: '8px', overflowX: 'auto', opacity: loading ? 0.65 : 1, transition: 'opacity 0.15s' }}>
-        <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left', tableLayout: 'fixed' }}>
+      <div
+        tabIndex={0}
+        role="region"
+        aria-label="书籍管理列表"
+        className="glass-panel"
+        style={{ padding: '8px', overflowX: 'auto', opacity: loading ? 0.65 : 1, transition: 'opacity 0.15s' }}
+      >
+        <table style={{ width: '100%', minWidth: '1320px', borderCollapse: 'collapse', textAlign: 'left', tableLayout: 'fixed' }}>
           <colgroup>
-            {colWidths.map((width, i) => (
-              <col key={i} style={{ width: `${width}px` }} />
+            {columns.map((col) => (
+              <col key={col.key} style={{ width: `${colWidths[col.key] || 100}px` }} />
             ))}
           </colgroup>
           <thead>
@@ -1460,16 +1783,29 @@ export default function NovelsTab() {
                 <th
                   key={col.key}
                   style={{
-                    padding: '12px 12px',
-                    textAlign: col.align === 'right' ? 'right' : 'left',
+                    padding: col.key === 'select' ? '12px 10px' : '12px 12px',
+                    textAlign: col.key === 'select' ? 'center' : col.align === 'right' ? 'right' : 'left',
                     position: 'relative',
-                    userSelect: 'none'
+                    userSelect: 'none',
+                    whiteSpace: 'nowrap',
                   }}
                 >
-                  {col.label}
-                  {index < columns.length - 1 && (
+                  {col.key === 'select' ? (
+                    <input
+                      ref={selectAllCheckboxRef}
+                      type="checkbox"
+                      aria-label="全选本页书籍"
+                      checked={allSelectedOnPage}
+                      disabled={novels.length === 0 || batchPublishUpdating}
+                      onChange={(e) => handleToggleSelectAllOnPage(e.target.checked)}
+                      style={{ width: '15px', height: '15px', cursor: novels.length === 0 ? 'not-allowed' : 'pointer', accentColor: 'hsl(var(--primary))', verticalAlign: 'middle' }}
+                    />
+                  ) : (
+                    col.label
+                  )}
+                  {col.resizable !== false && index < columns.length - 1 && (
                     <div
-                      onMouseDown={(e) => handleMouseDown(index, e)}
+                      onMouseDown={(e) => handleMouseDown(col.key, e)}
                       className="resize-handle"
                       style={{
                         position: 'absolute',
@@ -1499,14 +1835,42 @@ export default function NovelsTab() {
             ) : (
               novels.map((novel) => {
                 const pubMeta = getPublishStatusMeta(novel.publish_status);
+                const isSelected = selectedNovelIds.includes(novel.id);
+                const createdShort = formatNovelDateTime(novel.created_at);
+                const createdFull = formatNovelDateTime(novel.created_at, true);
+                const updatedShort = formatNovelDateTime(novel.updated_at);
+                const updatedFull = formatNovelDateTime(novel.updated_at, true);
                 return (
                 <tr
                   key={novel.id}
                   onClick={() => handleNovelClick(novel)}
-                  style={{ borderBottom: '1px solid hsl(var(--border) / 0.5)', fontSize: '0.9rem', cursor: 'pointer', transition: 'background-color 0.2s', color: 'hsl(var(--text-secondary))' }}
-                  onMouseEnter={(e) => e.currentTarget.style.backgroundColor = 'hsl(var(--bg-card))'}
-                  onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
+                  style={{
+                    borderBottom: '1px solid hsl(var(--border) / 0.5)',
+                    fontSize: '0.88rem',
+                    cursor: 'pointer',
+                    transition: 'background-color 0.2s',
+                    color: 'hsl(var(--text-secondary))',
+                    backgroundColor: isSelected ? 'hsl(var(--primary) / 0.06)' : 'transparent',
+                  }}
+                  onMouseEnter={(e) => {
+                    if (!isSelected) e.currentTarget.style.backgroundColor = 'hsl(var(--bg-card))';
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.backgroundColor = isSelected ? 'hsl(var(--primary) / 0.06)' : 'transparent';
+                  }}
                 >
+                  {canEditNovels && (
+                    <td style={{ padding: '14px 10px', textAlign: 'center' }} onClick={(e) => e.stopPropagation()}>
+                      <input
+                        type="checkbox"
+                        aria-label={`选择书籍《${novel.title}》`}
+                        checked={isSelected}
+                        disabled={batchPublishUpdating}
+                        onChange={() => handleToggleSelectNovel(novel.id)}
+                        style={{ width: '15px', height: '15px', cursor: 'pointer', accentColor: 'hsl(var(--primary))', verticalAlign: 'middle' }}
+                      />
+                    </td>
+                  )}
                   <td style={{ padding: '14px 12px', fontFamily: 'monospace', fontSize: '0.8rem', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={String(novel.id)}>
                     {novel.id}
                   </td>
@@ -1526,13 +1890,13 @@ export default function NovelsTab() {
                   <td style={{ padding: '14px 12px', color: 'hsl(var(--text-secondary))', fontSize: '0.8rem', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={novel.genres.join(', ')}>
                     {novel.genres.join(', ') || '未分类'}
                   </td>
-                  <td style={{ padding: '14px 12px' }}>
-                    <span className={`badge ${pubMeta.badgeClass}`} style={{ fontSize: '0.7rem' }}>
+                  <td style={{ padding: '14px 12px', whiteSpace: 'nowrap' }}>
+                    <span className={`badge ${pubMeta.badgeClass}`} style={{ fontSize: '0.7rem', whiteSpace: 'nowrap' }}>
                       {pubMeta.label}
                     </span>
                   </td>
-                  <td style={{ padding: '14px 12px' }}>
-                    <span className={`badge ${novel.status === 'Completed' ? 'badge-green' : 'badge-orange'}`} style={{ fontSize: '0.7rem' }}>
+                  <td style={{ padding: '14px 12px', whiteSpace: 'nowrap' }}>
+                    <span className={`badge ${novel.status === 'Completed' ? 'badge-green' : 'badge-orange'}`} style={{ fontSize: '0.7rem', whiteSpace: 'nowrap' }}>
                       {novel.status === 'Completed' ? '已完结' : '连载中'}
                     </span>
                   </td>
@@ -1544,21 +1908,36 @@ export default function NovelsTab() {
                       ? `${novel.coin_cost_per_thousand} 金币`
                       : `全局 (${novel.effective_coin_cost_per_thousand ?? globalCoinCost ?? 500})`}
                   </td>
-                  <td style={{ padding: '14px 12px' }}>
-                    <span className="badge badge-violet" style={{ fontSize: '0.7rem' }}>{novel.rating} ★</span>
+                  <td style={{ padding: '14px 12px', whiteSpace: 'nowrap' }}>
+                    <span className="badge badge-violet" style={{ fontSize: '0.7rem', whiteSpace: 'nowrap' }}>{novel.rating} ★</span>
+                  </td>
+                  <td
+                    style={{ padding: '14px 12px', fontSize: '0.78rem', fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
+                    title={createdFull}
+                  >
+                    {createdShort}
+                  </td>
+                  <td
+                    style={{ padding: '14px 12px', fontSize: '0.78rem', fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
+                    title={updatedFull}
+                  >
+                    {updatedShort}
                   </td>
                   <td style={{ padding: '14px 12px', textAlign: 'right' }} onClick={(e) => e.stopPropagation()}>
-                    <div style={{ display: 'flex', gap: '6px', justifyContent: 'flex-end' }}>
+                    <div style={{ display: 'flex', gap: '5px', justifyContent: 'flex-end', alignItems: 'center', flexWrap: 'nowrap' }}>
                       {canEditNovels && (
                         <button
                           type="button"
-                          disabled={publishUpdatingId === novel.id}
+                          disabled={publishUpdatingId === novel.id || batchPublishUpdating}
                           onClick={(e) => handleTogglePublishStatus(novel, novel.publish_status === 'published' ? 'offline' : 'published', e)}
                           className="btn-secondary"
                           style={{
-                            padding: '4px 8px',
-                            borderRadius: '6px',
-                            fontSize: '0.72rem',
+                            padding: '3px 7px',
+                            borderRadius: '5px',
+                            fontSize: '0.68rem',
+                            lineHeight: 1.2,
+                            whiteSpace: 'nowrap',
+                            flexShrink: 0,
                             color: novel.publish_status === 'published' ? '#f87171' : '#10b981',
                             borderColor: novel.publish_status === 'published' ? 'rgba(239, 68, 68, 0.25)' : 'rgba(16, 185, 129, 0.3)',
                           }}
@@ -1571,7 +1950,7 @@ export default function NovelsTab() {
                         <button
                           type="button"
                           className="btn-secondary"
-                          style={{ padding: '6px', borderRadius: '6px' }}
+                          style={{ padding: '5px', borderRadius: '6px', flexShrink: 0 }}
                           title="生成推广链接"
                           onClick={() => {
                             if (novel.publish_status !== 'published') {
@@ -1596,7 +1975,7 @@ export default function NovelsTab() {
                           <Link2 size={14} />
                         </button>
                       )}
-                      <button type="button" className="btn-secondary" style={{ padding: '6px', borderRadius: '6px' }} title="进入详情/导入" onClick={() => handleNovelClick(novel)}>
+                      <button type="button" className="btn-secondary" style={{ padding: '5px', borderRadius: '6px', flexShrink: 0 }} title="进入详情/导入" onClick={() => handleNovelClick(novel)}>
                         <Edit size={14} />
                       </button>
                       {canEditNovels && (
@@ -1604,7 +1983,7 @@ export default function NovelsTab() {
                           type="button"
                           className="btn-secondary"
                           onClick={(e) => handleDeleteNovel(novel.id, e)}
-                          style={{ padding: '6px', borderRadius: '6px', color: '#f87171', borderColor: 'rgba(239, 68, 68, 0.2)' }}
+                          style={{ padding: '5px', borderRadius: '6px', flexShrink: 0, color: '#f87171', borderColor: 'rgba(239, 68, 68, 0.2)' }}
                           title="删除书籍"
                         >
                           <Trash size={14} />

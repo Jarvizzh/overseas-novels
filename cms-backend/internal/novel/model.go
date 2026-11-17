@@ -19,6 +19,7 @@ type Novel struct {
 	EffectiveCoinCostPerThousand int       `json:"effective_coin_cost_per_thousand"`
 	StartPayChapterIndex         int       `json:"start_pay_chapter_index"`
 	CreatedAt                    time.Time `json:"created_at"`
+	UpdatedAt                    time.Time `json:"updated_at"`
 }
 
 type Chapter struct {

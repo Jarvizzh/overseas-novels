@@ -33,6 +33,7 @@ func (h *Handler) RegisterRoutes(rg *gin.RouterGroup) {
 	{
 		novels.GET("", h.ListNovels)
 		novels.POST("/cover-upload", editorRoles, h.UploadCover)
+		novels.PATCH("/batch-publish-status", editorRoles, h.BatchUpdatePublishStatus)
 		novels.GET("/:id", h.GetNovel)
 		novels.POST("", editorRoles, h.CreateNovel)
 		novels.PUT("/:id", editorRoles, h.UpdateNovel)
@@ -81,14 +82,24 @@ func (h *Handler) ListNovels(c *gin.Context) {
 	} else if pageSize > 200 {
 		pageSize = 200
 	}
-	status := c.Query("status")
-	publishStatus := c.Query("publish_status")
-	genre := c.Query("genre")
-	search := c.Query("search")
+	filter := NovelListFilter{
+		Status:        c.Query("status"),
+		PublishStatus: c.Query("publish_status"),
+		Genre:         c.Query("genre"),
+		Search:        c.Query("search"),
+		TitleOrID:     c.Query("title_or_id"),
+		Author:        c.Query("author"),
+		CreatedStart:  c.Query("created_start"),
+		CreatedEnd:    c.Query("created_end"),
+	}
 
 	ctx := c.Request.Context()
-	novels, total, err := h.service.ListNovels(ctx, page, pageSize, status, publishStatus, genre, search)
+	novels, total, err := h.service.ListNovels(ctx, page, pageSize, filter)
 	if err != nil {
+		if errors.Is(err, ErrInvalidFilterParam) || errors.Is(err, ErrInvalidPublishStatus) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch novels: " + err.Error()})
 		return
 	}
@@ -308,6 +319,37 @@ func (h *Handler) UpdatePublishStatus(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, updated)
+}
+
+type BatchUpdatePublishStatusReq struct {
+	IDs           []int64 `json:"ids" binding:"required,min=1"`
+	PublishStatus string  `json:"publish_status" binding:"required,oneof=draft published offline"`
+}
+
+func (h *Handler) BatchUpdatePublishStatus(c *gin.Context) {
+	var req BatchUpdatePublishStatusReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	result, err := h.service.BatchUpdatePublishStatus(c.Request.Context(), req.IDs, req.PublishStatus)
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrInvalidBatchNovelIDs),
+			errors.Is(err, ErrBatchLimitExceeded),
+			errors.Is(err, ErrInvalidPublishStatus),
+			errors.Is(err, ErrCannotPublishEmptyNovel):
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		case errors.Is(err, ErrNovelNotFound):
+			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		}
+		return
+	}
+
+	c.JSON(http.StatusOK, result)
 }
 
 func (h *Handler) DeleteNovel(c *gin.Context) {
