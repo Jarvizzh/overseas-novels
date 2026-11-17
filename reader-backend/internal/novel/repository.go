@@ -10,6 +10,7 @@ import (
 )
 
 type Repository interface {
+	GetContentVersion(context.Context, int64) (int64, error)
 	GetNovels(ctx context.Context, genre, sortBy string, limit, offset int) ([]model.Novel, error)
 	SearchNovels(ctx context.Context, search string, limit, offset int) ([]model.Novel, error)
 	GetByID(ctx context.Context, id int64) (*model.Novel, error)
@@ -56,13 +57,13 @@ func NewDBRepository() Repository {
 	return &dbRepository{}
 }
 
-const readerNovelSelectColumns = `id, title, author, cover_url, rating, status, publish_status, synopsis, genres, word_count, view_count, COALESCE(coin_cost_per_thousand, (SELECT value::integer FROM system_configs WHERE key = 'global_coin_cost_per_thousand'), 500) AS coin_cost_per_thousand, start_pay_chapter_index, created_at`
+const readerNovelSelectColumns = `id, title, author, cover_url, rating, status, publish_status, synopsis, genres, word_count, view_count, COALESCE(coin_cost_per_thousand, (SELECT value::integer FROM system_configs WHERE key = 'global_coin_cost_per_thousand'), 500) AS coin_cost_per_thousand, start_pay_chapter_index, created_at, content_version`
 
 func scanReaderNovel(scanner interface{ Scan(dest ...any) error }, n *model.Novel) error {
 	err := scanner.Scan(
 		&n.ID, &n.Title, &n.Author, &n.CoverURL, &n.Rating, &n.Status, &n.PublishStatus,
 		&n.Synopsis, &n.Genres, &n.WordCount, &n.ViewCount,
-		&n.CoinCostPerThousand, &n.StartPayChapterIndex, &n.CreatedAt,
+		&n.CoinCostPerThousand, &n.StartPayChapterIndex, &n.CreatedAt, &n.ContentVersion,
 	)
 	if err != nil {
 		return err
@@ -114,7 +115,7 @@ func (r *dbRepository) GetNovels(ctx context.Context, genre, sortBy string, limi
 		novels = append(novels, n)
 	}
 
-	return novels, nil
+	return novels, rows.Err()
 }
 
 func (r *dbRepository) SearchNovels(ctx context.Context, search string, limit, offset int) ([]model.Novel, error) {
@@ -141,7 +142,7 @@ func (r *dbRepository) SearchNovels(ctx context.Context, search string, limit, o
 		novels = append(novels, n)
 	}
 
-	return novels, nil
+	return novels, rows.Err()
 }
 
 func (r *dbRepository) GetByID(ctx context.Context, id int64) (*model.Novel, error) {
@@ -189,7 +190,7 @@ func (r *dbRepository) GetChaptersList(ctx context.Context, novelID int64) ([]mo
 		chapters = append(chapters, c)
 	}
 
-	return chapters, nil
+	return chapters, rows.Err()
 }
 
 func (r *dbRepository) GetChapter(ctx context.Context, novelID int64, chapterIndex int) (*model.Chapter, error) {
@@ -240,11 +241,12 @@ func (r *dbRepository) GetUnlockedChapterIndices(ctx context.Context, userID, no
 	var indices []int
 	for rows.Next() {
 		var idx int
-		if err := rows.Scan(&idx); err == nil {
-			indices = append(indices, idx)
+		if err := rows.Scan(&idx); err != nil {
+			return nil, err
 		}
+		indices = append(indices, idx)
 	}
-	return indices, nil
+	return indices, rows.Err()
 }
 
 func (r *dbRepository) HasActiveSubscription(ctx context.Context, userID int64) (bool, error) {
@@ -269,16 +271,15 @@ func (r *dbRepository) GetEffectivePricingRule(ctx context.Context, userID int64
 	err := db.DB.QueryRow(ctx, `
 		SELECT COALESCE(NULLIF(pl.start_pay_chapter_index, 0), NULLIF(n.start_pay_chapter_index, 0),
 			(SELECT value::int FROM system_configs WHERE key = 'global_start_pay_chapter_index'), 3),
-		       COALESCE(NULLIF(pl.coin_cost_per_thousand, 0), NULLIF(n.coin_cost_per_thousand, 0),
+		       COALESCE(pl.coin_cost_per_thousand, n.coin_cost_per_thousand,
 			(SELECT value::int FROM system_configs WHERE key = 'global_coin_cost_per_thousand'), 500)
 		FROM novels n
 		LEFT JOIN LATERAL (
 			SELECT p.start_pay_chapter_index, p.coin_cost_per_thousand
-			FROM users u JOIN promotion_links p ON p.utm_source = u.utm_source AND p.utm_campaign = u.utm_campaign
-			WHERE u.id = $1 AND p.novel_id = n.id AND u.utm_source <> '' AND u.utm_campaign <> ''
-			ORDER BY p.id DESC LIMIT 1
+			FROM promotion_links p WHERE p.novel_id=n.id AND p.id=CASE WHEN $1::bigint>0
+ THEN (SELECT id FROM reader_promotion_for_user($1)) ELSE resolve_reader_promotion($3,'','') END
 		) pl ON TRUE
-		WHERE n.id = $2 AND n.status <> 'archived' AND n.publish_status = 'published'`, userID, novelID).Scan(&start, &cost)
+		WHERE n.id = $2 AND n.status <> 'archived' AND n.publish_status = 'published'`, userID, novelID, promoID).Scan(&start, &cost)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -286,4 +287,13 @@ func (r *dbRepository) GetEffectivePricingRule(ctx context.Context, userID int64
 		return 0, 0, fmt.Errorf("invalid chapter pricing configuration")
 	}
 	return start, cost, nil
+}
+
+func (r *dbRepository) GetContentVersion(ctx context.Context, id int64) (int64, error) {
+	var version int64
+	err := db.DB.QueryRow(ctx, `SELECT content_version FROM novels WHERE id=$1 AND status<>'archived' AND publish_status='published'`, id).Scan(&version)
+	if err == pgx.ErrNoRows {
+		return 0, nil
+	}
+	return version, err
 }

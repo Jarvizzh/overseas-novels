@@ -124,8 +124,8 @@ var _ storage.CoverSigner = fakeCoverSigner{}
 func TestReaderNovelService_SignsWithoutMutatingCache(t *testing.T) {
 	repo := &fakeReaderRepo{
 		novels: []model.Novel{
-			{ID: 1, Title: "OSS Book", CoverURL: "oss://covers/2026/11/abc.webp", Status: "Ongoing", PublishStatus: "published"},
-			{ID: 2, Title: "Legacy Book", CoverURL: "/assets/legacy.png", Status: "Completed", PublishStatus: "published"},
+			{ID: 1, Title: "OSS Book", CoverURL: "oss://covers/2026/11/abc.webp", Status: "Ongoing", ContentVersion: 1, PublishStatus: "published"},
+			{ID: 2, Title: "Legacy Book", CoverURL: "/assets/legacy.png", Status: "Completed", ContentVersion: 1, PublishStatus: "published"},
 		},
 	}
 	cache := &fakeReaderCache{}
@@ -167,8 +167,8 @@ func TestReaderNovelService_HidesUnpublishedOrArchivedAndPricesConsistently(t *t
 	repo := &fakeReaderRepo{
 		novels: []model.Novel{
 			{ID: 1, Title: "Draft Book", Status: "Ongoing", PublishStatus: "draft"},
-			{ID: 2, Title: "Archived Book", Status: "archived", PublishStatus: "published"},
-			{ID: 3, Title: "Live Book", Status: "Ongoing", PublishStatus: "published"},
+			{ID: 2, Title: "Archived Book", Status: "archived", ContentVersion: 1, PublishStatus: "published"},
+			{ID: 3, Title: "Live Book", Status: "Ongoing", ContentVersion: 1, PublishStatus: "published"},
 		},
 		chapters: map[int64][]model.Chapter{
 			1: {{ID: "d1", NovelID: 1, ChapterIndex: 0, Title: "Ch 1", Content: "Hi", WordCount: 100}},
@@ -209,3 +209,5 @@ func TestReaderNovelService_HidesUnpublishedOrArchivedAndPricesConsistently(t *t
 }
 
 func (*fakeReaderRepo) HasWholeBook(context.Context, int64, int64) (bool, error) { return false, nil }
+
+func (r *fakeReaderRepo) GetContentVersion(context.Context, int64) (int64, error) { return 1, nil }

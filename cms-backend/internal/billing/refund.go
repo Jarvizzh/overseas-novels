@@ -242,6 +242,9 @@ func refundThroughPayPal(ctx context.Context, request *refundRequest) (*paypalRe
 			mode = "sandbox"
 		}
 	}
+	if _, err := db.DB.Exec(ctx, `SELECT assert_paypal_identity($1,$2)`, id, mode); err != nil {
+		return nil, err
+	}
 	host := "https://api-m.sandbox.paypal.com"
 	if mode == "live" || mode == "production" {
 		host = "https://api-m.paypal.com"

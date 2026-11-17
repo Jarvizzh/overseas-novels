@@ -52,6 +52,8 @@ export const Recharge: React.FC<RechargeProps> = ({
 
   const [isVIP, setIsVIP] = useState(false);
   const [userSubscription, setUserSubscription] = useState<SubscriptionInfo | null>(null);
+  const [userSubscriptions, setUserSubscriptions] = useState<SubscriptionInfo[]>([]);
+  const [cancellingSubscriptions, setCancellingSubscriptions] = useState<Set<string>>(new Set());
 
   const [slots, setSlots] = useState<Array<{
     id: number;
@@ -101,12 +103,13 @@ export const Recharge: React.FC<RechargeProps> = ({
       setOffersNovelId(novelId);
       setSlots(slotList);
 
+      setUserSubscriptions(subData?.subscriptions ?? (subData?.subscription ? [subData.subscription] : []));
       if (subData?.is_vip) {
         setIsVIP(true);
         setUserSubscription(subData.subscription);
       } else {
         setIsVIP(false);
-        setUserSubscription(null);
+        setUserSubscription(subData?.subscription || null);
       }
 
       if (slotList.length === 0) setSelectedPack(null);
@@ -392,6 +395,64 @@ export const Recharge: React.FC<RechargeProps> = ({
 
       <div className="scroll-container" style={{ flex: 1, minHeight: 0 }}>
         <div className="sn-narrow-container" style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
+          {userSubscriptions.map((agreement) => {
+            const canCancel =
+              agreement.payment_method === 'paypal' &&
+              ['PENDING', 'ACTIVE', 'SUSPENDED', 'CANCEL_PENDING'].includes(agreement.status);
+            const cancelling = cancellingSubscriptions.has(agreement.subscription_id);
+            return (
+              <section
+                key={agreement.subscription_id}
+                className="card"
+                style={{ padding: 16 }}
+                aria-label={`Payment agreement ${agreement.subscription_id}`}
+              >
+                <p>
+                  {agreement.payment_method === 'paypal' ? 'PayPal' : agreement.payment_method} · {agreement.cycle} plan
+                </p>
+                <p>Agreement: {agreement.subscription_id}</p>
+                <p role="status">Status: {agreement.status}</p>
+                {canCancel && (
+                  <button
+                    type="button"
+                    className="btn-cta-secondary"
+                    disabled={cancelling || agreement.status === 'CANCEL_PENDING'}
+                    aria-label={`Cancel auto-renewal for ${agreement.subscription_id}`}
+                    onClick={async () => {
+                      const id = agreement.subscription_id;
+                      setCancellingSubscriptions((previous) => new Set(previous).add(id));
+                      try {
+                        await api.cancelSubscription(id);
+                        setUserSubscriptions((previous) =>
+                          previous.map((item) =>
+                            item.subscription_id === id ? { ...item, status: 'CANCEL_PENDING' } : item,
+                          ),
+                        );
+                        setUserSubscription((previous) =>
+                          previous?.subscription_id === id ? { ...previous, status: 'CANCEL_PENDING' } : previous,
+                        );
+                        showToast('Cancellation requested.', 'success');
+                      } catch {
+                        showToast('Cancellation could not be requested. Please retry.', 'error');
+                      } finally {
+                        setCancellingSubscriptions((previous) => {
+                          const next = new Set(previous);
+                          next.delete(id);
+                          return next;
+                        });
+                      }
+                    }}
+                  >
+                    {agreement.status === 'CANCEL_PENDING'
+                      ? 'Cancellation pending'
+                      : cancelling
+                        ? 'Requesting cancellation…'
+                        : 'Cancel auto-renewal'}
+                  </button>
+                )}
+              </section>
+            );
+          })}
           {/* Active VIP Member Card Banner (Clean, no cancel control per requirement) */}
           {isVIP && userSubscription && (
             <div

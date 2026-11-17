@@ -19,7 +19,7 @@ func NewRepository() Repository {
 func (r *repository) CreateFeedback(ctx context.Context, fb *Feedback) (int64, error) {
 	query := `
 		INSERT INTO feedback (user_id, email, subject, content, status, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, 'pending', NOW(), NOW())
+		VALUES (NULLIF($1::bigint,0), $2, $3, $4, 'pending', NOW(), NOW())
 		RETURNING id
 	`
 	var id int64

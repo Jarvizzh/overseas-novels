@@ -3,8 +3,11 @@ package auth
 import (
 	"context"
 	"database/sql"
+	"errors"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+
 	"reader-backend/internal/db"
 	"reader-backend/internal/model"
 )
@@ -33,12 +36,12 @@ func (r *dbUserRepository) BeginTx(ctx context.Context) (pgx.Tx, error) {
 
 func (r *dbUserRepository) CreateGuestUser(ctx context.Context, tx pgx.Tx, nickname, device, ipAddress, utmSource, utmCampaign string) (*model.User, error) {
 	userQuery := `
-		INSERT INTO users (email, password_hash, nickname, avatar_url, status, device, ip_address, utm_source, utm_campaign)
-		VALUES (NULL, NULL, $1, '/assets/default_avatar.png', 1, $2, $3, $4, $5)
+		INSERT INTO users (email, password_hash, nickname, avatar_url, status, device, ip_address, utm_source, utm_campaign, promotion_link_id, promotion_resolved)
+		VALUES (NULL, NULL, $1::text, '/assets/default_avatar.png', 1, $2::text, $3::text, $4::text, $5::text,resolve_reader_promotion($6,$4::text,$5::text),true)
 		RETURNING id, nickname, avatar_url, status, created_at`
 
 	var user model.User
-	err := tx.QueryRow(ctx, userQuery, nickname, device, ipAddress, utmSource, utmCampaign).Scan(
+	err := tx.QueryRow(ctx, userQuery, nickname, device, ipAddress, utmSource, utmCampaign, promotionID(ctx)).Scan(
 		&user.ID, &user.Nickname, &user.AvatarURL, &user.Status, &user.CreatedAt,
 	)
 	if err != nil {
@@ -53,13 +56,13 @@ func (r *dbUserRepository) CreateGuestUser(ctx context.Context, tx pgx.Tx, nickn
 
 func (r *dbUserRepository) CreateStandardUser(ctx context.Context, tx pgx.Tx, email, passwordHash, nickname, device, ipAddress, utmSource, utmCampaign string) (*model.User, error) {
 	userQuery := `
-		INSERT INTO users (email, password_hash, nickname, avatar_url, status, device, ip_address, utm_source, utm_campaign)
-		VALUES ($1, $2, $3, '/assets/default_avatar.png', 1, $4, $5, $6, $7)
+		INSERT INTO users (email, password_hash, nickname, avatar_url, status, device, ip_address, utm_source, utm_campaign, promotion_link_id, promotion_resolved)
+		VALUES ($1::text, $2::text, $3::text, '/assets/default_avatar.png', 1, $4::text, $5::text, $6::text, $7::text,resolve_reader_promotion($8,$6::text,$7::text),true)
 		RETURNING id, email, nickname, avatar_url, status, created_at`
 
 	var user model.User
 	var emailStr string
-	err := tx.QueryRow(ctx, userQuery, email, passwordHash, nickname, device, ipAddress, utmSource, utmCampaign).Scan(
+	err := tx.QueryRow(ctx, userQuery, email, passwordHash, nickname, device, ipAddress, utmSource, utmCampaign, promotionID(ctx)).Scan(
 		&user.ID, &emailStr, &user.Nickname, &user.AvatarURL, &user.Status, &user.CreatedAt,
 	)
 	if err != nil {
@@ -141,20 +144,30 @@ func (r *dbUserRepository) GetUserByID(ctx context.Context, id int64) (*model.Us
 
 func (r *dbUserRepository) BindEmail(ctx context.Context, userID int64, email, passwordHash, nickname string) (*model.User, error) {
 	query := `
+ WITH bound AS (
 		UPDATE users
 		SET email = $1, password_hash = $2, nickname = COALESCE(NULLIF($3, ''), nickname)
-		WHERE id = $4
-		RETURNING id, email, nickname, avatar_url, status, created_at`
+		WHERE id = $4 AND email IS NULL AND password_hash IS NULL AND status=1
+		RETURNING id, email, nickname, avatar_url, status, created_at
+ ), revoked AS (
+ DELETE FROM reader_sessions WHERE user_id=(SELECT id FROM bound)
+ ) SELECT id,email,nickname,avatar_url,status,created_at FROM bound`
 
 	var user model.User
 	var emailStr string
 	err := db.DB.QueryRow(ctx, query, email, passwordHash, nickname, userID).Scan(
 		&user.ID, &emailStr, &user.Nickname, &user.AvatarURL, &user.Status, &user.CreatedAt,
 	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrAlreadyBound
+	}
+	var conflict *pgconn.PgError
+	if errors.As(err, &conflict) && conflict.Code == "23505" {
+		return nil, ErrEmailExists
+	}
 	if err != nil {
 		return nil, err
 	}
 	user.Email = &emailStr
 	return &user, nil
 }
-

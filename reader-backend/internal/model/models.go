@@ -5,7 +5,7 @@ import "time"
 // User represents a user in the system (can be guest or registered)
 type User struct {
 	ID           int64     `json:"id" db:"id"`
-	Email        *string   `json:"email" db:"email"` // Nullable
+	Email        *string   `json:"email" db:"email"`     // Nullable
 	PasswordHash *string   `json:"-" db:"password_hash"` // Nullable, omitted in JSON
 	Nickname     string    `json:"nickname" db:"nickname"`
 	AvatarURL    string    `json:"avatar_url" db:"avatar_url"`
@@ -19,12 +19,13 @@ type User struct {
 
 // Novel represents novel metadata
 type Novel struct {
+	ContentVersion       int64     `json:"content_version"`
 	ID                   int64     `json:"id" db:"id"`
 	Title                string    `json:"title" db:"title"`
 	Author               string    `json:"author" db:"author"`
 	CoverURL             string    `json:"cover" db:"cover_url"`
 	Rating               float64   `json:"rating" db:"rating"`
-	Status               string    `json:"status" db:"status"` // Ongoing / Completed / archived
+	Status               string    `json:"status" db:"status"`                 // Ongoing / Completed / archived
 	PublishStatus        string    `json:"publish_status" db:"publish_status"` // draft / published / offline
 	Synopsis             string    `json:"synopsis" db:"synopsis"`
 	Genres               []string  `json:"genres" db:"genres"`
@@ -76,7 +77,7 @@ type Wallet struct {
 type Transaction struct {
 	ID          string    `json:"id" db:"id"`
 	UserID      int64     `json:"user_id" db:"user_id"`
-	Type        string    `json:"type" db:"type"` // credit / debit
+	Type        string    `json:"type" db:"type"`         // credit / debit
 	BizType     string    `json:"biz_type" db:"biz_type"` // recharge, checkin, unlock, reward_task
 	Amount      int       `json:"amount" db:"amount"`
 	ChargedAmt  int       `json:"charged_amount" db:"charged_amount"`
@@ -158,7 +159,6 @@ type UserSubscription struct {
 
 // ThirdPartyPaymentOrder represents third-party payment transaction details (e.g. PayPal, Stripe)
 type ThirdPartyPaymentOrder struct {
-
 	ID                     int64     `json:"id" db:"id"`
 	OrderID                int64     `json:"order_id" db:"order_id"`
 	PaymentProvider        string    `json:"payment_provider" db:"payment_provider"`
@@ -178,5 +178,3 @@ type ThirdPartyPaymentOrder struct {
 	CreatedAt              time.Time `json:"created_at" db:"created_at"`
 	UpdatedAt              time.Time `json:"updated_at" db:"updated_at"`
 }
-
-

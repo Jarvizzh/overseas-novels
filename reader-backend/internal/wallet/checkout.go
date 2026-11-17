@@ -49,10 +49,7 @@ func (r *dbRepository) GetCheckoutTemplate(ctx context.Context, userID int64) (i
 	var id int
 	err := db.DB.QueryRow(ctx, `
 		SELECT COALESCE(
-			(SELECT p.recharge_template_id FROM users u JOIN promotion_links p
-			ON u.utm_source = p.utm_source AND u.utm_campaign = p.utm_campaign
-			WHERE u.id = $1 AND u.utm_source <> '' AND u.utm_campaign <> ''
-			AND p.recharge_template_id IS NOT NULL ORDER BY p.id DESC LIMIT 1),
+			(SELECT p.recharge_template_id FROM reader_promotion_for_user($1) p WHERE p.recharge_template_id IS NOT NULL),
 			(SELECT id FROM recharge_templates ORDER BY is_default DESC NULLS LAST, id LIMIT 1), 0)`, userID).Scan(&id)
 	return id, err
 }
@@ -68,12 +65,9 @@ func (r *dbRepository) CreateCheckout(ctx context.Context, userID int64, slot *m
 		INSERT INTO recharge_orders (checkout_id, user_id, amount_cents, currency, coins, bonus_coins_credited,
 			payment_method, status, order_type, recharge_slot_id, recharge_template_id, novel_id, utm_source, utm_campaign, promotion_link_id,fb_lead_metadata)
 		SELECT $1, u.id, $2, 'USD', $3, $4, 'paypal', 'Pending', $5::varchar, $6, $7, NULLIF($8, 0),
-			u.utm_source, u.utm_campaign, p.id,$10::jsonb
+			u.utm_source, u.utm_campaign, p.id,$10::jsonb || jsonb_build_object('pixel_id',(SELECT fp.pixel_id FROM promotion_links l JOIN fb_pixels fp ON fp.id=l.fb_pixel_id WHERE l.id=p.id))
 		FROM users u
-		LEFT JOIN LATERAL (SELECT id,novel_id,recharge_template_id FROM promotion_links
-			WHERE utm_source = u.utm_source AND utm_campaign = u.utm_campaign
-			AND u.utm_source <> '' AND u.utm_campaign <> '' AND recharge_template_id IS NOT NULL
-			ORDER BY id DESC LIMIT 1) p ON TRUE
+		LEFT JOIN LATERAL (SELECT id,novel_id,recharge_template_id FROM reader_promotion_for_user(u.id)) p ON TRUE
 		WHERE u.id = $9
 		AND $7 = COALESCE(p.recharge_template_id,(SELECT id FROM recharge_templates ORDER BY is_default DESC NULLS LAST,id LIMIT 1))
 		AND ($5::varchar <> 'whole_book' OR whole_book_offer_available(u.id,$7,$8))
@@ -216,7 +210,7 @@ func (r *dbRepository) settleCheckout(ctx context.Context, orderID string, captu
 			return nil, err
 		}
 	}
-	_, err = tx.Exec(ctx, `UPDATE recharge_orders SET status='Success', paid_at=now(), fulfilled_at=now(), updated_at=now() WHERE id=$1`, o.id)
+	_, err = tx.Exec(ctx, `UPDATE recharge_orders SET status='Success', paid_at=now(), fulfilled_at=now(), updated_at=now(),payment_events_enabled=true WHERE id=$1`, o.id)
 	if err != nil {
 		return nil, err
 	}

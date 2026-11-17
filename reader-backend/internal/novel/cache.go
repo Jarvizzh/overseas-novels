@@ -41,7 +41,7 @@ func NewRedisCache() Cache {
 }
 
 func (c *redisCache) GetNovel(ctx context.Context, id int64) (*model.Novel, error) {
-	key := fmt.Sprintf("novel:detail:%d", id)
+	key := fmt.Sprintf("novel:v%d:detail:%d", contentVersion(ctx), id)
 	val, err := redisclient.RDB.Get(ctx, key).Result()
 	if err == redis.Nil {
 		return nil, nil
@@ -58,7 +58,7 @@ func (c *redisCache) GetNovel(ctx context.Context, id int64) (*model.Novel, erro
 }
 
 func (c *redisCache) SetNovel(ctx context.Context, id int64, novel *model.Novel) error {
-	key := fmt.Sprintf("novel:detail:%d", id)
+	key := fmt.Sprintf("novel:v%d:detail:%d", contentVersion(ctx), id)
 	data, err := json.Marshal(novel)
 	if err != nil {
 		return err
@@ -68,7 +68,7 @@ func (c *redisCache) SetNovel(ctx context.Context, id int64, novel *model.Novel)
 }
 
 func (c *redisCache) GetChaptersList(ctx context.Context, novelID int64) ([]model.Chapter, error) {
-	key := fmt.Sprintf("novel:chapters:%d", novelID)
+	key := fmt.Sprintf("novel:v%d:chapters:%d", contentVersion(ctx), novelID)
 	val, err := redisclient.RDB.Get(ctx, key).Result()
 	if err == redis.Nil {
 		return nil, nil
@@ -85,7 +85,7 @@ func (c *redisCache) GetChaptersList(ctx context.Context, novelID int64) ([]mode
 }
 
 func (c *redisCache) SetChaptersList(ctx context.Context, novelID int64, chapters []model.Chapter) error {
-	key := fmt.Sprintf("novel:chapters:%d", novelID)
+	key := fmt.Sprintf("novel:v%d:chapters:%d", contentVersion(ctx), novelID)
 	data, err := json.Marshal(chapters)
 	if err != nil {
 		return err
@@ -95,7 +95,7 @@ func (c *redisCache) SetChaptersList(ctx context.Context, novelID int64, chapter
 }
 
 func (c *redisCache) GetChapter(ctx context.Context, novelID int64, chapterIndex int) (*model.Chapter, error) {
-	key := fmt.Sprintf("novel:chapter:%d:%d", novelID, chapterIndex)
+	key := fmt.Sprintf("novel:v%d:chapter:%d:%d", contentVersion(ctx), novelID, chapterIndex)
 	val, err := redisclient.RDB.Get(ctx, key).Result()
 	if err == redis.Nil {
 		return nil, nil
@@ -112,7 +112,7 @@ func (c *redisCache) GetChapter(ctx context.Context, novelID int64, chapterIndex
 }
 
 func (c *redisCache) SetChapter(ctx context.Context, novelID int64, chapterIndex int, chapter *model.Chapter) error {
-	key := fmt.Sprintf("novel:chapter:%d:%d", novelID, chapterIndex)
+	key := fmt.Sprintf("novel:v%d:chapter:%d:%d", contentVersion(ctx), novelID, chapterIndex)
 	data, err := json.Marshal(chapter)
 	if err != nil {
 		return err
@@ -144,7 +144,7 @@ func (c *redisCache) SetUnlockedChaptersBatch(ctx context.Context, userID, novel
 		return nil
 	}
 	key := fmt.Sprintf("user:unlocks:%d:%d", userID, novelID)
-	
+
 	members := make([]interface{}, len(chapterIndices))
 	for i, v := range chapterIndices {
 		members[i] = v
@@ -155,4 +155,14 @@ func (c *redisCache) SetUnlockedChaptersBatch(ctx context.Context, userID, novel
 	pipe.Expire(ctx, key, 24*time.Hour)
 	_, err := pipe.Exec(ctx)
 	return err
+}
+
+type contentVersionKey struct{}
+
+func withContentVersion(ctx context.Context, v int64) context.Context {
+	return context.WithValue(ctx, contentVersionKey{}, v)
+}
+func contentVersion(ctx context.Context) int64 {
+	v, _ := ctx.Value(contentVersionKey{}).(int64)
+	return v
 }

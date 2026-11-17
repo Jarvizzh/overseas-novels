@@ -13,6 +13,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"reader-backend/internal/config"
@@ -145,7 +146,7 @@ func SendFacebookEvent(pixelID string, eventName string, userID string, email st
 	}
 
 	// 4. Send request
-	apiURL := fmt.Sprintf("https://graph.facebook.com/v19.0/%s/events?access_token=%s", pixelID, accessToken)
+	apiURL := fmt.Sprintf("https://graph.facebook.com/%s/%s/events", graphAPIVersion(), pixelID)
 	req, err := http.NewRequest("POST", apiURL, bytes.NewBuffer(jsonBytes))
 	if err != nil {
 		log.Printf("Failed to create FB CAPI request: %v", err)
@@ -153,6 +154,7 @@ func SendFacebookEvent(pixelID string, eventName string, userID string, email st
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+accessToken)
 
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
@@ -188,6 +190,9 @@ type CAPILogItem struct {
 
 var (
 	logChan   = make(chan CAPILogItem, 5000)
+	logMu     sync.RWMutex
+	logClosed bool
+	closeLogs sync.Once
 	flushDone = make(chan struct{})
 )
 
@@ -224,7 +229,7 @@ func init() {
 // Shutdown gracefully closes the log channel and flushes all pending logs to the database.
 func Shutdown(ctx context.Context) {
 	log.Println("[CAPI Logger] Gracefully shutting down CAPI log flusher...")
-	close(logChan)
+	closeLogs.Do(func() { logMu.Lock(); logClosed = true; close(logChan); logMu.Unlock() })
 	select {
 	case <-flushDone:
 		log.Println("[CAPI Logger] All pending CAPI logs flushed successfully")
@@ -253,6 +258,11 @@ func saveCAPILog(pixelID string, eventName string, userID string, value float64,
 		Response:      response,
 	}
 
+	logMu.RLock()
+	defer logMu.RUnlock()
+	if logClosed {
+		return
+	}
 	select {
 	case logChan <- item:
 	default:

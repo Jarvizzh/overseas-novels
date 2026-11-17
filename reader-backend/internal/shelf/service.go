@@ -2,11 +2,19 @@ package shelf
 
 import (
 	"context"
+	"errors"
+	"math"
 	"time"
 
 	"reader-backend/internal/model"
 	"reader-backend/internal/storage"
 )
+
+const MaxBatchSize = 100
+
+var ErrInvalidBatch = errors.New("batch must contain 1–100 positive novel IDs")
+
+var ErrInvalidProgress = errors.New("invalid reading progress")
 
 type ProgressUpdate struct {
 	NovelID                int64     `json:"novel_id" binding:"required"`
@@ -48,14 +56,33 @@ func (s *service) GetShelf(ctx context.Context, userID int64) ([]model.Bookshelf
 }
 
 func (s *service) AddToShelf(ctx context.Context, userID int64, novelID int64) error {
+	if novelID <= 0 {
+		return ErrInvalidBatch
+	}
 	return s.repo.AddToShelf(ctx, userID, novelID)
 }
 
 func (s *service) RemoveFromShelf(ctx context.Context, userID int64, novelIDs []int64) error {
+	if len(novelIDs) == 0 || len(novelIDs) > MaxBatchSize {
+		return ErrInvalidBatch
+	}
+	for _, id := range novelIDs {
+		if id <= 0 {
+			return ErrInvalidBatch
+		}
+	}
 	return s.repo.RemoveFromShelf(ctx, userID, novelIDs)
 }
 
 func (s *service) SyncProgress(ctx context.Context, userID int64, updates []ProgressUpdate) error {
+	if len(updates) == 0 || len(updates) > MaxBatchSize {
+		return ErrInvalidBatch
+	}
+	for _, update := range updates {
+		if update.NovelID <= 0 || update.ChapterIndex < 0 || math.IsNaN(update.ScrollOffsetPercentage) || math.IsInf(update.ScrollOffsetPercentage, 0) || update.ScrollOffsetPercentage < 0 || update.ScrollOffsetPercentage > 1 || update.UpdatedAt.IsZero() || update.UpdatedAt.After(time.Now().Add(5*time.Minute)) {
+			return ErrInvalidProgress
+		}
+	}
 	for _, update := range updates {
 		current, err := s.repo.GetProgress(ctx, userID, update.NovelID)
 		if err != nil {

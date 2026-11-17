@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -77,37 +78,26 @@ func applyRefundBeforeFulfillment(ctx context.Context, tx pgx.Tx, orderID int64,
 }
 
 func (s *service) reconcilePayPalEvents(ctx context.Context) {
-	rows, err := db.DB.Query(ctx, `WITH due AS (
-		SELECT event_id FROM paypal_event_inbox WHERE processed_at IS NULL AND next_attempt_at<=now()
-		ORDER BY next_attempt_at,event_id LIMIT 10 FOR UPDATE SKIP LOCKED
-	)
-	UPDATE paypal_event_inbox i SET attempts=i.attempts+1,next_attempt_at=now()+interval '10 minutes'
-	FROM due WHERE i.event_id=due.event_id RETURNING i.event`)
+	events, err := claimPayPalEvents(ctx)
 	if err != nil {
+		log.Printf("task=inbox action=claim error=%v", err)
 		return
 	}
-	events, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (payment.WebhookEventResult, error) {
-		var event payment.WebhookEventResult
-		err := row.Scan(&event)
-		return event, err
-	})
-	if err != nil {
-		return
-	}
+
 	for i := range events {
 		if ctx.Err() != nil {
 			return
 		}
-		event := &events[i]
+		job := events[i]
+		event := &job.event
 		requestCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
 		err := s.applyPayPalEvent(requestCtx, s.paypalClient, event)
 		cancel()
 		if err != nil {
-			_, _ = db.DB.Exec(ctx, `UPDATE paypal_event_inbox SET last_error=left($2,1000),
-				next_attempt_at=now()+interval '1 second'*LEAST(30*attempts,1800)
-				WHERE event_id=$1 AND processed_at IS NULL`, event.EventID, err.Error())
-			continue
+			log.Printf("task=inbox id=%s attempt=%d error=%v", event.EventID, job.attempt, err)
 		}
-		_, _ = db.DB.Exec(ctx, `UPDATE paypal_event_inbox SET processed_at=now(),last_error=NULL WHERE event_id=$1`, event.EventID)
+		if saveErr := finishInboxEvent(ctx, job, err); saveErr != nil {
+			log.Printf("task=inbox id=%s action=save error=%v", event.EventID, saveErr)
+		}
 	}
 }

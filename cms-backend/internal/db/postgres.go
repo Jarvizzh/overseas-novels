@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	dbassets "star-novel-cms/db"
 	"star-novel-cms/internal/config"
@@ -16,7 +17,7 @@ import (
 var DB *pgxpool.Pool
 
 func InitDB() {
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 
 	cfg, err := pgxpool.ParseConfig(config.AppConfig.DatabaseURL)
@@ -24,6 +25,7 @@ func InitDB() {
 		log.Fatalf("Unable to parse database URL: %v", err)
 	}
 
+	cfg.ConnConfig.ConnectTimeout = 5 * time.Second
 	cfg.MaxConns = 15
 	cfg.MinConns = 2
 	cfg.MaxConnIdleTime = 15 * time.Minute
@@ -41,17 +43,44 @@ func InitDB() {
 	DB = pool
 
 	// Execute safe, idempotent auto-migration (No DROP TABLE, CREATE IF NOT EXISTS only)
-	autoMigrate(ctx, pool)
+	if err := autoMigrate(ctx, pool); err != nil {
+		pool.Close()
+		log.Fatalf("Database migration failed: %v", err)
+	}
 }
 
-func autoMigrate(ctx context.Context, pool *pgxpool.Pool) {
+const RequiredSchemaVersion int64 = 2026111701
+
+func autoMigrate(ctx context.Context, pool *pgxpool.Pool) error {
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock(2026111701)"); err != nil {
+		return err
+	}
+	var ledger *string
+	if err := tx.QueryRow(ctx, "SELECT to_regclass('reader_schema_migrations')::text").Scan(&ledger); err != nil {
+		return err
+	}
+	if ledger != nil {
+		var version int64
+		if err := tx.QueryRow(ctx, "SELECT COALESCE(max(version),0) FROM reader_schema_migrations").Scan(&version); err != nil {
+			return err
+		}
+		if version > RequiredSchemaVersion {
+			return fmt.Errorf("schema %d newer than CMS %d", version, RequiredSchemaVersion)
+		}
+	}
+
 	log.Println("Running safe database auto-migration...")
 
 	// 1. Execute full schema DDL (Idempotent table and index creation)
 	if dbassets.SchemaSQL != "" {
-		_, err := pool.Exec(ctx, dbassets.SchemaSQL)
+		_, err := tx.Exec(ctx, dbassets.SchemaSQL)
 		if err != nil {
-			log.Printf("[MIGRATE WARNING] Schema migration notice: %v", err)
+			return fmt.Errorf("schema migration: %w", err)
 		} else {
 			log.Println("Database schema checked/migrated successfully")
 		}
@@ -59,31 +88,40 @@ func autoMigrate(ctx context.Context, pool *pgxpool.Pool) {
 
 	// 2. Seed initial data if tables are empty (admin account, configs, domains, templates, novels)
 	var adminCount int
-	err := pool.QueryRow(ctx, "SELECT COUNT(*) FROM admins").Scan(&adminCount)
-	if err == nil && adminCount == 0 {
+	err = tx.QueryRow(ctx, "SELECT COUNT(*) FROM admins").Scan(&adminCount)
+	if err != nil {
+		return fmt.Errorf("read admins: %w", err)
+	}
+	if adminCount == 0 {
 		log.Println("Database is newly initialized. Seeding initial superadmin, configs, and sample novels...")
 		if dbassets.SeedSQL != "" {
-			_, err = pool.Exec(ctx, dbassets.SeedSQL)
+			_, err = tx.Exec(ctx, dbassets.SeedSQL)
 			if err != nil {
-				log.Printf("[SEED WARNING] Initial seed notice: %v", err)
+				return fmt.Errorf("seed: %w", err)
 			} else {
 				log.Println("Initial seed data inserted successfully (Admin: admin / admin123)")
 			}
 		}
 	} else {
 		// Ensure system configs and default recharge templates are present (idempotent)
-		_, _ = pool.Exec(ctx, `
+		_, err = tx.Exec(ctx, `
 			INSERT INTO system_configs (key, value) VALUES ('global_coin_cost_per_thousand', '500') ON CONFLICT (key) DO NOTHING;
 			INSERT INTO system_configs (key, value) VALUES ('global_start_pay_chapter_index', '3') ON CONFLICT (key) DO NOTHING;
 			INSERT INTO admins (id, username, password_hash, nickname, role, status) 
 			VALUES ('10000000-0000-0000-0000-000000000001', 'admin', '$2a$10$F18fKqJSG4r6zPEp3EokNesCxK005I2a66WHrWhwopOOBA./liWqa', '超级管理员', 'SuperAdmin', 1) 
 			ON CONFLICT (username) DO UPDATE SET password_hash = '$2a$10$F18fKqJSG4r6zPEp3EokNesCxK005I2a66WHrWhwopOOBA./liWqa' WHERE admins.username = 'admin' AND admins.password_hash = '$2a$10$N.zmdr9k7uOCQb376NoUnuTJ8iAt6Z5EHsM8lE9lBOsl7iKTVKIUi';
 		`)
+		if err != nil {
+			return fmt.Errorf("ensure defaults: %w", err)
+		}
 	}
 
 	// 3. Ensure all primary-key sequences are at least as high as MAX(id)
 	//    (prevents SQLSTATE 23505 after explicit-ID seed inserts or imports).
-	syncSequences(ctx, pool)
+	if err := syncSequences(ctx, tx); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 type sequenceSpec struct {
@@ -114,12 +152,18 @@ var managedSequences = []sequenceSpec{
 	{table: "third_party_payment_orders", column: "id"},
 }
 
-func syncSequences(ctx context.Context, pool *pgxpool.Pool) {
+type migrationDB interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+}
+
+func syncSequences(ctx context.Context, pool migrationDB) error {
 	for _, spec := range managedSequences {
 		if err := syncOneSequence(ctx, pool, spec); err != nil {
-			log.Printf("[MIGRATE WARNING] Sequence sync notice for %s.%s: %v", spec.table, spec.column, err)
+			return fmt.Errorf("sequence %s.%s: %w", spec.table, spec.column, err)
 		}
 	}
+	return nil
 }
 
 // SyncSequence advances the backing PostgreSQL sequence for table.column when it lags behind MAX(column).
@@ -130,7 +174,7 @@ func SyncSequence(ctx context.Context, table, column, seqName string) error {
 	return syncOneSequence(ctx, DB, sequenceSpec{table: table, column: column, seqName: seqName})
 }
 
-func syncOneSequence(ctx context.Context, pool *pgxpool.Pool, spec sequenceSpec) error {
+func syncOneSequence(ctx context.Context, pool migrationDB, spec sequenceSpec) error {
 	seqName := spec.seqName
 	if seqName == "" {
 		if err := pool.QueryRow(ctx, "SELECT COALESCE(pg_get_serial_sequence($1, $2), '')", spec.table, spec.column).Scan(&seqName); err != nil {
@@ -183,4 +227,18 @@ func CloseDB() {
 		DB.Close()
 		log.Println("CMS Database connection pool closed")
 	}
+}
+
+func CheckSchema(ctx context.Context) error {
+	if DB == nil {
+		return errors.New("database is not initialized")
+	}
+	var version int64
+	if err := DB.QueryRow(ctx, "SELECT COALESCE(max(version),0) FROM reader_schema_migrations").Scan(&version); err != nil {
+		return err
+	}
+	if version != RequiredSchemaVersion {
+		return fmt.Errorf("schema %d, required %d", version, RequiredSchemaVersion)
+	}
+	return nil
 }

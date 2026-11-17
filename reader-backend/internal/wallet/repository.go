@@ -45,7 +45,8 @@ type Repository interface {
 	releaseSubscriptionIntent(context.Context, string)
 	submitSubscriptionIntent(context.Context, string, string) error
 	finishSubscriptionIntent(context.Context, *subscriptionIntent, *payment.SubscriptionResult) error
-	GetActiveSubscriptionByUserID(ctx context.Context, userID int64) (*model.UserSubscription, error)
+	GetManagedSubscriptionByUserID(ctx context.Context, userID int64) (*model.UserSubscription, error)
+	ListManagedSubscriptions(context.Context, int64) ([]model.UserSubscription, error)
 	GetSubscriptionByID(ctx context.Context, subID string) (*model.UserSubscription, error)
 	UpdateUserSubscriptionStatus(ctx context.Context, subID string, status string) error
 	RecordSubscriptionRenewalOrderTx(ctx context.Context, sub *model.UserSubscription, externalRefID string, amountCents int64, currency string, paidAt, periodEnd time.Time, providerStatus string, tpOrder *model.ThirdPartyPaymentOrder) (bool, error)
@@ -101,7 +102,7 @@ func (r *dbRepository) GetTransactions(ctx context.Context, userID int64, limit,
 		}
 		txs = append(txs, t)
 	}
-	return txs, nil
+	return txs, rows.Err()
 }
 
 func (r *dbRepository) UnlockChapterTx(ctx context.Context, userID int64, novelID int64, chapterIndex int, price int, chapterTitle string) error {
@@ -315,7 +316,7 @@ func (r *dbRepository) GetRechargeSlots(ctx context.Context, templateID int) ([]
 		}
 		slots = append(slots, s)
 	}
-	return slots, nil
+	return slots, rows.Err()
 }
 
 func (r *dbRepository) GetRechargeSlotByID(ctx context.Context, slotID int) (*model.RechargeSlot, error) {
@@ -338,7 +339,8 @@ func (r *dbRepository) GetProviderPlan(ctx context.Context, provider string, slo
 	query := `
 		SELECT id, provider, slot_id, cycle, price_cents, currency, external_plan_id, status, COALESCE(raw_payload::text, '{}'), created_at, updated_at
 		FROM payment_provider_plans
-		WHERE provider = $1 AND slot_id = $2
+		WHERE provider = $1 AND slot_id = $2 AND status='ACTIVE'
+ AND ($1<>'paypal' OR EXISTS(SELECT 1 FROM paypal_identity_lock i WHERE i.client_id=payment_provider_plans.identity_client_id AND i.environment=payment_provider_plans.identity_environment))
 		LIMIT 1`
 	var p model.PaymentProviderPlan
 	err := db.DB.QueryRow(ctx, query, provider, slotID).Scan(
@@ -355,10 +357,11 @@ func (r *dbRepository) GetProviderPlan(ctx context.Context, provider string, slo
 
 func (r *dbRepository) SaveProviderPlan(ctx context.Context, plan *model.PaymentProviderPlan) error {
 	query := `
-		INSERT INTO payment_provider_plans (provider, slot_id, cycle, price_cents, currency, external_plan_id, status, raw_payload)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
+		INSERT INTO payment_provider_plans (provider, slot_id, cycle, price_cents, currency, external_plan_id, status, raw_payload,identity_client_id,identity_environment)
+ VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb,(SELECT client_id FROM paypal_identity_lock),(SELECT environment FROM paypal_identity_lock))
 		ON CONFLICT (provider, slot_id) DO UPDATE SET
 			external_plan_id = EXCLUDED.external_plan_id,
+ identity_client_id=EXCLUDED.identity_client_id,identity_environment=EXCLUDED.identity_environment,
 			price_cents = EXCLUDED.price_cents,
 			cycle = EXCLUDED.cycle,
 			currency = EXCLUDED.currency,
@@ -407,28 +410,43 @@ func (r *dbRepository) UpsertUserSubscription(ctx context.Context, sub *model.Us
 	).Scan(&sub.ID)
 }
 
-func (r *dbRepository) GetActiveSubscriptionByUserID(ctx context.Context, userID int64) (*model.UserSubscription, error) {
+func (r *dbRepository) GetManagedSubscriptionByUserID(ctx context.Context, userID int64) (*model.UserSubscription, error) {
+	subscriptions, err := r.ListManagedSubscriptions(ctx, userID)
+	if err != nil || len(subscriptions) == 0 {
+		return nil, err
+	}
+	return &subscriptions[0], nil
+}
+func (r *dbRepository) ListManagedSubscriptions(ctx context.Context, userID int64) ([]model.UserSubscription, error) {
 	query := `
 		SELECT id, user_id, subscription_id, COALESCE(plan_id, ''), COALESCE(slot_id, 0), COALESCE(template_id, 0),
 		       status, cycle, price_cents, currency, payment_method, current_period_start, current_period_end,
 		       next_billing_time, last_payment_time, cancelled_at, COALESCE(raw_payload::text, '{}'), created_at, updated_at
 		FROM user_subscriptions
-		WHERE user_id = $1 AND ` + novel.PaidSubscriptionPredicate + `
-		ORDER BY id DESC
-		LIMIT 1`
-	var s model.UserSubscription
-	err := db.DB.QueryRow(ctx, query, userID).Scan(
-		&s.ID, &s.UserID, &s.SubscriptionID, &s.PlanID, &s.SlotID, &s.TemplateID,
-		&s.Status, &s.Cycle, &s.PriceCents, &s.Currency, &s.PaymentMethod, &s.CurrentPeriodStart, &s.CurrentPeriodEnd,
-		&s.NextBillingTime, &s.LastPaymentTime, &s.CancelledAt, &s.RawPayload, &s.CreatedAt, &s.UpdatedAt,
-	)
+		WHERE user_id = $1 AND (status IN ('PENDING','ACTIVE','SUSPENDED','CANCEL_PENDING') OR (` + novel.PaidSubscriptionPredicate + `))
+ AND subscription_id NOT LIKE 'I-MOCK%'
+		ORDER BY id DESC`
+	rows, err := db.DB.Query(ctx, query, userID)
 	if err != nil {
-		if err == pgx.ErrNoRows {
-			return nil, nil
-		}
 		return nil, err
 	}
-	return &s, nil
+	defer rows.Close()
+	subscriptions := make([]model.UserSubscription, 0)
+	for rows.Next() {
+		row := rows
+
+		var s model.UserSubscription
+		err := row.Scan(
+			&s.ID, &s.UserID, &s.SubscriptionID, &s.PlanID, &s.SlotID, &s.TemplateID,
+			&s.Status, &s.Cycle, &s.PriceCents, &s.Currency, &s.PaymentMethod, &s.CurrentPeriodStart, &s.CurrentPeriodEnd,
+			&s.NextBillingTime, &s.LastPaymentTime, &s.CancelledAt, &s.RawPayload, &s.CreatedAt, &s.UpdatedAt,
+		)
+		if err != nil {
+			return nil, err
+		}
+		subscriptions = append(subscriptions, s)
+	}
+	return subscriptions, rows.Err()
 }
 
 func (r *dbRepository) GetSubscriptionByID(ctx context.Context, subID string) (*model.UserSubscription, error) {
@@ -487,14 +505,13 @@ func (r *dbRepository) RecordSubscriptionRenewalOrderTx(
 	err = tx.QueryRow(ctx, `INSERT INTO recharge_orders
 		(user_id, external_ref_id, amount_cents,currency,coins,bonus_coins_credited,payment_method,status,
 		paid_at, order_type, subscription_id, recharge_slot_id, recharge_template_id, fulfilled_at, paid_period_start, paid_period_end,
-		utm_source, utm_campaign, promotion_link_id, novel_id, reconciliation_note, paypal_refund_reported)
-		SELECT u.id,$2,$3,$4,0,0,$5,'Success',$6,'subscription',$7,$8,
-			(SELECT id FROM recharge_templates WHERE id=$9),CASE WHEN $10::timestamptz IS NOT NULL THEN now() END,CASE WHEN $10::timestamptz IS NOT NULL THEN $6::timestamptz END,$10,u.utm_source,u.utm_campaign,p.id,p.novel_id,
+		utm_source, utm_campaign, promotion_link_id, novel_id, reconciliation_note, paypal_refund_reported,fb_lead_metadata,payment_events_enabled)
+		SELECT u.id,$2,$3,$4,0,0,$5,'Success',$6,'subscription',$7::text,$8,
+			(SELECT id FROM recharge_templates WHERE id=$9),CASE WHEN $10::timestamptz IS NOT NULL THEN now() END,CASE WHEN $10::timestamptz IS NOT NULL THEN $6::timestamptz END,$10,COALESCE((SELECT attribution->>'utm_source' FROM user_subscriptions WHERE subscription_id=$7::text),u.utm_source),COALESCE((SELECT attribution->>'utm_campaign' FROM user_subscriptions WHERE subscription_id=$7::text),u.utm_campaign),p.id,p.novel_id,
  CASE WHEN $11 THEN 'PayPal reports refunded sale; match refund ID'
- WHEN $10::timestamptz IS NULL THEN 'PayPal settled amount verified; billing period needs review' END,$11
+ WHEN $10::timestamptz IS NULL THEN 'PayPal settled amount verified; billing period needs review' END,$11,(SELECT attribution FROM user_subscriptions WHERE subscription_id=$7::text) || jsonb_build_object('payer_email',$12::text),true
 		FROM users u LEFT JOIN LATERAL (
-			SELECT id,novel_id FROM promotion_links WHERE utm_source=u.utm_source AND utm_campaign=u.utm_campaign
-			AND u.utm_source <> '' AND u.utm_campaign <> '' ORDER BY id DESC LIMIT 1
+			SELECT id,novel_id FROM reader_promotion_for_user(u.id)
 		) p ON TRUE WHERE u.id=$1
 		ON CONFLICT(external_ref_id) DO UPDATE SET
 			paid_period_end=COALESCE(EXCLUDED.paid_period_end,recharge_orders.paid_period_end),
@@ -508,7 +525,7 @@ func (r *dbRepository) RecordSubscriptionRenewalOrderTx(
 			AND recharge_orders.subscription_id=EXCLUDED.subscription_id AND recharge_orders.payment_method=EXCLUDED.payment_method
 			AND recharge_orders.amount_cents=EXCLUDED.amount_cents AND recharge_orders.currency=EXCLUDED.currency
 		RETURNING id`,
-		sub.UserID, externalRefID, amountCents, currency, sub.PaymentMethod, paidAt, sub.SubscriptionID, sub.SlotID, sub.TemplateID, confirmedEnd, reportedRefund).Scan(&orderID)
+		sub.UserID, externalRefID, amountCents, currency, sub.PaymentMethod, paidAt, sub.SubscriptionID, sub.SlotID, sub.TemplateID, confirmedEnd, reportedRefund, tpOrder.PayerEmail).Scan(&orderID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}
@@ -517,7 +534,7 @@ func (r *dbRepository) RecordSubscriptionRenewalOrderTx(
 	}
 	_, err = tx.Exec(ctx, `INSERT INTO third_party_payment_orders
 		(order_id,payment_provider,external_order_id,capture_id,payer_id,payer_email,payer_name,currency,gross_amount,net_amount,status,raw_payload)
-		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9::bigint::numeric/100,$9::bigint::numeric/100,'VERIFIED',$10::jsonb)
+		VALUES($1,$2,$3,$4,$5,$6,$7::text,$8,$9::bigint::numeric/100,$9::bigint::numeric/100,'VERIFIED',$10::jsonb)
  ON CONFLICT(payment_provider,external_order_id,capture_id) DO UPDATE SET status='VERIFIED',raw_payload=EXCLUDED.raw_payload
  WHERE third_party_payment_orders.order_id=EXCLUDED.order_id`,
 		orderID, sub.PaymentMethod, sub.SubscriptionID, externalRefID, tpOrder.PayerID, tpOrder.PayerEmail, tpOrder.PayerName,

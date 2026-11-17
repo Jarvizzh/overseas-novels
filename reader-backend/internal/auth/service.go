@@ -4,9 +4,13 @@ import (
 	"context"
 	"errors"
 	"strconv"
+	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"golang.org/x/crypto/bcrypt"
+
 	"reader-backend/internal/db"
 	"reader-backend/internal/model"
 	"reader-backend/internal/tracking"
@@ -14,10 +18,12 @@ import (
 )
 
 var (
-	ErrEmailExists   = errors.New("Email is already registered")
-	ErrInvalidAuth   = errors.New("Invalid email or password")
-	ErrAccountBanned = errors.New("This account has been banned")
-	ErrUserNotFound  = errors.New("User not found")
+	ErrAlreadyBound    = errors.New("Account is already registered")
+	ErrEmailExists     = errors.New("Email is already registered")
+	ErrInvalidAuth     = errors.New("Invalid email or password")
+	ErrAccountBanned   = errors.New("This account has been banned")
+	ErrUserNotFound    = errors.New("User not found")
+	ErrInvalidPassword = errors.New("password must contain at least 6 characters and at most 72 bytes")
 )
 
 type AuthService interface {
@@ -78,9 +84,11 @@ func (s *authService) GuestLogin(ctx context.Context, device, ipAddress, utmSour
 
 	// Trigger FB CompleteRegistration event asynchronously via WorkerPool strictly using CMS configured pixel
 	workerpool.Submit(func() {
-		effectivePixelID := pixelID
+		taskCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		effectivePixelID := ""
 		if effectivePixelID == "" && utmSource != "" && utmCampaign != "" && db.DB != nil {
-			_ = db.DB.QueryRow(context.Background(), "SELECT fp.pixel_id FROM promotion_links pl JOIN fb_pixels fp ON pl.fb_pixel_id = fp.id WHERE pl.utm_source = $1 AND pl.utm_campaign = $2 LIMIT 1", utmSource, utmCampaign).Scan(&effectivePixelID)
+			_ = db.DB.QueryRow(taskCtx, "SELECT fp.pixel_id FROM reader_promotion_for_user($1) pl JOIN fb_pixels fp ON pl.fb_pixel_id = fp.id", user.ID).Scan(&effectivePixelID)
 		}
 		if effectivePixelID != "" {
 			tracking.SendFacebookEvent(effectivePixelID, "CompleteRegistration", strconv.FormatInt(user.ID, 10), "", ipAddress, userAgent, fbc, fbp, 0, "", sourceURL, country)
@@ -91,6 +99,9 @@ func (s *authService) GuestLogin(ctx context.Context, device, ipAddress, utmSour
 }
 
 func (s *authService) Register(ctx context.Context, email, password, nickname, device, ipAddress, utmSource, utmCampaign, fbp, fbc, pixelID, userAgent, sourceURL, country string) (*model.User, string, error) {
+	if utf8.RuneCountInString(password) < 6 || len(password) > 72 {
+		return nil, "", ErrInvalidPassword
+	}
 	exists, err := s.repo.EmailExists(ctx, email)
 	if err != nil {
 		return nil, "", err
@@ -144,9 +155,11 @@ func (s *authService) Register(ctx context.Context, email, password, nickname, d
 
 	// Trigger FB CompleteRegistration event asynchronously via WorkerPool strictly using CMS configured pixel
 	workerpool.Submit(func() {
-		effectivePixelID := pixelID
+		taskCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		effectivePixelID := ""
 		if effectivePixelID == "" && utmSource != "" && utmCampaign != "" && db.DB != nil {
-			_ = db.DB.QueryRow(context.Background(), "SELECT fp.pixel_id FROM promotion_links pl JOIN fb_pixels fp ON pl.fb_pixel_id = fp.id WHERE pl.utm_source = $1 AND pl.utm_campaign = $2 LIMIT 1", utmSource, utmCampaign).Scan(&effectivePixelID)
+			_ = db.DB.QueryRow(taskCtx, "SELECT fp.pixel_id FROM reader_promotion_for_user($1) pl JOIN fb_pixels fp ON pl.fb_pixel_id = fp.id", user.ID).Scan(&effectivePixelID)
 		}
 		if effectivePixelID != "" {
 			tracking.SendFacebookEvent(effectivePixelID, "CompleteRegistration", strconv.FormatInt(user.ID, 10), email, ipAddress, userAgent, fbc, fbp, 0, "", sourceURL, country)
@@ -157,8 +170,17 @@ func (s *authService) Register(ctx context.Context, email, password, nickname, d
 }
 
 func (s *authService) Login(ctx context.Context, email, password string) (*model.User, string, error) {
+	if len(password) > 72 {
+		return nil, "", ErrInvalidAuth
+	}
 	user, passwordHash, err := s.repo.GetUserByEmail(ctx, email)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, "", ErrInvalidAuth
+	}
 	if err != nil {
+		return nil, "", err
+	}
+	if user == nil {
 		return nil, "", ErrInvalidAuth
 	}
 
@@ -180,13 +202,29 @@ func (s *authService) Login(ctx context.Context, email, password string) (*model
 
 func (s *authService) GetProfile(ctx context.Context, userID int64) (*model.User, error) {
 	user, err := s.repo.GetUserByID(ctx, userID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrUserNotFound
+	}
 	if err != nil {
+		return nil, err
+	}
+	if user == nil {
 		return nil, ErrUserNotFound
 	}
 	return user, nil
 }
 
 func (s *authService) BindEmail(ctx context.Context, userID int64, email, password, nickname string) (*model.User, string, error) {
+	if utf8.RuneCountInString(password) < 6 || len(password) > 72 {
+		return nil, "", ErrInvalidPassword
+	}
+	current, err := s.repo.GetUserByID(ctx, userID)
+	if err != nil {
+		return nil, "", err
+	}
+	if current.Email != nil {
+		return nil, "", ErrAlreadyBound
+	}
 	exists, err := s.repo.EmailExists(ctx, email)
 	if err != nil {
 		return nil, "", err
@@ -212,4 +250,3 @@ func (s *authService) BindEmail(ctx context.Context, userID int64, email, passwo
 
 	return user, token, nil
 }
-

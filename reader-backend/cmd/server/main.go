@@ -5,8 +5,10 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -16,6 +18,7 @@ import (
 	"reader-backend/internal/config"
 	"reader-backend/internal/db"
 	"reader-backend/internal/feedback"
+	"reader-backend/internal/httpx"
 	"reader-backend/internal/novel"
 	"reader-backend/internal/payment"
 	"reader-backend/internal/redis"
@@ -40,23 +43,35 @@ func main() {
 	// 3. Connect to DB and Redis, Initialize WorkerPool
 	db.InitDB()
 	defer db.CloseDB()
+	tokenCtx, tokenCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	if err := auth.InitTokenPolicy(tokenCtx); err != nil {
+		log.Fatal(err)
+	}
+	tokenCancel()
 
 	redis.InitRedis()
 	defer redis.CloseRedis()
 
 	workerpool.InitPool(10, 1000)
-	defer workerpool.Shutdown()
 
 	// 4. Setup Gin engine
 	r := gin.New()
+	// Trust only the local gateway, never arbitrary forwarded chains.
+	proxies := []string{"127.0.0.1", "::1", "172.30.87.1"}
+	if raw := os.Getenv("TRUSTED_PROXIES"); raw != "" {
+		proxies = strings.Split(raw, ",")
+	}
+	if err := r.SetTrustedProxies(proxies); err != nil {
+		log.Fatal(err)
+	}
 	r.Use(gin.Logger(), gin.Recovery())
 
 	// 5. Middleware
-	r.Use(corsMiddleware(), requestIDMiddleware())
+	r.Use(corsMiddleware(), requestIDMiddleware(), httpx.Policy())
 
 	r.GET("/healthz", func(c *gin.Context) {
 		dbStatus := "UP"
-		if db.DB == nil || db.DB.Ping(c.Request.Context()) != nil {
+		if db.DB == nil || db.CheckSchema(c.Request.Context()) != nil {
 			dbStatus = "DOWN"
 		}
 		redisStatus := "UP"
@@ -80,6 +95,7 @@ func main() {
 
 	// 6. Basic Health check and routes
 	reconcileCtx, stopReconciliation := context.WithCancel(context.Background())
+	reconciliationDone := make(chan struct{})
 	defer stopReconciliation()
 	api := r.Group("/api/v1")
 	{
@@ -116,7 +132,7 @@ func main() {
 
 		walletRepo := wallet.NewDBRepository()
 		walletService := wallet.NewService(walletRepo, novelRepo, novelCache, stripeClient, paypalClient)
-		go walletService.RunReconciliation(reconcileCtx)
+		go func() { defer close(reconciliationDone); walletService.RunReconciliation(reconcileCtx) }()
 		walletHandler := wallet.NewHandler(walletService)
 		walletHandler.RegisterRoutes(api)
 
@@ -136,8 +152,13 @@ func main() {
 
 	// 7. Setup graceful shutdown server
 	srv := &http.Server{
-		Addr:    ":" + config.AppConfig.Port,
-		Handler: r,
+		Addr:              ":" + config.AppConfig.Port,
+		Handler:           r,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      70 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    32 << 10,
 	}
 
 	go func() {
@@ -147,20 +168,32 @@ func main() {
 		}
 	}()
 
-	// Wait for interrupt signal to gracefully shutdown the server with a timeout of 5 seconds.
+	// Drain producers and consumers in dependency order within the container shutdown budget.
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
-	stopReconciliation()
 	log.Println("Shutting down server...")
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 	defer cancel()
-	if err := srv.Shutdown(ctx); err != nil {
-		log.Fatal("Server forced to shutdown:", err)
+	httpCtx, httpCancel := context.WithTimeout(ctx, 8*time.Second)
+	if err := srv.Shutdown(httpCtx); err != nil {
+		log.Printf("HTTP shutdown: %v", err)
+		_ = srv.Close()
 	}
-
+	httpCancel()
+	stopReconciliation()
+	select {
+	case <-reconciliationDone:
+	case <-ctx.Done():
+		log.Print("Background shutdown budget exhausted; durable work will resume")
+		os.Exit(1)
+	}
+	if err := workerpool.ShutdownContext(ctx); err != nil {
+		log.Print("Worker shutdown budget exhausted; durable work will resume")
+		os.Exit(1)
+	}
 	tracking.Shutdown(ctx)
+
 	log.Println("Server exiting")
 }
 
@@ -168,12 +201,30 @@ func corsMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		origin := c.Request.Header.Get("Origin")
 		if origin != "" {
+			parsed, err := url.Parse(origin)
+			allowed := err == nil && parsed.Host == c.Request.Host
+			if gin.Mode() != gin.ReleaseMode && (origin == "http://localhost:5173" || origin == "http://127.0.0.1:5173") {
+				allowed = true
+			}
+			for _, candidate := range strings.Split(os.Getenv("ALLOWED_ORIGINS"), ",") {
+				if origin == strings.TrimSpace(candidate) {
+					allowed = true
+				}
+			}
+			if origin == config.AppConfig.DefaultDomain {
+				allowed = true
+			}
+			if !allowed {
+				c.AbortWithStatus(403)
+				return
+			}
+			c.Header("Vary", "Origin")
 			c.Writer.Header().Set("Access-Control-Allow-Origin", origin)
 		} else {
 			c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
 		}
 		c.Writer.Header().Set("Access-Control-Allow-Credentials", "true")
-		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization, accept, origin, Cache-Control, X-Requested-With, X-FB-FBP, X-FB-FBC, X-UTM-Source, X-UTM-Campaign, X-Event-Source-URL, X-FB-Pixel-ID, X-Recharge-Template-ID, X-Country, CF-IPCountry")
+		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization, accept, origin, Cache-Control, X-Requested-With, X-FB-FBP, X-FB-FBC, X-UTM-Source, X-UTM-Campaign, X-Event-Source-URL, X-FB-Pixel-ID, X-Recharge-Template-ID, X-Promo-ID, X-Country, CF-IPCountry")
 		c.Writer.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS, GET, PUT, DELETE")
 
 		if c.Request.Method == "OPTIONS" {

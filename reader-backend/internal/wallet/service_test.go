@@ -74,8 +74,8 @@ func TestUnlockChapter_EnforcesPublishedAndUnifiedPrice(t *testing.T) {
 	nRepo := &fakeWalletNovelRepo{
 		novels: map[int64]*model.Novel{
 			1: {ID: 1, Status: "Ongoing", PublishStatus: "draft"},
-			2: {ID: 2, Status: "archived", PublishStatus: "published"},
-			3: {ID: 3, Status: "Ongoing", PublishStatus: "published"},
+			2: {ID: 2, Status: "archived", ContentVersion: 1, PublishStatus: "published"},
+			3: {ID: 3, Status: "Ongoing", ContentVersion: 1, PublishStatus: "published"},
 		},
 		chapters: map[int64]map[int]*model.Chapter{
 			1: {2: {ID: "c1", NovelID: 1, ChapterIndex: 2, Title: "Ch 3", WordCount: 1000, Price: 500}},
@@ -115,7 +115,7 @@ func (subscribedNovelRepository) HasActiveSubscription(context.Context, int64) (
 
 func TestUnlockChapterDoesNotDebitPaidVIP(t *testing.T) {
 	novels := subscribedNovelRepository{&fakeWalletNovelRepo{
-		novels: map[int64]*model.Novel{1: {ID: 1, Status: "Ongoing", PublishStatus: "published"}},
+		novels: map[int64]*model.Novel{1: {ID: 1, Status: "Ongoing", ContentVersion: 1, PublishStatus: "published"}},
 		chapters: map[int64]map[int]*model.Chapter{
 			1: {2: {NovelID: 1, ChapterIndex: 2, WordCount: 1000}},
 		},
@@ -130,3 +130,5 @@ func TestUnlockChapterDoesNotDebitPaidVIP(t *testing.T) {
 		t.Fatalf("VIP reached debit path for %d coins", repo.chargedPrice)
 	}
 }
+
+func (r *fakeWalletNovelRepo) GetContentVersion(context.Context, int64) (int64, error) { return 1, nil }

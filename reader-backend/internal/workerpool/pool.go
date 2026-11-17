@@ -1,6 +1,7 @@
 package workerpool
 
 import (
+	"context"
 	"log"
 	"runtime/debug"
 	"sync"
@@ -12,6 +13,9 @@ type Pool struct {
 	jobQueue chan Job
 	wg       sync.WaitGroup
 	once     sync.Once
+	mu       sync.RWMutex
+	closed   bool
+	done     chan struct{}
 }
 
 var GlobalPool *Pool
@@ -22,7 +26,7 @@ func InitPool(workers int, queueSize int) {
 		return
 	}
 	GlobalPool = &Pool{
-		jobQueue: make(chan Job, queueSize),
+		jobQueue: make(chan Job, queueSize), done: make(chan struct{}),
 	}
 	for i := 0; i < workers; i++ {
 		GlobalPool.wg.Add(1)
@@ -39,11 +43,14 @@ func InitPool(workers int, queueSize int) {
 // Submit submits a job to the worker pool. Returns false if the queue is full.
 func Submit(job Job) bool {
 	if GlobalPool == nil || GlobalPool.jobQueue == nil {
-		// Fallback if pool is not initialized
-		go safelyExecute(job)
-		return true
+		return false
 	}
 
+	GlobalPool.mu.RLock()
+	defer GlobalPool.mu.RUnlock()
+	if GlobalPool.closed {
+		return false
+	}
 	select {
 	case GlobalPool.jobQueue <- job:
 		return true
@@ -54,13 +61,25 @@ func Submit(job Job) bool {
 }
 
 // Shutdown gracefully waits for enqueued jobs to finish and closes worker pool.
-func Shutdown() {
-	if GlobalPool != nil {
-		GlobalPool.once.Do(func() {
-			close(GlobalPool.jobQueue)
-			GlobalPool.wg.Wait()
-			log.Println("[WorkerPool] Shutdown complete")
-		})
+func Shutdown() { _ = ShutdownContext(context.Background()) }
+
+func ShutdownContext(ctx context.Context) error {
+	if GlobalPool == nil {
+		return nil
+	}
+	p := GlobalPool
+	p.once.Do(func() {
+		p.mu.Lock()
+		p.closed = true
+		close(p.jobQueue)
+		p.mu.Unlock()
+		go func() { p.wg.Wait(); close(p.done) }()
+	})
+	select {
+	case <-p.done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 

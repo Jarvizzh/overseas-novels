@@ -117,6 +117,11 @@ func (p *PayPalClient) getConfig(ctx context.Context) (clientID, secret, baseURL
 		baseURL = "https://api-m.sandbox.paypal.com"
 	}
 
+	if db.DB != nil && clientID != "" {
+		if _, err := db.DB.Exec(ctx, `SELECT assert_paypal_identity($1,$2)`, clientID, mode); err != nil {
+			return "", "", "", ""
+		}
+	}
 	// Update cache
 	ppCache.clientID = clientID
 	ppCache.secret = secret

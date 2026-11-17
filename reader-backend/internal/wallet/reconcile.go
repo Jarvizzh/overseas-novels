@@ -2,33 +2,37 @@ package wallet
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/jackc/pgx/v5"
-	"reader-backend/internal/db"
 	"reader-backend/internal/model"
 	"reader-backend/internal/payment"
 )
 
 func (s *service) RunReconciliation(ctx context.Context) {
 	var workers sync.WaitGroup
-	for _, run := range []func(context.Context){
-		s.reconcilePayPalEvents, s.reconcilePayPalOrders,
-		s.reconcilePayPalCancellations, s.reconcilePayPalSubscriptions,
+	for _, worker := range []struct {
+		run      func(context.Context)
+		interval time.Duration
+	}{
+		{s.reconcilePaymentEvents, 15 * time.Second}, {s.reconcilePayPalEvents, 15 * time.Second}, {s.reconcilePayPalOrders, 15 * time.Second},
+		{s.reconcilePayPalCancellations, 15 * time.Second}, {s.reconcilePayPalSubscriptions, 15 * time.Second}, {s.observePaymentTasks, time.Minute},
 	} {
 		workers.Go(func() {
-			ticker := time.NewTicker(15 * time.Second)
+			ticker := time.NewTicker(worker.interval)
 			defer ticker.Stop()
 			for {
 				select {
 				case <-ctx.Done():
 					return
 				case <-ticker.C:
-					run(ctx)
+					cycle, cancel := context.WithTimeout(ctx, 8*time.Minute)
+					worker.run(cycle)
+					cancel()
 				}
 			}
 		})
@@ -37,29 +41,22 @@ func (s *service) RunReconciliation(ctx context.Context) {
 }
 
 func (s *service) reconcilePayPalOrders(ctx context.Context) {
-	rows, err := db.DB.Query(ctx, `
-		WITH batch AS (
-			SELECT id FROM recharge_orders WHERE payment_method='paypal' AND external_ref_id IS NOT NULL
-			AND (status='Pending' OR (status IN ('Success','Paid') AND order_type='whole_book' AND fulfilled_at IS NULL))
-			AND COALESCE(reconciliation_at,created_at) < now() - interval '5 minutes'
-			AND (status <> 'Pending' OR created_at > now() - interval '30 days' OR checkout_id IS NULL)
-			AND external_ref_id NOT LIKE 'mock%'
-			ORDER BY COALESCE(reconciliation_at,created_at), id LIMIT 5 FOR UPDATE SKIP LOCKED
-		)
-		UPDATE recharge_orders o SET reconciliation_at=now()
-		FROM batch WHERE o.id=batch.id RETURNING o.external_ref_id`)
+	jobs, err := claimPayPalOrders(ctx)
 	if err != nil {
-		log.Printf("PayPal reconciliation batch: %v", err)
+		log.Printf("task=order action=claim error=%v", err)
 		return
 	}
-	ids, err := pgx.CollectRows(rows, pgx.RowTo[string])
-	if err != nil {
-		return
-	}
-	for _, id := range ids {
+
+	for _, job := range jobs {
 		requestCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
-		_, _ = s.completePayPalOrder(requestCtx, 0, id, true)
+		_, err := s.completePayPalOrder(requestCtx, 0, job.id, true)
 		cancel()
+		if err != nil {
+			log.Printf("task=order id=%s attempt=%d error=%v", job.id, job.attempt, err)
+		}
+		if saveErr := finishOrderReconciliation(ctx, job, err); saveErr != nil {
+			log.Printf("task=order id=%s action=save error=%v", job.id, saveErr)
+		}
 	}
 }
 
@@ -68,27 +65,10 @@ type paypalCancellation struct {
 	attempt    int
 }
 
-func claimPayPalCancellations(ctx context.Context) ([]paypalCancellation, error) {
-	rows, err := db.DB.Query(ctx, `WITH due AS (
-		SELECT id FROM user_subscriptions WHERE status='CANCEL_PENDING' AND payment_method='paypal'
-		AND COALESCE(cancel_next_attempt_at,updated_at)<=now()
-		ORDER BY COALESCE(cancel_next_attempt_at,updated_at),id LIMIT 5 FOR UPDATE SKIP LOCKED
-	)
-	UPDATE user_subscriptions s SET cancel_next_attempt_at=now()+interval '5 minutes',cancel_attempts=s.cancel_attempts+1
-	FROM due WHERE s.id=due.id RETURNING s.subscription_id,COALESCE(s.cancel_reason,''),s.cancel_attempts`)
-	if err != nil {
-		return nil, err
-	}
-	return pgx.CollectRows(rows, func(row pgx.CollectableRow) (paypalCancellation, error) {
-		var task paypalCancellation
-		err := row.Scan(&task.id, &task.reason, &task.attempt)
-		return task, err
-	})
-}
-
 func (s *service) reconcilePayPalCancellations(ctx context.Context) {
 	tasks, err := claimPayPalCancellations(ctx)
 	if err != nil {
+		log.Printf("task=cancel action=claim error=%v", err)
 		return
 	}
 	for _, task := range tasks {
@@ -98,9 +78,10 @@ func (s *service) reconcilePayPalCancellations(ctx context.Context) {
 		if err == nil {
 			continue
 		}
-		_, _ = db.DB.Exec(ctx, `UPDATE user_subscriptions SET cancel_last_error=left($3,1000),
-			cancel_next_attempt_at=now()+interval '1 minute'*LEAST(cancel_attempts,30)
-			WHERE subscription_id=$1 AND cancel_attempts=$2 AND status='CANCEL_PENDING'`, task.id, task.attempt, err.Error())
+		log.Printf("task=cancel id=%s attempt=%d error=%v", task.id, task.attempt, err)
+		if saveErr := finishCancellationRetry(ctx, task, err); saveErr != nil {
+			log.Printf("task=cancel id=%s action=save error=%v", task.id, saveErr)
+		}
 	}
 }
 
@@ -128,31 +109,12 @@ func (s *service) confirmPayPalCancellation(ctx context.Context, id, reason stri
 }
 
 func (s *service) reconcilePayPalSubscriptions(ctx context.Context) {
-	rows, err := db.DB.Query(ctx, `WITH due AS (
-		SELECT id FROM user_subscriptions WHERE payment_method='paypal'
-		AND subscription_id NOT LIKE 'I-MOCK%'
-		AND (status IN ('ACTIVE','SUSPENDED','CANCEL_PENDING') OR updated_at>now()-interval '30 days')
-		AND COALESCE(paypal_next_check_at,created_at)<=now()
-		ORDER BY COALESCE(paypal_next_check_at,created_at),id LIMIT 5 FOR UPDATE SKIP LOCKED
-	)
-	UPDATE user_subscriptions s SET paypal_next_check_at=now()+interval '15 minutes'
-	FROM due WHERE s.id=due.id RETURNING s.subscription_id,
-	COALESCE(s.paypal_transaction_cursor,GREATEST(s.created_at,now()-interval '30 days')),s.paypal_next_check_at`)
+	jobs, err := claimPayPalSubscriptions(ctx)
 	if err != nil {
+		log.Printf("task=subscription action=claim error=%v", err)
 		return
 	}
-	type job struct {
-		id            string
-		cursor, lease time.Time
-	}
-	jobs, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (job, error) {
-		var task job
-		err := row.Scan(&task.id, &task.cursor, &task.lease)
-		return task, err
-	})
-	if err != nil {
-		return
-	}
+
 	for _, job := range jobs {
 		req, cancel := context.WithTimeout(ctx, time.Minute)
 		now := time.Now().UTC().Truncate(time.Second)
@@ -163,13 +125,11 @@ func (s *service) reconcilePayPalSubscriptions(ctx context.Context) {
 		err := s.reconcileSubscriptionWindow(req, job.id, job.cursor.Add(-24*time.Hour), end)
 		cancel()
 		if err != nil {
-			log.Printf("PayPal subscription reconciliation deferred: %v", err)
-			continue
+			log.Printf("task=subscription id=%s from=%s to=%s error=%v", job.id, job.cursor.Format(time.RFC3339), end.Format(time.RFC3339), err)
 		}
-		_, _ = db.DB.Exec(ctx, `UPDATE user_subscriptions SET paypal_transaction_cursor=$2,
-			paypal_next_check_at=CASE WHEN $2 < now()-interval '1 day'
-				THEN now()+interval '30 seconds' ELSE now()+interval '1 hour' END
-			WHERE subscription_id=$1 AND paypal_next_check_at=$3`, job.id, end, job.lease)
+		if saveErr := finishSubscriptionReconciliation(ctx, job, end, err); saveErr != nil {
+			log.Printf("task=subscription id=%s action=save error=%v", job.id, saveErr)
+		}
 	}
 }
 
@@ -187,6 +147,12 @@ func (s *service) reconcileSubscriptionWindow(ctx context.Context, id string, fr
 	}
 	if details.SubscriptionID != id || details.PlanID != sub.PlanID {
 		return ErrCheckoutUnavailable
+	}
+	switch details.Status {
+	case "ACTIVE", "CANCELLED", "SUSPENDED", "EXPIRED":
+		if err := s.repo.UpdateUserSubscriptionStatus(ctx, id, details.Status); err != nil {
+			return err
+		}
 	}
 	if details.Status == "APPROVAL_PENDING" || details.Status == "APPROVED" {
 		return nil
@@ -207,4 +173,20 @@ func (s *service) importPayPalSubscriptionTransactions(ctx context.Context,
 		}
 	}
 	return nil
+}
+
+func (s *service) observePaymentTasks(ctx context.Context) {
+	request, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	status, err := PaymentTaskStatus(request)
+	if err != nil {
+		log.Printf("payment_tasks action=inspect error=%v", err)
+		return
+	}
+	payload, err := json.Marshal(status)
+	if err != nil {
+		log.Printf("payment_tasks action=encode error=%v", err)
+		return
+	}
+	log.Printf("payment_tasks=%s", payload)
 }

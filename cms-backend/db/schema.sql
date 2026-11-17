@@ -727,18 +727,127 @@ CREATE TABLE IF NOT EXISTS paypal_subscription_intents (
     submitted_at TIMESTAMPTZ
 );
 
+ALTER TABLE users ADD COLUMN IF NOT EXISTS promotion_link_id INTEGER REFERENCES promotion_links(id) ON DELETE SET NULL;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS promotion_resolved BOOLEAN NOT NULL DEFAULT false;
+CREATE OR REPLACE FUNCTION resolve_reader_promotion(link INTEGER, source TEXT, campaign TEXT) RETURNS INTEGER LANGUAGE sql STABLE AS $$
+ SELECT CASE WHEN link>0 THEN (SELECT p.id FROM promotion_links p JOIN novels n ON n.id=p.novel_id WHERE p.id=link AND n.publish_status='published' AND n.status<>'archived')
+ ELSE (SELECT min(id) FROM promotion_links WHERE utm_source=source AND utm_campaign=campaign AND source<>'' AND campaign<>'' HAVING count(*)=1) END
+$$;
+UPDATE users SET promotion_link_id=resolve_reader_promotion(0,utm_source,utm_campaign), promotion_resolved=true WHERE NOT promotion_resolved;
+CREATE OR REPLACE FUNCTION reader_promotion_for_user(uid BIGINT) RETURNS SETOF promotion_links LANGUAGE sql STABLE AS $$
+ SELECT p.* FROM users u JOIN promotion_links p ON p.id=COALESCE(u.promotion_link_id,CASE WHEN NOT u.promotion_resolved THEN resolve_reader_promotion(0,u.utm_source,u.utm_campaign) END) WHERE u.id=uid
+$$;
 -- Both the offer list and checkout use this rule for the current novel.
 CREATE OR REPLACE FUNCTION whole_book_offer_available(p_user_id BIGINT,p_template_id INTEGER,p_novel_id BIGINT)
 RETURNS BOOLEAN LANGUAGE sql STABLE AS $$
  SELECT EXISTS(
   SELECT 1 FROM users u
-  LEFT JOIN LATERAL(SELECT id,novel_id,recharge_template_id FROM promotion_links
-   WHERE utm_source=u.utm_source AND utm_campaign=u.utm_campaign
-   AND u.utm_source<>'' AND u.utm_campaign<>'' AND recharge_template_id IS NOT NULL
-   ORDER BY id DESC LIMIT 1) p ON TRUE
+  LEFT JOIN LATERAL(SELECT id,novel_id,recharge_template_id FROM reader_promotion_for_user(u.id)) p ON TRUE
   WHERE u.id=p_user_id AND p_novel_id>0
   AND EXISTS(SELECT 1 FROM novels WHERE id=p_novel_id AND status<>'archived' AND publish_status='published')
   AND p_template_id=COALESCE(p.recharge_template_id,(SELECT id FROM recharge_templates ORDER BY is_default DESC NULLS LAST,id LIMIT 1))
   AND (p.novel_id=p_novel_id OR (p.id IS NULL AND EXISTS(SELECT 1 FROM recharge_templates WHERE id=p_template_id AND is_default)))
  )
 $$;
+
+-- Reader availability fixes: preserve accepted attribution and separate progress ordering.
+ALTER TABLE recharge_orders ALTER COLUMN utm_source TYPE VARCHAR(100);
+ALTER TABLE recharge_orders ALTER COLUMN utm_campaign TYPE VARCHAR(100);
+UPDATE bookshelves SET updated_at=now() WHERE updated_at>now()+interval '5 minutes';
+
+CREATE TABLE IF NOT EXISTS reader_sessions(token_hash TEXT PRIMARY KEY,user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,expires_at TIMESTAMPTZ NOT NULL);
+CREATE INDEX IF NOT EXISTS reader_sessions_expiry ON reader_sessions(expires_at);
+
+-- Published content cache generations are owned by the database, not Redis invalidations.
+ALTER TABLE novels ADD COLUMN IF NOT EXISTS content_version BIGINT NOT NULL DEFAULT 1;
+CREATE OR REPLACE FUNCTION bump_reader_novel_version() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN NEW.content_version:=OLD.content_version+1; RETURN NEW; END $$;
+DROP TRIGGER IF EXISTS reader_novel_version ON novels;
+CREATE TRIGGER reader_novel_version BEFORE UPDATE ON novels FOR EACH ROW EXECUTE FUNCTION bump_reader_novel_version();
+CREATE OR REPLACE FUNCTION bump_reader_chapter_version() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+ IF TG_OP<>'INSERT' THEN UPDATE novels SET content_version=content_version WHERE id=OLD.novel_id; END IF;
+ IF TG_OP='INSERT' OR (TG_OP='UPDATE' AND NEW.novel_id<>OLD.novel_id) THEN UPDATE novels SET content_version=content_version WHERE id=NEW.novel_id; END IF;
+ RETURN NULL;
+END $$;
+DROP TRIGGER IF EXISTS reader_chapter_version ON chapters;
+CREATE TRIGGER reader_chapter_version AFTER INSERT OR UPDATE OR DELETE ON chapters FOR EACH ROW EXECUTE FUNCTION bump_reader_chapter_version();
+
+ALTER TABLE payment_provider_plans ADD COLUMN IF NOT EXISTS identity_client_id TEXT;
+ALTER TABLE payment_provider_plans ADD COLUMN IF NOT EXISTS identity_environment TEXT;
+
+-- The current installation is bound to one PayPal merchant/environment. Secret rotation is allowed.
+CREATE TABLE IF NOT EXISTS paypal_identity_lock(id BOOLEAN PRIMARY KEY DEFAULT true CHECK(id),client_id TEXT NOT NULL,environment TEXT NOT NULL);
+CREATE OR REPLACE FUNCTION assert_paypal_identity(cid TEXT, mode TEXT) RETURNS VOID LANGUAGE plpgsql AS $$
+DECLARE environment_name TEXT;
+BEGIN
+ IF cid='' THEN RAISE EXCEPTION 'PayPal client ID required'; END IF;
+ environment_name:=CASE WHEN mode IN ('live','production') THEN 'live' ELSE 'sandbox' END;
+ INSERT INTO paypal_identity_lock(id,client_id,environment) VALUES(true,cid,environment_name) ON CONFLICT DO NOTHING;
+ IF NOT EXISTS(SELECT 1 FROM paypal_identity_lock WHERE id AND client_id=cid AND environment=environment_name) THEN
+ RAISE EXCEPTION 'PayPal merchant/environment change requires an audited migration'; END IF;
+END $$;
+CREATE OR REPLACE FUNCTION guard_paypal_identity_settings() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+ IF COALESCE(NEW.key,OLD.key) IN ('paypal_client_id','paypal_mode','payment_sandbox_mode') AND EXISTS(SELECT 1 FROM paypal_identity_lock) THEN
+  IF TG_OP='INSERT' AND EXISTS(SELECT 1 FROM system_configs WHERE key=NEW.key AND value=NEW.value) THEN RETURN NEW; END IF;
+  IF TG_OP='INSERT' OR TG_OP='DELETE' THEN RAISE EXCEPTION 'PayPal identity settings are locked'; END IF;
+  IF NEW.value IS DISTINCT FROM OLD.value THEN RAISE EXCEPTION 'PayPal identity settings are locked'; END IF;
+ END IF;
+ IF TG_OP='DELETE' THEN RETURN OLD; END IF; RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS paypal_identity_settings ON system_configs;
+CREATE TRIGGER paypal_identity_settings BEFORE INSERT OR UPDATE OR DELETE ON system_configs FOR EACH ROW EXECUTE FUNCTION guard_paypal_identity_settings();
+
+ALTER TABLE paypal_subscription_intents ADD COLUMN IF NOT EXISTS attribution JSONB NOT NULL DEFAULT '{}';
+ALTER TABLE user_subscriptions ADD COLUMN IF NOT EXISTS attribution JSONB NOT NULL DEFAULT '{}';
+
+CREATE TABLE IF NOT EXISTS payment_event_outbox(
+ event_id TEXT PRIMARY KEY,order_id BIGINT NOT NULL REFERENCES recharge_orders(id),event_name TEXT NOT NULL,
+ payload JSONB NOT NULL,created_at TIMESTAMPTZ NOT NULL DEFAULT now(),next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+ state TEXT NOT NULL DEFAULT 'pending',attempts INT NOT NULL DEFAULT 0,lease_token UUID,lease_until TIMESTAMPTZ,delivered_at TIMESTAMPTZ,last_error TEXT
+);
+CREATE INDEX IF NOT EXISTS payment_event_outbox_due ON payment_event_outbox(next_attempt_at) WHERE delivered_at IS NULL;
+CREATE OR REPLACE FUNCTION enqueue_payment_event(purchase recharge_orders,name TEXT) RETURNS VOID LANGUAGE plpgsql AS $$
+BEGIN
+ INSERT INTO payment_event_outbox(event_id,order_id,event_name,payload,state)
+ SELECT CASE WHEN name='Subscribe' THEN 'subscription:'||purchase.subscription_id||':Subscribe' ELSE 'payment:'||purchase.id||':'||name END,purchase.id,name,jsonb_build_object(
+ 'event_id',CASE WHEN name='Subscribe' THEN 'subscription:'||purchase.subscription_id||':Subscribe' ELSE 'payment:'||purchase.id||':'||name END,'event_name',name,'event_time',extract(epoch FROM COALESCE(purchase.paid_at,now()))::bigint,
+ 'user_id',purchase.user_id::text,'email',COALESCE(NULLIF(u.email,''),NULLIF(purchase.fb_lead_metadata->>'payer_email',''),(SELECT payer_email FROM third_party_payment_orders WHERE order_id=purchase.id ORDER BY id DESC LIMIT 1),''),'amount_cents',purchase.amount_cents,'currency',purchase.currency,
+ 'attribution',COALESCE(purchase.fb_lead_metadata,'{}')),CASE WHEN COALESCE(purchase.fb_lead_metadata->>'pixel_id','')='' THEN 'unattributed' ELSE 'pending' END FROM users u WHERE u.id=purchase.user_id
+ ON CONFLICT(event_id) DO NOTHING;
+END $$;
+ALTER TABLE recharge_orders ADD COLUMN IF NOT EXISTS payment_events_enabled BOOLEAN NOT NULL DEFAULT false;
+CREATE OR REPLACE FUNCTION capture_payment_events() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+ IF NEW.status='Refunded' AND NEW.fulfilled_at IS NULL THEN DELETE FROM payment_event_outbox WHERE order_id=NEW.id AND delivered_at IS NULL; END IF;
+ IF TG_OP='UPDATE' THEN IF OLD.fulfilled_at IS NOT NULL THEN RETURN NEW; END IF; END IF;
+ IF NEW.payment_events_enabled AND NEW.status IN ('Success','Paid') AND NEW.fulfilled_at IS NOT NULL AND NOT NEW.paypal_refund_reported THEN
+  PERFORM enqueue_payment_event(NEW,'Purchase');
+  IF NEW.order_type='subscription' AND NOT EXISTS(
+   SELECT 1 FROM recharge_orders o WHERE o.subscription_id=NEW.subscription_id AND o.id<>NEW.id AND o.fulfilled_at IS NOT NULL AND o.status IN ('Success','Paid','RefundPending')
+  ) THEN PERFORM enqueue_payment_event(NEW,'Subscribe'); END IF;
+ END IF;RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS payment_events ON recharge_orders;
+CREATE TRIGGER payment_events AFTER INSERT OR UPDATE ON recharge_orders FOR EACH ROW EXECUTE FUNCTION capture_payment_events();
+
+-- Reader release ledger: append one immutable milestone per schema release.
+-- Applying this file directly must run inside a transaction (CMS does so).
+ALTER TABLE paypal_event_inbox ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT now();
+ALTER TABLE recharge_orders ADD COLUMN IF NOT EXISTS reconciliation_attempts INT NOT NULL DEFAULT 0;
+ALTER TABLE recharge_orders ADD COLUMN IF NOT EXISTS reconciliation_error TEXT;
+ALTER TABLE user_subscriptions ADD COLUMN IF NOT EXISTS paypal_recovery_requested BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE user_subscriptions ADD COLUMN IF NOT EXISTS paypal_check_attempts INT NOT NULL DEFAULT 0;
+ALTER TABLE user_subscriptions ADD COLUMN IF NOT EXISTS paypal_check_error TEXT;
+ALTER TABLE user_subscriptions ADD COLUMN IF NOT EXISTS cancel_requested_at TIMESTAMPTZ;
+UPDATE user_subscriptions SET cancel_requested_at=updated_at WHERE status='CANCEL_PENDING' AND cancel_requested_at IS NULL;
+CREATE OR REPLACE FUNCTION mark_cancel_requested() RETURNS TRIGGER LANGUAGE plpgsql AS $$
+BEGIN
+ IF NEW.status='CANCEL_PENDING' AND OLD.status IS DISTINCT FROM NEW.status THEN NEW.cancel_requested_at=now(); END IF;
+ RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS mark_cancel_requested ON user_subscriptions;
+CREATE TRIGGER mark_cancel_requested BEFORE UPDATE ON user_subscriptions FOR EACH ROW EXECUTE FUNCTION mark_cancel_requested();
+CREATE TABLE IF NOT EXISTS reader_schema_migrations(version BIGINT PRIMARY KEY,applied_at TIMESTAMPTZ NOT NULL DEFAULT now());
+INSERT INTO reader_schema_migrations(version) VALUES(2026111701) ON CONFLICT(version) DO NOTHING;

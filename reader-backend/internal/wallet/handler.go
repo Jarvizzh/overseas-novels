@@ -8,6 +8,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"reader-backend/internal/auth"
+	"reader-backend/internal/httpx"
+	"reader-backend/internal/model"
 	"reader-backend/internal/novel"
 )
 
@@ -62,20 +64,10 @@ func (h *Handler) GetBalance(c *gin.Context) {
 
 func (h *Handler) GetHistory(c *gin.Context) {
 	userID := c.MustGet("user_id").(int64)
-	pageStr := c.DefaultQuery("page", "1")
-	limitStr := c.DefaultQuery("limit", "20")
-
-	page, err := strconv.Atoi(pageStr)
-	if err != nil || page < 1 {
-		page = 1
+	limit, offset, ok := httpx.Pagination(c)
+	if !ok {
+		return
 	}
-
-	limit, err := strconv.Atoi(limitStr)
-	if err != nil || limit < 1 {
-		limit = 20
-	}
-
-	offset := (page - 1) * limit
 	ctx := c.Request.Context()
 
 	txs, err := h.service.GetHistory(ctx, userID, limit, offset)
@@ -88,7 +80,7 @@ func (h *Handler) GetHistory(c *gin.Context) {
 }
 
 type UnlockRequest struct {
-	NovelID      int64 `json:"novel_id" binding:"required"`
+	NovelID      int64 `json:"novel_id" binding:"required,gt=0"`
 	ChapterIndex int   `json:"chapter_index" binding:"gte=0"`
 	Price        *int  `json:"price" binding:"required,gte=0"`
 }
@@ -97,7 +89,7 @@ func (h *Handler) UnlockChapter(c *gin.Context) {
 	userID := c.MustGet("user_id").(int64)
 	var req UnlockRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		httpx.Fail(c, http.StatusBadRequest, "invalid_request", "Invalid request fields", nil)
 		return
 	}
 
@@ -123,11 +115,12 @@ func (h *Handler) UnlockChapter(c *gin.Context) {
 	err := h.service.UnlockChapter(ctx, userID, req.NovelID, req.ChapterIndex, promoID, utmSource, utmCampaign, *req.Price)
 	if err != nil {
 		if errors.Is(err, novel.ErrNovelNotFound) || errors.Is(err, ErrChapterNotFound) {
-			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+			httpx.Fail(c, 404, "resource_unavailable", "Resource unavailable", nil)
 			return
 		}
 		if errors.Is(err, ErrPriceChanged) {
-			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+			code, message := publicWalletError(err)
+			httpx.Fail(c, 409, code, message, nil)
 			return
 		}
 		if errors.Is(err, ErrInsufficientBalance) {
@@ -138,7 +131,7 @@ func (h *Handler) UnlockChapter(c *gin.Context) {
 			c.JSON(http.StatusOK, gin.H{"message": "Chapter is already unlocked"})
 			return
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		httpx.Fail(c, http.StatusInternalServerError, "internal_error", "Request failed", err)
 		return
 	}
 
@@ -154,7 +147,7 @@ func (h *Handler) InitiateCheckout(c *gin.Context) {
 	userID := c.MustGet("user_id").(int64)
 	var req InitiateCheckoutRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		httpx.Fail(c, http.StatusBadRequest, "invalid_request", "Invalid request fields", nil)
 		return
 	}
 
@@ -173,7 +166,7 @@ func (h *Handler) InitiateCheckout(c *gin.Context) {
 
 	err := h.service.InitiateCheckout(ctx, userID, req.AmountCents, req.CoinsAmount, fbp, fbc, pixelID, ip, ua, sourceURL, country)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		httpx.Fail(c, http.StatusInternalServerError, "internal_error", "Request failed", err)
 		return
 	}
 
@@ -212,7 +205,7 @@ func (h *Handler) CreatePayPalOrder(c *gin.Context) {
 	}
 	id, approval, err := h.service.CreatePayPalOrder(c.Request.Context(), c.GetInt64("user_id"), req.SlotID, req.NovelID, req.ReturnURL, req.CancelURL, attribution)
 	if errors.Is(err, ErrCheckoutUnavailable) {
-		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		httpx.Fail(c, 404, "resource_unavailable", "Resource unavailable", nil)
 		return
 	}
 	if err != nil {
@@ -234,7 +227,7 @@ func (h *Handler) CapturePayPalPayment(c *gin.Context) {
 	}
 	result, err := h.service.CapturePayPalPayment(c.Request.Context(), c.GetInt64("user_id"), req.OrderID)
 	if errors.Is(err, ErrCheckoutUnavailable) {
-		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		httpx.Fail(c, 404, "resource_unavailable", "Resource unavailable", nil)
 		return
 	}
 	if err != nil {
@@ -279,7 +272,7 @@ func (h *Handler) GetRechargeTemplates(c *gin.Context) {
 	}
 	slots, err := h.service.GetRechargeTemplates(ctx, c.GetInt64("user_id"), novelID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to query template slots: " + err.Error()})
+		httpx.Fail(c, http.StatusInternalServerError, "internal_error", "Failed to query template slots", err)
 		return
 	}
 
@@ -287,7 +280,7 @@ func (h *Handler) GetRechargeTemplates(c *gin.Context) {
 }
 
 type CreateSubscriptionRequest struct {
-	SlotID        int    `json:"slot_id" binding:"required"`
+	SlotID        int    `json:"slot_id" binding:"required,gt=0"`
 	PaymentMethod string `json:"payment_method"` // paypal, stripe, etc.
 	ReturnURL     string `json:"return_url"`
 	CancelURL     string `json:"cancel_url"`
@@ -297,7 +290,7 @@ func (h *Handler) CreateSubscription(c *gin.Context) {
 	userID := c.MustGet("user_id").(int64)
 	var req CreateSubscriptionRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		httpx.Fail(c, http.StatusBadRequest, "invalid_request", "Invalid request fields", nil)
 		return
 	}
 
@@ -320,11 +313,12 @@ func (h *Handler) CreateSubscription(c *gin.Context) {
 
 	res, err := h.service.CreateSubscription(ctx, userID, provider, req.SlotID, req.ReturnURL, req.CancelURL, fbp, fbc, pixelID, ip, ua, sourceURL, country)
 	if errors.Is(err, ErrSubscriptionConflict) || errors.Is(err, ErrSubscriptionPending) || errors.Is(err, ErrSubscriptionReview) || errors.Is(err, ErrCheckoutUnavailable) {
-		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+		code, message := publicWalletError(err)
+		httpx.Fail(c, 409, code, message, nil)
 		return
 	}
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create subscription: " + err.Error()})
+		httpx.Fail(c, http.StatusInternalServerError, "internal_error", "Failed to create subscription", err)
 		return
 	}
 
@@ -332,7 +326,7 @@ func (h *Handler) CreateSubscription(c *gin.Context) {
 }
 
 type ActivateSubscriptionRequest struct {
-	SubscriptionID string `json:"subscription_id" binding:"required"`
+	SubscriptionID string `json:"subscription_id" binding:"required,max=100"`
 	PaymentMethod  string `json:"payment_method"`
 }
 
@@ -340,7 +334,7 @@ func (h *Handler) ActivateSubscription(c *gin.Context) {
 	userID := c.MustGet("user_id").(int64)
 	var req ActivateSubscriptionRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		httpx.Fail(c, http.StatusBadRequest, "invalid_request", "Invalid request fields", nil)
 		return
 	}
 
@@ -363,7 +357,13 @@ func (h *Handler) ActivateSubscription(c *gin.Context) {
 
 	err := h.service.ActivateSubscription(ctx, userID, provider, req.SubscriptionID, fbp, fbc, pixelID, ip, ua, sourceURL, country)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		if errors.Is(err, ErrCheckoutUnavailable) {
+			httpx.Fail(c, 404, "checkout_unavailable", ErrCheckoutUnavailable.Error(), nil)
+		} else if errors.Is(err, ErrStripeDisabled) {
+			httpx.Fail(c, 503, "stripe_disabled", ErrStripeDisabled.Error(), nil)
+		} else {
+			httpx.Fail(c, 503, "subscription_pending", "Subscription confirmation unavailable", err)
+		}
 		return
 	}
 
@@ -374,28 +374,30 @@ func (h *Handler) GetSubscriptionStatus(c *gin.Context) {
 	userID := c.MustGet("user_id").(int64)
 	ctx := c.Request.Context()
 
-	sub, err := h.service.GetActiveSubscription(ctx, userID)
+	subscriptions, err := h.service.ListManagedSubscriptions(ctx, userID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Subscription status unavailable"})
 		return
 	}
-
-	if sub == nil {
-		c.JSON(http.StatusOK, gin.H{
-			"is_vip":       false,
-			"subscription": nil,
-		})
-		return
+	var sub *model.UserSubscription
+	if len(subscriptions) > 0 {
+		sub = &subscriptions[0]
 	}
 
+	vip, err := h.service.HasSubscriptionAccess(ctx, userID)
+	if err != nil {
+		c.AbortWithStatus(503)
+		return
+	}
 	c.JSON(http.StatusOK, gin.H{
-		"is_vip":       true,
-		"subscription": sub,
+		"is_vip":        vip,
+		"subscription":  sub,
+		"subscriptions": subscriptions,
 	})
 }
 
 type CancelSubscriptionRequest struct {
-	SubscriptionID string `json:"subscription_id" binding:"required"`
+	SubscriptionID string `json:"subscription_id" binding:"required,max=100"`
 	Reason         string `json:"reason" binding:"max=128"`
 }
 
@@ -403,14 +405,18 @@ func (h *Handler) CancelSubscription(c *gin.Context) {
 	userID := c.MustGet("user_id").(int64)
 	var req CancelSubscriptionRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		httpx.Fail(c, http.StatusBadRequest, "invalid_request", "Invalid request fields", nil)
 		return
 	}
 
 	ctx := c.Request.Context()
 	err := h.service.CancelSubscription(ctx, userID, req.SubscriptionID, req.Reason)
+	if errors.Is(err, ErrCheckoutUnavailable) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Subscription unavailable"})
+		return
+	}
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Cancellation unavailable"})
 		return
 	}
 
@@ -444,4 +450,19 @@ func (h *Handler) SubscriptionWebhook(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"received": true})
+}
+
+func publicWalletError(err error) (string, string) {
+	for _, rule := range []struct {
+		cause error
+		code  string
+	}{
+		{ErrPriceChanged, "price_changed"}, {ErrSubscriptionConflict, "subscription_conflict"},
+		{ErrSubscriptionPending, "subscription_pending"}, {ErrSubscriptionReview, "subscription_review"}, {ErrCheckoutUnavailable, "checkout_unavailable"},
+	} {
+		if errors.Is(err, rule.cause) {
+			return rule.code, rule.cause.Error()
+		}
+	}
+	return "wallet_unavailable", "Wallet unavailable"
 }

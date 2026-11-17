@@ -34,7 +34,9 @@ type Service interface {
 	CapturePayPalPayment(context.Context, int64, string) (*CheckoutResult, error)
 	CreateSubscription(ctx context.Context, userID int64, providerName string, slotID int, returnURL, cancelURL, fbp, fbc, pixelID, ip, ua, sourceURL, country string) (*payment.SubscriptionResult, error)
 	ActivateSubscription(ctx context.Context, userID int64, providerName string, subscriptionID string, fbp, fbc, pixelID, ip, ua, sourceURL, country string) error
-	GetActiveSubscription(ctx context.Context, userID int64) (*model.UserSubscription, error)
+	HasSubscriptionAccess(context.Context, int64) (bool, error)
+	GetManagedSubscription(ctx context.Context, userID int64) (*model.UserSubscription, error)
+	ListManagedSubscriptions(context.Context, int64) ([]model.UserSubscription, error)
 	CancelSubscription(ctx context.Context, userID int64, subscriptionID string, reason string) error
 	ProcessSubscriptionWebhook(ctx context.Context, providerName string, payload []byte, headers map[string]string) error
 	ProcessStripeWebhook(ctx context.Context, payload []byte, sigHeader string, webhookSecret string) error
@@ -129,9 +131,11 @@ func (s *service) InitiateCheckout(ctx context.Context, userID int64, amountCent
 
 	// Trigger FB Conversions API InitiateCheckout event asynchronously via WorkerPool strictly using CMS configured pixel
 	workerpool.Submit(func() {
-		effectivePixelID := pixelID
+		taskCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		effectivePixelID := ""
 		if effectivePixelID == "" && db.DB != nil {
-			_ = db.DB.QueryRow(context.Background(), "SELECT fp.pixel_id FROM users u JOIN promotion_links pl ON (u.utm_source = pl.utm_source AND u.utm_campaign = pl.utm_campaign) JOIN fb_pixels fp ON pl.fb_pixel_id = fp.id WHERE u.id = $1 LIMIT 1", userID).Scan(&effectivePixelID)
+			_ = db.DB.QueryRow(taskCtx, "SELECT fp.pixel_id FROM reader_promotion_for_user($1) pl JOIN fb_pixels fp ON pl.fb_pixel_id = fp.id", userID).Scan(&effectivePixelID)
 		}
 		if effectivePixelID != "" {
 			tracking.SendFacebookEvent(effectivePixelID, "InitiateCheckout", strconv.FormatInt(userID, 10), email, ip, ua, fbc, fbp, float64(amountCents)/100.0, "USD", sourceURL, country)
@@ -185,7 +189,7 @@ func (s *service) CreatePayPalOrder(ctx context.Context, userID int64, slotID in
 	if err := s.repo.BindCheckout(ctx, checkoutID, orderID); err != nil {
 		return "", "", err
 	}
-	s.trackCheckoutPayment(orderID, "InitiateCheckout", "")
+	s.trackCheckoutInitiation(orderID)
 	return orderID, approvalURL, nil
 }
 
@@ -260,13 +264,10 @@ func (s *service) completePayPalOrder(ctx context.Context, userID int64, orderID
 			return nil, markErr
 		}
 	}
-	if err == nil && result.settled {
-		s.trackCheckoutPayment(orderID, "Purchase", capture.PayerEmail)
-	}
 	return result, err
 }
 
-func (s *service) trackCheckoutPayment(orderID, event, payerEmail string) {
+func (s *service) trackCheckoutInitiation(orderID string) {
 	workerpool.Submit(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
@@ -287,10 +288,7 @@ func (s *service) trackCheckoutPayment(orderID, event, payerEmail string) {
 		if err := json.Unmarshal(metadata, &attribution); err != nil {
 			return
 		}
-		if email == "" {
-			email = payerEmail
-		}
-		tracking.SendFacebookEvent(pixel, event, strconv.FormatInt(userID, 10), email, attribution.IP, attribution.UserAgent,
+		tracking.SendFacebookEvent(pixel, "InitiateCheckout", strconv.FormatInt(userID, 10), email, attribution.IP, attribution.UserAgent,
 			attribution.FBC, attribution.FBP, float64(amount)/100, currency, attribution.SourceURL, attribution.Country)
 	})
 }
@@ -357,6 +355,11 @@ func (s *service) CreateSubscription(
 		return nil, err
 	}
 
+	if providerName == payment.ProviderPayPal {
+		if err := s.paypalClient.ValidateIdentity(ctx); err != nil {
+			return nil, err
+		}
+	}
 	if providerName == payment.ProviderPayPal && !s.paypalClient.WebhookConfigured() {
 		return nil, errors.New("PayPal webhook is not configured")
 	}
@@ -384,7 +387,8 @@ func (s *service) CreateSubscription(
 		return nil, ErrCheckoutUnavailable
 	}
 	intent, err := s.repo.reserveSubscriptionIntent(ctx, subscriptionIntent{userID: userID, slotID: slot.ID,
-		templateID: slot.TemplateID, priceCents: slot.PriceCents, cycle: cycleStr, returnURL: returnURL, cancelURL: cancelURL})
+		templateID: slot.TemplateID, priceCents: slot.PriceCents, cycle: cycleStr, returnURL: returnURL, cancelURL: cancelURL,
+		attribution: checkoutAttribution{FBP: fbp, FBC: fbc, IP: ip, UserAgent: ua, SourceURL: sourceURL, Country: country}})
 	if err != nil {
 		return nil, err
 	}
@@ -456,9 +460,11 @@ func (s *service) CreateSubscription(
 
 	email, _ := s.repo.GetUserEmail(ctx, userID)
 	workerpool.Submit(func() {
-		effectivePixelID := pixelID
+		taskCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		effectivePixelID := ""
 		if effectivePixelID == "" && db.DB != nil {
-			_ = db.DB.QueryRow(context.Background(), "SELECT fp.pixel_id FROM users u JOIN promotion_links pl ON (u.utm_source = pl.utm_source AND u.utm_campaign = pl.utm_campaign) JOIN fb_pixels fp ON pl.fb_pixel_id = fp.id WHERE u.id = $1 LIMIT 1", userID).Scan(&effectivePixelID)
+			_ = db.DB.QueryRow(taskCtx, "SELECT fp.pixel_id FROM reader_promotion_for_user($1) pl JOIN fb_pixels fp ON pl.fb_pixel_id = fp.id", userID).Scan(&effectivePixelID)
 		}
 		if effectivePixelID != "" {
 			tracking.SendFacebookEvent(effectivePixelID, "InitiateCheckout", strconv.FormatInt(userID, 10), email, ip, ua, fbc, fbp, float64(slot.PriceCents)/100.0, "USD", sourceURL, country)
@@ -515,21 +521,16 @@ func (s *service) ActivateSubscription(
 	}
 }
 
-func (s *service) GetActiveSubscription(ctx context.Context, userID int64) (*model.UserSubscription, error) {
-	return s.repo.GetActiveSubscriptionByUserID(ctx, userID)
+func (s *service) GetManagedSubscription(ctx context.Context, userID int64) (*model.UserSubscription, error) {
+	return s.repo.GetManagedSubscriptionByUserID(ctx, userID)
 }
 
 func (s *service) CancelSubscription(ctx context.Context, userID int64, subscriptionID string, reason string) error {
 	sub, err := s.repo.GetSubscriptionByID(ctx, subscriptionID)
-	if err != nil || sub == nil {
-		return errors.New("subscription not found")
+	if err != nil {
+		return err
 	}
-
-	if sub.UserID != userID {
-		return errors.New("subscription owner mismatch")
-	}
-
-	if sub.PaymentMethod != payment.ProviderPayPal {
+	if sub == nil || sub.UserID != userID || sub.PaymentMethod != payment.ProviderPayPal {
 		return ErrCheckoutUnavailable
 	}
 	return s.repo.enqueuePayPalCancellation(ctx, subscriptionID, userID, reason)
@@ -661,10 +662,15 @@ func (s *service) recordPayPalSubscriptionTransaction(ctx context.Context, sub *
 		CaptureID: transaction.ID, Currency: sub.Currency, PayerEmail: details.PayerEmail, Status: transaction.Status,
 		PayerID: details.PayerID, PayerName: details.PayerName, RawPayload: string(raw),
 	}
-	first, err := s.repo.RecordSubscriptionRenewalOrderTx(ctx, sub, transaction.ID, amount, sub.Currency,
+	_, err = s.repo.RecordSubscriptionRenewalOrderTx(ctx, sub, transaction.ID, amount, sub.Currency,
 		transaction.Time, periodEnd, details.Status, tpOrder)
-	if err == nil && first {
-		s.trackCheckoutPayment(transaction.ID, "Subscribe", details.PayerEmail)
-	}
 	return err
+}
+
+func (s *service) HasSubscriptionAccess(ctx context.Context, id int64) (bool, error) {
+	return s.novelRepo.HasActiveSubscription(ctx, id)
+}
+
+func (s *service) ListManagedSubscriptions(ctx context.Context, id int64) ([]model.UserSubscription, error) {
+	return s.repo.ListManagedSubscriptions(ctx, id)
 }

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"math"
 	"slices"
-	"strings"
 
 	"golang.org/x/sync/singleflight"
 	"reader-backend/internal/model"
@@ -98,6 +97,14 @@ func (s *service) SearchNovels(ctx context.Context, search string, limit, offset
 }
 
 func (s *service) GetNovelDetail(ctx context.Context, id int64) (*model.Novel, error) {
+	version, err := s.repo.GetContentVersion(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if version == 0 {
+		return nil, nil
+	}
+	ctx = withContentVersion(ctx, version)
 	n, err := s.cache.GetNovel(ctx, id)
 	if err == nil && n != nil && n.PublishStatus != "" {
 		if !IsNovelPublished(n) {
@@ -108,7 +115,7 @@ func (s *service) GetNovelDetail(ctx context.Context, id int64) (*model.Novel, e
 		return &signed, nil
 	}
 
-	sfKey := fmt.Sprintf("sf:novel:detail:%d", id)
+	sfKey := fmt.Sprintf("sf:novel:detail:%d:%d", id, contentVersion(ctx))
 	val, err, _ := s.sf.Do(sfKey, func() (interface{}, error) {
 		if cached, _ := s.cache.GetNovel(ctx, id); cached != nil && cached.PublishStatus != "" {
 			return cached, nil
@@ -145,9 +152,10 @@ func (s *service) GetChaptersList(ctx context.Context, userID int64, novelID int
 		return nil, ErrNovelNotFound
 	}
 
+	ctx = withContentVersion(ctx, n.ContentVersion)
 	list, err := s.cache.GetChaptersList(ctx, novelID)
 	if err != nil || len(list) == 0 {
-		sfKey := fmt.Sprintf("sf:novel:chapters:%d", novelID)
+		sfKey := fmt.Sprintf("sf:novel:chapters:%d:%d", novelID, contentVersion(ctx))
 		val, errSF, _ := s.sf.Do(sfKey, func() (interface{}, error) {
 			if cached, _ := s.cache.GetChaptersList(ctx, novelID); len(cached) > 0 {
 				return cached, nil
@@ -204,9 +212,10 @@ func (s *service) GetChapterContent(ctx context.Context, userID int64, novelID i
 		return nil, nil
 	}
 
+	ctx = withContentVersion(ctx, n.ContentVersion)
 	ch, err := s.cache.GetChapter(ctx, novelID, chapterIndex)
 	if err != nil || ch == nil {
-		sfKey := fmt.Sprintf("sf:chapter:%d:%d", novelID, chapterIndex)
+		sfKey := fmt.Sprintf("sf:chapter:%d:%d:%d", novelID, chapterIndex, contentVersion(ctx))
 		val, errSF, _ := s.sf.Do(sfKey, func() (interface{}, error) {
 			if cached, _ := s.cache.GetChapter(ctx, novelID, chapterIndex); cached != nil {
 				return cached, nil
@@ -219,9 +228,13 @@ func (s *service) GetChapterContent(ctx context.Context, userID int64, novelID i
 			// If storage is provided and (chDB.Content is empty or storage is OSS), load content from storage
 			if s.storage != nil && (chDB.Content == "" || s.storage.StorageType() == "oss") {
 				content, errStorage := s.storage.GetContent(ctx, novelID, chapterIndex)
-				if errStorage == nil && content != "" {
-					chDB.Content = content
+				if errStorage != nil {
+					return nil, errStorage
 				}
+				if content == "" {
+					return nil, storage.ErrContentNotFound
+				}
+				chDB.Content = content
 			}
 
 			_ = s.cache.SetChapter(ctx, novelID, chapterIndex, chDB)
@@ -334,28 +347,10 @@ func (s *service) GetChapterContent(ctx context.Context, userID int64, novelID i
 
 func getLockedPreview(original *model.Chapter) *model.Chapter {
 	preview := *original // shallow copy
-
-	// Try splitting by double newline first
-	paragraphs := strings.Split(original.Content, "\n\n")
-	if len(paragraphs) > 2 {
-		preview.Content = strings.Join(paragraphs[:2], "\n\n")
-		return &preview
-	}
-
-	// Fallback to single newline if text uses \n
-	lines := strings.Split(original.Content, "\n")
-	if len(lines) > 3 {
-		preview.Content = strings.Join(lines[:3], "\n")
-		return &preview
-	}
-
-	// If no line breaks or single long block, truncate to first 250 runes
 	runes := []rune(original.Content)
-	if len(runes) > 250 {
-		preview.Content = string(runes[:250]) + "..."
-	} else {
-		preview.Content = original.Content
+	limit := min(250, len(runes)/2)
+	if len(runes) > limit {
+		preview.Content = string(runes[:limit]) + "..."
 	}
-
 	return &preview
 }

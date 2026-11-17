@@ -7,6 +7,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"reader-backend/internal/auth"
+	"reader-backend/internal/httpx"
 )
 
 type Handler struct {
@@ -33,22 +34,10 @@ func (h *Handler) RegisterRoutes(r *gin.RouterGroup) {
 func (h *Handler) GetNovels(c *gin.Context) {
 	genre := c.Query("genre")
 	sortBy := c.DefaultQuery("sort", "popular")
-	pageStr := c.DefaultQuery("page", "1")
-	limitStr := c.DefaultQuery("limit", "20")
-
-	page, err := strconv.Atoi(pageStr)
-	if err != nil || page < 1 {
-		page = 1
+	limit, offset, ok := httpx.Pagination(c)
+	if !ok {
+		return
 	}
-
-	limit, err := strconv.Atoi(limitStr)
-	if err != nil || limit < 1 {
-		limit = 20
-	} else if limit > 100 {
-		limit = 100
-	}
-
-	offset := (page - 1) * limit
 	ctx := c.Request.Context()
 
 	novels, err := h.service.GetNovels(ctx, genre, sortBy, limit, offset)
@@ -67,22 +56,10 @@ func (h *Handler) SearchNovels(c *gin.Context) {
 		return
 	}
 
-	pageStr := c.DefaultQuery("page", "1")
-	limitStr := c.DefaultQuery("limit", "20")
-
-	page, err := strconv.Atoi(pageStr)
-	if err != nil || page < 1 {
-		page = 1
+	limit, offset, ok := httpx.Pagination(c)
+	if !ok {
+		return
 	}
-
-	limit, err := strconv.Atoi(limitStr)
-	if err != nil || limit < 1 {
-		limit = 20
-	} else if limit > 100 {
-		limit = 100
-	}
-
-	offset := (page - 1) * limit
 	ctx := c.Request.Context()
 
 	novels, err := h.service.SearchNovels(ctx, search, limit, offset)

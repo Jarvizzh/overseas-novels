@@ -2,6 +2,7 @@ package wallet
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"time"
 
@@ -30,6 +31,7 @@ type subscriptionIntent struct {
 	approvalURL    string
 	leaseActive    bool
 	needsReview    bool
+	attribution    checkoutAttribution
 }
 
 func (r *dbRepository) reserveSubscriptionIntent(ctx context.Context, proposed subscriptionIntent) (*subscriptionIntent, error) {
@@ -77,10 +79,15 @@ func (r *dbRepository) reserveSubscriptionIntent(ctx context.Context, proposed s
 	if current.id == "" {
 		current = proposed
 		current.id = uuid.NewString()
+		metadata, err := json.Marshal(current.attribution)
+		if err != nil {
+			return nil, err
+		}
 		_, err = tx.Exec(ctx, `INSERT INTO paypal_subscription_intents
-			(user_id,intent_id,slot_id,template_id,cycle,price_cents,return_url,cancel_url)
-			VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, current.userID, current.id, current.slotID, current.templateID,
-			current.cycle, current.priceCents, current.returnURL, current.cancelURL)
+			(user_id,intent_id,slot_id,template_id,cycle,price_cents,return_url,cancel_url,attribution)
+ SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb || jsonb_build_object('pixel_id',fp.pixel_id,'promotion_link_id',p.id,'novel_id',p.novel_id,'utm_source',u.utm_source,'utm_campaign',u.utm_campaign)
+ FROM users u LEFT JOIN LATERAL reader_promotion_for_user(u.id) p ON true LEFT JOIN fb_pixels fp ON fp.id=p.fb_pixel_id WHERE u.id=$1`, current.userID, current.id, current.slotID, current.templateID,
+			current.cycle, current.priceCents, current.returnURL, current.cancelURL, metadata)
 		if err != nil {
 			return nil, err
 		}
@@ -135,10 +142,10 @@ func (r *dbRepository) finishSubscriptionIntent(ctx context.Context, intent *sub
 	sub := model.UserSubscription{UserID: intent.userID, SubscriptionID: result.SubscriptionID, PlanID: intent.planID,
 		SlotID: intent.slotID, TemplateID: intent.templateID, Status: "PENDING", Cycle: intent.cycle,
 		PriceCents: intent.priceCents, Currency: "USD", PaymentMethod: "paypal", CurrentPeriodStart: &now}
-	tag, err = tx.Exec(ctx, `INSERT INTO user_subscriptions(user_id,subscription_id,plan_id,slot_id,template_id,status,cycle,price_cents,currency,payment_method,current_period_start)
-		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT(subscription_id) DO UPDATE SET updated_at=user_subscriptions.updated_at
+	tag, err = tx.Exec(ctx, `INSERT INTO user_subscriptions(user_id,subscription_id,plan_id,slot_id,template_id,status,cycle,price_cents,currency,payment_method,current_period_start,attribution)
+ VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,(SELECT attribution FROM paypal_subscription_intents WHERE intent_id=$12)) ON CONFLICT(subscription_id) DO UPDATE SET updated_at=user_subscriptions.updated_at
 		WHERE user_subscriptions.user_id=EXCLUDED.user_id AND user_subscriptions.plan_id=EXCLUDED.plan_id`,
-		sub.UserID, sub.SubscriptionID, sub.PlanID, sub.SlotID, sub.TemplateID, sub.Status, sub.Cycle, sub.PriceCents, sub.Currency, sub.PaymentMethod, sub.CurrentPeriodStart)
+		sub.UserID, sub.SubscriptionID, sub.PlanID, sub.SlotID, sub.TemplateID, sub.Status, sub.Cycle, sub.PriceCents, sub.Currency, sub.PaymentMethod, sub.CurrentPeriodStart, intent.id)
 	if err != nil {
 		return err
 	}

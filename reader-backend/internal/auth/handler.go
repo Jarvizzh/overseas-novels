@@ -4,23 +4,47 @@ import (
 	"errors"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"golang.org/x/time/rate"
+	"reader-backend/internal/httpx"
 	"reader-backend/internal/model"
 )
 
-var guestLimiters = sync.Map{}
-
 func GuestRateLimitMiddleware(rps float64, burst int) gin.HandlerFunc {
+	type entry struct {
+		limiter *rate.Limiter
+		seen    time.Time
+	}
+	var mu sync.Mutex
+	entries := make(map[string]entry)
 	return func(c *gin.Context) {
+		now := time.Now()
 		ip := c.ClientIP()
-		limiterRaw, _ := guestLimiters.LoadOrStore(ip, rate.NewLimiter(rate.Limit(rps), burst))
-		limiter := limiterRaw.(*rate.Limiter)
-
-		if !limiter.Allow() {
-			c.JSON(http.StatusTooManyRequests, gin.H{"error": "Too many guest registration attempts. Please try again later."})
-			c.Abort()
+		mu.Lock()
+		if len(entries) >= 10000 {
+			for key, v := range entries {
+				if now.Sub(v.seen) > time.Hour {
+					delete(entries, key)
+				}
+			}
+		}
+		v, exists := entries[ip]
+		if !exists {
+			if len(entries) >= 10000 {
+				mu.Unlock()
+				c.AbortWithStatus(429)
+				return
+			}
+			v.limiter = rate.NewLimiter(rate.Limit(rps), burst)
+		}
+		v.seen = now
+		entries[ip] = v
+		allowed := v.limiter.Allow()
+		mu.Unlock()
+		if !allowed {
+			c.AbortWithStatusJSON(429, gin.H{"error": "Too many authentication attempts"})
 			return
 		}
 		c.Next()
@@ -46,15 +70,21 @@ func (h *AuthHandler) RegisterRoutes(r *gin.RouterGroup) {
 	authGroup := r.Group("/auth")
 	{
 		authGroup.POST("/guest", GuestRateLimitMiddleware(0.1, 5), h.GuestLogin)
-		authGroup.POST("/register", h.Register)
-		authGroup.POST("/login", h.Login)
+		authGroup.POST("/refresh", h.RefreshSession)
+		authGroup.POST("/logout", h.Logout)
+		authGroup.POST("/register", GuestRateLimitMiddleware(0.1, 5), h.Register)
+		authGroup.POST("/login", GuestRateLimitMiddleware(0.2, 10), h.Login)
 		authGroup.POST("/bind", AuthMiddleware(), h.BindEmail)
 		authGroup.GET("/profile", AuthMiddleware(), h.GetProfile)
 	}
 }
 
 func (h *AuthHandler) GuestLogin(c *gin.Context) {
-	ctx := c.Request.Context()
+	if raw, err := c.Cookie(sessionCookieName()); err == nil && raw != "" {
+		h.RefreshSession(c)
+		return
+	}
+	ctx := promotionContext(c.Request.Context(), c.GetHeader("X-Promo-ID"))
 
 	device := c.GetHeader("User-Agent")
 	ipAddress := c.ClientIP()
@@ -72,30 +102,30 @@ func (h *AuthHandler) GuestLogin(c *gin.Context) {
 
 	user, token, err := h.service.GuestLogin(ctx, device, ipAddress, utmSource, utmCampaign, fbp, fbc, pixelID, userAgent, sourceURL, country)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to login as guest: " + err.Error()})
+		httpx.Fail(c, http.StatusInternalServerError, "internal_error", "Failed to login as guest", err)
 		return
 	}
 
-	c.JSON(http.StatusOK, AuthResponse{
+	h.respondAuth(c, AuthResponse{
 		Token: token,
 		User:  *user,
 	})
 }
 
 type RegisterRequest struct {
-	Email    string `json:"email" binding:"required,email"`
-	Password string `json:"password" binding:"required,min=6"`
-	Nickname string `json:"nickname"`
+	Email    string `json:"email" binding:"required,email,max=255"`
+	Password string `json:"password" binding:"required,min=6,max=72"`
+	Nickname string `json:"nickname" binding:"max=100"`
 }
 
 func (h *AuthHandler) Register(c *gin.Context) {
 	var req RegisterRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		httpx.Fail(c, http.StatusBadRequest, "invalid_request", "Invalid request fields", nil)
 		return
 	}
 
-	ctx := c.Request.Context()
+	ctx := promotionContext(c.Request.Context(), c.GetHeader("X-Promo-ID"))
 
 	device := c.GetHeader("User-Agent")
 	ipAddress := c.ClientIP()
@@ -113,49 +143,57 @@ func (h *AuthHandler) Register(c *gin.Context) {
 
 	user, token, err := h.service.Register(ctx, req.Email, req.Password, req.Nickname, device, ipAddress, utmSource, utmCampaign, fbp, fbc, pixelID, userAgent, sourceURL, country)
 	if err != nil {
-		if errors.Is(err, ErrEmailExists) {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		if errors.Is(err, ErrInvalidPassword) {
+			httpx.Fail(c, 400, "invalid_password", ErrInvalidPassword.Error(), nil)
 			return
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Registration failed: " + err.Error()})
+		if errors.Is(err, ErrEmailExists) || errors.Is(err, ErrAlreadyBound) {
+			if errors.Is(err, ErrEmailExists) {
+				httpx.Fail(c, 400, "email_exists", ErrEmailExists.Error(), nil)
+			} else {
+				httpx.Fail(c, 400, "already_bound", ErrAlreadyBound.Error(), nil)
+			}
+			return
+		}
+		httpx.Fail(c, http.StatusInternalServerError, "internal_error", "Registration failed", err)
 		return
 	}
 
-	c.JSON(http.StatusOK, AuthResponse{
+	h.respondAuth(c, AuthResponse{
 		Token: token,
 		User:  *user,
 	})
 }
 
 type LoginRequest struct {
-	Email    string `json:"email" binding:"required,email"`
-	Password string `json:"password" binding:"required"`
+	Email    string `json:"email" binding:"required,email,max=255"`
+	Password string `json:"password" binding:"required,max=72"`
 }
 
 func (h *AuthHandler) Login(c *gin.Context) {
 	var req LoginRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		httpx.Fail(c, http.StatusBadRequest, "invalid_request", "Invalid request fields", nil)
 		return
 	}
 
-	ctx := c.Request.Context()
+	ctx := promotionContext(c.Request.Context(), c.GetHeader("X-Promo-ID"))
 
 	user, token, err := h.service.Login(ctx, req.Email, req.Password)
 	if err != nil {
 		if errors.Is(err, ErrInvalidAuth) {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
+			httpx.Fail(c, 401, "invalid_auth", ErrInvalidAuth.Error(), nil)
 			return
 		}
 		if errors.Is(err, ErrAccountBanned) {
-			c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
+			httpx.Fail(c, 403, "account_banned", ErrAccountBanned.Error(), nil)
 			return
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Login failed"})
+		httpx.Fail(c, 500, "internal_error", "Login failed", err)
 		return
 	}
 
-	c.JSON(http.StatusOK, AuthResponse{
+	h.respondAuth(c, AuthResponse{
 		Token: token,
 		User:  *user,
 	})
@@ -173,21 +211,33 @@ func (h *AuthHandler) GetProfile(c *gin.Context) {
 			return
 		}
 	}
-	ctx := c.Request.Context()
+	ctx := promotionContext(c.Request.Context(), c.GetHeader("X-Promo-ID"))
 
 	user, err := h.service.GetProfile(ctx, userID)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		if errors.Is(err, ErrUserNotFound) {
+			httpx.Fail(c, 404, "user_not_found", ErrUserNotFound.Error(), nil)
+		} else {
+			httpx.Fail(c, 503, "profile_unavailable", "Profile unavailable", err)
+		}
 		return
 	}
 
+	if _, err := c.Cookie(sessionCookieName()); err != nil {
+		raw, err := (sessionService{}).create(ctx, userID)
+		if err != nil {
+			c.AbortWithStatus(503)
+			return
+		}
+		setSessionCookie(c, raw, 180*86400)
+	}
 	c.JSON(http.StatusOK, user)
 }
 
 type BindEmailRequest struct {
-	Email    string `json:"email" binding:"required,email"`
-	Password string `json:"password" binding:"required,min=6"`
-	Nickname string `json:"nickname"`
+	Email    string `json:"email" binding:"required,email,max=255"`
+	Password string `json:"password" binding:"required,min=6,max=72"`
+	Nickname string `json:"nickname" binding:"max=100"`
 }
 
 func (h *AuthHandler) BindEmail(c *gin.Context) {
@@ -208,24 +258,31 @@ func (h *AuthHandler) BindEmail(c *gin.Context) {
 
 	var req BindEmailRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		httpx.Fail(c, http.StatusBadRequest, "invalid_request", "Invalid request fields", nil)
 		return
 	}
 
-	ctx := c.Request.Context()
+	ctx := promotionContext(c.Request.Context(), c.GetHeader("X-Promo-ID"))
 	user, token, err := h.service.BindEmail(ctx, userID, req.Email, req.Password, req.Nickname)
 	if err != nil {
-		if errors.Is(err, ErrEmailExists) {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		if errors.Is(err, ErrInvalidPassword) {
+			httpx.Fail(c, 400, "invalid_password", ErrInvalidPassword.Error(), nil)
 			return
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to bind email: " + err.Error()})
+		if errors.Is(err, ErrEmailExists) || errors.Is(err, ErrAlreadyBound) {
+			if errors.Is(err, ErrEmailExists) {
+				httpx.Fail(c, 400, "email_exists", ErrEmailExists.Error(), nil)
+			} else {
+				httpx.Fail(c, 400, "already_bound", ErrAlreadyBound.Error(), nil)
+			}
+			return
+		}
+		httpx.Fail(c, http.StatusInternalServerError, "internal_error", "Failed to bind email", err)
 		return
 	}
 
-	c.JSON(http.StatusOK, AuthResponse{
+	h.respondAuth(c, AuthResponse{
 		Token: token,
 		User:  *user,
 	})
 }
-

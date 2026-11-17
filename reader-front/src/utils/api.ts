@@ -76,15 +76,16 @@ async function request<T>(endpoint: string, options: RequestInit = {}, retried =
   const response = await fetch(`${BASE_URL}${endpoint}`, {
     ...options,
     headers,
+    credentials: 'include',
   });
 
   const isAuthCredentialEndpoint =
     endpoint.startsWith('/auth/login') ||
     endpoint.startsWith('/auth/register') ||
-    endpoint.startsWith('/auth/guest');
+    endpoint.startsWith('/auth/guest') ||
+    endpoint.startsWith('/auth/refresh');
 
   if (response.status === 401 && !isAuthCredentialEndpoint && !retried) {
-    localStorage.removeItem('auth-token');
     const newToken = await runSingleFlightRefresh();
     if (newToken) {
       return request<T>(endpoint, options, true);
@@ -204,12 +205,35 @@ export interface SubscriptionInfo {
 export interface SubscriptionStatusResponse {
   is_vip: boolean;
   subscription: SubscriptionInfo | null;
+  subscriptions: SubscriptionInfo[];
+}
+
+async function sendShelfBatches<T>(
+  items: T[],
+  send: (batch: T[]) => Promise<{ message: string }>,
+  keepalive = false,
+): Promise<{ message: string }> {
+  const batches: T[][] = [];
+  for (let offset = 0; offset < items.length; offset += 100) {
+    batches.push(items.slice(offset, offset + 100));
+  }
+  let result = { message: 'No changes' };
+  if (keepalive) {
+    // Schedule exit requests immediately; a later response may arrive after page teardown.
+    const responses = await Promise.all(batches.map(send));
+    return responses.at(-1) ?? result;
+  }
+  for (const batch of batches) {
+    result = await send(batch);
+  }
+  return result;
 }
 
 export const api = {
   // === AUTH ===
-  guestLogin: () =>
-    request<{ token: string; user: User }>('/auth/guest', { method: 'POST' }),
+  refresh: () => request<{ token: string; user: User }>('/auth/refresh', { method: 'POST' }),
+  logout: () => request<void>('/auth/logout', { method: 'POST' }),
+  guestLogin: () => request<{ token: string; user: User }>('/auth/guest', { method: 'POST' }),
 
   register: (body: { email: string; password: string; nickname?: string }) =>
     request<{ token: string; user: User }>('/auth/register', {
@@ -266,20 +290,27 @@ export const api = {
     }),
 
   removeFromShelf: (novelIds: number[]) =>
-    request<{ message: string }>('/shelf/remove', {
-      method: 'POST',
-      body: JSON.stringify({ novel_ids: novelIds }),
-    }),
+    sendShelfBatches(novelIds, (batch) =>
+      request<{ message: string }>('/shelf/remove', {
+        method: 'POST',
+        body: JSON.stringify({ novel_ids: batch }),
+      }),
+    ),
 
   syncProgress: (
     updates: Array<{ novel_id: number; chapter_index: number; scroll_offset_percentage: number; updated_at: string }>,
-    options: { keepalive?: boolean } = {}
+    options: { keepalive?: boolean } = {},
   ) =>
-    request<{ message: string }>('/shelf/sync', {
-      method: 'POST',
-      keepalive: options.keepalive,
-      body: JSON.stringify({ progress_updates: updates }),
-    }),
+    sendShelfBatches(
+      updates,
+      (batch) =>
+        request<{ message: string }>('/shelf/sync', {
+          method: 'POST',
+          keepalive: options.keepalive,
+          body: JSON.stringify({ progress_updates: batch }),
+        }),
+      options.keepalive,
+    ),
 
   // === WALLET ===
   getWalletBalance: () =>
@@ -342,7 +373,9 @@ export const api = {
         price: string;
         price_cents: number;
       }>;
-    }>(`/wallet/recharge/templates${novelId ? `?${new URLSearchParams({ novel_id: String(novelId) })}` : ''}`, { signal }),
+    }>(`/wallet/recharge/templates${novelId ? `?${new URLSearchParams({ novel_id: String(novelId) })}` : ''}`, {
+      signal,
+    }),
 
   createSubscription: (slotId: number, paymentMethod: string = 'paypal', returnUrl?: string, cancelUrl?: string) =>
     request<{ subscription_id: string; approve_url: string; status: string }>('/wallet/recharge/subscription/create', {

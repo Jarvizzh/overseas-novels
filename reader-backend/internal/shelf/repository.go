@@ -63,7 +63,7 @@ func (r *dbRepository) GetShelfItemsWithNovel(ctx context.Context, userID int64)
 		items = append(items, item)
 	}
 
-	return items, nil
+	return items, rows.Err()
 }
 
 func (r *dbRepository) AddToShelf(ctx context.Context, userID int64, novelID int64) error {
@@ -80,7 +80,7 @@ func (r *dbRepository) AddToShelf(ctx context.Context, userID int64, novelID int
 		INSERT INTO bookshelves (user_id, novel_id, in_shelf, updated_at)
 		VALUES ($1, $2, TRUE, CURRENT_TIMESTAMP)
 		ON CONFLICT (user_id, novel_id)
-		DO UPDATE SET in_shelf = TRUE, updated_at = CURRENT_TIMESTAMP`
+		DO UPDATE SET in_shelf = TRUE`
 
 	_, err = db.DB.Exec(ctx, query, userID, novelID)
 	return err
@@ -89,7 +89,7 @@ func (r *dbRepository) AddToShelf(ctx context.Context, userID int64, novelID int
 func (r *dbRepository) RemoveFromShelf(ctx context.Context, userID int64, novelIDs []int64) error {
 	query := `
 		UPDATE bookshelves
-		SET in_shelf = FALSE, updated_at = CURRENT_TIMESTAMP
+		SET in_shelf = FALSE
 		WHERE user_id = $1 AND novel_id = ANY($2)`
 
 	_, err := db.DB.Exec(ctx, query, userID, novelIDs)
@@ -124,7 +124,8 @@ func (r *dbRepository) SaveProgress(ctx context.Context, userID int64, novelID i
 		DO UPDATE SET 
 			chapter_index = EXCLUDED.chapter_index, 
 			scroll_offset_percentage = EXCLUDED.scroll_offset_percentage, 
-			updated_at = EXCLUDED.updated_at`
+			updated_at = EXCLUDED.updated_at
+ WHERE EXCLUDED.updated_at > bookshelves.updated_at`
 
 	_, err := db.DB.Exec(ctx, query, userID, novelID, chapterIndex, offset, updatedAt)
 	return err

@@ -214,7 +214,21 @@ function AppContent() {
     if (!guestLoginPromiseRef.current) {
       guestLoginPromiseRef.current = (async () => {
         try {
-          const res = await api.guestLogin();
+          let res;
+          try {
+            res = await api.refresh();
+          } catch (error) {
+            if (
+              error instanceof Error &&
+              'status' in error &&
+              error.status === 401 &&
+              !localStorage.getItem('auth-token')
+            ) {
+              res = await api.guestLogin();
+            } else {
+              throw error;
+            }
+          }
           localStorage.setItem('auth-token', res.token);
           setUser(res.user);
           await reloadWalletAndShelf();
@@ -699,7 +713,8 @@ function AppContent() {
                   await reloadWalletAndShelf();
                   navigateTo('profile');
                 }}
-                onLogout={() => {
+                onLogout={async () => {
+                  await api.logout();
                   localStorage.removeItem('auth-token');
                   setUser(null);
                   setShelfBookIds([]);

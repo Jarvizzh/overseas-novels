@@ -47,7 +47,7 @@ func NewAliyunOSSStorage(
 	}
 	basePath = strings.Trim(basePath, "/")
 
-	client, err := oss.New(endpoint, accessKeyID, accessKeySecret)
+	client, err := oss.New(endpoint, accessKeyID, accessKeySecret, oss.Timeout(5, 10))
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize Aliyun OSS client: %w", err)
 	}
@@ -81,12 +81,12 @@ func (s *AliyunOSSStorage) formatNovelPrefix(novelID int64) string {
 func (s *AliyunOSSStorage) PutContent(ctx context.Context, novelID int64, chapterIndex int, content string) error {
 	objectKey := s.formatObjectKey(novelID, chapterIndex)
 	reader := strings.NewReader(content)
-	return s.bucket.PutObject(objectKey, reader)
+	return s.bucket.PutObject(objectKey, reader, oss.WithContext(ctx))
 }
 
 func (s *AliyunOSSStorage) GetContent(ctx context.Context, novelID int64, chapterIndex int) (string, error) {
 	objectKey := s.formatObjectKey(novelID, chapterIndex)
-	body, err := s.bucket.GetObject(objectKey)
+	body, err := s.bucket.GetObject(objectKey, oss.WithContext(ctx))
 	if err != nil {
 		// If object is not found in OSS and a fallback DB is provided, check PostgreSQL
 		var ossErr oss.ServiceError
@@ -114,7 +114,7 @@ func (s *AliyunOSSStorage) GetContent(ctx context.Context, novelID int64, chapte
 
 func (s *AliyunOSSStorage) DeleteContent(ctx context.Context, novelID int64, chapterIndex int) error {
 	objectKey := s.formatObjectKey(novelID, chapterIndex)
-	return s.bucket.DeleteObject(objectKey)
+	return s.bucket.DeleteObject(objectKey, oss.WithContext(ctx))
 }
 
 func (s *AliyunOSSStorage) DeleteNovelContent(ctx context.Context, novelID int64) error {
@@ -122,7 +122,7 @@ func (s *AliyunOSSStorage) DeleteNovelContent(ctx context.Context, novelID int64
 	marker := ""
 
 	for {
-		lor, err := s.bucket.ListObjects(oss.Prefix(prefix), oss.Marker(marker), oss.MaxKeys(500))
+		lor, err := s.bucket.ListObjects(oss.Prefix(prefix), oss.Marker(marker), oss.MaxKeys(500), oss.WithContext(ctx))
 		if err != nil {
 			return fmt.Errorf("failed to list objects with prefix %q: %w", prefix, err)
 		}
@@ -132,7 +132,7 @@ func (s *AliyunOSSStorage) DeleteNovelContent(ctx context.Context, novelID int64
 			for _, obj := range lor.Objects {
 				keys = append(keys, obj.Key)
 			}
-			if _, err := s.bucket.DeleteObjects(keys); err != nil {
+			if _, err := s.bucket.DeleteObjects(keys, oss.WithContext(ctx)); err != nil {
 				return fmt.Errorf("failed to delete OSS objects for novel %d: %w", novelID, err)
 			}
 		}

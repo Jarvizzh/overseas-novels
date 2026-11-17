@@ -15,7 +15,7 @@ type Feedback struct {
 }
 
 type CreateFeedbackRequest struct {
-	Email   string `json:"email"`
+	Email   string `json:"email" binding:"omitempty,email,max=100"`
 	Subject string `json:"subject"`
-	Content string `json:"content"`
+	Content string `json:"content" binding:"required,max=10000"`
 }

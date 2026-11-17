@@ -53,12 +53,14 @@ func main() {
 	r.Use(corsMiddleware(), requestIDMiddleware())
 
 	r.GET("/healthz", func(c *gin.Context) {
+		ctx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Second)
+		defer cancel()
 		dbStatus := "UP"
-		if db.DB == nil || db.DB.Ping(c.Request.Context()) != nil {
+		if db.DB == nil || db.CheckSchema(ctx) != nil {
 			dbStatus = "DOWN"
 		}
 		redisStatus := "UP"
-		if redis.RDB == nil || redis.RDB.Ping(c.Request.Context()).Err() != nil {
+		if redis.RDB == nil || redis.RDB.Ping(ctx).Err() != nil {
 			redisStatus = "DOWN"
 		}
 
