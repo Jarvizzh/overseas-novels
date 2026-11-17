@@ -43,6 +43,8 @@ const EMPTY_NOVEL_FILTER: NovelListFilterDraft = {
   createdEnd: '',
 };
 
+const DEFAULT_NEW_NOVEL_GENRES = 'Contemporary, Romance, Cheating';
+
 function formatNovelDateTime(value?: string, withSeconds = false): string {
   if (!value) return '-';
   const parsed = new Date(value);
@@ -114,7 +116,7 @@ export default function NovelsTab() {
   const [isSubmittingNovel, setIsSubmittingNovel] = useState(false);
   const [newNovel, setNewNovel] = useState<NovelFormData>({
     title: '', author: '', cover_url: '', cover_preview_url: '',
-    status: 'Ongoing', publish_status: 'draft', rating: 4.5, synopsis: '', genres: 'Romance, Werewolf',
+    status: 'Ongoing', publish_status: 'draft', rating: 4.5, synopsis: '', genres: DEFAULT_NEW_NOVEL_GENRES,
     coin_cost_per_thousand: '', start_pay_chapter_index: 3
   });
   const [createImportType, setCreateImportType] = useState<'single_txt' | 'zip'>('single_txt');
@@ -434,7 +436,7 @@ export default function NovelsTab() {
   const resetCreateModalState = () => {
     setNewNovel({
       title: '', author: '', cover_url: '', cover_preview_url: '',
-      status: 'Ongoing', publish_status: 'draft', rating: 4.5, synopsis: '', genres: 'Romance, Werewolf',
+      status: 'Ongoing', publish_status: 'draft', rating: 4.5, synopsis: '', genres: DEFAULT_NEW_NOVEL_GENRES,
       coin_cost_per_thousand: '', start_pay_chapter_index: globalStartPayChapter || 3,
     });
     setCreateImportType('single_txt');
