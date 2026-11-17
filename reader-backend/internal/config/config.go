@@ -18,6 +18,7 @@ type Config struct {
 	PayPalClientID          string
 	PayPalClientSecret      string
 	PayPalMode              string // "sandbox" or "live"
+	PaymentTaskMetrics      bool
 	DefaultDomain           string
 	StorageType             string
 	OSSEndpoint             string
@@ -58,6 +59,7 @@ func LoadConfig() {
 		PayPalClientID:          getEnv("PAYPAL_CLIENT_ID", ""),
 		PayPalClientSecret:      getEnv("PAYPAL_CLIENT_SECRET", ""),
 		PayPalMode:              getEnv("PAYPAL_MODE", "sandbox"),
+		PaymentTaskMetrics:      getEnvBool("PAYMENT_TASK_METRICS_ENABLED", true),
 		DefaultDomain:           getEnv("DEFAULT_DOMAIN", "https://h5.starsfic.com"),
 		StorageType:             getEnv("STORAGE_TYPE", "postgres"),
 		OSSEndpoint:             getEnv("OSS_ENDPOINT", ""),

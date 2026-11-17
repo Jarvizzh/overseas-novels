@@ -169,6 +169,11 @@ export interface Transaction {
   date: string;
 }
 
+export interface TransactionPage {
+  items: Transaction[];
+  next_cursor?: string;
+}
+
 export interface ChapterContentResponse {
   chapter: Chapter;
   locked: boolean;
@@ -316,8 +321,11 @@ export const api = {
   getWalletBalance: () =>
     request<Wallet>('/wallet/balance'),
 
-  getTransactionHistory: (page: number = 1, limit: number = 20) =>
-    request<Transaction[]>(`/wallet/history?page=${page}&limit=${limit}`),
+  getTransactionHistory: (limit: number, cursor?: string, signal?: AbortSignal) => {
+    const params = new URLSearchParams({ limit: String(limit) });
+    if (cursor) params.set('cursor', cursor);
+    return request<TransactionPage>(`/wallet/history/cursor?${params}`, { signal });
+  },
 
   unlockChapter: (novelId: number, chapterIndex: number, price: number) =>
     request<{ message: string }>('/wallet/unlock', {

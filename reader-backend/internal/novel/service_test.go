@@ -58,6 +58,9 @@ func (r *fakeReaderRepo) GetChapter(_ context.Context, novelID int64, chapterInd
 	}
 	return nil, nil
 }
+func (r *fakeReaderRepo) CheckChapterUnlocked(context.Context, int64, int64, int) (bool, error) {
+	return false, nil
+}
 func (r *fakeReaderRepo) GetUnlockedChapterIndices(context.Context, int64, int64) ([]int, error) {
 	return nil, nil
 }
@@ -103,9 +106,6 @@ func (c *fakeReaderCache) IsChapterUnlocked(context.Context, int64, int64, int) 
 	return false, nil
 }
 func (c *fakeReaderCache) SetChapterUnlocked(context.Context, int64, int64, int) error {
-	return nil
-}
-func (c *fakeReaderCache) SetUnlockedChaptersBatch(context.Context, int64, int64, []int) error {
 	return nil
 }
 

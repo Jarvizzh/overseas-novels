@@ -4,6 +4,8 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
+	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
 	"reader-backend/internal/auth"
@@ -50,9 +52,9 @@ func (h *Handler) GetNovels(c *gin.Context) {
 }
 
 func (h *Handler) SearchNovels(c *gin.Context) {
-	search := c.Query("q")
-	if search == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Query parameter 'q' is required"})
+	search := strings.TrimSpace(c.Query("q"))
+	if search == "" || !utf8.ValidString(search) || utf8.RuneCountInString(search) > 128 {
+		httpx.Fail(c, http.StatusBadRequest, "invalid_search", "Search must contain 1–128 characters", nil)
 		return
 	}
 

@@ -28,6 +28,7 @@ func (h *Handler) RegisterRoutes(r *gin.RouterGroup) {
 	{
 		walletGroup.GET("/balance", h.GetBalance)
 		walletGroup.GET("/history", h.GetHistory)
+		walletGroup.GET("/history/cursor", h.GetHistoryPage)
 		walletGroup.POST("/unlock", h.UnlockChapter)
 		walletGroup.POST("/recharge/initiate", h.InitiateCheckout)
 		walletGroup.POST("/recharge/stripe", h.CreateStripeIntent)
@@ -77,6 +78,25 @@ func (h *Handler) GetHistory(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, txs)
+}
+
+func (h *Handler) GetHistoryPage(c *gin.Context) {
+	limit, err := strconv.Atoi(c.DefaultQuery("limit", "20"))
+	if err != nil || limit < 1 || limit > httpx.MaxPageSize {
+		httpx.Fail(c, http.StatusBadRequest, "invalid_pagination", "Page size must be 1–100", nil)
+		return
+	}
+	after, err := parseHistoryCursor(c.Query("cursor"))
+	if err != nil {
+		httpx.Fail(c, http.StatusBadRequest, "invalid_cursor", "Invalid transaction cursor", nil)
+		return
+	}
+	page, err := h.service.GetHistoryPage(c.Request.Context(), c.GetInt64("user_id"), limit, after)
+	if err != nil {
+		httpx.Fail(c, http.StatusServiceUnavailable, "history_unavailable", "Failed to fetch transaction history", err)
+		return
+	}
+	c.JSON(http.StatusOK, page)
 }
 
 type UnlockRequest struct {

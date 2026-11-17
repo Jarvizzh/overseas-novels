@@ -107,6 +107,9 @@ func (r *dbNovelRepository) ListNovels(ctx context.Context, selectQuery string, 
 		}
 		novels = append(novels, n)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return novels, nil
 }
 
@@ -399,6 +402,9 @@ func (r *dbNovelRepository) ListChapters(ctx context.Context, novelID int64) ([]
 		}
 		chapters = append(chapters, c)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return chapters, nil
 }
 
@@ -487,6 +493,9 @@ func (r *dbNovelRepository) GetSettings(ctx context.Context) (map[string]string,
 		}
 		settings[key] = val
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return settings, nil
 }
 
@@ -527,6 +536,9 @@ func (r *dbNovelRepository) ListPromotionLinks(ctx context.Context) ([]Promotion
 			return nil, err
 		}
 		links = append(links, link)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return links, nil
 }
@@ -576,6 +588,9 @@ func (r *dbNovelRepository) ListFBPixels(ctx context.Context) ([]FBPixel, error)
 			return nil, err
 		}
 		pixels = append(pixels, pixel)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return pixels, nil
 }

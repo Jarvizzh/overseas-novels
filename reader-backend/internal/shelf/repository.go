@@ -18,6 +18,7 @@ type Repository interface {
 	RemoveFromShelf(ctx context.Context, userID int64, novelIDs []int64) error
 	GetProgress(ctx context.Context, userID int64, novelID int64) (*model.Bookshelf, error)
 	SaveProgress(ctx context.Context, userID int64, novelID int64, chapterIndex int, offset float64, updatedAt time.Time) error
+	SaveProgressBatch(ctx context.Context, userID int64, updates []ProgressUpdate) error
 }
 
 type dbRepository struct{}
@@ -34,7 +35,7 @@ func (r *dbRepository) GetShelfItemsWithNovel(ctx context.Context, userID int64)
 		FROM bookshelves b
 		INNER JOIN novels n ON b.novel_id = n.id
 		WHERE b.user_id = $1 AND b.in_shelf = TRUE AND n.status != 'archived' AND n.publish_status = 'published'
-		ORDER BY b.updated_at DESC`
+		ORDER BY b.updated_at DESC, b.novel_id DESC`
 
 	rows, err := db.DB.Query(ctx, query, userID)
 	if err != nil {
@@ -117,9 +118,27 @@ func (r *dbRepository) GetProgress(ctx context.Context, userID int64, novelID in
 }
 
 func (r *dbRepository) SaveProgress(ctx context.Context, userID int64, novelID int64, chapterIndex int, offset float64, updatedAt time.Time) error {
+	return r.SaveProgressBatch(ctx, userID, []ProgressUpdate{{
+		NovelID: novelID, ChapterIndex: chapterIndex, ScrollOffsetPercentage: offset, UpdatedAt: updatedAt,
+	}})
+}
+
+// SaveProgressBatch receives one validated update per novel from the service.
+func (r *dbRepository) SaveProgressBatch(ctx context.Context, userID int64, updates []ProgressUpdate) error {
+	ids := make([]int64, len(updates))
+	chapters := make([]int32, len(updates))
+	offsets := make([]float64, len(updates))
+	timestamps := make([]time.Time, len(updates))
+	for i, update := range updates {
+		ids[i], chapters[i] = update.NovelID, int32(update.ChapterIndex)
+		offsets[i], timestamps[i] = update.ScrollOffsetPercentage, update.UpdatedAt
+	}
 	query := `
 		INSERT INTO bookshelves (user_id, novel_id, chapter_index, scroll_offset_percentage, in_shelf, updated_at)
-		VALUES ($1, $2, $3, $4, FALSE, $5)
+		SELECT $1, novel_id, chapter_index, scroll_offset, false, updated_at
+		FROM unnest($2::bigint[], $3::integer[], $4::double precision[], $5::timestamptz[])
+		  AS updates(novel_id, chapter_index, scroll_offset, updated_at)
+		ORDER BY novel_id
 		ON CONFLICT (user_id, novel_id)
 		DO UPDATE SET 
 			chapter_index = EXCLUDED.chapter_index, 
@@ -127,6 +146,6 @@ func (r *dbRepository) SaveProgress(ctx context.Context, userID int64, novelID i
 			updated_at = EXCLUDED.updated_at
  WHERE EXCLUDED.updated_at > bookshelves.updated_at`
 
-	_, err := db.DB.Exec(ctx, query, userID, novelID, chapterIndex, offset, updatedAt)
+	_, err := db.DB.Exec(ctx, query, userID, ids, chapters, offsets, timestamps)
 	return err
 }

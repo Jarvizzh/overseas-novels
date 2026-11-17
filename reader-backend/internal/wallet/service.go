@@ -27,6 +27,7 @@ type Service interface {
 	RunReconciliation(context.Context)
 	GetWallet(ctx context.Context, userID int64) (*model.Wallet, error)
 	GetHistory(ctx context.Context, userID int64, limit, offset int) ([]model.Transaction, error)
+	GetHistoryPage(ctx context.Context, userID int64, limit int, after *historyCursor) (*HistoryPage, error)
 	UnlockChapter(ctx context.Context, userID int64, novelID int64, chapterIndex int, promoID int, utmSource, utmCampaign string, quotedPrice ...int) error
 	InitiateCheckout(ctx context.Context, userID int64, amountCents int64, coinsAmount int, fbp, fbc, pixelID, ip, ua, sourceURL, country string) error
 	CreateStripeIntent(ctx context.Context, userID int64, amountCents int64, coinsAmount int, fbp, fbc, pixelID, ip, ua, sourceURL, country string) (string, error)

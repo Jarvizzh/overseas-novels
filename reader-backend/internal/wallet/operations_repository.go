@@ -21,14 +21,38 @@ type TaskStatus struct {
 // PaymentTaskStatus excludes payloads, credentials and customer data.
 func PaymentTaskStatus(ctx context.Context) ([]TaskStatus, error) {
 	rows, err := db.DB.Query(ctx, `
+ WITH order_attention AS (
+   SELECT paid_unfulfilled, order_pending, manual_review,
+          COALESCE(paid_at,created_at) AS payment_time, created_at, reconciliation_attempts
+   FROM recharge_orders
+   CROSS JOIN LATERAL (VALUES (
+       status IN ('Success','Paid') AND fulfilled_at IS NULL,
+       status='Pending' AND payment_method='paypal',
+       reconciliation_note IS NOT NULL AND status<>'Refunded'
+   )) AS flags(paid_unfulfilled,order_pending,manual_review)
+   WHERE paid_unfulfilled OR order_pending OR manual_review
+ ), order_totals AS (
+   SELECT count(*) FILTER (WHERE paid_unfulfilled) AS paid_count,
+          min(payment_time) FILTER (WHERE paid_unfulfilled) AS paid_oldest,
+          max(reconciliation_attempts) FILTER (WHERE paid_unfulfilled) AS paid_attempts,
+          count(*) FILTER (WHERE order_pending) AS pending_count,
+          min(created_at) FILTER (WHERE order_pending) AS pending_oldest,
+          max(reconciliation_attempts) FILTER (WHERE order_pending) AS pending_attempts,
+          count(*) FILTER (WHERE manual_review) AS review_count,
+          min(created_at) FILTER (WHERE manual_review) AS review_oldest,
+          max(reconciliation_attempts) FILTER (WHERE manual_review) AS review_attempts
+   FROM order_attention
+ )
  SELECT 'inbox',count(*),min(created_at),COALESCE(max(attempts),0) FROM paypal_event_inbox WHERE processed_at IS NULL
  UNION ALL SELECT 'outbox',count(*),min(created_at),COALESCE(max(attempts),0) FROM payment_event_outbox WHERE state='pending' AND delivered_at IS NULL
  UNION ALL SELECT 'unattributed',count(*),min(created_at),COALESCE(max(attempts),0) FROM payment_event_outbox WHERE state='unattributed'
  UNION ALL SELECT 'cancel_pending',count(*),min(COALESCE(cancel_requested_at,updated_at)),COALESCE(max(cancel_attempts),0) FROM user_subscriptions WHERE status='CANCEL_PENDING'
  UNION ALL SELECT 'subscription_due',count(*),min(COALESCE(paypal_next_check_at,created_at)),COALESCE(max(paypal_check_attempts),0) FROM user_subscriptions WHERE payment_method='paypal' AND subscription_id NOT LIKE 'I-MOCK%' AND (status IN ('ACTIVE','SUSPENDED','CANCEL_PENDING') OR updated_at>now()-interval '30 days' OR paypal_recovery_requested) AND COALESCE(paypal_next_check_at,created_at)<=now()
- UNION ALL SELECT 'paid_unfulfilled',count(*),min(COALESCE(paid_at,created_at)),COALESCE(max(reconciliation_attempts),0) FROM recharge_orders WHERE status IN ('Success','Paid') AND fulfilled_at IS NULL
- UNION ALL SELECT 'order_pending',count(*),min(created_at),COALESCE(max(reconciliation_attempts),0) FROM recharge_orders WHERE status='Pending' AND payment_method='paypal'
- UNION ALL SELECT 'manual_review',count(*),min(created_at),COALESCE(max(reconciliation_attempts),0) FROM recharge_orders WHERE reconciliation_note IS NOT NULL AND status<>'Refunded'
+ UNION ALL SELECT kind,task_count,oldest_at,COALESCE(max_attempts,0) FROM order_totals
+ CROSS JOIN LATERAL (VALUES ('paid_unfulfilled',paid_count,paid_oldest,paid_attempts),
+                            ('order_pending',pending_count,pending_oldest,pending_attempts),
+                            ('manual_review',review_count,review_oldest,review_attempts))
+                   AS summary(kind,task_count,oldest_at,max_attempts)
  UNION ALL SELECT 'refund_shortfall',count(*),min(updated_at),0 FROM payment_refunds WHERE charged_coin_shortfall>0 OR bonus_coin_shortfall>0
  UNION ALL SELECT 'subscription_intent_uncertain',count(*),min(submitted_at),0 FROM paypal_subscription_intents WHERE submitted_at IS NOT NULL AND subscription_id IS NULL`)
 	if err != nil {

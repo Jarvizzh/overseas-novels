@@ -17,6 +17,7 @@ type Repository interface {
 	GetChaptersList(ctx context.Context, novelID int64) ([]model.Chapter, error)
 	GetChapter(ctx context.Context, novelID int64, chapterIndex int) (*model.Chapter, error)
 	GetUnlockedChapterIndices(ctx context.Context, userID, novelID int64) ([]int, error)
+	CheckChapterUnlocked(ctx context.Context, userID, novelID int64, chapterIndex int) (bool, error)
 	HasActiveSubscription(ctx context.Context, userID int64) (bool, error)
 	HasWholeBook(context.Context, int64, int64) (bool, error)
 	GetEffectivePricingRule(ctx context.Context, userID int64, novelID int64, promoID int, utmSource, utmCampaign string) (int, int, error)
@@ -78,7 +79,7 @@ func (r *dbRepository) GetNovels(ctx context.Context, genre, sortBy string, limi
 	var rows pgx.Rows
 	var err error
 
-	orderSQL := "ORDER BY view_count DESC, created_at DESC"
+	orderSQL := "ORDER BY view_count DESC, created_at DESC, id DESC"
 	if sortBy == "latest" {
 		orderSQL = "ORDER BY created_at DESC, id DESC"
 	}
@@ -124,7 +125,7 @@ func (r *dbRepository) SearchNovels(ctx context.Context, search string, limit, o
 		SELECT %s
 		FROM novels
 		WHERE (title ILIKE $1 OR author ILIKE $1 OR synopsis ILIKE $1) AND status != 'archived' AND publish_status = 'published'
-		ORDER BY view_count DESC, created_at DESC
+		ORDER BY view_count DESC, created_at DESC, id DESC
 		LIMIT $2 OFFSET $3`, readerNovelSelectColumns)
 
 	rows, err := db.DB.Query(ctx, query, likeSearch, limit, offset)

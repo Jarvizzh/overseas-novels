@@ -78,27 +78,22 @@ func (s *service) SyncProgress(ctx context.Context, userID int64, updates []Prog
 	if len(updates) == 0 || len(updates) > MaxBatchSize {
 		return ErrInvalidBatch
 	}
+	latest := make(map[int64]ProgressUpdate, len(updates))
+	maxTime := time.Now().Add(5 * time.Minute)
 	for _, update := range updates {
-		if update.NovelID <= 0 || update.ChapterIndex < 0 || math.IsNaN(update.ScrollOffsetPercentage) || math.IsInf(update.ScrollOffsetPercentage, 0) || update.ScrollOffsetPercentage < 0 || update.ScrollOffsetPercentage > 1 || update.UpdatedAt.IsZero() || update.UpdatedAt.After(time.Now().Add(5*time.Minute)) {
+		if update.NovelID <= 0 || update.NovelID > math.MaxInt32 ||
+			update.ChapterIndex < 0 || update.ChapterIndex > math.MaxInt32 ||
+			math.IsNaN(update.ScrollOffsetPercentage) || update.ScrollOffsetPercentage < 0 || update.ScrollOffsetPercentage > 1 ||
+			update.UpdatedAt.IsZero() || update.UpdatedAt.After(maxTime) {
 			return ErrInvalidProgress
 		}
-	}
-	for _, update := range updates {
-		current, err := s.repo.GetProgress(ctx, userID, update.NovelID)
-		if err != nil {
-			return err
-		}
-
-		if current != nil {
-			if !update.UpdatedAt.After(current.UpdatedAt) {
-				continue
-			}
-		}
-
-		err = s.repo.SaveProgress(ctx, userID, update.NovelID, update.ChapterIndex, update.ScrollOffsetPercentage, update.UpdatedAt)
-		if err != nil {
-			return err
+		if previous, ok := latest[update.NovelID]; !ok || update.UpdatedAt.After(previous.UpdatedAt) {
+			latest[update.NovelID] = update
 		}
 	}
-	return nil
+	batch := make([]ProgressUpdate, 0, len(latest))
+	for _, update := range latest {
+		batch = append(batch, update)
+	}
+	return s.repo.SaveProgressBatch(ctx, userID, batch)
 }

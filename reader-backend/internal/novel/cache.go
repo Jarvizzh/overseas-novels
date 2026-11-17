@@ -31,7 +31,6 @@ type Cache interface {
 
 	IsChapterUnlocked(ctx context.Context, userID, novelID int64, chapterIndex int) (bool, error)
 	SetChapterUnlocked(ctx context.Context, userID, novelID int64, chapterIndex int) error
-	SetUnlockedChaptersBatch(ctx context.Context, userID, novelID int64, chapterIndices []int) error
 }
 
 type redisCache struct{}
@@ -135,24 +134,6 @@ func (c *redisCache) SetChapterUnlocked(ctx context.Context, userID, novelID int
 	pipe := redisclient.RDB.Pipeline()
 	pipe.SAdd(ctx, key, chapterIndex)
 	pipe.Expire(ctx, key, 24*time.Hour) // Extend expiration on activity
-	_, err := pipe.Exec(ctx)
-	return err
-}
-
-func (c *redisCache) SetUnlockedChaptersBatch(ctx context.Context, userID, novelID int64, chapterIndices []int) error {
-	if len(chapterIndices) == 0 {
-		return nil
-	}
-	key := fmt.Sprintf("user:unlocks:%d:%d", userID, novelID)
-
-	members := make([]interface{}, len(chapterIndices))
-	for i, v := range chapterIndices {
-		members[i] = v
-	}
-
-	pipe := redisclient.RDB.Pipeline()
-	pipe.SAdd(ctx, key, members...)
-	pipe.Expire(ctx, key, 24*time.Hour)
 	_, err := pipe.Exec(ctx)
 	return err
 }

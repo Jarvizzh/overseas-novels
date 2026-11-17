@@ -55,6 +55,9 @@ func (r *fakeWalletNovelRepo) GetChapter(_ context.Context, novelID int64, chapt
 	copyCh := *ch
 	return &copyCh, nil
 }
+func (r *fakeWalletNovelRepo) CheckChapterUnlocked(context.Context, int64, int64, int) (bool, error) {
+	return false, nil
+}
 func (r *fakeWalletNovelRepo) GetUnlockedChapterIndices(context.Context, int64, int64) ([]int, error) {
 	return nil, nil
 }

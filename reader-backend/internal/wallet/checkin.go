@@ -32,17 +32,19 @@ func (r *dbRepository) CheckIn(ctx context.Context, userID int64, claim bool) (*
 	var checked bool
 	var streak int
 	err = tx.QueryRow(ctx, `
-		WITH dates AS (
-			SELECT (created_at AT TIME ZONE 'UTC')::date AS day
-			FROM transactions WHERE user_id = $1 AND biz_type = 'checkin'
-		), ranked AS (
-			SELECT day, max(day) OVER () AS last_day,
-				row_number() OVER (ORDER BY day DESC) - 1 AS day_offset FROM dates
+		WITH RECURSIVE streak(day) AS (
+			(SELECT (created_at AT TIME ZONE 'UTC')::date
+			 FROM transactions WHERE user_id=$1 AND biz_type='checkin'
+			 AND (created_at AT TIME ZONE 'UTC')::date BETWEEN (now() AT TIME ZONE 'UTC')::date-1 AND (now() AT TIME ZONE 'UTC')::date
+			 ORDER BY (created_at AT TIME ZONE 'UTC')::date DESC LIMIT 1)
+			UNION ALL
+			SELECT streak.day-1 FROM streak WHERE EXISTS (
+				SELECT 1 FROM transactions WHERE user_id=$1 AND biz_type='checkin'
+				AND (created_at AT TIME ZONE 'UTC')::date=streak.day-1
+			)
 		)
-		SELECT COALESCE(bool_or(day = (now() AT TIME ZONE 'UTC')::date), FALSE),
-			count(*) FILTER (WHERE last_day >= (now() AT TIME ZONE 'UTC')::date - 1
-				AND last_day - day = day_offset)
-		FROM ranked`, userID).Scan(&checked, &streak)
+		SELECT COALESCE(max(day) = (now() AT TIME ZONE 'UTC')::date, false), count(*)
+		FROM streak`, userID).Scan(&checked, &streak)
 	if err != nil {
 		return nil, err
 	}

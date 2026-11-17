@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"slices"
 
 	"golang.org/x/sync/singleflight"
 	"reader-backend/internal/model"
@@ -300,34 +299,16 @@ func (s *service) GetChapterContent(ctx context.Context, userID int64, novelID i
 	}
 
 	unlocked, err := s.cache.IsChapterUnlocked(ctx, userID, novelID, chapterIndex)
-	if err == nil && unlocked {
-		clone := *ch
-		clone.IsPaid = true
-		clone.Price = price
-		result.Chapter = &clone
-		result.Locked = false
-		result.AccessType = "chapter"
-		return result, nil
-	}
-
-	sfUnlockKey := fmt.Sprintf("sf:unlock:%d:%d", userID, novelID)
-	valUnlock, errUnlock, _ := s.sf.Do(sfUnlockKey, func() (interface{}, error) {
-		indices, err := s.repo.GetUnlockedChapterIndices(ctx, userID, novelID)
+	if err != nil || !unlocked {
+		unlocked, err = s.repo.CheckChapterUnlocked(ctx, userID, novelID, chapterIndex)
 		if err != nil {
 			return nil, err
 		}
-		if len(indices) > 0 {
-			_ = s.cache.SetUnlockedChaptersBatch(ctx, userID, novelID, indices)
+		if unlocked {
+			_ = s.cache.SetChapterUnlocked(ctx, userID, novelID, chapterIndex)
 		}
-		return indices, nil
-	})
-
-	if errUnlock != nil {
-		return nil, errUnlock
 	}
-
-	dbUnlocked := slices.Contains(valUnlock.([]int), chapterIndex)
-	if dbUnlocked {
+	if unlocked {
 		clone := *ch
 		clone.IsPaid = true
 		clone.Price = price

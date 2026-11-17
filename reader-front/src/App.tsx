@@ -108,9 +108,9 @@ function AppContent() {
 
   const [unlockedBookChapters, setUnlockedBookChapters] = useState<string[]>([]);
   const [transactionHistory, setTransactionHistory] = useState<Transaction[]>([]);
-  const [transactionsPage, setTransactionsPage] = useState(1);
-  const [hasMoreTransactions, setHasMoreTransactions] = useState(false);
+  const [nextTransactionCursor, setNextTransactionCursor] = useState<string>();
   const [loadingMoreTransactions, setLoadingMoreTransactions] = useState(false);
+  const transactionRequest = useRef<AbortController | null>(null);
 
   const syncTimeouts = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const guestLoginPromiseRef = useRef<Promise<string | null> | null>(null);
@@ -151,13 +151,18 @@ function AppContent() {
   }, [themePreference]);
 
   const reloadWalletAndShelf = useCallback(async () => {
+    transactionRequest.current?.abort();
+    const controller = new AbortController();
+    transactionRequest.current = controller;
+    setLoadingMoreTransactions(false);
     try {
       const [balance, shelfItems, txs, subStatus] = await Promise.all([
         api.getWalletBalance(),
         api.getShelf().then((res) => res || []),
-        api.getTransactionHistory(1, TX_PAGE_SIZE).then((res) => res || []),
+        api.getTransactionHistory(TX_PAGE_SIZE, undefined, controller.signal),
         api.getSubscriptionStatus().catch(() => null),
       ]);
+      if (controller.signal.aborted) return;
 
       setChargedCoins(balance.charged_coins);
       setBonusCoins(balance.bonus_coins);
@@ -175,40 +180,42 @@ function AppContent() {
       });
       setReadingProgress(progressMap);
 
-      setTransactionHistory(txs);
-      setTransactionsPage(1);
-      setHasMoreTransactions(txs.length >= TX_PAGE_SIZE);
+      setTransactionHistory(txs.items);
+      setNextTransactionCursor(txs.next_cursor);
 
       if (subStatus) {
         setIsVip(Boolean(subStatus.is_vip));
         setSubscription(subStatus.subscription);
       }
     } catch (err) {
-      console.error('Failed to load shelf or wallet info:', err);
+      if (!controller.signal.aborted) console.error('Failed to load shelf or wallet info:', err);
     } finally {
-      setShelfLoading(false);
+      if (transactionRequest.current === controller) {
+        transactionRequest.current = null;
+        setShelfLoading(false);
+      }
     }
   }, []);
 
   const handleLoadMoreTransactions = useCallback(async () => {
-    if (loadingMoreTransactions || !hasMoreTransactions) return;
+    if (!nextTransactionCursor || transactionRequest.current) return;
+    const controller = new AbortController();
+    transactionRequest.current = controller;
     setLoadingMoreTransactions(true);
     try {
-      const nextPage = transactionsPage + 1;
-      const batch = (await api.getTransactionHistory(nextPage, TX_PAGE_SIZE)) || [];
-      setTransactionHistory((prev) => {
-        const seen = new Set(prev.map((t) => t.id));
-        const unique = batch.filter((t) => !seen.has(t.id));
-        return [...prev, ...unique];
-      });
-      setTransactionsPage(nextPage);
-      setHasMoreTransactions(batch.length >= TX_PAGE_SIZE);
+      const page = await api.getTransactionHistory(TX_PAGE_SIZE, nextTransactionCursor, controller.signal);
+      if (controller.signal.aborted) return;
+      setTransactionHistory((prev) => [...prev, ...page.items]);
+      setNextTransactionCursor(page.next_cursor);
     } catch (err) {
-      console.error('Failed to load more transactions:', err);
+      if (!controller.signal.aborted) console.error('Failed to load more transactions:', err);
     } finally {
-      setLoadingMoreTransactions(false);
+      if (transactionRequest.current === controller) {
+        transactionRequest.current = null;
+        setLoadingMoreTransactions(false);
+      }
     }
-  }, [loadingMoreTransactions, hasMoreTransactions, transactionsPage]);
+  }, [nextTransactionCursor]);
 
   const triggerGuestLogin = useCallback(async (): Promise<string | null> => {
     if (!guestLoginPromiseRef.current) {
@@ -699,7 +706,7 @@ function AppContent() {
                 isVip={isVip}
                 subscription={subscription}
                 transactionHistory={transactionHistory}
-                hasMoreTransactions={hasMoreTransactions}
+                hasMoreTransactions={Boolean(nextTransactionCursor)}
                 loadingMoreTransactions={loadingMoreTransactions}
                 onLoadMoreTransactions={handleLoadMoreTransactions}
                 currentUser={user}
@@ -707,6 +714,8 @@ function AppContent() {
                 systemTheme={systemTheme}
                 onThemePreferenceChange={setThemePreference}
                 onLoginSuccess={async (token, u) => {
+                  setTransactionHistory([]);
+                  setNextTransactionCursor(undefined);
                   localStorage.setItem('auth-token', token);
                   setUser(u);
                   setShelfLoading(true);
@@ -715,6 +724,8 @@ function AppContent() {
                 }}
                 onLogout={async () => {
                   await api.logout();
+                  transactionRequest.current?.abort();
+                  transactionRequest.current = null;
                   localStorage.removeItem('auth-token');
                   setUser(null);
                   setShelfBookIds([]);
@@ -726,7 +737,8 @@ function AppContent() {
                   setIsVip(false);
                   setSubscription(null);
                   setTransactionHistory([]);
-                  setHasMoreTransactions(false);
+                  setNextTransactionCursor(undefined);
+                  setLoadingMoreTransactions(false);
                   setUnlockedBookChapters([]);
                   setShelfLoading(true);
                   triggerGuestLogin();

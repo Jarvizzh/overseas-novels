@@ -932,26 +932,38 @@ func parseChaptersFromSingleTXT(rawData []byte, delimiterRegex string) ([]zipFil
 
 func (s *novelService) BulkImportChapters(ctx context.Context, novelID int64, zipData []byte, importType string, delimiterRegex string) (*BulkImportResult, error) {
 	novel, err := s.repo.GetNovel(ctx, novelID)
-	if err != nil || novel == nil {
+	if err != nil {
+		return nil, err
+	}
+	if novel == nil {
 		return nil, ErrNovelNotFound
 	}
 
 	var configs map[string]string
 	if novel.CoinCostPerThousand == nil || novel.StartPayChapterIndex <= 0 {
-		configs, _ = s.repo.GetSettings(ctx)
+		configs, err = s.repo.GetSettings(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("read import pricing settings: %w", err)
+		}
 	}
 
 	costPerThousand := 500
 	if novel.CoinCostPerThousand != nil {
 		costPerThousand = *novel.CoinCostPerThousand
 	} else if val, ok := configs["global_coin_cost_per_thousand"]; ok {
-		_, _ = fmt.Sscanf(val, "%d", &costPerThousand)
+		costPerThousand, err = validateSettingInt(val, 0, "global_coin_cost_per_thousand")
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	startPay := novel.StartPayChapterIndex
 	if startPay <= 0 {
 		if val, ok := configs["global_start_pay_chapter_index"]; ok {
-			_, _ = fmt.Sscanf(val, "%d", &startPay)
+			startPay, err = validateSettingInt(val, 1, "global_start_pay_chapter_index")
+			if err != nil {
+				return nil, err
+			}
 		}
 		if startPay <= 0 {
 			startPay = 3

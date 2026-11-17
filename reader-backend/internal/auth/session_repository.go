@@ -12,7 +12,8 @@ type sessionRepository struct{}
 func (sessionRepository) save(ctx context.Context, hash string, userID int64) error {
 	_, err := db.DB.Exec(ctx, `WITH expired AS (
  DELETE FROM reader_sessions WHERE token_hash IN (
-  SELECT token_hash FROM reader_sessions WHERE expires_at<=now() LIMIT 100
+  SELECT token_hash FROM reader_sessions WHERE expires_at<=now()
+  ORDER BY expires_at LIMIT 100 FOR UPDATE SKIP LOCKED
  )
 ) INSERT INTO reader_sessions(token_hash,user_id,expires_at)
 VALUES($1,$2,now()+interval '180 days')`, hash, userID)

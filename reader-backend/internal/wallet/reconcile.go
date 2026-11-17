@@ -9,19 +9,25 @@ import (
 	"sync"
 	"time"
 
+	"reader-backend/internal/config"
 	"reader-backend/internal/model"
 	"reader-backend/internal/payment"
 )
 
 func (s *service) RunReconciliation(ctx context.Context) {
 	var workers sync.WaitGroup
-	for _, worker := range []struct {
+	type scheduledWorker struct {
 		run      func(context.Context)
 		interval time.Duration
-	}{
+	}
+	scheduled := []scheduledWorker{
 		{s.reconcilePaymentEvents, 15 * time.Second}, {s.reconcilePayPalEvents, 15 * time.Second}, {s.reconcilePayPalOrders, 15 * time.Second},
-		{s.reconcilePayPalCancellations, 15 * time.Second}, {s.reconcilePayPalSubscriptions, 15 * time.Second}, {s.observePaymentTasks, time.Minute},
-	} {
+		{s.reconcilePayPalCancellations, 15 * time.Second}, {s.reconcilePayPalSubscriptions, 15 * time.Second},
+	}
+	if config.AppConfig.PaymentTaskMetrics {
+		scheduled = append(scheduled, scheduledWorker{s.observePaymentTasks, time.Minute})
+	}
+	for _, worker := range scheduled {
 		workers.Go(func() {
 			ticker := time.NewTicker(worker.interval)
 			defer ticker.Stop()

@@ -29,6 +29,7 @@ type Repository interface {
 	getPayPalBillingSnapshot(context.Context, string, time.Time, string, int64) (time.Time, error)
 	GetWallet(ctx context.Context, userID int64) (*model.Wallet, error)
 	GetTransactions(ctx context.Context, userID int64, limit, offset int) ([]model.Transaction, error)
+	getTransactionsAfter(ctx context.Context, userID int64, limit int, after *historyCursor) ([]model.Transaction, error)
 	UnlockChapterTx(ctx context.Context, userID int64, novelID int64, chapterIndex int, price int, chapterTitle string) error
 	AddCoins(ctx context.Context, userID int64, amount int, isBonus bool, bizType string, description string) error
 	CheckIn(context.Context, int64, bool) (*CheckInState, error)
@@ -78,20 +79,36 @@ func (r *dbRepository) GetWallet(ctx context.Context, userID int64) (*model.Wall
 	return &w, nil
 }
 
-func (r *dbRepository) GetTransactions(ctx context.Context, userID int64, limit, offset int) ([]model.Transaction, error) {
-	query := `
-		SELECT id, user_id, type, biz_type, amount, charged_amount, bonus_amount, description, created_at
+// Treat missing historical timestamps as the oldest value, so every row has
+// a stable position in both offset and cursor pagination.
+const transactionDate = `COALESCE(created_at, TIMESTAMPTZ '0001-01-01 00:00:00+00')`
+const transactionHistorySelect = `
+		SELECT id, user_id, type, biz_type, amount, COALESCE(charged_amount,0), COALESCE(bonus_amount,0),
+		       COALESCE(description,''), ` + transactionDate + `
 		FROM transactions
-		WHERE user_id = $1
-		ORDER BY created_at DESC
-		LIMIT $2 OFFSET $3`
-	rows, err := db.DB.Query(ctx, query, userID, limit, offset)
+		WHERE user_id = $1`
+const transactionHistoryOrder = ` ORDER BY ` + transactionDate + ` DESC, id DESC LIMIT $2`
+
+func (r *dbRepository) GetTransactions(ctx context.Context, userID int64, limit, offset int) ([]model.Transaction, error) {
+	return queryTransactions(ctx, transactionHistorySelect+transactionHistoryOrder+` OFFSET $3`, userID, limit, offset)
+}
+
+func (r *dbRepository) getTransactionsAfter(ctx context.Context, userID int64, limit int, after *historyCursor) ([]model.Transaction, error) {
+	if after == nil {
+		return queryTransactions(ctx, transactionHistorySelect+transactionHistoryOrder, userID, limit)
+	}
+	return queryTransactions(ctx, transactionHistorySelect+` AND (`+transactionDate+`, id) < ($3::timestamptz, $4::varchar)`+transactionHistoryOrder,
+		userID, limit, after.createdAt, after.id)
+}
+
+func queryTransactions(ctx context.Context, query string, args ...any) ([]model.Transaction, error) {
+	rows, err := db.DB.Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	var txs []model.Transaction
+	txs := make([]model.Transaction, 0)
 	for rows.Next() {
 		var t model.Transaction
 		err = rows.Scan(
