@@ -24,6 +24,8 @@ func (h *Handler) RegisterRoutes(r *gin.RouterGroup) {
 	shelfGroup := r.Group("/shelf", auth.AuthMiddleware())
 	{
 		shelfGroup.GET("", h.GetShelf)
+		shelfGroup.GET("/cursor", h.GetShelfPage)
+		shelfGroup.GET("/ids", h.GetShelfIDs)
 		shelfGroup.GET("/progress/:novel_id", h.GetProgress)
 		shelfGroup.POST("/add", h.AddToShelf)
 		shelfGroup.POST("/remove", h.RemoveFromShelf)
@@ -46,8 +48,7 @@ func (h *Handler) GetShelf(c *gin.Context) {
 
 func (h *Handler) GetProgress(c *gin.Context) {
 	userID := c.MustGet("user_id").(int64)
-	if c.Query("user_id") != strconv.FormatInt(userID, 10) {
-		httpx.Fail(c, http.StatusConflict, "account_changed", "Reading progress belongs to a different account", nil)
+	if !verifyShelfAccount(c, userID) {
 		return
 	}
 	novelID, err := strconv.ParseInt(c.Param("novel_id"), 10, 32)
@@ -60,8 +61,52 @@ func (h *Handler) GetProgress(c *gin.Context) {
 		httpx.Fail(c, http.StatusInternalServerError, "internal_error", "Failed to load reading progress", err)
 		return
 	}
-	c.Header("Cache-Control", "private, no-store")
 	c.JSON(http.StatusOK, progress)
+}
+
+func verifyShelfAccount(c *gin.Context, userID int64) bool {
+	c.Header("Cache-Control", "private, no-store")
+	if c.Query("user_id") != strconv.FormatInt(userID, 10) {
+		httpx.Fail(c, http.StatusConflict, "account_changed", "Reading library belongs to a different account", nil)
+		return false
+	}
+	return true
+}
+
+func (h *Handler) GetShelfPage(c *gin.Context) {
+	userID := c.MustGet("user_id").(int64)
+	if !verifyShelfAccount(c, userID) {
+		return
+	}
+	limit, err := strconv.Atoi(c.DefaultQuery("limit", "20"))
+	if err != nil || limit < 1 || limit > httpx.MaxPageSize {
+		httpx.Fail(c, http.StatusBadRequest, "invalid_pagination", "Page size must be 1–100", nil)
+		return
+	}
+	after, err := parseShelfCursor(c.Query("cursor"))
+	if err != nil {
+		httpx.Fail(c, http.StatusBadRequest, "invalid_cursor", "Invalid library cursor", nil)
+		return
+	}
+	page, err := h.service.GetShelfPage(c.Request.Context(), userID, limit, after)
+	if err != nil {
+		httpx.Fail(c, http.StatusInternalServerError, "internal_error", "Failed to load library", err)
+		return
+	}
+	c.JSON(http.StatusOK, page)
+}
+
+func (h *Handler) GetShelfIDs(c *gin.Context) {
+	userID := c.MustGet("user_id").(int64)
+	if !verifyShelfAccount(c, userID) {
+		return
+	}
+	ids, err := h.service.GetShelfIDs(c.Request.Context(), userID)
+	if err != nil {
+		httpx.Fail(c, http.StatusInternalServerError, "internal_error", "Failed to load library", err)
+		return
+	}
+	c.JSON(http.StatusOK, ids)
 }
 
 type AddRequest struct {

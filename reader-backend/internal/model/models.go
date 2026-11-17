@@ -67,7 +67,8 @@ type Bookshelf struct {
 
 type BookshelfWithNovel struct {
 	Bookshelf
-	Novel Novel `json:"novel"`
+	Novel      Novel     `json:"novel"`
+	ActivityAt time.Time `json:"-"`
 }
 
 // Wallet represents a user's coins balance

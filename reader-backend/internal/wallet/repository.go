@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"fmt"
 	"math"
 	"time"
 
@@ -520,12 +519,15 @@ func (r *dbRepository) GetSubscriptionByID(ctx context.Context, subID string) (*
 }
 
 func (r *dbRepository) UpdateUserSubscriptionStatus(ctx context.Context, subID string, status string) error {
-	var cancelQuery string
-	if status == "CANCELLED" {
-		cancelQuery = ", cancelled_at = COALESCE(cancelled_at, CURRENT_TIMESTAMP), next_billing_time = NULL, cancel_next_attempt_at=NULL, cancel_last_error=NULL"
-	}
-	query := fmt.Sprintf("UPDATE user_subscriptions SET status = $1, updated_at = CURRENT_TIMESTAMP %s WHERE subscription_id = $2 AND (status <> 'CANCELLED' OR $1='CANCELLED')  AND (status <> 'CANCEL_PENDING' OR $1 IN ('CANCELLED','EXPIRED'))", cancelQuery)
-	_, err := db.Pool(ctx).Exec(ctx, query, status, subID)
+	_, err := db.Pool(ctx).Exec(ctx, `UPDATE user_subscriptions SET status=$1,updated_at=now(),
+		cancelled_at=CASE WHEN $1='CANCELLED' THEN COALESCE(cancelled_at,now()) ELSE cancelled_at END,
+		next_billing_time=CASE WHEN $1='CANCELLED' THEN NULL ELSE next_billing_time END,
+		cancel_next_attempt_at=CASE WHEN $1='CANCELLED' THEN NULL ELSE cancel_next_attempt_at END,
+		cancel_last_error=CASE WHEN $1='CANCELLED' THEN NULL ELSE cancel_last_error END
+		WHERE subscription_id=$2 AND (status<>'CANCELLED' OR $1='CANCELLED')
+		AND (status<>'CANCEL_PENDING' OR $1 IN ('CANCELLED','EXPIRED'))
+		AND (status<>$1 OR ($1='CANCELLED' AND (cancelled_at IS NULL OR next_billing_time IS NOT NULL
+		     OR cancel_next_attempt_at IS NOT NULL OR cancel_last_error IS NOT NULL)))`, status, subID)
 	return err
 }
 

@@ -62,15 +62,28 @@ func claimPayPalCancellations(ctx context.Context) ([]paypalCancellation, error)
 	})
 }
 
+const (
+	paypalSubscription     = `payment_method='paypal' AND subscription_id NOT LIKE 'I-MOCK%'`
+	continuousSubscription = `(status IN ('ACTIVE','SUSPENDED','CANCEL_PENDING') OR paypal_recovery_requested)`
+	recentSubscription     = `NOT ` + continuousSubscription + ` AND paypal_status_changed_at > now()-interval '30 days'`
+	subscriptionCheckAt    = `COALESCE(paypal_next_check_at,created_at)`
+	subscriptionDue        = paypalSubscription + ` AND ` + subscriptionCheckAt + `<=now() AND `
+)
+
 func claimPayPalSubscriptions(ctx context.Context) ([]subscriptionJob, error) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	rows, err := db.Pool(ctx).Query(ctx, `WITH due AS (
-		SELECT id FROM user_subscriptions WHERE payment_method='paypal'
-		AND subscription_id NOT LIKE 'I-MOCK%'
-		AND (status IN ('ACTIVE','SUSPENDED','CANCEL_PENDING') OR updated_at>now()-interval '30 days' OR paypal_recovery_requested)
-		AND COALESCE(paypal_next_check_at,created_at)<=now()
-		ORDER BY COALESCE(paypal_next_check_at,created_at),id LIMIT 5 FOR UPDATE SKIP LOCKED
+	rows, err := db.Pool(ctx).Query(ctx, `WITH continuous AS (
+		SELECT id, `+subscriptionCheckAt+` AS due_at FROM user_subscriptions
+		WHERE `+subscriptionDue+continuousSubscription+`
+		ORDER BY due_at,id LIMIT 5 FOR UPDATE SKIP LOCKED
+	), recent AS (
+		SELECT id, `+subscriptionCheckAt+` AS due_at FROM user_subscriptions
+		WHERE `+subscriptionDue+recentSubscription+`
+		ORDER BY due_at,id LIMIT 5 FOR UPDATE SKIP LOCKED
+	), due AS (
+		SELECT id FROM (SELECT * FROM continuous UNION ALL SELECT * FROM recent) candidates
+		ORDER BY due_at,id LIMIT 5
 	)
 	UPDATE user_subscriptions s SET paypal_next_check_at=now()+interval '15 minutes',paypal_check_attempts=s.paypal_check_attempts+1
 	FROM due WHERE s.id=due.id RETURNING s.subscription_id,

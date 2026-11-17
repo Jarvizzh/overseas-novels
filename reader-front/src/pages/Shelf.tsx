@@ -5,9 +5,13 @@ import type { Novel } from '../utils/api';
 interface ShelfProps {
   novels: Novel[];
   loading?: boolean;
+  loadingMore: boolean;
+  hasMore: boolean;
+  pageFailed: boolean;
+  editing: boolean;
+  onLoadMore: () => void;
   onNavigate: (page: string, params?: Record<string, unknown>) => void;
-  shelfBookIds: number[];
-  onRemoveFromShelf: (bookIds: number[]) => void;
+  onRemoveFromShelf: (bookIds: number[]) => Promise<boolean>;
   readingProgress: {
     [bookId: number]: {
       chapterIndex: number;
@@ -19,15 +23,17 @@ interface ShelfProps {
 export const Shelf: React.FC<ShelfProps> = ({
   novels,
   loading = false,
+  loadingMore,
+  hasMore,
+  pageFailed,
+  editing,
+  onLoadMore,
   onNavigate,
-  shelfBookIds,
   onRemoveFromShelf,
   readingProgress,
 }) => {
   const [isEditMode, setIsEditMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<number[]>([]);
-
-  const shelfNovels = novels.filter((n) => shelfBookIds.includes(n.id));
 
   const handleToggleSelect = (id: number) => {
     setSelectedIds((prev) =>
@@ -35,11 +41,12 @@ export const Shelf: React.FC<ShelfProps> = ({
     );
   };
 
-  const handleDeleteSelected = () => {
-    if (selectedIds.length === 0) return;
-    onRemoveFromShelf(selectedIds);
-    setSelectedIds([]);
-    setIsEditMode(false);
+  const handleDeleteSelected = async () => {
+    if (editing || selectedIds.length === 0) return;
+    if (await onRemoveFromShelf(selectedIds)) {
+      setSelectedIds([]);
+      setIsEditMode(false);
+    }
   };
 
   const handleCancelEdit = () => {
@@ -52,7 +59,7 @@ export const Shelf: React.FC<ShelfProps> = ({
       <div className="sn-shell-container">
         <div className="shelf-header">
           <h2 className="shelf-title">My Library</h2>
-          {shelfNovels.length > 0 && (
+          {novels.length > 0 && (
             <button
               type="button"
               onClick={isEditMode ? handleCancelEdit : () => setIsEditMode(true)}
@@ -71,14 +78,14 @@ export const Shelf: React.FC<ShelfProps> = ({
           )}
         </div>
 
-        {loading && shelfNovels.length === 0 ? (
+        {loading && novels.length === 0 ? (
           <div className="shelf-empty-state">
             <div className="sn-spinner" />
             <p style={{ fontSize: '0.875rem', marginTop: '8px' }}>Loading your library...</p>
           </div>
-        ) : shelfNovels.length > 0 ? (
+        ) : novels.length > 0 ? (
           <div className="shelf-grid">
-            {shelfNovels.map((novel) => {
+            {novels.map((novel) => {
               const progress = readingProgress[novel.id];
               const isSelected = selectedIds.includes(novel.id);
 
@@ -141,7 +148,7 @@ export const Shelf: React.FC<ShelfProps> = ({
               );
             })}
           </div>
-        ) : (
+        ) : pageFailed ? null : (
           <div className="shelf-empty-state">
             <div className="shelf-empty-icon-wrap">
               <BookOpen size={26} strokeWidth={1.65} aria-hidden="true" />
@@ -163,6 +170,22 @@ export const Shelf: React.FC<ShelfProps> = ({
           </div>
         )}
 
+        <div role="status">{pageFailed && !loadingMore ? 'Could not load your library.' : ''}</div>
+        {(hasMore || pageFailed) && (
+          <div style={{ display: 'flex', justifyContent: 'center', marginTop: '20px' }}>
+            <button
+              type="button"
+              className="btn-cta-secondary"
+              aria-disabled={loadingMore || editing}
+              onClick={() => {
+                if (!loadingMore && !editing) onLoadMore();
+              }}
+            >
+              {loadingMore ? 'Loading…' : pageFailed ? 'Try Again' : 'Load More Books'}
+            </button>
+          </div>
+        )}
+
         {isEditMode && (
           <div className="shelf-edit-bar glass-panel animate-slide-up">
             <span style={{ fontSize: '0.875rem', fontWeight: 600, color: 'var(--text-primary)' }} className="tabular-nums">
@@ -172,7 +195,7 @@ export const Shelf: React.FC<ShelfProps> = ({
               type="button"
               className="shelf-edit-btn-delete"
               onClick={handleDeleteSelected}
-              disabled={selectedIds.length === 0}
+              disabled={editing || selectedIds.length === 0}
               style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}
             >
               <Trash2 size={14} strokeWidth={2} aria-hidden="true" />

@@ -21,3 +21,8 @@ var ChapterPublicationSQL string
 //
 //go:embed migrations/2026111703.sql
 var ReaderPerformanceSQL string
+
+// ReaderQueueAndShelfSQL adds stable scheduling and payment task aggregates.
+//
+//go:embed migrations/2026111704.sql
+var ReaderQueueAndShelfSQL string

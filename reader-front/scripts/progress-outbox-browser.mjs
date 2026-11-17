@@ -69,6 +69,9 @@ const requests = [];
 const successful = [];
 let mode = 'success';
 let releaseRequest;
+const libraryIDs = new Set();
+let failLibraryPage = false;
+const libraryRequests = [];
 const novel = { id: 1, title: 'Outbox test', author: 'Author', cover: '', status: 'Ongoing',
   publish_status: 'published', synopsis: 'Test', genres: [], words: 20000, views: 0 };
 const chapters = Array.from({ length: 4 }, (_, index) => ({
@@ -116,10 +119,31 @@ try {
     if (path === '/api/v1/auth/refresh' || path === '/api/v1/auth/guest') return json({ token: 'u' + profile.id, user: profile });
     if (path === '/api/v1/wallet/balance') return json({ charged_coins: 100, bonus_coins: 0 });
     if (path.endsWith('/history/cursor')) return json({ items: [] });
-    if (path === '/api/v1/shelf') return json([]);
+    if (path === '/api/v1/shelf/ids') {
+      return Number(url.searchParams.get('user_id')) === user
+        ? json(user === 1 ? [...libraryIDs] : [])
+        : json({ code: 'account_changed' }, 409);
+    }
+    if (path === '/api/v1/shelf/cursor') {
+      if (Number(url.searchParams.get('user_id')) !== user) return json({ code: 'account_changed' }, 409);
+      const cursor = url.searchParams.get('cursor');
+      libraryRequests.push({ user, cursor });
+      if (cursor && failLibraryPage) {
+        failLibraryPage = false;
+        return json({ error: 'Temporary failure' }, 503);
+      }
+      const ids = user === 1 ? [...libraryIDs] : [];
+      const items = (cursor ? ids.slice(2) : ids.slice(0, 2)).map((id) => ({
+        user_id: user, novel_id: id, chapter_index: 0, scroll_offset_percentage: 0,
+        updated_at: '2026-01-01T00:00:00Z', progress_version: '1',
+        in_shelf: true, novel: { ...novel, id, title: 'Library Book ' + id },
+      }));
+      return json({ items, next_cursor: !cursor && ids.length > 2 ? 'test-second-page' : undefined });
+    }
     if (path === '/api/v1/novels') return json([novel]);
     if (path === '/api/v1/novels/1') return json(novel);
-    if (path === '/api/v1/novels/1/chapters') return json(chapters);
+    if (path === '/api/v1/novels/3') return json({ ...novel, id: 3, title: 'Library Book 3' });
+    if (path === '/api/v1/novels/1/chapters' || path === '/api/v1/novels/3/chapters') return json(chapters);
     if (path.startsWith('/api/v1/novels/1/chapters/')) {
       const chapter = chapters[Number(path.split('/').at(-1))];
       return chapter
@@ -309,6 +333,26 @@ try {
   await first.eval("window.dispatchEvent(new Event('online'))");
   await until(async () => (await entries(first, 1)).length === 0, 'remaining batches automatically drain');
   console.log('PASS partial-batch success clears only acknowledged versions');
+
+  for (const id of [1, 2, 3]) libraryIDs.add(id);
+  await navigate(first, '/detail?novel_id=3');
+  await until(() => first.eval("!!document.querySelector('button[aria-label=\"Remove from Library\"]')"), 'off-page library membership');
+  assert.equal(libraryRequests.length, 0, 'detail loads membership without fetching book cards');
+  await navigate(first, '/shelf');
+  await until(() => first.eval("document.querySelectorAll('.shelf-item').length === 2"), 'library first page');
+  failLibraryPage = true;
+  const clickLibraryPage = (label) => first.eval(`[...document.querySelectorAll('button')]
+    .find((button) => button.textContent.trim() === ${JSON.stringify(label)})?.click()`);
+  await clickLibraryPage('Load More Books');
+  await until(() => first.eval("document.querySelector('[role=status]')?.textContent.includes('Could not load your library')"), 'library pagination error');
+  assert.equal(await first.eval("document.querySelectorAll('.shelf-item').length"), 2);
+  await clickLibraryPage('Try Again');
+  await until(() => first.eval("document.querySelectorAll('.shelf-item').length === 3"), 'library next page');
+  assert.deepEqual(libraryRequests.map((entry) => entry.cursor), [null, 'test-second-page', 'test-second-page']);
+  await second.eval("localStorage.setItem('auth-token','u2')");
+  await until(() => first.eval("document.querySelector('.shelf-empty-state')?.textContent.includes('Your library is empty')"), 'account switch clears book cards');
+  assert.equal(libraryRequests.at(-1).user, 2);
+  console.log('PASS library membership, paginated retry and account switch');
 } finally {
   if (releaseRequest) releaseRequest();
   for (const client of clients) client.close();

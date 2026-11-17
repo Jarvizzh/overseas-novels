@@ -106,7 +106,7 @@ func CloseDB() {
 }
 
 // RequiredSchemaVersion is advanced with each reviewed unified schema release.
-const RequiredSchemaVersion int64 = 2026111703
+const RequiredSchemaVersion int64 = 2026111704
 
 func CheckSchema(ctx context.Context) error {
 	if DB == nil {

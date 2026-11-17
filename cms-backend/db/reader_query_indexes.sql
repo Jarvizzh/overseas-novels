@@ -4,6 +4,9 @@
 -- accepting them through CREATE INDEX IF NOT EXISTS.
 DO $$
 BEGIN
+    IF NOT EXISTS (SELECT 1 FROM reader_schema_migrations WHERE version = 2026111704) THEN
+        RAISE EXCEPTION 'Apply Reader schema migration 2026111704 before building query indexes';
+    END IF;
     IF EXISTS (
         SELECT FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid
         WHERE c.relnamespace = current_schema()::regnamespace
@@ -12,8 +15,10 @@ BEGIN
               'idx_orders_subscription_period', 'idx_whole_book_entitlement_v2',
               'idx_transactions_user_feed', 'idx_novels_reader_popular', 'idx_novels_reader_latest',
               'idx_payment_outbox_pending', 'idx_reader_sessions_user', 'idx_paypal_order_claim',
-              'idx_paypal_cancel_claim', 'idx_paypal_subscription_claim', 'idx_payment_order_attention',
-              'idx_reader_shelf_feed', 'idx_promotion_links_utm', 'idx_reader_paid_vip_expiry'
+              'idx_paypal_cancel_claim', 'idx_payment_order_attention',
+              'idx_promotion_links_utm', 'idx_reader_paid_vip_expiry',
+              'idx_paypal_subscription_continuous', 'idx_paypal_subscription_recent',
+              'idx_outbox_unattributed_oldest', 'idx_reader_shelf_activity'
           ])
     ) THEN
         RAISE EXCEPTION 'Invalid Reader query index exists. Inspect pg_index before retrying';
@@ -50,9 +55,18 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_paypal_cancel_claim
     ON user_subscriptions((COALESCE(cancel_next_attempt_at, updated_at)), id)
     WHERE status = 'CANCEL_PENDING' AND payment_method = 'paypal';
 
-CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_paypal_subscription_claim
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_paypal_subscription_continuous
     ON user_subscriptions((COALESCE(paypal_next_check_at, created_at)), id)
-    WHERE payment_method = 'paypal' AND subscription_id NOT LIKE 'I-MOCK%';
+    WHERE payment_method = 'paypal' AND subscription_id NOT LIKE 'I-MOCK%'
+      AND (status IN ('ACTIVE','SUSPENDED','CANCEL_PENDING') OR paypal_recovery_requested);
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_paypal_subscription_recent
+    ON user_subscriptions(paypal_status_changed_at, (COALESCE(paypal_next_check_at, created_at)))
+    WHERE payment_method = 'paypal' AND subscription_id NOT LIKE 'I-MOCK%'
+      AND NOT (status IN ('ACTIVE','SUSPENDED','CANCEL_PENDING') OR paypal_recovery_requested);
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_outbox_unattributed_oldest
+    ON payment_event_outbox(created_at) WHERE state = 'unattributed';
 
 CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_payment_order_attention
     ON recharge_orders(id)
@@ -60,8 +74,9 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_payment_order_attention
        OR (status = 'Pending' AND payment_method = 'paypal')
        OR (reconciliation_note IS NOT NULL AND status <> 'Refunded');
 
-CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_reader_shelf_feed
-    ON bookshelves(user_id, updated_at DESC, novel_id DESC) WHERE in_shelf = true;
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_reader_shelf_activity
+    ON bookshelves(user_id, (COALESCE(GREATEST(updated_at, shelf_added_at), TIMESTAMPTZ 'epoch')) DESC, novel_id DESC)
+    WHERE in_shelf = true;
 
 CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_promotion_links_utm ON promotion_links(utm_source, utm_campaign);
 

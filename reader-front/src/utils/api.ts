@@ -168,6 +168,13 @@ export interface BookshelfItem {
   novel: Novel;
 }
 
+export interface ShelfPage {
+  items: BookshelfItem[];
+  next_cursor?: string;
+}
+
+type ShelfRequestOptions = { authToken?: string; signal?: AbortSignal };
+
 export interface Wallet {
   user_id: number;
   charged_coins: number;
@@ -305,21 +312,29 @@ export const api = {
     request<ChapterContentResponse>(`/novels/${id}/chapters/${index}?user_id=${userId}`),
 
   // === SHELF ===
-  getShelf: () =>
-    request<BookshelfItem[]>('/shelf'),
+  getShelfIDs: (userId: number, options: ShelfRequestOptions) =>
+    request<number[]>(`/shelf/ids?user_id=${userId}`, { ...options, cache: 'no-store' }),
+
+  getShelfPage: (userId: number, cursor: string | undefined, options: ShelfRequestOptions) => {
+    const query = new URLSearchParams({ user_id: String(userId) });
+    if (cursor) query.set('cursor', cursor);
+    return request<ShelfPage>(`/shelf/cursor?${query}`, { ...options, cache: 'no-store' });
+  },
 
   getProgress: (novelId: number, userId: number, signal?: AbortSignal, authToken?: string) =>
     request<SavedProgress | null>(`/shelf/progress/${novelId}?user_id=${userId}`, { signal, authToken, cache: 'no-store' }),
 
-  addToShelf: (novelId: number) =>
+  addToShelf: (novelId: number, options: ShelfRequestOptions = {}) =>
     request<{ message: string }>('/shelf/add', {
+      ...options,
       method: 'POST',
       body: JSON.stringify({ novel_id: novelId }),
     }),
 
-  removeFromShelf: (novelIds: number[]) =>
+  removeFromShelf: (novelIds: number[], options: ShelfRequestOptions = {}) =>
     sendShelfBatches(novelIds, (batch) =>
       request<{ message: string }>('/shelf/remove', {
+        ...options,
         method: 'POST',
         body: JSON.stringify({ novel_ids: batch }),
       }),

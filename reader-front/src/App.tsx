@@ -15,6 +15,7 @@ import { Recharge } from './pages/Recharge';
 import { api, registerSessionRefreshHandler } from './utils/api';
 import type { Novel, User, Transaction, SubscriptionInfo, SavedProgress } from './utils/api';
 import { useProgressOutbox } from './utils/useProgressOutbox';
+import { useShelf } from './utils/useShelf';
 import { withRequestTimeout } from './utils/requestTimeout';
 import { ToastProvider } from './context/ToastContext';
 import { ConfirmProvider } from './context/ConfirmContext';
@@ -92,10 +93,6 @@ function AppContent() {
   const [hasMoreNovels, setHasMoreNovels] = useState(false);
   const [loadingMoreNovels, setLoadingMoreNovels] = useState(false);
 
-  const [shelfLoading, setShelfLoading] = useState(true);
-  const [shelfBookIds, setShelfBookIds] = useState<number[]>([]);
-  const [shelfNovelsList, setShelfNovelsList] = useState<Novel[]>([]);
-
   type ReadingPosition = {
     chapterIndex: number;
     scrollOffsetPercentage: number;
@@ -126,6 +123,8 @@ function AppContent() {
       return { ...previous, [userId]: { ...owner, [entry.novel_id]: position } };
     });
   }, []);
+
+  const shelf = useShelf(user?.id, session?.token, location.pathname === '/shelf', mergePosition);
 
   const [themePreference, setThemePreference] = useState<ThemePreference>(getStoredThemePreference);
   const [systemTheme, setSystemTheme] = useState<'light' | 'dark'>(getSystemTheme);
@@ -176,15 +175,14 @@ function AppContent() {
     applyThemePreference(themePreference);
   }, [themePreference]);
 
-  const reloadWalletAndShelf = useCallback(async () => {
+  const reloadWallet = useCallback(async () => {
     transactionRequest.current?.abort();
     const controller = new AbortController();
     transactionRequest.current = controller;
     setLoadingMoreTransactions(false);
     try {
-      const [balance, shelfItems, txs, subStatus] = await Promise.all([
+      const [balance, txs, subStatus] = await Promise.all([
         api.getWalletBalance(),
-        api.getShelf().then((res) => res || []),
         api.getTransactionHistory(TX_PAGE_SIZE, undefined, controller.signal),
         api.getSubscriptionStatus().catch(() => null),
       ]);
@@ -194,13 +192,6 @@ function AppContent() {
       setBonusCoins(balance.bonus_coins);
       setUserCoins(balance.charged_coins + balance.bonus_coins);
 
-      setShelfBookIds(shelfItems.map((item) => item.novel_id));
-      setShelfNovelsList(shelfItems.map((item) => item.novel).filter(Boolean));
-
-      for (const item of shelfItems) {
-        mergePosition(item.user_id, { ...item, version: item.progress_version });
-      }
-
       setTransactionHistory(txs.items);
       setNextTransactionCursor(txs.next_cursor);
 
@@ -209,14 +200,13 @@ function AppContent() {
         setSubscription(subStatus.subscription);
       }
     } catch (err) {
-      if (!controller.signal.aborted) console.error('Failed to load shelf or wallet info:', err);
+      if (!controller.signal.aborted) console.error('Failed to load wallet info:', err);
     } finally {
       if (transactionRequest.current === controller) {
         transactionRequest.current = null;
-        setShelfLoading(false);
       }
     }
-  }, [mergePosition]);
+  }, []);
 
   const handleLoadMoreTransactions = useCallback(async () => {
     if (!nextTransactionCursor || transactionRequest.current) return;
@@ -259,11 +249,10 @@ function AppContent() {
           }
           localStorage.setItem('auth-token', res.token);
           setSession({ user: res.user, token: res.token });
-          await reloadWalletAndShelf();
+          await reloadWallet();
           return res.token;
         } catch (err) {
           console.error('Guest login failed:', err);
-          setShelfLoading(false);
           return null;
         } finally {
           guestLoginPromiseRef.current = null;
@@ -271,7 +260,7 @@ function AppContent() {
       })();
     }
     return guestLoginPromiseRef.current;
-  }, [reloadWalletAndShelf]);
+  }, [reloadWallet]);
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -338,7 +327,7 @@ function AppContent() {
           const u = await api.getProfile();
           if (!disposed && localStorage.getItem('auth-token') === tokenBefore) {
             setSession({ user: u, token: tokenBefore });
-            await reloadWalletAndShelf();
+            await reloadWallet();
           }
         } catch (err) {
           console.error('Auth init failed, fallback to guest:', err);
@@ -375,7 +364,7 @@ function AppContent() {
       window.removeEventListener('online', initAuth);
       registerSessionRefreshHandler(null);
     };
-  }, [triggerGuestLogin, reloadWalletAndShelf]);
+  }, [triggerGuestLogin, reloadWallet]);
 
   useEffect(() => {
     let request: AbortController | undefined;
@@ -385,8 +374,6 @@ function AppContent() {
       if (!event.newValue) {
         transactionRequest.current?.abort();
         setSession(null);
-        setShelfBookIds([]);
-        setShelfNovelsList([]);
         setUserCoins(0);
         setChargedCoins(0);
         setBonusCoins(0);
@@ -395,7 +382,6 @@ function AppContent() {
         setTransactionHistory([]);
         setNextTransactionCursor(undefined);
         setLoadingMoreTransactions(false);
-        setShelfLoading(false);
         return;
       }
       const token = event.newValue;
@@ -404,7 +390,7 @@ function AppContent() {
       void api.getProfile(controller.signal, token).then((profile) => {
         if (controller.signal.aborted || localStorage.getItem('auth-token') !== token) return;
         setSession({ user: profile, token });
-        void reloadWalletAndShelf();
+        void reloadWallet();
       }).catch(() => {});
     };
     window.addEventListener('storage', onAccountChange);
@@ -412,7 +398,7 @@ function AppContent() {
       request?.abort();
       window.removeEventListener('storage', onAccountChange);
     };
-  }, [reloadWalletAndShelf]);
+  }, [reloadWallet]);
 
   useEffect(() => {
     if (location.pathname === '/content' || location.pathname === '/detail') {
@@ -529,56 +515,6 @@ function AppContent() {
     }
   }, [loadingMoreNovels, hasMoreNovels, novelsPage]);
 
-  const handleToggleShelf = useCallback(
-    async (bookId: number) => {
-      const inShelf = shelfBookIds.includes(bookId);
-      if (inShelf) {
-        const prevIds = shelfBookIds;
-        const prevList = shelfNovelsList;
-        setShelfBookIds((prev) => prev.filter((id) => id !== bookId));
-        setShelfNovelsList((list) => list.filter((n) => n.id !== bookId));
-        try {
-          await api.removeFromShelf([bookId]);
-        } catch (err) {
-          console.error('Failed to remove from shelf:', err);
-          setShelfBookIds(prevIds);
-          setShelfNovelsList(prevList);
-        }
-        return;
-      }
-
-      setShelfBookIds((prev) => (prev.includes(bookId) ? prev : [...prev, bookId]));
-      const known = novels.find((n) => n.id === bookId) || latestNovels.find((n) => n.id === bookId);
-      if (known) {
-        setShelfNovelsList((list) => (list.some((n) => n.id === bookId) ? list : [known, ...list]));
-      }
-      try {
-        await api.addToShelf(bookId);
-        if (!known) {
-          const detail = await api.getNovelDetail(bookId);
-          if (detail) {
-            setShelfNovelsList((list) => (list.some((n) => n.id === bookId) ? list : [detail, ...list]));
-          }
-        }
-      } catch (err) {
-        console.error('Failed to add to shelf:', err);
-        setShelfBookIds((prev) => prev.filter((id) => id !== bookId));
-        setShelfNovelsList((list) => list.filter((n) => n.id !== bookId));
-      }
-    },
-    [shelfBookIds, shelfNovelsList, novels, latestNovels]
-  );
-
-  const handleRemoveMultipleFromShelf = useCallback(async (bookIds: number[]) => {
-    try {
-      await api.removeFromShelf(bookIds);
-      setShelfBookIds((prev) => prev.filter((id) => !bookIds.includes(id)));
-      setShelfNovelsList((prev) => prev.filter((n) => !bookIds.includes(n.id)));
-    } catch (err) {
-      console.error('Failed to remove multiple books:', err);
-    }
-  }, []);
-
   const handleSaveProgress = useCallback(
     (bookId: number, chapterIndex: number, scrollOffsetPercentage: number, paragraphIndex?: number) => {
       if (!user?.id) return;
@@ -594,9 +530,9 @@ function AppContent() {
 
   const handleAddCoins = useCallback(
     async (_amount: number, _reason: string) => {
-      await reloadWalletAndShelf();
+      await reloadWallet();
     },
-    [reloadWalletAndShelf]
+    [reloadWallet]
   );
 
   const markChapterUnlocked = useCallback(
@@ -629,10 +565,10 @@ function AppContent() {
     async (bookId: number, chapterIndex: number, price: number, chapterId: string, version: number): Promise<boolean> => {
       if (!session || localStorage.getItem('auth-token') !== session.token) return false;
       await api.unlockChapter(bookId, chapterIndex, price, chapterId, version, session.user.id, session.token);
-      await reloadWalletAndShelf();
+      await reloadWallet();
       return true;
     },
-    [reloadWalletAndShelf, session]
+    [reloadWallet, session]
   );
 
   const getActiveTab = (): NavTabType | null => {
@@ -783,11 +719,16 @@ function AppContent() {
             path="/shelf"
             element={
               <Shelf
-                novels={shelfNovelsList}
-                loading={shelfLoading}
+                key={user?.id}
+                novels={shelf.novels}
+                loading={!authReady || shelf.initialLoading}
+                loadingMore={shelf.loadingMore}
+                hasMore={shelf.hasMore}
+                pageFailed={shelf.pageFailed}
+                editing={shelf.editing}
+                onLoadMore={shelf.loadMore}
                 onNavigate={navigateTo}
-                shelfBookIds={shelfBookIds}
-                onRemoveFromShelf={handleRemoveMultipleFromShelf}
+                onRemoveFromShelf={shelf.remove}
                 readingProgress={readingProgress}
               />
             }
@@ -797,7 +738,7 @@ function AppContent() {
             path="/profile"
             element={
               <Profile
-                shelfBookIds={shelfBookIds}
+                shelfBookIds={shelf.ids}
                 onNavigate={navigateTo}
                 userCoins={userCoins}
                 chargedCoins={chargedCoins}
@@ -817,8 +758,7 @@ function AppContent() {
                   setNextTransactionCursor(undefined);
                   localStorage.setItem('auth-token', token);
                   setSession({ user: u, token });
-                  setShelfLoading(true);
-                  await reloadWalletAndShelf();
+                  await reloadWallet();
                   navigateTo('profile');
                 }}
                 onLogout={async () => {
@@ -827,8 +767,6 @@ function AppContent() {
                   transactionRequest.current = null;
                   localStorage.removeItem('auth-token');
                   setSession(null);
-                  setShelfBookIds([]);
-                  setShelfNovelsList([]);
                   setPositions({});
                   setUserCoins(0);
                   setChargedCoins(0);
@@ -839,7 +777,6 @@ function AppContent() {
                   setNextTransactionCursor(undefined);
                   setLoadingMoreTransactions(false);
                   setUnlockedBookChapters([]);
-                  setShelfLoading(true);
                   triggerGuestLogin();
                 }}
               />
@@ -855,8 +792,8 @@ function AppContent() {
                 novels={novels}
                 onNavigate={navigateTo}
                 onBack={navigateBack}
-                shelfBookIds={shelfBookIds}
-                onToggleShelf={handleToggleShelf}
+                shelfBookIds={shelf.ids}
+                onToggleShelf={shelf.toggle}
                 readingProgress={readingProgress}
               />
             }
@@ -874,8 +811,8 @@ function AppContent() {
                 novels={novels}
                 onNavigate={navigateTo}
                 onSyncChapterUrl={syncReaderChapterUrl}
-                shelfBookIds={shelfBookIds}
-                onToggleShelf={handleToggleShelf}
+                shelfBookIds={shelf.ids}
+                onToggleShelf={shelf.toggle}
                 readingProgress={readingProgress}
                 onSaveProgress={handleSaveProgress}
                 unlockedBookChapters={unlockedBookChapters}
@@ -894,11 +831,11 @@ function AppContent() {
                 novelId={readerNovelId}
                 novelTitle={
                   novels.find((book) => book.id === readerNovelId)?.title ||
-                  shelfNovelsList.find((book) => book.id === readerNovelId)?.title
+                  shelf.novels.find((book) => book.id === readerNovelId)?.title
                 }
                 userCoins={userCoins}
                 onAddCoins={handleAddCoins}
-                onRefreshStatus={reloadWalletAndShelf}
+                onRefreshStatus={reloadWallet}
                 onBack={navigateBack}
                 onNavigate={navigateTo}
               />

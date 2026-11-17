@@ -116,7 +116,15 @@ flowchart TD
    ```bash
    docker run --rm --env-file cms-backend/.env star-cms-backend:latest -backfill-chapter-previews
    ```
-   检查回填结果后切换 Reader 流量。仍待回填的 OSS 章节会显示付费墙，已授权的读者仍能读取全文。PostgreSQL 正文可直接生成历史预览。有效 VIP 索引在数据库迁移完成后另用 `psql -X -v ON_ERROR_STOP=1 -f cms-backend/db/reader_query_indexes.sql` 连接同一个 RDS 业务库执行，脚本使用并发建索引。
+   检查回填结果后切换 Reader 流量。仍待回填的 OSS 章节会显示付费墙，已授权的读者仍能读取全文。PostgreSQL 正文可直接生成历史预览。
+
+   **订阅对账、监控和书架升级 `2026111704`**。先用新版 CMS 镜像运行 `-migrate`。迁移会回填订阅状态变更时间和无归因事件计数，安排维护窗口并停止支付写入和后台任务，按存量规模预演迁移耗时。迁移成功后，用同一个业务库单独执行并发索引脚本，然后发布 CMS、Reader API，最后发布 H5。
+
+   ```bash
+   psql -X -v ON_ERROR_STOP=1 -f cms-backend/db/reader_query_indexes.sql
+   ```
+
+   脚本需要自动提交。核对新索引的定义和有效性后，对 `user_subscriptions`、`payment_event_outbox`、`bookshelves` 更新统计信息。旧版的 `idx_paypal_subscription_claim`、`idx_reader_shelf_feed` 如已存在，可在升级完成并确认没有依赖后单独并发删除。新版本的任务汇总在同一数据库内每分钟最多采集一次，保留 `PAYMENT_TASK_METRICS_ENABLED` 实例开关和手工查询。
 
    Reader 单实例数据库连接默认前台 21、支付后台 4。可用 `READER_DB_FOREGROUND_MAX_CONNS` 和 `READER_DB_BACKGROUND_MAX_CONNS` 调整，按 Reader 实例数、CMS 和运维进程预留 RDS 总连接数。阅读请求和不同缓存回源的并发分别由 `READER_MAX_IN_FLIGHT_READS` 和 `READER_MAX_CONTENT_LOADS` 控制，默认 48 和 12。Reader 的 `/healthz` 提供两组池的累计等待、取消和使用量，数据库正常而 Redis 不可用时仍返回 200，由有界回源提供服务。CMS 的就绪检查使用现有依赖策略。
 

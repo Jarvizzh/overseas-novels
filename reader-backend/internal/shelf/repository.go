@@ -14,6 +14,8 @@ var ErrNovelUnavailable = errors.New("novel not found or unavailable")
 
 type Repository interface {
 	GetShelfItemsWithNovel(ctx context.Context, userID int64) ([]model.BookshelfWithNovel, error)
+	GetShelfPage(ctx context.Context, userID int64, limit int, after *shelfCursor) ([]model.BookshelfWithNovel, error)
+	GetShelfIDs(ctx context.Context, userID int64) ([]int64, error)
 	AddToShelf(ctx context.Context, userID int64, novelID int64) error
 	RemoveFromShelf(ctx context.Context, userID int64, novelIDs []int64) error
 	GetProgress(ctx context.Context, userID int64, novelID int64) (*model.Bookshelf, error)
@@ -27,17 +29,37 @@ func NewDBRepository() Repository {
 	return &dbRepository{}
 }
 
-func (r *dbRepository) GetShelfItemsWithNovel(ctx context.Context, userID int64) ([]model.BookshelfWithNovel, error) {
-	query := `
-		SELECT 
-			b.chapter_index, b.scroll_offset_percentage, b.in_shelf, b.updated_at, b.progress_version,
-			n.id, n.title, n.author, n.cover_url, n.rating, n.status, n.publish_status, n.synopsis, n.genres, n.word_count, n.view_count
-		FROM bookshelves b
-		INNER JOIN novels n ON b.novel_id = n.id
-		WHERE b.user_id = $1 AND b.in_shelf = TRUE AND n.status != 'archived' AND n.publish_status = 'published'
-		ORDER BY GREATEST(b.updated_at, b.shelf_added_at) DESC, b.novel_id DESC`
+const shelfActivity = `COALESCE(GREATEST(b.updated_at, b.shelf_added_at), TIMESTAMPTZ 'epoch')`
+const shelfFilter = `FROM bookshelves b JOIN novels n ON b.novel_id=n.id
+	WHERE b.user_id=$1 AND b.in_shelf=TRUE AND n.status<>'archived' AND n.publish_status='published'`
+const shelfSelect = `SELECT b.chapter_index, b.scroll_offset_percentage, b.in_shelf,
+	COALESCE(b.updated_at, TIMESTAMPTZ 'epoch'), b.progress_version,
+	n.id, n.title, n.author, n.cover_url, n.rating, n.status, n.publish_status, n.synopsis, n.genres, n.word_count, n.view_count,
+	` + shelfActivity + ` ` + shelfFilter
+const shelfOrder = ` ORDER BY ` + shelfActivity + ` DESC, b.novel_id DESC`
 
-	rows, err := db.DB.Query(ctx, query, userID)
+func (r *dbRepository) GetShelfItemsWithNovel(ctx context.Context, userID int64) ([]model.BookshelfWithNovel, error) {
+	return queryShelf(ctx, userID, shelfSelect+shelfOrder)
+}
+
+func (r *dbRepository) GetShelfPage(ctx context.Context, userID int64, limit int, after *shelfCursor) ([]model.BookshelfWithNovel, error) {
+	if after == nil {
+		return queryShelf(ctx, userID, shelfSelect+shelfOrder+` LIMIT $2`, limit)
+	}
+	return queryShelf(ctx, userID, shelfSelect+` AND (`+shelfActivity+`, b.novel_id)<($3,$4)`+shelfOrder+` LIMIT $2`,
+		limit, after.activityAt, after.novelID)
+}
+
+func (r *dbRepository) GetShelfIDs(ctx context.Context, userID int64) ([]int64, error) {
+	rows, err := db.DB.Query(ctx, `SELECT b.novel_id `+shelfFilter, userID)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.AppendRows(make([]int64, 0), rows, pgx.RowTo[int64])
+}
+
+func queryShelf(ctx context.Context, userID int64, query string, args ...any) ([]model.BookshelfWithNovel, error) {
+	rows, err := db.DB.Query(ctx, query, append([]any{userID}, args...)...)
 	if err != nil {
 		return nil, err
 	}
@@ -52,7 +74,7 @@ func (r *dbRepository) GetShelfItemsWithNovel(ctx context.Context, userID int64)
 			&item.ChapterIndex, &item.ScrollOffsetPercentage, &item.InShelf, &item.UpdatedAt, &item.ProgressVersion,
 			&item.Novel.ID, &item.Novel.Title, &item.Novel.Author, &item.Novel.CoverURL,
 			&item.Novel.Rating, &item.Novel.Status, &item.Novel.PublishStatus, &item.Novel.Synopsis, &item.Novel.Genres,
-			&item.Novel.WordCount, &item.Novel.ViewCount,
+			&item.Novel.WordCount, &item.Novel.ViewCount, &item.ActivityAt,
 		)
 		if err != nil {
 			return nil, err

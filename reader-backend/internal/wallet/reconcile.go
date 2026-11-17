@@ -27,7 +27,7 @@ func (s *service) RunReconciliation(ctx context.Context) {
 		{s.reconcilePayPalCancellations, 15 * time.Second}, {s.reconcilePayPalSubscriptions, 15 * time.Second},
 	}
 	if config.AppConfig.PaymentTaskMetrics {
-		scheduled = append(scheduled, scheduledWorker{s.observePaymentTasks, time.Minute})
+		scheduled = append(scheduled, scheduledWorker{s.observePaymentTasks, 30 * time.Second})
 	}
 	for _, worker := range scheduled {
 		workers.Go(func() {
@@ -186,6 +186,14 @@ func (s *service) importPayPalSubscriptionTransactions(ctx context.Context,
 func (s *service) observePaymentTasks(ctx context.Context) {
 	request, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
+	claimed, err := claimPaymentTaskMetrics(request)
+	if err != nil {
+		log.Printf("payment_tasks action=claim error=%v", err)
+		return
+	}
+	if !claimed {
+		return
+	}
 	status, err := PaymentTaskStatus(request)
 	if err != nil {
 		log.Printf("payment_tasks action=inspect error=%v", err)

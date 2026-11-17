@@ -53,9 +53,10 @@ func InitDB(migrate bool) {
 }
 
 const (
-	baselineSchemaVersion int64 = 2026111701
-	chapterSchemaVersion  int64 = 2026111702
-	RequiredSchemaVersion int64 = 2026111703
+	baselineSchemaVersion    int64 = 2026111701
+	chapterSchemaVersion     int64 = 2026111702
+	readerPerformanceVersion int64 = 2026111703
+	RequiredSchemaVersion    int64 = 2026111704
 )
 
 func autoMigrate(ctx context.Context, pool *pgxpool.Pool) error {
@@ -100,7 +101,12 @@ func autoMigrate(ctx context.Context, pool *pgxpool.Pool) error {
 			return fmt.Errorf("schema migration %d: %w", chapterSchemaVersion, err)
 		}
 	}
-	if _, err := tx.Exec(ctx, dbassets.ReaderPerformanceSQL); err != nil {
+	if version < readerPerformanceVersion {
+		if _, err := tx.Exec(ctx, dbassets.ReaderPerformanceSQL); err != nil {
+			return fmt.Errorf("schema migration %d: %w", readerPerformanceVersion, err)
+		}
+	}
+	if _, err := tx.Exec(ctx, dbassets.ReaderQueueAndShelfSQL); err != nil {
 		return fmt.Errorf("schema migration %d: %w", RequiredSchemaVersion, err)
 	}
 	return tx.Commit(ctx)

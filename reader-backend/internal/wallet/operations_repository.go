@@ -18,6 +18,15 @@ type TaskStatus struct {
 	MaxAttempts int        `json:"max_attempts"`
 }
 
+// claimPaymentTaskMetrics permits one scheduled sample per database per minute.
+// Manual inspection reads the same metrics without claiming the schedule.
+func claimPaymentTaskMetrics(ctx context.Context) (bool, error) {
+	tag, err := db.Pool(ctx).Exec(ctx, `INSERT INTO payment_task_metrics_schedule AS schedule (singleton,next_collection_at)
+		VALUES (true,now()+interval '1 minute') ON CONFLICT (singleton) DO UPDATE
+		SET next_collection_at=excluded.next_collection_at WHERE schedule.next_collection_at<=now()`)
+	return tag.RowsAffected() == 1, err
+}
+
 // PaymentTaskStatus excludes payloads, credentials and customer data.
 func PaymentTaskStatus(ctx context.Context) ([]TaskStatus, error) {
 	rows, err := db.Pool(ctx).Query(ctx, `
@@ -45,9 +54,15 @@ func PaymentTaskStatus(ctx context.Context) ([]TaskStatus, error) {
  )
  SELECT 'inbox',count(*),min(created_at),COALESCE(max(attempts),0) FROM paypal_event_inbox WHERE processed_at IS NULL
  UNION ALL SELECT 'outbox',count(*),min(created_at),COALESCE(max(attempts),0) FROM payment_event_outbox WHERE state='pending' AND delivered_at IS NULL
- UNION ALL SELECT 'unattributed',count(*),min(created_at),COALESCE(max(attempts),0) FROM payment_event_outbox WHERE state='unattributed'
+ UNION ALL SELECT 'unattributed',COALESCE(sum(event_count),0)::bigint,
+   (SELECT created_at FROM payment_event_outbox WHERE state='unattributed' ORDER BY created_at LIMIT 1),
+   COALESCE(max(attempts),0) FROM payment_unattributed_counts
  UNION ALL SELECT 'cancel_pending',count(*),min(COALESCE(cancel_requested_at,updated_at)),COALESCE(max(cancel_attempts),0) FROM user_subscriptions WHERE status='CANCEL_PENDING'
- UNION ALL SELECT 'subscription_due',count(*),min(COALESCE(paypal_next_check_at,created_at)),COALESCE(max(paypal_check_attempts),0) FROM user_subscriptions WHERE payment_method='paypal' AND subscription_id NOT LIKE 'I-MOCK%' AND (status IN ('ACTIVE','SUSPENDED','CANCEL_PENDING') OR updated_at>now()-interval '30 days' OR paypal_recovery_requested) AND COALESCE(paypal_next_check_at,created_at)<=now()
+ UNION ALL SELECT 'subscription_due',count(*),min(due_at),COALESCE(max(paypal_check_attempts),0) FROM (
+   SELECT `+subscriptionCheckAt+` AS due_at,paypal_check_attempts FROM user_subscriptions WHERE `+subscriptionDue+continuousSubscription+`
+   UNION ALL
+   SELECT `+subscriptionCheckAt+` AS due_at,paypal_check_attempts FROM user_subscriptions WHERE `+subscriptionDue+recentSubscription+`
+ ) AS subscription_candidates
  UNION ALL SELECT kind,task_count,oldest_at,COALESCE(max_attempts,0) FROM order_totals
  CROSS JOIN LATERAL (VALUES ('paid_unfulfilled',paid_count,paid_oldest,paid_attempts),
                             ('order_pending',pending_count,pending_oldest,pending_attempts),
