@@ -1,8 +1,8 @@
 import React, { useEffect, useId, useRef, useState } from 'react';
-import { createPortal } from 'react-dom';
-import { AlertCircle, CheckCircle2, Image as ImageIcon, Loader2, Upload, X } from 'lucide-react';
+import { AlertCircle, CheckCircle2, Image as ImageIcon, Loader2, Upload } from 'lucide-react';
 import { apiRequest } from '../../utils/api';
 import CustomSelect from '../CustomSelect';
+import { CmsDialog } from '../ui/CmsDialog';
 import { ChapterUploadFields, DEFAULT_CHAPTER_DELIMITER_REGEX } from './ChapterUploadFields';
 
 const MAX_COVER_BYTES = 5 * 1024 * 1024;
@@ -24,6 +24,12 @@ export interface NovelFormData {
   start_pay_chapter_index: number | string;
 }
 
+export interface ChapterIdentityOption {
+  id: string;
+  title: string;
+  chapter_index: number | null;
+}
+
 interface NovelFormModalProps {
   isOpen: boolean;
   isEditing?: boolean;
@@ -40,6 +46,10 @@ interface NovelFormModalProps {
   onChapterFileChange?: (file: File | null) => void;
   chapterRegex?: string;
   onChapterRegexChange?: (val: string) => void;
+  chapterMapping?: string;
+  onChapterMappingChange?: (val: string) => void;
+  chapterIdentities?: ChapterIdentityOption[];
+  onLoadChapterIdentities?: () => void;
   createdDraftId?: number | null;
   submitError?: string;
 }
@@ -60,6 +70,10 @@ export const NovelFormModal: React.FC<NovelFormModalProps> = ({
   onChapterFileChange,
   chapterRegex = DEFAULT_CHAPTER_DELIMITER_REGEX,
   onChapterRegexChange,
+  chapterMapping = '',
+  onChapterMappingChange,
+  chapterIdentities = [],
+  onLoadChapterIdentities,
   createdDraftId = null,
   submitError = '',
 }) => {
@@ -77,8 +91,9 @@ export const NovelFormModal: React.FC<NovelFormModalProps> = ({
   const chapterFileInputRef = useRef<HTMLInputElement>(null);
   const chapterUploadBtnRef = useRef<HTMLButtonElement>(null);
   const chapterRegexInputRef = useRef<HTMLInputElement>(null);
+  const formRef = useRef<HTMLFormElement>(null);
 
-  const modalTitleId = useId();
+  const formId = useId();
   const titleId = useId();
   const authorId = useId();
   const coverInputId = useId();
@@ -104,32 +119,22 @@ export const NovelFormModal: React.FC<NovelFormModalProps> = ({
   }, [isOpen]);
 
   useEffect(() => {
-    if (chapterFile) {
-      setChapterFileError('');
-    }
+    if (chapterFile) setChapterFileError('');
   }, [chapterFile]);
 
   useEffect(() => {
     setPreviewFailed(false);
   }, [formData.cover_preview_url, formData.cover_url]);
 
-  if (!isOpen) return null;
-
   const isCloseBlocked = uploadingCover || isSubmitting;
   const previewSrc = formData.cover_preview_url || (formData.cover_url.startsWith('oss://') ? '' : formData.cover_url);
 
   const validateGenresValue = (raw: string): string => {
     const trimmed = raw.trim();
-    if (!trimmed) {
-      return '请输入至少一个分类标签';
-    }
-    if (trimmed.length > MAX_GENRES_LENGTH) {
-      return `分类标签不能超过 ${MAX_GENRES_LENGTH} 个字符`;
-    }
+    if (!trimmed) return '请输入至少一个分类标签';
+    if (trimmed.length > MAX_GENRES_LENGTH) return `分类标签不能超过 ${MAX_GENRES_LENGTH} 个字符`;
     const tags = trimmed.split(',').map((g) => g.trim()).filter(Boolean);
-    if (tags.length === 0) {
-      return '请输入至少一个有效的分类标签';
-    }
+    if (tags.length === 0) return '请输入至少一个有效的分类标签';
     return '';
   };
 
@@ -164,15 +169,13 @@ export const NovelFormModal: React.FC<NovelFormModalProps> = ({
       }));
       setPreviewFailed(false);
       window.showToast?.('封面图片上传成功', 'success');
-    } catch (err: any) {
-      const msg = err?.message || '封面图片上传失败';
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : '封面图片上传失败';
       setCoverError(msg);
       window.showToast?.(msg, 'error');
     } finally {
       setUploadingCover(false);
-      if (fileInputRef.current) {
-        fileInputRef.current.value = '';
-      }
+      if (fileInputRef.current) fileInputRef.current.value = '';
     }
   };
 
@@ -200,10 +203,18 @@ export const NovelFormModal: React.FC<NovelFormModalProps> = ({
       chapterUploadBtnRef.current?.focus();
       return;
     }
-    if (!isEditing && chapterFile && chapterImportType === 'single_txt' && !chapterRegex.trim()) {
+    if (chapterFile && chapterImportType === 'single_txt' && !chapterRegex.trim()) {
       window.showToast?.('请输入章节匹配分割正则表达式', 'error');
       chapterRegexInputRef.current?.focus();
       return;
+    }
+    if (isEditing && chapterFile && chapterMapping.trim()) {
+      try {
+        JSON.parse(chapterMapping);
+      } catch {
+        window.showToast?.('章节映射 JSON 格式无效，请检查语法后再提交', 'error');
+        return;
+      }
     }
     onSubmit(e);
   };
@@ -211,519 +222,450 @@ export const NovelFormModal: React.FC<NovelFormModalProps> = ({
   const describedByCover = coverError ? `${coverHintId} ${coverErrorId}` : coverHintId;
   const describedByGenres = genresError ? `${genresHintId} ${genresErrorId}` : genresHintId;
 
-  return createPortal(
-    <div
-      style={{
-        position: 'fixed',
-        top: 0,
-        left: 0,
-        right: 0,
-        bottom: 0,
-        backgroundColor: 'rgba(15, 23, 42, 0.35)',
-        backdropFilter: 'blur(2.5px)',
-        WebkitBackdropFilter: 'blur(2.5px)',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        zIndex: 10000,
-        padding: '20px',
-        overscrollBehavior: 'contain',
-      }}
-    >
-      <div
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={modalTitleId}
-        className="glass-panel animate-fade-in"
-        style={{
-          width: '100%',
-          maxWidth: isEditing ? '640px' : '700px',
-          maxHeight: '90vh',
-          backgroundColor: 'hsl(var(--bg-surface))',
-          border: '1px solid hsl(var(--border))',
-          borderRadius: '16px',
-          display: 'flex',
-          flexDirection: 'column',
-          boxShadow: 'var(--shadow-lg)',
-          overflow: 'hidden',
-        }}
-      >
-        {/* Modal Header */}
-        <div
-          style={{
-            padding: '18px 24px',
-            borderBottom: '1px solid hsl(var(--border))',
-            display: 'flex',
-            justifyContent: 'space-between',
-            alignItems: 'center',
-          }}
-        >
-          <h3 id={modalTitleId} style={{ fontSize: '1.25rem', fontWeight: 600 }}>
-            {isEditing ? '编辑书籍及计费设置' : '新建书籍档案'}
-          </h3>
-          <button
-            type="button"
-            aria-label="关闭窗口"
-            disabled={isCloseBlocked}
-            onClick={onCancel}
-            style={{
-              background: 'transparent',
-              border: 'none',
-              padding: '6px',
-              borderRadius: '8px',
-              display: 'inline-flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              color: 'hsl(var(--text-secondary))',
-              cursor: isCloseBlocked ? 'not-allowed' : 'pointer',
-              opacity: isCloseBlocked ? 0.5 : 1,
-            }}
-          >
-            <X size={20} aria-hidden="true" />
+  return (
+    <CmsDialog
+      open={isOpen}
+      onClose={onCancel}
+      variant="drawer"
+      size="lg"
+      closedBy={isCloseBlocked ? 'none' : 'closerequest'}
+      closeDisabled={isCloseBlocked}
+      title={isEditing ? '编辑书籍及计费设置' : '新建书籍档案'}
+      subtitle={isEditing ? '修改书目信息、独立单价、上架状态或批量更新章节手稿' : '录入书名封面与初始章节手稿，保存为草稿'}
+      footer={
+        <>
+          <button type="button" className="btn-secondary" disabled={isCloseBlocked} onClick={onCancel}>
+            取消
           </button>
+          <button type="submit" form={formId} className="btn-primary" disabled={uploadingCover || isSubmitting}>
+            {isSubmitting
+              ? isEditing
+                ? chapterFile
+                  ? '正在保存并导入章节...'
+                  : '保存中...'
+                : '正在创建并导入章节...'
+              : isEditing
+                ? chapterFile
+                  ? '保存修改并导入章节'
+                  : '保存修改'
+                : createdDraftId
+                  ? '重试导入章节并完成'
+                  : '创建书籍并导入章节'}
+          </button>
+        </>
+      }
+    >
+      <form id={formId} ref={formRef} onSubmit={handleFormSubmit} className="space-y-5">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <label htmlFor={titleId} className="space-y-1.5">
+            <span className="block text-xs font-medium text-[var(--cms-muted-fg)]">
+              书名 <span aria-hidden="true" className="text-[var(--cms-error)]">*</span>
+            </span>
+            <input
+              id={titleId}
+              name="title"
+              type="text"
+              autoFocus
+              className="input-field"
+              placeholder="e.g. Alpha King Bound"
+              value={formData.title}
+              onChange={(e) => setFormData((prev) => ({ ...prev, title: e.target.value }))}
+              required
+            />
+          </label>
+
+          <label htmlFor={authorId} className="space-y-1.5">
+            <span className="block text-xs font-medium text-[var(--cms-muted-fg)]">
+              作者 <span aria-hidden="true" className="text-[var(--cms-error)]">*</span>
+            </span>
+            <input
+              id={authorId}
+              name="author"
+              type="text"
+              className="input-field"
+              placeholder="e.g. Catherine A."
+              value={formData.author}
+              onChange={(e) => setFormData((prev) => ({ ...prev, author: e.target.value }))}
+              required
+            />
+          </label>
         </div>
 
-        {/* Modal Form Body */}
-        <form
-          onSubmit={handleFormSubmit}
-          style={{ display: 'flex', flexDirection: 'column', flex: 1, overflow: 'hidden', margin: 0 }}
-        >
-          <div style={{ padding: '24px', overflowY: 'auto', flex: 1, overscrollBehavior: 'contain' }}>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px', marginBottom: '16px' }}>
-              <div>
-                <label htmlFor={titleId} style={{ display: 'block', fontSize: '0.8rem', color: 'hsl(var(--text-secondary))', marginBottom: '6px' }}>
-                  书名 <span aria-hidden="true" style={{ color: '#ef4444' }}>*</span>
-                </label>
-                <input
-                  id={titleId}
-                  name="title"
-                  type="text"
-                  className="input-field"
-                  placeholder="e.g. Alpha King Bound"
-                  value={formData.title}
-                  onChange={(e) => setFormData((prev) => ({ ...prev, title: e.target.value }))}
-                  required
+        {/* Cover Upload */}
+        <div className="space-y-1.5">
+          <label htmlFor={coverInputId} className="block text-xs font-medium text-[var(--cms-muted-fg)]">
+            书籍封面图片 <span aria-hidden="true" className="text-[var(--cms-error)]">*</span>
+          </label>
+          <div
+            className="cover-upload-dropzone flex items-center gap-4 p-4 rounded-xl border transition-colors"
+            onDragOver={(e) => {
+              e.preventDefault();
+              setIsDragging(true);
+            }}
+            onDragLeave={(e) => {
+              e.preventDefault();
+              setIsDragging(false);
+            }}
+            onDrop={(e) => {
+              e.preventDefault();
+              setIsDragging(false);
+              if (!uploadingCover) handleCoverFile(e.dataTransfer.files?.[0]);
+            }}
+            style={{
+              borderStyle: 'dashed',
+              borderColor: coverError
+                ? 'var(--cms-error)'
+                : isDragging
+                  ? 'var(--cms-primary)'
+                  : 'var(--cms-border)',
+              backgroundColor: isDragging
+                ? 'color-mix(in srgb, var(--cms-primary) 6%, var(--cms-card))'
+                : 'var(--cms-content)',
+            }}
+          >
+            <div className="w-20 h-28 rounded-lg border border-[var(--cms-border)] bg-[var(--cms-card)] flex items-center justify-center overflow-hidden shrink-0">
+              {previewSrc && !previewFailed ? (
+                <img
+                  src={previewSrc}
+                  alt="书籍封面预览"
+                  className="w-full h-full object-cover"
+                  onError={() => setPreviewFailed(true)}
                 />
-              </div>
-              <div>
-                <label htmlFor={authorId} style={{ display: 'block', fontSize: '0.8rem', color: 'hsl(var(--text-secondary))', marginBottom: '6px' }}>
-                  作者 <span aria-hidden="true" style={{ color: '#ef4444' }}>*</span>
-                </label>
-                <input
-                  id={authorId}
-                  name="author"
-                  type="text"
-                  className="input-field"
-                  placeholder="e.g. Catherine A."
-                  value={formData.author}
-                  onChange={(e) => setFormData((prev) => ({ ...prev, author: e.target.value }))}
-                  required
-                />
-              </div>
-
-              <div style={{ gridColumn: 'span 2' }}>
-                <label htmlFor={coverInputId} style={{ display: 'block', fontSize: '0.8rem', color: 'hsl(var(--text-secondary))', marginBottom: '6px' }}>
-                  书籍封面图片 <span aria-hidden="true" style={{ color: '#ef4444' }}>*</span>
-                </label>
-                <div
-                  className="cover-upload-dropzone"
-                  onDragOver={(e) => {
-                    e.preventDefault();
-                    setIsDragging(true);
-                  }}
-                  onDragLeave={(e) => {
-                    e.preventDefault();
-                    setIsDragging(false);
-                  }}
-                  onDrop={(e) => {
-                    e.preventDefault();
-                    setIsDragging(false);
-                    if (!uploadingCover) {
-                      handleCoverFile(e.dataTransfer.files?.[0]);
-                    }
-                  }}
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: '16px',
-                    padding: '14px',
-                    borderRadius: '12px',
-                    border: coverError
-                      ? '1px dashed #ef4444'
-                      : isDragging
-                        ? '1px dashed hsl(var(--primary))'
-                        : '1px dashed hsl(var(--border))',
-                    backgroundColor: isDragging ? 'hsl(var(--primary) / 0.05)' : 'hsl(var(--bg-card))',
-                    transition: 'border-color 0.2s ease, background-color 0.2s ease',
-                  }}
-                >
-                  <div
-                    style={{
-                      width: '84px',
-                      height: '112px',
-                      borderRadius: '8px',
-                      border: '1px solid hsl(var(--border))',
-                      backgroundColor: 'hsl(var(--bg-surface))',
-                      display: 'flex',
-                      flexDirection: 'column',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      overflow: 'hidden',
-                      flexShrink: 0,
-                    }}
-                  >
-                    {previewSrc && !previewFailed ? (
-                      <img
-                        src={previewSrc}
-                        alt="书籍封面预览"
-                        style={{ width: '100%', height: '100%', objectFit: 'cover' }}
-                        onError={() => setPreviewFailed(true)}
-                      />
-                    ) : (
-                      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '6px', padding: '8px', textAlign: 'center', color: 'hsl(var(--text-muted))' }}>
-                        <ImageIcon size={22} aria-hidden="true" />
-                        <span style={{ fontSize: '0.7rem' }}>{previewFailed ? '加载失败' : '暂无封面'}</span>
-                      </div>
-                    )}
-                  </div>
-
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <input
-                      ref={fileInputRef}
-                      id={coverInputId}
-                      name="cover_file"
-                      type="file"
-                      className="visually-hidden"
-                      accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp"
-                      aria-invalid={coverError ? 'true' : 'false'}
-                      aria-describedby={describedByCover}
-                      disabled={uploadingCover}
-                      onChange={(e) => handleCoverFile(e.target.files?.[0])}
-                    />
-
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap', marginBottom: '8px' }}>
-                      <button
-                        ref={uploadBtnRef}
-                        type="button"
-                        className="btn-secondary"
-                        disabled={uploadingCover}
-                        onClick={() => fileInputRef.current?.click()}
-                        style={{ gap: '6px', padding: '7px 14px', fontSize: '0.825rem' }}
-                      >
-                        {uploadingCover ? (
-                          <>
-                            <Loader2 size={15} className="animate-spin" aria-hidden="true" />
-                            <span>正在上传至 OSS...</span>
-                          </>
-                        ) : (
-                          <>
-                            <Upload size={15} aria-hidden="true" />
-                            <span>{formData.cover_url ? '更换封面图片' : '选择或拖拽上传封面'}</span>
-                          </>
-                        )}
-                      </button>
-
-                      {formData.cover_url && !uploadingCover && (
-                        <span
-                          role="status"
-                          style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', fontSize: '0.78rem', color: 'hsl(var(--accent-green))', fontWeight: 500 }}
-                        >
-                          <CheckCircle2 size={14} aria-hidden="true" />
-                          <span>已上传封面</span>
-                        </span>
-                      )}
-                    </div>
-
-                    <p id={coverHintId} style={{ fontSize: '0.75rem', color: 'hsl(var(--text-muted))', lineHeight: 1.5 }}>
-                      支持 JPG、PNG、WebP 原图上传，单张不超过 5MB（推荐 3:4 竖版封面）。仅支持上传，不支持手填链接。
-                    </p>
-
-                    {coverError && (
-                      <p
-                        id={coverErrorId}
-                        role="status"
-                        aria-live="polite"
-                        style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '0.78rem', color: '#ef4444', marginTop: '6px' }}
-                      >
-                        <AlertCircle size={14} aria-hidden="true" />
-                        <span>{coverError}</span>
-                      </p>
-                    )}
-                  </div>
-                </div>
-              </div>
-
-              <div style={{ gridColumn: 'span 2' }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px', gap: '8px' }}>
-                  <label htmlFor={genresId} style={{ fontSize: '0.8rem', color: 'hsl(var(--text-secondary))' }}>
-                    分类标签 (用逗号分隔，如 Romance, Werewolf) <span aria-hidden="true" style={{ color: '#ef4444' }}>*</span>
-                  </label>
-                  <span style={{ fontSize: '0.72rem', color: formData.genres.length >= MAX_GENRES_LENGTH ? '#f59e0b' : 'hsl(var(--text-muted))' }}>
-                    {formData.genres.length} / {MAX_GENRES_LENGTH} 字符
-                  </span>
-                </div>
-                <input
-                  ref={genresInputRef}
-                  id={genresId}
-                  name="genres"
-                  type="text"
-                  maxLength={MAX_GENRES_LENGTH}
-                  className="input-field"
-                  placeholder="e.g. Romance, Werewolf, CEO"
-                  aria-invalid={genresError ? 'true' : 'false'}
-                  aria-describedby={describedByGenres}
-                  value={formData.genres}
-                  onChange={(e) => {
-                    const nextVal = e.target.value;
-                    setFormData((prev) => ({ ...prev, genres: nextVal }));
-                    if (genresError) {
-                      setGenresError('');
-                    }
-                  }}
-                  onBlur={() => {
-                    if (genresTouched || formData.genres.length > 0) {
-                      setGenresTouched(true);
-                      setGenresError(validateGenresValue(formData.genres));
-                    }
-                  }}
-                  required
-                />
-                <p id={genresHintId} style={{ fontSize: '0.72rem', color: 'hsl(var(--text-muted))', marginTop: '4px' }}>
-                  多个标签请使用英文逗号分隔，总长度最多支持 {MAX_GENRES_LENGTH} 个字符。
-                </p>
-                {genresError && (
-                  <p
-                    id={genresErrorId}
-                    role="status"
-                    aria-live="polite"
-                    style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '0.78rem', color: '#ef4444', marginTop: '4px' }}
-                  >
-                    <AlertCircle size={14} aria-hidden="true" />
-                    <span>{genresError}</span>
-                  </p>
-                )}
-              </div>
-              <div>
-                <label style={{ display: 'block', fontSize: '0.8rem', color: 'hsl(var(--text-secondary))', marginBottom: '6px' }}>
-                  完结状态
-                </label>
-                <CustomSelect
-                  options={[
-                    { value: 'Ongoing', label: '连载中 (Ongoing)' },
-                    { value: 'Completed', label: '已完结 (Completed)' },
-                  ]}
-                  value={formData.status}
-                  onChange={(val) => setFormData((prev) => ({ ...prev, status: val }))}
-                  width="100%"
-                />
-              </div>
-              <div>
-                <label htmlFor={ratingId} style={{ display: 'block', fontSize: '0.8rem', color: 'hsl(var(--text-secondary))', marginBottom: '6px' }}>
-                  评分 (1-5)
-                </label>
-                <input
-                  id={ratingId}
-                  name="rating"
-                  type="number"
-                  className="input-field"
-                  min={0}
-                  max={5}
-                  step={0.1}
-                  value={formData.rating}
-                  onChange={(e) => setFormData((prev) => ({ ...prev, rating: Number(e.target.value) }))}
-                  required
-                />
-              </div>
-              <div>
-                <label htmlFor={costId} style={{ display: 'block', fontSize: '0.8rem', color: 'hsl(var(--text-secondary))', marginBottom: '6px' }}>
-                  千字付费金币数 (留空跟随全局)
-                </label>
-                <p id={costHintId} style={{ fontSize: '0.72rem', color: 'hsl(var(--text-muted))', marginBottom: '6px' }}>
-                  留空继承全局单价（当前 {globalCoinCost} 金币/千字），输入 0 免费。
-                </p>
-                <input
-                  id={costId}
-                  name="coin_cost_per_thousand"
-                  type="number"
-                  className="input-field"
-                  placeholder={`跟随全局（${globalCoinCost} 金币）`}
-                  aria-describedby={costHintId}
-                  min={0}
-                  max={2147483647}
-                  value={formData.coin_cost_per_thousand}
-                  onChange={(e) =>
-                    setFormData((prev) => ({
-                      ...prev,
-                      coin_cost_per_thousand: e.target.value === '' ? '' : Number(e.target.value),
-                    }))
-                  }
-                />
-              </div>
-              <div>
-                <label htmlFor={startPayId} style={{ display: 'block', fontSize: '0.8rem', color: 'hsl(var(--text-secondary))', marginBottom: '6px' }}>
-                  起始收费章节 (默认从第 3 章起) <span aria-hidden="true" style={{ color: '#ef4444' }}>*</span>
-                </label>
-                <input
-                  id={startPayId}
-                  name="start_pay_chapter_index"
-                  type="number"
-                  className="input-field"
-                  min={1}
-                  value={formData.start_pay_chapter_index}
-                  onChange={(e) =>
-                    setFormData((prev) => ({
-                      ...prev,
-                      start_pay_chapter_index: e.target.value === '' ? '' : Number(e.target.value),
-                    }))
-                  }
-                  required
-                />
-              </div>
-              {isEditing ? (
-                <fieldset style={{ gridColumn: 'span 2', border: '1px solid hsl(var(--border))', borderRadius: '10px', padding: '12px 14px', margin: 0 }}>
-                  <legend style={{ fontSize: '0.8rem', color: 'hsl(var(--text-secondary))', padding: '0 6px' }}>
-                    上架发布状态
-                  </legend>
-                  <div style={{ display: 'flex', gap: '16px', flexWrap: 'wrap', alignItems: 'center' }}>
-                    {[
-                      { value: 'draft', label: '草稿（待上架）', disabled: false },
-                      { value: 'published', label: hasChapters ? '已上架（书城可见）' : '已上架（需先导入章节）', disabled: !hasChapters },
-                      { value: 'offline', label: '已下架（书城隐藏）', disabled: false },
-                    ].map((opt) => (
-                      <label
-                        key={opt.value}
-                        style={{
-                          display: 'inline-flex',
-                          alignItems: 'center',
-                          gap: '6px',
-                          fontSize: '0.85rem',
-                          cursor: opt.disabled ? 'not-allowed' : 'pointer',
-                          color: opt.disabled ? 'hsl(var(--text-muted))' : 'hsl(var(--text-primary))',
-                        }}
-                      >
-                        <input
-                          type="radio"
-                          name="publish_status"
-                          value={opt.value}
-                          checked={(formData.publish_status || 'draft') === opt.value}
-                          disabled={opt.disabled}
-                          onChange={(e) => setFormData((prev) => ({ ...prev, publish_status: e.target.value }))}
-                        />
-                        <span>{opt.label}</span>
-                      </label>
-                    ))}
-                  </div>
-                </fieldset>
               ) : (
-                <div style={{ gridColumn: 'span 2', padding: '10px 12px', borderRadius: '8px', backgroundColor: 'hsl(var(--bg-card))', border: '1px solid hsl(var(--border))', fontSize: '0.8rem', color: 'hsl(var(--text-secondary))' }}>
-                  新建书籍默认保存为 <strong>草稿（待上架）</strong>，不会立即暴露在书城；请上传书籍章节后创建并返回列表，核对无误再点击「上架发布」。
-                </div>
-              )}
-              <div style={{ gridColumn: 'span 2' }}>
-                <label htmlFor={synopsisId} style={{ display: 'block', fontSize: '0.8rem', color: 'hsl(var(--text-secondary))', marginBottom: '6px' }}>
-                  书籍简介
-                </label>
-                <textarea
-                  id={synopsisId}
-                  name="synopsis"
-                  className="input-field"
-                  rows={4}
-                  placeholder="描述一下小说的主要情节吸引读者..."
-                  value={formData.synopsis}
-                  onChange={(e) => setFormData((prev) => ({ ...prev, synopsis: e.target.value }))}
-                />
-              </div>
-
-              {!isEditing && onChapterImportTypeChange && onChapterFileChange && onChapterRegexChange && (
-                <div
-                  style={{
-                    gridColumn: 'span 2',
-                    padding: '16px',
-                    borderRadius: '12px',
-                    border: '1px solid hsl(var(--border))',
-                    backgroundColor: 'hsl(var(--bg-card))',
-                  }}
-                >
-                  <div style={{ fontSize: '0.9rem', fontWeight: 600, color: 'hsl(var(--text-primary))', marginBottom: '12px', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                    <Upload size={16} aria-hidden="true" style={{ color: 'hsl(var(--accent-pink))' }} />
-                    <span>
-                      书籍章节内容上传 <span aria-hidden="true" style={{ color: '#ef4444' }}>*</span>
-                    </span>
-                  </div>
-                  <ChapterUploadFields
-                    importType={chapterImportType}
-                    onImportTypeChange={onChapterImportTypeChange}
-                    file={chapterFile}
-                    onFileChange={onChapterFileChange}
-                    fileInputRef={chapterFileInputRef}
-                    uploadBtnRef={chapterUploadBtnRef}
-                    regex={chapterRegex}
-                    onRegexChange={onChapterRegexChange}
-                    regexInputRef={chapterRegexInputRef}
-                    required={true}
-                    disabled={isSubmitting}
-                    isCreateMode={true}
-                    error={chapterFileError}
-                  />
+                <div className="flex flex-col items-center gap-1.5 p-2 text-center text-[var(--cms-placeholder)]">
+                  <ImageIcon size={20} aria-hidden="true" />
+                  <span className="text-xs">{previewFailed ? '加载失败' : '暂无封面'}</span>
                 </div>
               )}
             </div>
 
-            {submitError && (
-              <div
-                role="status"
-                aria-live="polite"
-                style={{
-                  marginTop: '16px',
-                  padding: '12px',
-                  borderRadius: '8px',
-                  backgroundColor: 'rgba(239, 68, 68, 0.1)',
-                  border: '1px solid rgba(239, 68, 68, 0.25)',
-                  color: '#ef4444',
-                  fontSize: '0.82rem',
-                  display: 'flex',
-                  alignItems: 'flex-start',
-                  gap: '8px',
-                }}
-              >
-                <AlertCircle size={16} aria-hidden="true" style={{ flexShrink: 0, marginTop: '2px' }} />
-                <span>{submitError}</span>
+            <div className="flex-1 min-w-0 space-y-2">
+              <input
+                ref={fileInputRef}
+                id={coverInputId}
+                name="cover_file"
+                type="file"
+                className="visually-hidden"
+                accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp"
+                aria-invalid={coverError ? 'true' : 'false'}
+                aria-describedby={describedByCover}
+                disabled={uploadingCover}
+                onChange={(e) => handleCoverFile(e.target.files?.[0])}
+              />
+
+              <div className="flex items-center gap-2.5 flex-wrap">
+                <button
+                  ref={uploadBtnRef}
+                  type="button"
+                  className="btn-secondary h-8 px-3 text-xs"
+                  disabled={uploadingCover}
+                  onClick={() => fileInputRef.current?.click()}
+                >
+                  {uploadingCover ? (
+                    <>
+                      <Loader2 size={14} className="animate-spin" aria-hidden="true" />
+                      <span>正在上传至 OSS...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Upload size={14} aria-hidden="true" />
+                      <span>{formData.cover_url ? '更换封面图片' : '选择或拖拽上传封面'}</span>
+                    </>
+                  )}
+                </button>
+
+                {formData.cover_url && !uploadingCover && (
+                  <span role="status" className="inline-flex items-center gap-1 text-xs font-medium text-[var(--cms-success)]">
+                    <CheckCircle2 size={14} aria-hidden="true" />
+                    <span>已上传封面</span>
+                  </span>
+                )}
               </div>
-            )}
+
+              <p id={coverHintId} className="text-xs text-[var(--cms-muted-fg)] m-0">
+                支持 JPG、PNG、WebP 原图上传，单张不超过 5MB（推荐 3:4 竖版封面）。仅支持上传，不支持手填链接。
+              </p>
+
+              {coverError && (
+                <p id={coverErrorId} role="status" aria-live="polite" className="flex items-center gap-1 text-xs text-[var(--cms-error)] m-0">
+                  <AlertCircle size={13} aria-hidden="true" />
+                  <span>{coverError}</span>
+                </p>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* Genres */}
+        <div className="space-y-1.5">
+          <div className="flex items-center justify-between gap-2">
+            <label htmlFor={genresId} className="text-xs font-medium text-[var(--cms-muted-fg)]">
+              分类标签 (用逗号分隔，如 Romance, Werewolf) <span aria-hidden="true" className="text-[var(--cms-error)]">*</span>
+            </label>
+            <span className={`text-xs tabular-nums ${formData.genres.length >= MAX_GENRES_LENGTH ? 'text-[var(--cms-warning)]' : 'text-[var(--cms-muted-fg)]'}`}>
+              {formData.genres.length} / {MAX_GENRES_LENGTH}
+            </span>
+          </div>
+          <input
+            ref={genresInputRef}
+            id={genresId}
+            name="genres"
+            type="text"
+            maxLength={MAX_GENRES_LENGTH}
+            className="input-field"
+            placeholder="e.g. Romance, Werewolf, CEO"
+            aria-invalid={genresError ? 'true' : 'false'}
+            aria-describedby={describedByGenres}
+            value={formData.genres}
+            onChange={(e) => {
+              const nextVal = e.target.value;
+              setFormData((prev) => ({ ...prev, genres: nextVal }));
+              if (genresError) setGenresError('');
+            }}
+            onBlur={() => {
+              if (genresTouched || formData.genres.length > 0) {
+                setGenresTouched(true);
+                setGenresError(validateGenresValue(formData.genres));
+              }
+            }}
+            required
+          />
+          <p id={genresHintId} className="text-xs text-[var(--cms-muted-fg)] m-0">
+            多个标签请使用英文逗号分隔，总长度最多支持 {MAX_GENRES_LENGTH} 个字符。
+          </p>
+          {genresError && (
+            <p id={genresErrorId} role="status" aria-live="polite" className="flex items-center gap-1 text-xs text-[var(--cms-error)] m-0">
+              <AlertCircle size={13} aria-hidden="true" />
+              <span>{genresError}</span>
+            </p>
+          )}
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div className="space-y-1.5">
+            <span className="block text-xs font-medium text-[var(--cms-muted-fg)]">完结状态</span>
+            <CustomSelect
+              aria-label="完结状态"
+              options={[
+                { value: 'Ongoing', label: '连载中 (Ongoing)' },
+                { value: 'Completed', label: '已完结 (Completed)' },
+              ]}
+              value={formData.status}
+              onChange={(val) => setFormData((prev) => ({ ...prev, status: val }))}
+              width="100%"
+            />
           </div>
 
-          {/* Modal Footer */}
+          <label htmlFor={ratingId} className="space-y-1.5">
+            <span className="block text-xs font-medium text-[var(--cms-muted-fg)]">评分 (0–5)</span>
+            <input
+              id={ratingId}
+              name="rating"
+              type="number"
+              className="input-field tabular-nums"
+              min={0}
+              max={5}
+              step={0.1}
+              value={formData.rating}
+              onChange={(e) => setFormData((prev) => ({ ...prev, rating: Number(e.target.value) }))}
+              required
+            />
+          </label>
+
+          <label htmlFor={costId} className="space-y-1.5">
+            <span className="block text-xs font-medium text-[var(--cms-muted-fg)]">
+              千字付费金币数（留空跟随全局）
+            </span>
+            <input
+              id={costId}
+              name="coin_cost_per_thousand"
+              type="number"
+              className="input-field tabular-nums"
+              placeholder={`跟随全局（${globalCoinCost} 金币）`}
+              aria-describedby={costHintId}
+              min={0}
+              max={2147483647}
+              value={formData.coin_cost_per_thousand}
+              onChange={(e) =>
+                setFormData((prev) => ({
+                  ...prev,
+                  coin_cost_per_thousand: e.target.value === '' ? '' : Number(e.target.value),
+                }))
+              }
+            />
+            <span id={costHintId} className="block text-xs text-[var(--cms-muted-fg)]">
+              当前全局 {globalCoinCost} 金币/千字，输入 0 为全书免费
+            </span>
+          </label>
+
+          <label htmlFor={startPayId} className="space-y-1.5">
+            <span className="block text-xs font-medium text-[var(--cms-muted-fg)]">
+              起始收费章节 <span aria-hidden="true" className="text-[var(--cms-error)]">*</span>
+            </span>
+            <input
+              id={startPayId}
+              name="start_pay_chapter_index"
+              type="number"
+              className="input-field tabular-nums"
+              min={1}
+              value={formData.start_pay_chapter_index}
+              onChange={(e) =>
+                setFormData((prev) => ({
+                  ...prev,
+                  start_pay_chapter_index: e.target.value === '' ? '' : Number(e.target.value),
+                }))
+              }
+              required
+            />
+            <span className="block text-xs text-[var(--cms-muted-fg)]">前 N-1 章为免费试读章节</span>
+          </label>
+        </div>
+
+        {isEditing ? (
+          <fieldset className="p-4 rounded-xl border border-[var(--cms-border)] bg-[var(--cms-content)] m-0 space-y-2.5">
+            <legend className="text-xs font-medium text-[var(--cms-muted-fg)] px-1">上架发布状态</legend>
+            <div className="flex flex-wrap gap-4">
+              {[
+                { value: 'draft', label: '草稿（待上架）', disabled: false },
+                {
+                  value: 'published',
+                  label: hasChapters || Boolean(chapterFile) ? '已上架（书城可见）' : '已上架（需先导入章节）',
+                  disabled: !hasChapters && !chapterFile,
+                },
+                { value: 'offline', label: '已下架（书城隐藏）', disabled: false },
+              ].map((opt) => (
+                <label
+                  key={opt.value}
+                  className={`inline-flex items-center gap-2 text-xs font-medium ${
+                    opt.disabled ? 'cursor-not-allowed text-[var(--cms-placeholder)]' : 'cursor-pointer text-[var(--cms-fg)]'
+                  }`}
+                >
+                  <input
+                    type="radio"
+                    name="publish_status"
+                    value={opt.value}
+                    checked={(formData.publish_status || 'draft') === opt.value}
+                    disabled={opt.disabled}
+                    onChange={(e) => setFormData((prev) => ({ ...prev, publish_status: e.target.value }))}
+                  />
+                  <span>{opt.label}</span>
+                </label>
+              ))}
+            </div>
+          </fieldset>
+        ) : (
+          <div className="px-4 py-3 rounded-xl bg-[var(--cms-content)] border border-[var(--cms-border)] text-xs text-[var(--cms-muted-fg)] leading-relaxed">
+            新建书籍默认保存为 <strong className="text-[var(--cms-fg)]">草稿（待上架）</strong>，不会立即暴露在书城；创建并在列表核对无误后再「上架发布」。
+          </div>
+        )}
+
+        <label htmlFor={synopsisId} className="block space-y-1.5">
+          <span className="block text-xs font-medium text-[var(--cms-muted-fg)]">书籍简介</span>
+          <textarea
+            id={synopsisId}
+            name="synopsis"
+            className="input-field"
+            rows={3}
+            placeholder="描述一下小说的主要情节吸引读者..."
+            value={formData.synopsis}
+            onChange={(e) => setFormData((prev) => ({ ...prev, synopsis: e.target.value }))}
+          />
+        </label>
+
+        {onChapterImportTypeChange && onChapterFileChange && onChapterRegexChange && (
+          <div className="p-4 rounded-xl border border-[var(--cms-border)] bg-[var(--cms-content)] space-y-3">
+            <div className="flex items-center justify-between gap-2">
+              <div className="text-xs font-semibold text-[var(--cms-fg)] flex items-center gap-2">
+                <Upload size={15} aria-hidden="true" className="text-[var(--cms-primary)]" />
+                <span>
+                  {isEditing ? (
+                    '批量导入 / 更新章节手稿（可选）'
+                  ) : (
+                    <>
+                      书籍章节内容上传 <span aria-hidden="true" className="text-[var(--cms-error)]">*</span>
+                    </>
+                  )}
+                </span>
+              </div>
+              <span className="text-xs text-[var(--cms-muted-fg)]">上限 50MB</span>
+            </div>
+
+            <ChapterUploadFields
+              importType={chapterImportType}
+              onImportTypeChange={onChapterImportTypeChange}
+              file={chapterFile}
+              onFileChange={onChapterFileChange}
+              fileInputRef={chapterFileInputRef}
+              uploadBtnRef={chapterUploadBtnRef}
+              regex={chapterRegex}
+              onRegexChange={onChapterRegexChange}
+              regexInputRef={chapterRegexInputRef}
+              required={!isEditing}
+              disabled={isSubmitting}
+              isCreateMode={!isEditing}
+              error={chapterFileError}
+            />
+
+            {isEditing && onChapterMappingChange && (
+              <details className="p-3.5 rounded-xl border border-[var(--cms-border)] bg-[var(--cms-card)] text-xs space-y-2.5">
+                <summary className="font-medium text-[var(--cms-fg)] cursor-pointer select-none">
+                  章节映射（高级：保留 / 拆分 / 下架章节 ID）
+                </summary>
+                <p className="text-[var(--cms-muted-fg)] m-0 pt-2 leading-relaxed">
+                  正文完全一致的唯一章节会自动保留 ID。改写、拆分或下架章节时，请填写对应 ID，新章节序号从 1 开始。
+                </p>
+                <label htmlFor={`${formId}-chapter-mapping`} className="block font-medium text-[var(--cms-muted-fg)]">
+                  映射 JSON
+                </label>
+                <textarea
+                  id={`${formId}-chapter-mapping`}
+                  className="input-field font-mono-code text-xs"
+                  rows={3}
+                  value={chapterMapping}
+                  disabled={isSubmitting}
+                  placeholder={'{"keep":{"2":"原章节ID"},"split_from":{"3":"原章节ID"},"retire":[]}'}
+                  onChange={(event) => onChapterMappingChange(event.target.value)}
+                />
+                {onLoadChapterIdentities && (
+                  <details
+                    onToggle={(event) => {
+                      if (event.currentTarget.open) onLoadChapterIdentities();
+                    }}
+                  >
+                    <summary className="font-medium text-[var(--cms-primary)] cursor-pointer">
+                      查看现有及已下架的章节 ID
+                    </summary>
+                    <ul className="mt-2 pl-4 max-h-40 overflow-y-auto space-y-1 text-[var(--cms-muted-fg)]">
+                      {chapterIdentities.map((chapter) => (
+                        <li key={chapter.id}>
+                          {chapter.chapter_index === null ? '已下架' : `第 ${chapter.chapter_index + 1} 章`} ·{' '}
+                          {chapter.title} · <code className="text-[var(--cms-fg)]">{chapter.id}</code>
+                        </li>
+                      ))}
+                    </ul>
+                  </details>
+                )}
+              </details>
+            )}
+          </div>
+        )}
+
+        {submitError && (
           <div
+            role="status"
+            aria-live="polite"
+            className="p-3.5 rounded-xl border text-xs flex items-start gap-2"
             style={{
-              padding: '16px 24px',
-              borderTop: '1px solid hsl(var(--border))',
-              display: 'flex',
-              justifyContent: 'flex-end',
-              alignItems: 'center',
-              gap: '12px',
-              backgroundColor: 'hsl(var(--bg-surface))',
-              width: '100%',
-              boxSizing: 'border-box',
+              backgroundColor: 'color-mix(in srgb, var(--cms-error) 10%, transparent)',
+              borderColor: 'color-mix(in srgb, var(--cms-error) 28%, transparent)',
+              color: 'var(--cms-error)',
             }}
           >
-            <button type="button" className="btn-secondary" disabled={isCloseBlocked} onClick={onCancel} style={{ marginLeft: 'auto' }}>
-              取消
-            </button>
-            <button type="submit" className="btn-primary" disabled={uploadingCover || isSubmitting}>
-              {isSubmitting
-                ? isEditing
-                  ? '保存中...'
-                  : '正在创建并导入章节...'
-                : isEditing
-                  ? '保存修改'
-                  : createdDraftId
-                    ? '重试导入章节并完成'
-                    : '创建书籍并导入章节'}
-            </button>
+            <AlertCircle size={15} aria-hidden="true" className="shrink-0 mt-0.5" />
+            <span>{submitError}</span>
           </div>
-        </form>
-      </div>
-    </div>,
-    document.body
+        )}
+      </form>
+    </CmsDialog>
   );
 };

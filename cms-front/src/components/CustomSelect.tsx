@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React from 'react';
 
 interface Option {
   value: string;
@@ -12,6 +12,11 @@ interface CustomSelectProps {
   placeholder?: string;
   width?: string;
   style?: React.CSSProperties;
+  className?: string;
+  disabled?: boolean;
+  id?: string;
+  name?: string;
+  'aria-label'?: string;
 }
 
 export default function CustomSelect({
@@ -21,160 +26,33 @@ export default function CustomSelect({
   placeholder,
   width = '180px',
   style,
+  className = '',
+  disabled = false,
+  id,
+  name,
+  'aria-label': ariaLabel,
 }: CustomSelectProps) {
-  const [isOpen, setIsOpen] = useState(false);
-  const containerRef = useRef<HTMLDivElement>(null);
-  const selectedOption = options.find((o) => o.value === value);
-
-  useEffect(() => {
-    if (!isOpen) return;
-    const handleOutsideClick = (e: MouseEvent) => {
-      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
-        setIsOpen(false);
-      }
-    };
-    document.addEventListener('mousedown', handleOutsideClick);
-    return () => document.removeEventListener('mousedown', handleOutsideClick);
-  }, [isOpen]);
-
-  const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === 'Escape') {
-      if (isOpen) {
-        e.stopPropagation();
-      }
-      setIsOpen(false);
-    } else if (e.key === 'Enter' || e.key === ' ') {
-      e.preventDefault();
-      setIsOpen((prev) => !prev);
-    } else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
-      e.preventDefault();
-      if (!isOpen) {
-        setIsOpen(true);
-        return;
-      }
-      const currentIndex = options.findIndex((o) => o.value === value);
-      if (e.key === 'ArrowDown') {
-        const nextIndex = (currentIndex + 1) % options.length;
-        onChange(options[nextIndex].value);
-      } else {
-        const prevIndex = (currentIndex - 1 + options.length) % options.length;
-        onChange(options[prevIndex].value);
-      }
-    }
-  };
+  const hasEmptyOption = options.some((o) => o.value === '');
 
   return (
-    <div ref={containerRef} style={{ position: 'relative', width, ...style }}>
-      <div
-        className="custom-select-trigger"
-        onClick={() => setIsOpen(!isOpen)}
-        onKeyDown={handleKeyDown}
-        tabIndex={0}
-        role="combobox"
-        aria-expanded={isOpen}
-        aria-haspopup="listbox"
-        style={{
-          height: '38px',
-          backgroundColor: 'hsl(var(--bg-card))',
-          border: isOpen ? '1px solid hsl(var(--primary))' : '1px solid hsl(var(--border))',
-          boxShadow: isOpen ? '0 0 0 3px hsl(var(--primary) / 0.2)' : 'var(--shadow-sm)',
-          borderRadius: '8px',
-          color: 'hsl(var(--text-primary))',
-          fontSize: '0.8rem',
-          padding: '8px 36px 8px 12px',
-          cursor: 'pointer',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          userSelect: 'none',
-          position: 'relative',
-          transition: 'all 0.15s ease-in-out',
-          outline: 'none',
-        }}
-      >
-        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-          {selectedOption ? selectedOption.label : placeholder}
-        </span>
-        <span
-          style={{
-            position: 'absolute',
-            right: '12px',
-            top: '50%',
-            transform: 'translateY(-50%)',
-            display: 'flex',
-            alignItems: 'center',
-            color: 'hsl(var(--text-secondary))',
-            pointerEvents: 'none',
-          }}
-        >
-          <svg
-            xmlns="http://www.w3.org/2000/svg"
-            fill="none"
-            viewBox="0 0 24 24"
-            strokeWidth="2"
-            stroke="currentColor"
-            style={{ width: '1rem', height: '1rem' }}
-          >
-            <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5" />
-          </svg>
-        </span>
-      </div>
-
-      {isOpen && (
-        <div
-          role="listbox"
-          style={{
-            position: 'absolute',
-            top: '44px',
-            left: 0,
-            right: 0,
-            backgroundColor: 'hsl(var(--bg-surface))',
-            border: '1px solid hsl(var(--border))',
-            borderRadius: '8px',
-            boxShadow: 'var(--shadow-lg)',
-            zIndex: 1000,
-            maxHeight: '250px',
-            overflowY: 'auto',
-            padding: '4px 0',
-          }}
-        >
-          {options.map((option) => {
-            const isSelected = option.value === value;
-            return (
-              <div
-                key={option.value}
-                role="option"
-                aria-selected={isSelected}
-                onClick={() => {
-                  onChange(option.value);
-                  setIsOpen(false);
-                }}
-                style={{
-                  padding: '8px 12px',
-                  fontSize: '0.8rem',
-                  color: isSelected ? 'hsl(var(--primary))' : 'hsl(var(--text-primary))',
-                  backgroundColor: isSelected ? 'hsl(var(--primary) / 0.15)' : 'transparent',
-                  cursor: 'pointer',
-                  transition: 'background-color 0.15s',
-                  fontWeight: isSelected ? 600 : 400,
-                }}
-                onMouseEnter={(e) => {
-                  if (!isSelected) {
-                    e.currentTarget.style.backgroundColor = 'hsl(var(--bg-base))';
-                  }
-                }}
-                onMouseLeave={(e) => {
-                  if (!isSelected) {
-                    e.currentTarget.style.backgroundColor = 'transparent';
-                  }
-                }}
-              >
-                {option.label}
-              </div>
-            );
-          })}
-        </div>
+    <select
+      id={id}
+      name={name}
+      aria-label={ariaLabel || placeholder}
+      disabled={disabled}
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      className={`cms-select ${className}`}
+      style={{ width, ...style }}
+    >
+      {placeholder && !hasEmptyOption && (
+        <option value="">{placeholder}</option>
       )}
-    </div>
+      {options.map((option) => (
+        <option key={option.value} value={option.value}>
+          {option.label}
+        </option>
+      ))}
+    </select>
   );
 }

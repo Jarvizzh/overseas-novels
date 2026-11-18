@@ -1,7 +1,9 @@
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
+import { Key, User } from 'lucide-react';
 import { apiRequest } from '../utils/api';
 import type { AdminUser } from '../utils/api';
-import { Key, User, Sun, Moon } from 'lucide-react';
+import { useThemeMode } from '../utils/theme';
+import { ThemeSwitcher } from '../components/ThemeSwitcher';
 
 interface LoginProps {
   onLoginSuccess: (token: string, admin: AdminUser) => void;
@@ -12,21 +14,7 @@ export default function Login({ onLoginSuccess }: LoginProps) {
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
-
-  const [theme, setTheme] = useState<'light' | 'dark'>(() => {
-    return (localStorage.getItem('cms_theme') as 'light' | 'dark') || 'dark';
-  });
-
-  const toggleTheme = () => {
-    const nextTheme = theme === 'light' ? 'dark' : 'light';
-    setTheme(nextTheme);
-    localStorage.setItem('cms_theme', nextTheme);
-    document.documentElement.setAttribute('data-theme', nextTheme);
-  };
-
-  useEffect(() => {
-    document.documentElement.setAttribute('data-theme', theme);
-  }, [theme]);
+  const { mode, resolvedTheme, setMode } = useThemeMode();
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -36,143 +24,92 @@ export default function Login({ onLoginSuccess }: LoginProps) {
     try {
       const data = await apiRequest('POST', '/auth/login', { username, password });
       onLoginSuccess(data.token, data.admin);
-    } catch (err: any) {
-      setError(err.message || '登录失败，请检查您的账号和密码。');
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : '';
+      setError(msg || '登录失败，请检查您的账号和密码。');
     } finally {
       setLoading(false);
     }
   };
 
   return (
-    <div style={{
-      display: 'flex',
-      minHeight: '100vh',
-      alignItems: 'center',
-      justifyContent: 'center',
-      padding: '24px',
-      position: 'relative',
-      background: theme === 'dark'
-        ? 'radial-gradient(circle at 50% 30%, #0f172a 0%, #020617 100%)'
-        : 'radial-gradient(circle at 50% 30%, #f8fafc 0%, #e2e8f0 100%)'
-    }}>
-      {/* Theme Switcher Button */}
-      <div style={{ position: 'absolute', top: '24px', right: '24px', zIndex: 10 }}>
-        <button
-          onClick={toggleTheme}
-          className="btn-secondary"
-          style={{
-            padding: '6px 12px',
-            fontSize: '0.8rem',
-            display: 'flex',
-            gap: '6px',
-            alignItems: 'center',
-            cursor: 'pointer',
-            borderRadius: '8px',
-            color: 'hsl(var(--text-primary))',
-            backgroundColor: 'hsl(var(--bg-card))',
-            border: '1px solid hsl(var(--border))',
-            transition: 'all 0.2s ease'
-          }}
-          title={theme === 'light' ? '切换为深色模式' : '切换为浅色模式'}
-        >
-          {theme === 'light' ? <Moon size={15} style={{ color: 'hsl(var(--primary))' }} /> : <Sun size={15} style={{ color: 'hsl(var(--accent-orange))' }} />}
-          <span>{theme === 'light' ? '深色模式' : '浅色模式'}</span>
-        </button>
+    <div className="min-h-screen flex items-center justify-center p-6 relative bg-[var(--cms-bg)] text-[var(--cms-fg)] transition-colors">
+      {/* Icon-only Theme Switcher */}
+      <div className="absolute top-6 right-6 z-10">
+        <ThemeSwitcher mode={mode} resolvedTheme={resolvedTheme} onChange={setMode} />
       </div>
 
-      <div className="glass-panel animate-fade-in" style={{
-        width: '100%',
-        maxWidth: '420px',
-        padding: '36px',
-        border: '1px solid hsl(var(--border) / 0.8)',
-        boxShadow: theme === 'dark'
-          ? '0 20px 50px -10px rgba(0, 0, 0, 0.5), 0 0 20px 0 rgba(37, 99, 235, 0.15)'
-          : '0 20px 40px -15px rgba(37, 99, 235, 0.08)'
-      }}>
-        {/* Logo */}
-        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', textAlign: 'center', marginBottom: '32px' }}>
+      <div
+        className="w-full max-w-[420px] bg-[var(--cms-card)] border border-[var(--cms-border)] rounded-2xl p-9 space-y-7 animate-fade-in"
+        style={{ boxShadow: 'var(--shadow-lg)' }}
+      >
+        {/* Brand */}
+        <div className="flex flex-col items-center text-center space-y-3">
           <img
-            src={theme === 'dark' ? '/assets/logo_dark.png?v=twin_exact' : '/assets/logo_light.png?v=twin_exact'}
+            src={resolvedTheme === 'dark' ? '/assets/logo_dark.png?v=twin_exact' : '/assets/logo_light.png?v=twin_exact'}
             alt="STAR NOVEL Logo"
-            style={{
-              width: '64px',
-              height: '64px',
-              objectFit: 'contain',
-              borderRadius: '16px',
-              marginBottom: '16px',
-              boxShadow: 'var(--shadow-neon)',
-              border: '1px solid hsl(var(--border))'
-            }}
+            className="w-14 h-14 object-contain rounded-2xl border border-[var(--cms-border)]"
           />
-          <h2 style={{ fontSize: '1.8rem', fontWeight: 700, marginBottom: '6px' }} className="gradient-text">
-            STAR NOVEL
-          </h2>
-          <p style={{ color: 'hsl(var(--text-secondary))', fontSize: '0.9rem' }}>
-            海外小说内容与推广管理系统
-          </p>
+          <div>
+            <h1 className="text-2xl font-bold tracking-tight text-[var(--cms-fg)] m-0">STAR NOVEL</h1>
+            <p className="text-sm text-[var(--cms-muted-fg)] mt-1 m-0">海外小说内容与推广管理系统</p>
+          </div>
         </div>
 
         {error && (
-          <div style={{
-            backgroundColor: 'rgba(239, 68, 68, 0.1)',
-            border: '1px solid rgba(239, 68, 68, 0.25)',
-            color: '#f87171',
-            padding: '12px',
-            borderRadius: '8px',
-            fontSize: '0.85rem',
-            marginBottom: '20px'
-          }}>
+          <div
+            role="alert"
+            className="px-3.5 py-2.5 rounded-xl text-xs font-medium border"
+            style={{
+              backgroundColor: 'color-mix(in srgb, var(--cms-error) 10%, transparent)',
+              borderColor: 'color-mix(in srgb, var(--cms-error) 25%, transparent)',
+              color: 'var(--cms-error)',
+            }}
+          >
             {error}
           </div>
         )}
 
-        <form onSubmit={handleSubmit}>
-          <div style={{ marginBottom: '18px' }}>
-            <label style={{ display: 'block', fontSize: '0.8rem', color: 'hsl(var(--text-secondary))', marginBottom: '6px', fontWeight: 500 }}>
-              管理员账号
-            </label>
-            <div style={{ position: 'relative' }}>
-              <span style={{ position: 'absolute', left: '12px', top: '12px', color: 'hsl(var(--text-muted))' }}>
-                <User size={16} />
+        <form onSubmit={handleSubmit} className="space-y-4">
+          <label className="block space-y-1.5">
+            <span className="block text-xs font-medium text-[var(--cms-muted-fg)]">管理员账号</span>
+            <div className="relative">
+              <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-[var(--cms-placeholder)] pointer-events-none">
+                <User size={15} aria-hidden="true" />
               </span>
               <input
                 type="text"
                 className="input-field"
                 style={{ paddingLeft: '38px' }}
                 placeholder="请输入管理员用户名"
+                autoComplete="username"
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
                 required
               />
             </div>
-          </div>
+          </label>
 
-          <div style={{ marginBottom: '24px' }}>
-            <label style={{ display: 'block', fontSize: '0.8rem', color: 'hsl(var(--text-secondary))', marginBottom: '6px', fontWeight: 500 }}>
-              登录密码
-            </label>
-            <div style={{ position: 'relative' }}>
-              <span style={{ position: 'absolute', left: '12px', top: '12px', color: 'hsl(var(--text-muted))' }}>
-                <Key size={16} />
+          <label className="block space-y-1.5">
+            <span className="block text-xs font-medium text-[var(--cms-muted-fg)]">登录密码</span>
+            <div className="relative">
+              <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-[var(--cms-placeholder)] pointer-events-none">
+                <Key size={15} aria-hidden="true" />
               </span>
               <input
                 type="password"
                 className="input-field"
                 style={{ paddingLeft: '38px' }}
                 placeholder="请输入登录密码"
+                autoComplete="current-password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 required
               />
             </div>
-          </div>
+          </label>
 
-          <button
-            type="submit"
-            className="btn-primary"
-            disabled={loading}
-            style={{ width: '100%', padding: '12px', marginBottom: '0' }}
-          >
+          <button type="submit" disabled={loading} className="btn-primary w-full h-11 text-sm font-medium mt-2">
             {loading ? '正在验证身份...' : '登录管理后台'}
           </button>
         </form>

@@ -1,9 +1,20 @@
-import { useEffect, useState } from 'react';
-import { createPortal } from 'react-dom';
+import { useEffect, useMemo, useState } from 'react';
 import { apiRequest, domainApi } from '../utils/api';
 import type { SystemDomain } from '../utils/api';
-import { Trash, Clipboard, Search, Edit2, X } from 'lucide-react';
 import CustomSelect from '../components/CustomSelect';
+import { CmsDialog } from '../components/ui/CmsDialog';
+import { Pagination } from '../components/ui/Pagination';
+import {
+  type ColumnOption,
+  type FilterChip,
+  FilterChipsBar,
+  RowActionMenu,
+  SearchInput,
+  SkeletonRows,
+  type TableDensity,
+  TableRegion,
+  ViewOptionsPopover,
+} from '../components/ui/Primitives';
 
 interface PromotionLink {
   id: number;
@@ -41,90 +52,14 @@ export default function PromotionsTab() {
   const [templates, setTemplates] = useState<RechargeTemplate[]>([]);
   const [domains, setDomains] = useState<SystemDomain[]>([]);
   const [loading, setLoading] = useState(true);
+  const [hasLoadedOnce, setHasLoadedOnce] = useState(false);
+
   const [searchQuery, setSearchQuery] = useState('');
   const [sourceFilter, setSourceFilter] = useState('');
-
-  const [colWidths, setColWidths] = useState<number[]>([
-    140, // 创建时间
-    130, // 推广名称
-    140, // 小说书名
-    130, // 投放域名
-    90,  // 渠道 (Source)
-    110, // 绑定像素
-    110, // 绑定模板
-    110, // 专属千字计费
-    100, // 专属起付章节
-    110, // 活动 (Campaign)
-    80,  // 落地页
-    160, // 推广地址
-    130  // 操作
-  ]);
-
-  const columns = [
-    { label: '创建时间', key: 'created_at' },
-    { label: '推广名称', key: 'name' },
-    { label: '小说书名', key: 'novel_title' },
-    { label: '投放域名', key: 'domain' },
-    { label: '投放渠道', key: 'utm_source' },
-    { label: '绑定像素', key: 'fb_pixel_id' },
-    { label: '绑定模板', key: 'recharge_template_id' },
-    { label: '千字计费', key: 'coin_cost_per_thousand' },
-    { label: '起付章节', key: 'start_pay_chapter_index' },
-    { label: '广告名称', key: 'utm_campaign' },
-    { label: '落地页', key: 'chapter_index' },
-    { label: '推广地址', key: 'generated_url' },
-    { label: '操作', key: 'actions', align: 'right' }
-  ];
-
-  const handleMouseDown = (index: number, e: React.MouseEvent) => {
-    e.preventDefault();
-    const startX = e.clientX;
-    const startWidth = colWidths[index];
-
-    const handleMouseMove = (moveEvent: MouseEvent) => {
-      const deltaX = moveEvent.clientX - startX;
-      const newWidths = [...colWidths];
-      newWidths[index] = Math.max(50, startWidth + deltaX);
-      setColWidths(newWidths);
-    };
-
-    const handleMouseUp = () => {
-      window.removeEventListener('mousemove', handleMouseMove);
-      window.removeEventListener('mouseup', handleMouseUp);
-    };
-
-    window.addEventListener('mousemove', handleMouseMove);
-    window.addEventListener('mouseup', handleMouseUp);
-  };
-
-  const [tooltip, setTooltip] = useState<{
-    text: string;
-    x: number;
-    y: number;
-    visible: boolean;
-  }>({ text: '', x: 0, y: 0, visible: false });
-  const [hideTimeout, setHideTimeout] = useState<number | null>(null);
-
-  const showTooltip = (text: string, e: React.MouseEvent) => {
-    if (hideTimeout) {
-      window.clearTimeout(hideTimeout);
-      setHideTimeout(null);
-    }
-    const rect = e.currentTarget.getBoundingClientRect();
-    setTooltip({
-      text,
-      x: rect.left + rect.width / 2,
-      y: rect.top - 8,
-      visible: true
-    });
-  };
-
-  const hideTooltip = () => {
-    const timeout = window.setTimeout(() => {
-      setTooltip(prev => ({ ...prev, visible: false }));
-    }, 300);
-    setHideTimeout(timeout);
-  };
+  const [page, setPage] = useState(1);
+  const pageSize = 15;
+  const [density, setDensity] = useState<TableDensity>('compact');
+  const [showCreatedAt, setShowCreatedAt] = useState(true);
 
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
   const [editingLink, setEditingLink] = useState<PromotionLink | null>(null);
@@ -144,45 +79,20 @@ export default function PromotionsTab() {
     try {
       const data = await apiRequest('GET', '/promotion-links');
       setLinks(data || []);
-    } catch (err: any) {
-      window.showToast?.('加载推广链接失败: ' + err.message, 'error');
+      setHasLoadedOnce(true);
+    } catch (err: unknown) {
+      window.showToast?.(`加载推广链接失败: ${err instanceof Error ? err.message : ''}`, 'error');
+      setHasLoadedOnce(true);
     } finally {
       setLoading(false);
     }
   };
 
-  const fetchPixels = async () => {
-    try {
-      const data = await apiRequest('GET', '/fb-pixels');
-      setPixels(data || []);
-    } catch (e) {
-      console.error("加载像素列表失败:", e);
-    }
-  };
-
-  const fetchTemplates = async () => {
-    try {
-      const data = await apiRequest('GET', '/recharge-templates');
-      setTemplates(data || []);
-    } catch (e) {
-      console.error("加载模板列表失败:", e);
-    }
-  };
-
-  const fetchDomains = async () => {
-    try {
-      const data = await domainApi.getDomains();
-      setDomains(data || []);
-    } catch (e) {
-      console.error("加载域名列表失败:", e);
-    }
-  };
-
   useEffect(() => {
-    fetchLinks();
-    fetchPixels();
-    fetchTemplates();
-    fetchDomains();
+    void fetchLinks();
+    void apiRequest('GET', '/fb-pixels').then((d) => setPixels(d || [])).catch(() => {});
+    void apiRequest('GET', '/recharge-templates').then((d) => setTemplates(d || [])).catch(() => {});
+    void domainApi.getDomains().then((d) => setDomains(d || [])).catch(() => {});
   }, []);
 
   const handleEditClick = (link: PromotionLink) => {
@@ -195,8 +105,14 @@ export default function PromotionsTab() {
       domainId: link.domain_id ? String(link.domain_id) : '',
       fbPixelId: link.fb_pixel_id ? String(link.fb_pixel_id) : '',
       rechargeTemplateId: link.recharge_template_id ? String(link.recharge_template_id) : '',
-      coinCostPerThousand: link.coin_cost_per_thousand !== null && link.coin_cost_per_thousand !== undefined ? String(link.coin_cost_per_thousand) : '',
-      startPayChapterIndex: link.start_pay_chapter_index !== null && link.start_pay_chapter_index !== undefined ? String(link.start_pay_chapter_index) : '',
+      coinCostPerThousand:
+        link.coin_cost_per_thousand !== null && link.coin_cost_per_thousand !== undefined
+          ? String(link.coin_cost_per_thousand)
+          : '',
+      startPayChapterIndex:
+        link.start_pay_chapter_index !== null && link.start_pay_chapter_index !== undefined
+          ? String(link.start_pay_chapter_index)
+          : '',
     });
     setIsEditModalOpen(true);
   };
@@ -211,43 +127,29 @@ export default function PromotionsTab() {
     }
 
     const activeDomains = (domains || []).filter((d) => d.status === 1);
-    const targetDomainObj = activeDomains.find(d => String(d.id) === editForm.domainId);
-    const defaultDomainObj = activeDomains.find(d => d.is_default) || activeDomains.find(d => d.type === 'main') || activeDomains[0];
-    const domainHost = targetDomainObj ? targetDomainObj.domain : (defaultDomainObj ? defaultDomainObj.domain : window.location.host);
+    const targetDomainObj = activeDomains.find((d) => String(d.id) === editForm.domainId);
+    const defaultDomainObj =
+      activeDomains.find((d) => d.is_default) || activeDomains.find((d) => d.type === 'main') || activeDomains[0];
+    const domainHost = targetDomainObj
+      ? targetDomainObj.domain
+      : defaultDomainObj
+        ? defaultDomainObj.domain
+        : window.location.host;
 
-    let baseUrl = domainHost.startsWith('http://') || domainHost.startsWith('https://')
-      ? domainHost
-      : `https://${domainHost}`;
+    let baseUrl = domainHost.startsWith('http://') || domainHost.startsWith('https://') ? domainHost : `https://${domainHost}`;
     baseUrl = baseUrl.replace(/\/+$/, '');
 
     const params = new URLSearchParams();
     params.set('novel_id', String(editingLink.novel_id));
-    if (editForm.chapterIndex) {
-      params.set('chapter_index', editForm.chapterIndex);
-    }
-    if (editForm.utmSource) {
-      params.set('utm_source', editForm.utmSource);
-    }
-    if (editForm.utmCampaign) {
-      params.set('utm_campaign', editForm.utmCampaign);
-    }
+    if (editForm.chapterIndex) params.set('chapter_index', editForm.chapterIndex);
+    if (editForm.utmSource) params.set('utm_source', editForm.utmSource);
+    if (editForm.utmCampaign) params.set('utm_campaign', editForm.utmCampaign);
 
-    const targetPixel = pixels.find(p => p.id === parseInt(editForm.fbPixelId, 10));
-    if (targetPixel) {
-      params.set('pixel_id', targetPixel.pixel_id);
-    }
-
-    if (editForm.rechargeTemplateId) {
-      params.set('template_id', editForm.rechargeTemplateId);
-    }
-
-    if (editForm.coinCostPerThousand) {
-      params.set('cost', editForm.coinCostPerThousand);
-    }
-    if (editForm.startPayChapterIndex) {
-      params.set('pay_ch', editForm.startPayChapterIndex);
-    }
-
+    const targetPixel = pixels.find((p) => p.id === parseInt(editForm.fbPixelId, 10));
+    if (targetPixel) params.set('pixel_id', targetPixel.pixel_id);
+    if (editForm.rechargeTemplateId) params.set('template_id', editForm.rechargeTemplateId);
+    if (editForm.coinCostPerThousand) params.set('cost', editForm.coinCostPerThousand);
+    if (editForm.startPayChapterIndex) params.set('pay_ch', editForm.startPayChapterIndex);
     params.set('link_id', String(editingLink.id));
 
     const path = editForm.chapterIndex ? '/content' : '/detail';
@@ -260,477 +162,452 @@ export default function PromotionsTab() {
         utm_source: editForm.utmSource,
         utm_campaign: editForm.utmCampaign,
         generated_url: finalUrl,
-        domain_id: targetDomainObj ? targetDomainObj.id : (defaultDomainObj ? defaultDomainObj.id : null),
-        domain: targetDomainObj ? targetDomainObj.domain : (defaultDomainObj ? defaultDomainObj.domain : ''),
+        domain_id: targetDomainObj ? targetDomainObj.id : defaultDomainObj ? defaultDomainObj.id : null,
+        domain: targetDomainObj ? targetDomainObj.domain : defaultDomainObj ? defaultDomainObj.domain : '',
         fb_pixel_id: editForm.fbPixelId ? parseInt(editForm.fbPixelId, 10) : null,
         recharge_template_id: editForm.rechargeTemplateId ? parseInt(editForm.rechargeTemplateId, 10) : null,
         coin_cost_per_thousand: editForm.coinCostPerThousand ? parseInt(editForm.coinCostPerThousand, 10) : null,
         start_pay_chapter_index: editForm.startPayChapterIndex ? parseInt(editForm.startPayChapterIndex, 10) : null,
       });
 
-      window.showToast?.("修改推广链接成功！", "success");
+      window.showToast?.('修改推广链接成功！', 'success');
       setIsEditModalOpen(false);
-      fetchLinks();
-    } catch (err: any) {
-      window.showToast?.("修改推广链接失败：" + err.message, "error");
+      void fetchLinks();
+    } catch (err: unknown) {
+      window.showToast?.(`修改推广链接失败：${err instanceof Error ? err.message : ''}`, 'error');
     }
   };
 
-  const handleDelete = async (id: number) => {
+  const handleDelete = (id: number) => {
     window.showConfirm?.('确定要删除这条推广链接记录吗？此操作无法撤销。', async () => {
       try {
         await apiRequest('DELETE', `/promotion-links/${id}`);
-        setLinks(links.filter(l => l.id !== id));
+        setLinks((prev) => prev.filter((l) => l.id !== id));
         window.showToast?.('删除成功！', 'success');
-      } catch (err: any) {
-        window.showToast?.('删除失败: ' + err.message, 'error');
+      } catch (err: unknown) {
+        window.showToast?.(`删除失败: ${err instanceof Error ? err.message : ''}`, 'error');
       }
     });
   };
 
   const handleCopy = (url: string) => {
-    navigator.clipboard.writeText(url);
+    void navigator.clipboard.writeText(url);
     window.showToast?.('推广链接已复制到剪贴板！', 'success');
   };
 
-  // Filtered links
-  const filteredLinks = links.filter(link => {
-    const matchesSearch = link.novel_title.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      link.utm_campaign.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      (link.name && link.name.toLowerCase().includes(searchQuery.toLowerCase()));
-    const matchesSource = !sourceFilter || link.utm_source.toLowerCase() === sourceFilter.toLowerCase();
-    return matchesSearch && matchesSource;
-  });
+  const filteredLinks = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    return links.filter((link) => {
+      const matchesSearch =
+        !q ||
+        String(link.id).includes(q) ||
+        link.novel_title.toLowerCase().includes(q) ||
+        link.utm_campaign.toLowerCase().includes(q) ||
+        (link.name && link.name.toLowerCase().includes(q));
+      const matchesSource = !sourceFilter || link.utm_source.toLowerCase() === sourceFilter.toLowerCase();
+      return matchesSearch && matchesSource;
+    });
+  }, [links, searchQuery, sourceFilter]);
 
-  // Extract unique sources for filter dropdown
-  const uniqueSources = Array.from(new Set(links.map(l => l.utm_source).filter(Boolean)));
+  const totalPages = Math.max(1, Math.ceil(filteredLinks.length / pageSize));
+  const safePage = Math.min(page, totalPages);
+  const paginatedLinks = filteredLinks.slice((safePage - 1) * pageSize, safePage * pageSize);
 
-  if (loading) {
-    return <div style={{ color: 'hsl(var(--text-secondary))', padding: '20px' }}>正在加载推广链接数据...</div>;
-  }
+  const uniqueSources = Array.from(new Set(links.map((l) => l.utm_source).filter(Boolean)));
+  const activeDomains = (domains || []).filter((d) => d.status === 1);
+  const defaultDomain =
+    activeDomains.find((d) => d.is_default) || activeDomains.find((d) => d.type === 'main') || activeDomains[0];
+
+  const resetFilters = () => {
+    setSearchQuery('');
+    setSourceFilter('');
+    setPage(1);
+  };
+
+  const filterChips = useMemo<FilterChip[]>(() => {
+    const chips: FilterChip[] = [];
+    if (searchQuery) {
+      chips.push({
+        key: 'q',
+        label: `搜索: ${searchQuery}`,
+        onClear: () => {
+          setSearchQuery('');
+          setPage(1);
+        },
+      });
+    }
+    if (sourceFilter) {
+      chips.push({
+        key: 'source',
+        label: `渠道: ${sourceFilter}`,
+        onClear: () => {
+          setSourceFilter('');
+          setPage(1);
+        },
+      });
+    }
+    return chips;
+  }, [searchQuery, sourceFilter]);
+
+  const columnOptions: ColumnOption[] = [
+    { key: 'created_at', label: '创建时间', visible: showCreatedAt },
+  ];
+
+  const colSpan = showCreatedAt ? 9 : 8;
 
   return (
-    <div className="animate-fade-in" style={{ padding: '16px 24px 24px 24px' }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '24px' }}>
-        <h1 style={{ fontSize: '1.5rem', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '8px' }}>
-          <span className="gradient-text">推广链接管理</span>
-        </h1>
-      </div>
+    <div className="space-y-4 animate-fade-in">
+      {/* Unified Borderless Filter Strip */}
+      <search className="block space-y-2">
+        <div className="flex flex-wrap items-center justify-between gap-2.5">
+          <div className="flex flex-wrap items-center gap-2 flex-1 min-w-[260px]">
+            <SearchInput
+              className="w-full sm:w-80"
+              ariaLabel="搜索推广 ID、名称或书名"
+              placeholder="搜索推广 ID、名称、书名或活动..."
+              value={searchQuery}
+              onChange={(val) => {
+                setSearchQuery(val);
+                setPage(1);
+              }}
+            />
 
-      {/* Filters Area */}
-      <div className="glass-panel" style={{ position: 'relative', zIndex: 10, padding: '16px', marginBottom: '24px', display: 'flex', gap: '16px', flexWrap: 'wrap', alignItems: 'center' }}>
-        <div style={{ flex: 1, minWidth: '240px', position: 'relative' }}>
-          <span style={{ position: 'absolute', left: '12px', top: '50%', transform: 'translateY(-50%)', color: 'hsl(var(--text-muted))', display: 'flex' }}>
-            <Search size={16} />
-          </span>
-          <input
-            type="text"
-            className="input-field"
-            style={{ paddingLeft: '36px' }}
-            placeholder="搜索推广名称、书名或活动 (utm_campaign)..."
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-          />
+            <CustomSelect
+              aria-label="筛选广告渠道"
+              options={[
+                { value: '', label: '全部广告渠道' },
+                ...uniqueSources.map((src) => ({ value: src, label: src })),
+              ]}
+              value={sourceFilter}
+              onChange={(val) => {
+                setSourceFilter(val);
+                setPage(1);
+              }}
+              width="160px"
+            />
+
+            {(searchQuery || sourceFilter) && (
+              <button type="button" onClick={resetFilters} className="btn-ghost h-9 text-xs text-[var(--cms-muted-fg)]">
+                重置
+              </button>
+            )}
+          </div>
+
+          <div className="flex items-center gap-2 text-xs text-[var(--cms-muted-fg)]">
+            <span className="tabular-nums">共 {filteredLinks.length} 条</span>
+            <ViewOptionsPopover
+              density={density}
+              onDensityChange={setDensity}
+              columns={columnOptions}
+              onToggleColumn={(key) => {
+                if (key === 'created_at') setShowCreatedAt((v) => !v);
+              }}
+            />
+          </div>
         </div>
 
-        <div style={{ width: '180px' }}>
-          <CustomSelect
-            options={[
-              { value: '', label: '全部广告渠道' },
-              ...uniqueSources.map(src => ({ value: src, label: src }))
-            ]}
-            value={sourceFilter}
-            onChange={setSourceFilter}
-            width="180px"
-            placeholder="全部广告渠道"
-          />
-        </div>
-      </div>
+        <FilterChipsBar chips={filterChips} onResetAll={resetFilters} />
+      </search>
 
-      {/* List Table */}
-      <div className="glass-panel" style={{ padding: '8px', overflowX: 'auto' }}>
-        <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left', tableLayout: 'fixed' }}>
-          <colgroup>
-            {colWidths.map((width, i) => (
-              <col key={i} style={{ width: `${width}px` }} />
-            ))}
-          </colgroup>
+      {/* Promotions Table + External Pagination */}
+      <TableRegion
+        ariaLabel="推广链接列表"
+        footer={
+          <Pagination
+            page={safePage}
+            pageSize={pageSize}
+            total={filteredLinks.length}
+            onPageChange={setPage}
+            itemLabel="条链接"
+          />
+        }
+      >
+        <table className="cms-table min-w-[960px]" data-density={density}>
           <thead>
-            <tr style={{ borderBottom: '1px solid hsl(var(--border))', color: 'hsl(var(--text-secondary))', fontSize: '0.8rem' }}>
-              {columns.map((col, index) => (
-                <th
-                  key={col.key}
-                  style={{
-                    padding: '12px 12px',
-                    textAlign: col.align === 'right' ? 'right' : 'left',
-                    position: 'relative',
-                    userSelect: 'none'
-                  }}
-                >
-                  {col.label}
-                  {index < columns.length - 1 && (
-                    <div
-                      onMouseDown={(e) => handleMouseDown(index, e)}
-                      className="resize-handle"
-                      style={{
-                        position: 'absolute',
-                        right: 0,
-                        top: 0,
-                        bottom: 0,
-                        width: '5px',
-                        cursor: 'col-resize',
-                        zIndex: 10,
-                        borderRadius: '2px'
-                      }}
-                    />
-                  )}
-                </th>
-              ))}
+            <tr>
+              <th scope="col" className="whitespace-nowrap">推广 ID</th>
+              <th scope="col">推广名称 / 活动</th>
+              <th scope="col">关联书籍 / 落地页</th>
+              <th scope="col">域名与渠道</th>
+              <th scope="col">像素 &amp; 模板</th>
+              <th scope="col">计费规则</th>
+              <th scope="col">推广地址</th>
+              {showCreatedAt && <th scope="col">创建时间</th>}
+              <th scope="col" className="text-right w-px whitespace-nowrap">
+                操作
+              </th>
             </tr>
           </thead>
-          <tbody>
-            {filteredLinks.length === 0 ? (
+          <tbody className={loading && hasLoadedOnce ? 'opacity-65 transition-opacity' : ''}>
+            {!hasLoadedOnce && loading ? (
+              <SkeletonRows rows={6} cols={colSpan} />
+            ) : paginatedLinks.length === 0 ? (
               <tr>
-                <td colSpan={10} style={{ padding: '20px', textAlign: 'center', color: 'hsl(var(--text-muted))' }}>
-                  没有找到匹配的推广链接记录。
+                <td colSpan={colSpan} className="py-16 text-center text-[var(--cms-muted-fg)]">
+                  没有找到匹配的推广链接记录
                 </td>
               </tr>
             ) : (
-              filteredLinks.map((link) => (
-                <tr
-                  key={link.id}
-                  style={{ borderBottom: '1px solid hsl(var(--border) / 0.5)', fontSize: '0.9rem', transition: 'background-color 0.2s', color: 'hsl(var(--text-secondary))' }}
-                  onMouseEnter={(e) => e.currentTarget.style.backgroundColor = 'hsl(var(--bg-card))'}
-                  onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
-                >
-                  <td style={{ padding: '14px 12px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={new Date(link.created_at).toLocaleString('zh-CN', { hour12: false })}>
-                    {new Date(link.created_at).toLocaleString('zh-CN', { hour12: false })}
-                  </td>
-                  <td
-                    style={{ padding: '14px 12px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
-                    onMouseEnter={(e) => showTooltip(link.name || '未命名', e)}
-                    onMouseLeave={hideTooltip}
-                  >
-                    {link.name || <span style={{ color: 'hsl(var(--text-muted))' }}>未命名</span>}
-                  </td>
-                  <td style={{ padding: '14px 12px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={link.novel_title}>
-                    {link.novel_title}
-                  </td>
-                  <td style={{ padding: '14px 12px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={link.domain || '主站默认域名'}>
-                    {link.domain ? (
-                      <span className="badge badge-purple" style={{ fontSize: '0.75rem' }}>{link.domain}</span>
-                    ) : (
-                      <span style={{ color: 'hsl(var(--text-muted))', fontSize: '0.8rem' }}>默认主域名</span>
-                    )}
-                  </td>
-                  <td style={{ padding: '14px 12px' }}>
-                    <span className="badge badge-blue">{link.utm_source}</span>
-                  </td>
-                  <td style={{ padding: '14px 12px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={link.fb_pixel_id ? (pixels.find(p => p.id === link.fb_pixel_id)?.name || `ID: ${link.fb_pixel_id}`) : '-'}>
-                    {link.fb_pixel_id ? (
-                      pixels.find(p => p.id === link.fb_pixel_id)?.name || `ID: ${link.fb_pixel_id}`
-                    ) : (
-                      <span style={{ color: 'hsl(var(--text-muted))' }}>-</span>
-                    )}
-                  </td>
-                  <td style={{ padding: '14px 12px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={link.recharge_template_id ? (templates.find(t => t.id === link.recharge_template_id)?.name || `ID: ${link.recharge_template_id}`) : '-'}>
-                    {link.recharge_template_id ? (
-                      templates.find(t => t.id === link.recharge_template_id)?.name || `ID: ${link.recharge_template_id}`
-                    ) : (
-                      <span style={{ color: 'hsl(var(--text-muted))' }}>-</span>
-                    )}
-                  </td>
-                  <td style={{ padding: '14px 12px', whiteSpace: 'nowrap' }}>
-                    {link.coin_cost_per_thousand !== null && link.coin_cost_per_thousand !== undefined ? (
-                      <span className="badge badge-amber">{link.coin_cost_per_thousand} 币/千字</span>
-                    ) : (
-                      <span style={{ color: 'hsl(var(--text-muted))', fontSize: '0.8rem' }}>继承默认</span>
-                    )}
-                  </td>
-                  <td style={{ padding: '14px 12px', whiteSpace: 'nowrap' }}>
-                    {link.start_pay_chapter_index !== null && link.start_pay_chapter_index !== undefined ? (
-                      <span className="badge badge-purple">第 {link.start_pay_chapter_index} 章起</span>
-                    ) : (
-                      <span style={{ color: 'hsl(var(--text-muted))', fontSize: '0.8rem' }}>继承默认</span>
-                    )}
-                  </td>
-                  <td style={{ padding: '14px 12px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={link.utm_campaign || '-'}>
-                    {link.utm_campaign || <span style={{ color: 'hsl(var(--text-muted))' }}>-</span>}
-                  </td>
-                  <td style={{ padding: '14px 12px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                    {link.chapter_index > 0 ? `第 ${link.chapter_index} 章` : '书籍详情页'}
-                  </td>
-                  <td
-                    style={{ padding: '14px 12px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
-                    onMouseEnter={(e) => showTooltip(link.generated_url, e)}
-                    onMouseLeave={hideTooltip}
-                  >
-                    <code style={{ fontSize: '0.75rem', color: 'hsl(var(--primary))' }}>{link.generated_url}</code>
-                  </td>
-                  <td style={{ padding: '14px 12px', textAlign: 'right' }} onClick={(e) => e.stopPropagation()}>
-                    <div style={{ display: 'flex', gap: '6px', justifyContent: 'flex-end' }}>
-                      <button
-                        className="btn-secondary"
-                        style={{ padding: '6px', borderRadius: '6px' }}
-                        title="编辑推广链接"
-                        onClick={() => handleEditClick(link)}
+              paginatedLinks.map((link) => {
+                const pixelName = link.fb_pixel_id
+                  ? pixels.find((p) => p.id === link.fb_pixel_id)?.name || `Pixel #${link.fb_pixel_id}`
+                  : '-';
+                const tplName = link.recharge_template_id
+                  ? templates.find((t) => t.id === link.recharge_template_id)?.name || `Tpl #${link.recharge_template_id}`
+                  : '默认模板';
+
+                return (
+                  <tr key={link.id}>
+                    <td className="tabular-nums text-[var(--cms-muted-fg)] whitespace-nowrap">#{link.id}</td>
+                    <td>
+                      <div className="text-[var(--cms-fg)] truncate max-w-[180px]" title={link.name}>
+                        {link.name || <span className="text-[var(--cms-muted-fg)]">未命名 #{link.id}</span>}
+                      </div>
+                      <div
+                        className="text-[var(--cms-muted-fg)] mt-0.5 truncate max-w-[180px]"
+                        title={link.utm_campaign}
                       >
-                        <Edit2 size={14} />
-                      </button>
-                      <button
-                        className="btn-secondary"
-                        style={{ padding: '6px', borderRadius: '6px' }}
-                        title="复制推广链接"
-                        onClick={() => handleCopy(link.generated_url)}
+                        {link.utm_campaign || '无 utm_campaign'}
+                      </div>
+                    </td>
+                    <td>
+                      <div className="text-[var(--cms-fg)] truncate max-w-[180px]" title={link.novel_title}>
+                        {link.novel_title}
+                      </div>
+                      <div className="text-[var(--cms-muted-fg)] mt-0.5">
+                        {link.chapter_index > 0 ? `第 ${link.chapter_index} 章` : '书籍详情页'}
+                      </div>
+                    </td>
+                    <td>
+                      <div className="text-[var(--cms-fg)]">{link.utm_source}</div>
+                      <div
+                        className="text-[var(--cms-muted-fg)] mt-0.5 truncate max-w-[160px]"
+                        title={link.domain || '默认主域名'}
                       >
-                        <Clipboard size={14} />
-                      </button>
-                      <button
-                        className="btn-secondary"
-                        style={{ padding: '6px', borderRadius: '6px', color: '#f87171', borderColor: 'rgba(239, 68, 68, 0.2)' }}
-                        title="删除推广链接"
-                        onClick={() => handleDelete(link.id)}
-                      >
-                        <Trash size={14} />
-                      </button>
-                    </div>
-                  </td>
-                </tr>
-              ))
+                        {link.domain || '默认主域名'}
+                      </div>
+                    </td>
+                    <td>
+                      <div className="text-[var(--cms-fg)] truncate max-w-[150px]" title={pixelName}>
+                        {pixelName}
+                      </div>
+                      <div className="text-[var(--cms-muted-fg)] mt-0.5 truncate max-w-[150px]" title={tplName}>
+                        {tplName}
+                      </div>
+                    </td>
+                    <td className="tabular-nums">
+                      <div>
+                        {link.coin_cost_per_thousand !== null && link.coin_cost_per_thousand !== undefined ? (
+                          <span className="text-[var(--cms-fg)]">{link.coin_cost_per_thousand} 币/千字</span>
+                        ) : (
+                          <span className="text-[var(--cms-muted-fg)]">单价继承默认</span>
+                        )}
+                      </div>
+                      <div className="mt-0.5">
+                        {link.start_pay_chapter_index !== null && link.start_pay_chapter_index !== undefined ? (
+                          <span className="text-[var(--cms-fg)]">第 {link.start_pay_chapter_index} 章起付</span>
+                        ) : (
+                          <span className="text-[var(--cms-muted-fg)]">起付继承默认</span>
+                        )}
+                      </div>
+                    </td>
+                    <td>
+                      <div className="max-w-[200px]">
+                        <span
+                          className="text-[var(--cms-muted-fg)] truncate block"
+                          title={link.generated_url}
+                        >
+                          {link.generated_url}
+                        </span>
+                      </div>
+                    </td>
+                    {showCreatedAt && (
+                      <td className="tabular-nums text-[var(--cms-muted-fg)] whitespace-nowrap">
+                        {new Date(link.created_at).toLocaleString('zh-CN', { hour12: false })}
+                      </td>
+                    )}
+                    <td className="text-right whitespace-nowrap">
+                      <div className="inline-flex items-center justify-end gap-0.5 whitespace-nowrap">
+                        <button
+                          type="button"
+                          onClick={() => handleCopy(link.generated_url)}
+                          title="复制推广链接"
+                          className="btn-detail whitespace-nowrap"
+                        >
+                          复制
+                        </button>
+                        <RowActionMenu
+                          ariaLabel={`推广链接 ${link.name || link.id} 操作`}
+                          items={[
+                            { label: '编辑参数配置', onClick: () => handleEditClick(link) },
+                            {
+                              label: '删除推广链接',
+                              tone: 'danger',
+                              dividerBefore: true,
+                              onClick: () => handleDelete(link.id),
+                            },
+                          ]}
+                        />
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })
             )}
           </tbody>
         </table>
-      </div>
+      </TableRegion>
 
-      {isEditModalOpen && editingLink && createPortal(
-        <div style={{
-          position: 'fixed',
-          top: 0,
-          left: 0,
-          right: 0,
-          bottom: 0,
-          backgroundColor: 'rgba(15, 23, 42, 0.35)',
-          backdropFilter: 'blur(2.5px)',
-          WebkitBackdropFilter: 'blur(2.5px)',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          zIndex: 10000,
-          padding: '20px',
-          overscrollBehavior: 'contain'
-        }}>
-          <div className="glass-panel animate-scale-in" style={{
-            width: '100%',
-            maxWidth: '520px',
-            padding: '24px',
-            position: 'relative',
-            backgroundColor: 'hsl(var(--bg-surface))',
-            border: '1px solid hsl(var(--border))',
-            borderRadius: '16px',
-            boxShadow: 'var(--shadow-lg)',
-            overflow: 'hidden'
-          }}>
-            <button
-              type="button"
-              aria-label="关闭窗口"
-              onClick={() => setIsEditModalOpen(false)}
-              style={{ position: 'absolute', top: '16px', right: '16px', background: 'transparent', border: 'none', color: 'hsl(var(--text-secondary))', cursor: 'pointer' }}
-            >
-              <X size={18} aria-hidden="true" />
+      {/* Edit Promotion Link Slide-Over Drawer */}
+      <CmsDialog
+        open={Boolean(isEditModalOpen && editingLink)}
+        onClose={() => setIsEditModalOpen(false)}
+        variant="drawer"
+        title="编辑推广链接"
+        subtitle={editingLink ? `${editingLink.novel_title} · #${editingLink.id}` : undefined}
+        size="md"
+        footer={
+          <>
+            <button type="button" className="btn-secondary" onClick={() => setIsEditModalOpen(false)}>
+              取消
             </button>
-            <h3 style={{ fontSize: '1.25rem', fontWeight: 600, marginBottom: '20px' }}>编辑推广链接</h3>
+            <button type="submit" form="edit-promo-form" className="btn-primary">
+              确认保存
+            </button>
+          </>
+        }
+      >
+        {editingLink && (
+          <form id="edit-promo-form" onSubmit={handleEditSubmit} className="space-y-4 text-xs">
+            <label className="block space-y-1.5">
+              <span className="block font-medium text-[var(--cms-muted-fg)]">推广名称</span>
+              <input
+                type="text"
+                autoFocus
+                className="input-field"
+                value={editForm.name}
+                onChange={(e) => setEditForm({ ...editForm, name: e.target.value })}
+                required
+              />
+            </label>
 
-            <form onSubmit={handleEditSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-              <div>
-                <label style={{ display: 'block', fontSize: '0.75rem', color: 'hsl(var(--text-secondary))', marginBottom: '4px' }}>推广名称</label>
-                <input
-                  type="text"
-                  className="input-field"
-                  value={editForm.name}
-                  onChange={(e) => setEditForm({ ...editForm, name: e.target.value })}
-                  required
-                />
-              </div>
-
-              <div>
-                <label style={{ display: 'block', fontSize: '0.75rem', color: 'hsl(var(--text-secondary))', marginBottom: '4px' }}>推广书籍</label>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <label className="space-y-1.5">
+                <span className="block font-medium text-[var(--cms-muted-fg)]">推广书籍</span>
                 <input type="text" className="input-field" disabled value={editingLink.novel_title} />
-              </div>
-
-              <div>
-                <label style={{ display: 'block', fontSize: '0.75rem', color: 'hsl(var(--text-secondary))', marginBottom: '4px' }}>
-                  投放落地页域名 (可选，不选则默认主域名)
-                </label>
-                {(() => {
-                  const activeDomains = (domains || []).filter((d) => d.status === 1);
-                  const defaultDomain = activeDomains.find((d) => d.is_default) || activeDomains.find((d) => d.type === 'main') || activeDomains[0];
-                  return (
-                    <CustomSelect
-                      options={[
-                        {
-                          value: '',
-                          label: `-- 默认主域名 (${defaultDomain?.domain || '主站默认域名'}) --`
-                        },
-                        ...activeDomains.map((d) => ({
-                          value: String(d.id),
-                          label: `${d.name} (${d.domain}) ${d.is_default ? '[默认主域名]' : ''}`
-                        }))
-                      ]}
-                      value={editForm.domainId}
-                      onChange={(val) => setEditForm({ ...editForm, domainId: val })}
-                      width="100%"
-                    />
-                  );
-                })()}
-              </div>
-
-              <div>
-                <label style={{ display: 'block', fontSize: '0.75rem', color: 'hsl(var(--text-secondary))', marginBottom: '4px' }}>落地章节索引 (可选)</label>
+              </label>
+              <label className="space-y-1.5">
+                <span className="block font-medium text-[var(--cms-muted-fg)]">落地章节索引（可选）</span>
                 <input
                   type="number"
-                  className="input-field"
+                  className="input-field tabular-nums"
                   value={editForm.chapterIndex}
                   onChange={(e) => setEditForm({ ...editForm, chapterIndex: e.target.value })}
                 />
-              </div>
+              </label>
+            </div>
 
-              <div>
-                <label style={{ display: 'block', fontSize: '0.75rem', color: 'hsl(var(--text-secondary))', marginBottom: '4px' }}>广告渠道 (utm_source)</label>
+            <label className="block space-y-1.5">
+              <span className="block font-medium text-[var(--cms-muted-fg)]">投放落地页域名（可选）</span>
+              <CustomSelect
+                aria-label="投放落地页域名"
+                width="100%"
+                value={editForm.domainId}
+                onChange={(val) => setEditForm({ ...editForm, domainId: val })}
+                options={[
+                  {
+                    value: '',
+                    label: `-- 默认主域名 (${defaultDomain?.domain || '主站默认域名'}) --`,
+                  },
+                  ...activeDomains.map((d) => ({
+                    value: String(d.id),
+                    label: `${d.name} (${d.domain}) ${d.is_default ? '[默认主域名]' : ''}`,
+                  })),
+                ]}
+              />
+            </label>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <label className="space-y-1.5">
+                <span className="block font-medium text-[var(--cms-muted-fg)]">广告渠道 (utm_source)</span>
                 <CustomSelect
-                  options={[{ value: 'facebook', label: 'Facebook' }]}
+                  aria-label="广告渠道"
+                  width="100%"
                   value={editForm.utmSource}
                   onChange={(val) => setEditForm({ ...editForm, utmSource: val })}
-                  width="100%"
+                  options={[{ value: 'facebook', label: 'Facebook' }]}
                 />
-              </div>
+              </label>
 
-              <div>
-                <label style={{ display: 'block', fontSize: '0.75rem', color: 'hsl(var(--text-secondary))', marginBottom: '4px' }}>
-                  绑定 Facebook 像素 <span style={{ color: '#f87171' }}>*</span>
-                </label>
+              <label className="space-y-1.5">
+                <span className="block font-medium text-[var(--cms-muted-fg)]">
+                  绑定 Facebook 像素 <span className="text-[var(--cms-error)]">*</span>
+                </span>
                 <CustomSelect
-                  options={[
-                    { value: '', label: pixels.length === 0 ? '-- 请先添加像素配置 --' : '-- 选择绑定的 Facebook 像素 (必选) --' },
-                    ...pixels.map(p => ({ value: String(p.id), label: `${p.name} (${p.pixel_id})` }))
-                  ]}
+                  aria-label="绑定 Facebook 像素"
+                  width="100%"
                   value={editForm.fbPixelId}
                   onChange={(val) => setEditForm({ ...editForm, fbPixelId: val })}
-                  width="100%"
-                />
-              </div>
-
-              <div>
-                <label style={{ display: 'block', fontSize: '0.75rem', color: 'hsl(var(--text-secondary))', marginBottom: '4px' }}>广告活动名称 (utm_campaign)</label>
-                <input
-                  type="text"
-                  className="input-field"
-                  value={editForm.utmCampaign}
-                  onChange={(e) => setEditForm({ ...editForm, utmCampaign: e.target.value })}
-                />
-              </div>
-
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
-                <div>
-                  <label style={{ display: 'block', fontSize: '0.75rem', color: 'hsl(var(--text-secondary))', marginBottom: '4px' }}>
-                    专属千字计费 (可选)
-                  </label>
-                  <input
-                    type="number"
-                    className="input-field"
-                    placeholder="留空继承默认"
-                    min={0}
-                    value={editForm.coinCostPerThousand}
-                    onChange={(e) => setEditForm({ ...editForm, coinCostPerThousand: e.target.value })}
-                  />
-                </div>
-                <div>
-                  <label style={{ display: 'block', fontSize: '0.75rem', color: 'hsl(var(--text-secondary))', marginBottom: '4px' }}>
-                    专属起付章节 (可选)
-                  </label>
-                  <input
-                    type="number"
-                    className="input-field"
-                    placeholder="留空继承默认"
-                    min={1}
-                    value={editForm.startPayChapterIndex}
-                    onChange={(e) => setEditForm({ ...editForm, startPayChapterIndex: e.target.value })}
-                  />
-                </div>
-              </div>
-
-              <div>
-                <label style={{ display: 'block', fontSize: '0.75rem', color: 'hsl(var(--text-secondary))', marginBottom: '4px' }}>绑定充值模板 (可选)</label>
-                <CustomSelect
                   options={[
-                    { value: '', label: '-- 使用默认激活模板 --' },
-                    ...templates.map(t => ({ value: String(t.id), label: `${t.name} ${t.is_default ? '(默认)' : ''}` }))
+                    { value: '', label: pixels.length === 0 ? '-- 请先添加像素配置 --' : '-- 选择像素 (必选) --' },
+                    ...pixels.map((p) => ({ value: String(p.id), label: `${p.name} (${p.pixel_id})` })),
                   ]}
-                  value={editForm.rechargeTemplateId}
-                  onChange={(val) => setEditForm({ ...editForm, rechargeTemplateId: val })}
-                  width="100%"
                 />
-              </div>
+              </label>
+            </div>
 
-              <div style={{ display: 'flex', gap: '12px', marginTop: '8px' }}>
-                <button type="button" className="btn-secondary" style={{ flex: 1 }} onClick={() => setIsEditModalOpen(false)}>
-                  取消
-                </button>
-                <button type="submit" className="btn-primary" style={{ flex: 1.5 }}>
-                  确认保存
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>,
-        document.body
-      )}
+            <label className="block space-y-1.5">
+              <span className="block font-medium text-[var(--cms-muted-fg)]">广告活动名称 (utm_campaign)</span>
+              <input
+                type="text"
+                className="input-field"
+                value={editForm.utmCampaign}
+                onChange={(e) => setEditForm({ ...editForm, utmCampaign: e.target.value })}
+              />
+            </label>
 
-      {tooltip.visible && createPortal(
-        <div
-          onMouseEnter={() => {
-            if (hideTimeout) {
-              window.clearTimeout(hideTimeout);
-              setHideTimeout(null);
-            }
-          }}
-          onMouseLeave={hideTooltip}
-          style={{
-            position: 'fixed',
-            left: tooltip.x,
-            top: tooltip.y,
-            transform: 'translate(-50%, -100%)',
-            backgroundColor: '#1e293b',
-            color: '#ffffff',
-            border: 'none',
-            borderRadius: '6px',
-            padding: '6px 12px',
-            boxShadow: 'var(--shadow-md)',
-            fontSize: '0.8rem',
-            zIndex: 9999,
-            pointerEvents: 'auto',
-            maxWidth: '360px',
-            wordBreak: 'break-all',
-            whiteSpace: 'normal',
-            boxSizing: 'border-box',
-            textAlign: 'center'
-          }}
-        >
-          {tooltip.text}
-          {/* Downward pointing arrow */}
-          <div style={{
-            position: 'absolute',
-            top: '100%',
-            left: '50%',
-            transform: 'translateX(-50%)',
-            width: 0,
-            height: 0,
-            borderLeft: '6px solid transparent',
-            borderRight: '6px solid transparent',
-            borderTop: '6px solid #1e293b'
-          }} />
-        </div>,
-        document.body
-      )}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <label className="space-y-1.5">
+                <span className="block font-medium text-[var(--cms-muted-fg)]">专属千字计费（可选）</span>
+                <input
+                  type="number"
+                  className="input-field tabular-nums"
+                  placeholder="留空继承默认"
+                  min={0}
+                  value={editForm.coinCostPerThousand}
+                  onChange={(e) => setEditForm({ ...editForm, coinCostPerThousand: e.target.value })}
+                />
+              </label>
+
+              <label className="space-y-1.5">
+                <span className="block font-medium text-[var(--cms-muted-fg)]">专属起付章节（可选）</span>
+                <input
+                  type="number"
+                  className="input-field tabular-nums"
+                  placeholder="留空继承默认"
+                  min={1}
+                  value={editForm.startPayChapterIndex}
+                  onChange={(e) => setEditForm({ ...editForm, startPayChapterIndex: e.target.value })}
+                />
+              </label>
+            </div>
+
+            <label className="block space-y-1.5">
+              <span className="block font-medium text-[var(--cms-muted-fg)]">绑定充值模板（可选）</span>
+              <CustomSelect
+                aria-label="绑定充值模板"
+                width="100%"
+                value={editForm.rechargeTemplateId}
+                onChange={(val) => setEditForm({ ...editForm, rechargeTemplateId: val })}
+                options={[
+                  { value: '', label: '-- 使用默认激活模板 --' },
+                  ...templates.map((t) => ({ value: String(t.id), label: `${t.name} ${t.is_default ? '(默认)' : ''}` })),
+                ]}
+              />
+            </label>
+          </form>
+        )}
+      </CmsDialog>
     </div>
   );
 }
