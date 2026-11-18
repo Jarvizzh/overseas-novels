@@ -17,7 +17,7 @@ func NewHandler(srv Service) *Handler {
 }
 
 func (h *Handler) RegisterRoutes(rg *gin.RouterGroup) {
-	rg.GET("/tracking-logs", auth.AuthMiddleware(), h.ListLogs)
+	rg.GET("/tracking-logs", auth.AuthMiddleware(), auth.RoleMiddleware("SuperAdmin"), h.ListLogs)
 }
 
 func (h *Handler) ListLogs(c *gin.Context) {

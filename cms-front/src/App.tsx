@@ -1,103 +1,58 @@
-import { useState, useEffect } from 'react';
-import { BrowserRouter, Routes, Route, Navigate, useNavigate, useLocation, Link } from 'react-router-dom';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { BrowserRouter, Routes, Route, Navigate, useNavigate, useLocation } from 'react-router-dom';
+import { Menu } from 'lucide-react';
 import { ToastProvider } from './context/ToastContext';
 import { ConfirmProvider } from './context/ConfirmContext';
 import { apiRequest } from './utils/api';
 import type { AdminUser } from './utils/api';
+import { useThemeMode } from './utils/theme';
+import { ThemeSwitcher } from './components/ThemeSwitcher';
+import { CmsSidebar } from './components/CmsSidebar';
+import {
+  DEFAULT_EXPANDED_GROUPS,
+  flattenNavEntries,
+  getVisibleNavTree,
+  isNavPathActive,
+} from './config/navigation';
 import Login from './pages/Login';
 import DashboardTab from './pages/DashboardTab';
 import NovelsTab from './pages/NovelsTab';
 import UsersTab from './pages/UsersTab';
 import OrdersTab from './pages/OrdersTab';
 import PaymentTab from './pages/PaymentTab';
-import CampaignTab from './pages/CampaignTab';
 import AccountsTab from './pages/AccountsTab';
 import PixelsTab from './pages/PixelsTab';
 import TemplatesTab from './pages/TemplatesTab';
 import PromotionsTab from './pages/PromotionsTab';
 import TrackingLogsTab from './pages/TrackingLogsTab';
 import DomainsTab from './pages/DomainsTab';
-import MetaAdStatsTab from './pages/MetaAdStatsTab';
 import FeedbackTab from './pages/FeedbackTab';
 import OperationsTab from './pages/OperationsTab';
-import {
-  LayoutDashboard,
-  Book,
-  Users,
-  CreditCard,
-  Settings,
-  LogOut,
-  ChevronLeft,
-  ChevronRight,
-  Coins,
-  ShieldCheck,
-  ChevronDown,
-  ChevronUp,
-  Link2,
-  Target,
-  Gift,
-  FileText,
-  Sun,
-  Moon,
-  Globe,
-  BarChart3,
-  MessageSquare,
-  Sparkles
-} from 'lucide-react';
 
+const SIDEBAR_COLLAPSED_KEY = 'cms_sidebar_collapsed';
+const NAV_EXPANDED_GROUPS_KEY = 'cms_nav_expanded_groups';
 
-const navItems = [
-  { id: 'dashboard', label: '首页看板', path: '/', icon: <LayoutDashboard size={18} /> },
-  { id: 'novels', label: '书籍管理', path: '/novels', icon: <Book size={18} /> },
-  { id: 'users', label: '用户管理', path: '/users', icon: <Users size={18} /> },
-  { id: 'orders', label: '订单管理', path: '/orders', icon: <CreditCard size={18} /> },
-  { id: 'promotions', label: '推广链接', path: '/promotions', icon: <Link2 size={18} /> },
-  { id: 'templates', label: '充值模板', path: '/recharge-templates', icon: <Coins size={18} /> },
-  {
-    id: 'operations',
-    label: '运营配置',
-    path: '/operations',
-    icon: <Sparkles size={18} />
-  },
-  {
-    id: 'campaign',
-    label: '活动配置',
-    path: '/campaign',
-    icon: <Gift size={18} />
-  },
-  { id: 'feedback', label: '客服留言', path: '/feedback', icon: <MessageSquare size={18} /> },
-  {
-    id: 'ad-config',
-    label: '广告配置',
-    path: '/ad-config',
-    icon: <Target size={18} />,
-    children: [
-      { id: 'ad-pixels', label: '像素管理', path: '/ad-config/pixels', icon: <Target size={14} /> },
-      { id: 'ad-logs', label: '回传日志', path: '/ad-config/logs', icon: <FileText size={14} /> }
-    ]
-  },
-  {
-    id: 'settings',
-    label: '系统管理',
-    path: '/settings',
-    icon: <Settings size={18} />,
-    roles: ['SuperAdmin'],
-    children: [
-      { id: 'settings-domains', label: '域名管理', path: '/settings/domains', icon: <Globe size={14} /> },
-      { id: 'settings-payment', label: '支付管理', path: '/settings/payment', icon: <CreditCard size={14} /> },
-      { id: 'settings-accounts', label: '账号管理', path: '/settings/accounts', icon: <ShieldCheck size={14} /> }
-    ]
-  },
-  {
-    id: 'meta-ad-stats',
-    label: 'Meta广告统计',
-    path: '/meta-ad-stats',
-    icon: <BarChart3 size={18} />,
-    roles: ['SuperAdmin']
-  },
-];
+function readInitialSidebarCollapsed(): boolean {
+  try {
+    return localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
 
-
+function readInitialExpandedGroups(): Record<string, boolean> {
+  try {
+    const raw = localStorage.getItem(NAV_EXPANDED_GROUPS_KEY);
+    if (!raw) return DEFAULT_EXPANDED_GROUPS;
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      return { ...DEFAULT_EXPANDED_GROUPS, ...parsed };
+    }
+  } catch {
+    // Fallback to all groups expanded by default
+  }
+  return DEFAULT_EXPANDED_GROUPS;
+}
 
 declare global {
   interface Window {
@@ -107,27 +62,7 @@ declare global {
 }
 
 function AppContent() {
-  const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' | 'info' } | null>(null);
-  const [confirmData, setConfirmData] = useState<{ message: string; onConfirm: () => void } | null>(null);
-
-  useEffect(() => {
-    window.showToast = (message: string, type: 'success' | 'error' | 'info' = 'success') => {
-      setToast({ message, type });
-    };
-    window.showConfirm = (message: string, onConfirm: () => void) => {
-      setConfirmData({ message, onConfirm });
-    };
-  }, []);
-
-  useEffect(() => {
-    if (toast) {
-      const timer = setTimeout(() => {
-        setToast(null);
-      }, 3000);
-      return () => clearTimeout(timer);
-    }
-  }, [toast]);
-  const [token, setToken] = useState<string | null>(localStorage.getItem('cms_token'));
+  const [token, setToken] = useState<string | null>(() => localStorage.getItem('cms_token'));
   const [admin, setAdmin] = useState<AdminUser | null>(() => {
     try {
       const saved = localStorage.getItem('cms_admin');
@@ -137,81 +72,134 @@ function AppContent() {
     }
   });
   const [initializing, setInitializing] = useState(true);
-  const [theme, setTheme] = useState<'light' | 'dark'>(() => {
-    const savedTheme = localStorage.getItem('cms_theme');
-    if (savedTheme === 'dark' || savedTheme === 'light') return savedTheme;
-    return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
-  });
+  const { mode, resolvedTheme, setMode } = useThemeMode();
 
-  useEffect(() => {
-    document.documentElement.setAttribute('data-theme', theme);
-    localStorage.setItem('cms_theme', theme);
-  }, [theme]);
-
-  const toggleTheme = () => {
-    setTheme(prev => (prev === 'light' ? 'dark' : 'light'));
-  };
-
-  const [userMenuOpen, setUserMenuOpen] = useState(false);
-
-  useEffect(() => {
-    if (!userMenuOpen) return;
-    const handleClickOutside = () => setUserMenuOpen(false);
-    document.addEventListener('click', handleClickOutside);
-    return () => document.removeEventListener('click', handleClickOutside);
-  }, [userMenuOpen]);
-
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  const [settingsExpanded, setSettingsExpanded] = useState(true);
-  const [adConfigExpanded, setAdConfigExpanded] = useState(true);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(readInitialSidebarCollapsed);
+  const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>(readInitialExpandedGroups);
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
 
   const navigate = useNavigate();
   const location = useLocation();
 
+  const handleLogout = useCallback(() => {
+    localStorage.removeItem('cms_token');
+    localStorage.removeItem('cms_admin');
+    setMobileNavOpen(false);
+    setToken(null);
+    setAdmin(null);
+    navigate('/login', { replace: true });
+  }, [navigate]);
+
+  const handleLogoutRef = useRef(handleLogout);
   useEffect(() => {
+    handleLogoutRef.current = handleLogout;
+  }, [handleLogout]);
+
+  useEffect(() => {
+    let active = true;
     const verifySession = async () => {
       if (token) {
         try {
           const profile = await apiRequest('GET', '/auth/me');
+          if (!active) return;
           setAdmin(profile);
           localStorage.setItem('cms_admin', JSON.stringify(profile));
-        } catch (e) {
-          handleLogout();
+        } catch {
+          if (active) {
+            handleLogoutRef.current();
+          }
         }
       }
-      setInitializing(false);
+      if (active) {
+        setInitializing(false);
+      }
     };
-    verifySession();
+    void verifySession();
+    return () => {
+      active = false;
+    };
   }, [token]);
 
-  // Dynamically update browser tab title to match navigation name
+  const visibleNavTree = useMemo(
+    () => (admin ? getVisibleNavTree(admin.role) : []),
+    [admin],
+  );
+  const visibleFlatItems = useMemo(() => flattenNavEntries(visibleNavTree), [visibleNavTree]);
+  const allFlatItems = useMemo(() => flattenNavEntries(getVisibleNavTree('SuperAdmin')), []);
+
+  const currentNavItem = useMemo(
+    () =>
+      visibleFlatItems.find((item) => isNavPathActive(location.pathname, item.path)) ||
+      allFlatItems.find((item) => isNavPathActive(location.pathname, item.path)) ||
+      visibleFlatItems[0] ||
+      allFlatItems[0],
+    [location.pathname, visibleFlatItems, allFlatItems],
+  );
+
+  // Auto-expand the active item's parent group and close mobile drawer on route change
+  useEffect(() => {
+    setMobileNavOpen(false);
+    const activeGroupId = currentNavItem?.groupId;
+    if (activeGroupId) {
+      setExpandedGroups((prev) => {
+        if (prev[activeGroupId]) return prev;
+        const next = { ...prev, [activeGroupId]: true };
+        try {
+          localStorage.setItem(NAV_EXPANDED_GROUPS_KEY, JSON.stringify(next));
+        } catch {
+          // Ignore storage write errors
+        }
+        return next;
+      });
+    }
+  }, [location.pathname, currentNavItem?.groupId]);
+
+  // Update browser tab title cleanly
   useEffect(() => {
     if (location.pathname === '/login') {
       document.title = '登录 - STAR NOVEL CMS';
       return;
     }
-    const currentItem = navItems.find(item => item.path === location.pathname);
-    if (currentItem) {
-      document.title = `${currentItem.label} - STAR NOVEL CMS`;
-    } else {
-      document.title = 'STAR NOVEL CMS';
-    }
-  }, [location.pathname]);
+    const found = allFlatItems.find((item) => isNavPathActive(location.pathname, item.path));
+    document.title = found ? `${found.label} - STAR NOVEL CMS` : 'STAR NOVEL CMS';
+  }, [location.pathname, allFlatItems]);
 
-  // Auth & RBAC Route Guard Redirects
+  // Auth route guard redirects
   useEffect(() => {
     if (!initializing) {
       if (!token || !admin) {
         if (location.pathname !== '/login') {
           navigate('/login', { replace: true });
         }
-      } else {
-        if (location.pathname === '/login') {
-          navigate('/', { replace: true });
-        }
+      } else if (location.pathname === '/login') {
+        navigate('/', { replace: true });
       }
     }
   }, [token, admin, initializing, location.pathname, navigate]);
+
+  const handleToggleCollapse = useCallback(() => {
+    setSidebarCollapsed((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem(SIDEBAR_COLLAPSED_KEY, next ? '1' : '0');
+      } catch {
+        // Ignore storage write errors
+      }
+      return next;
+    });
+  }, []);
+
+  const handleToggleGroup = useCallback((groupId: string) => {
+    setExpandedGroups((prev) => {
+      const next = { ...prev, [groupId]: !(prev[groupId] ?? true) };
+      try {
+        localStorage.setItem(NAV_EXPANDED_GROUPS_KEY, JSON.stringify(next));
+      } catch {
+        // Ignore storage write errors
+      }
+      return next;
+    });
+  }, []);
 
   const handleLoginSuccess = (newToken: string, newAdmin: AdminUser) => {
     localStorage.setItem('cms_token', newToken);
@@ -221,26 +209,14 @@ function AppContent() {
     navigate('/', { replace: true });
   };
 
-  const handleLogout = () => {
-    localStorage.removeItem('cms_token');
-    localStorage.removeItem('cms_admin');
-    setToken(null);
-    setAdmin(null);
-    navigate('/login', { replace: true });
-  };
-
   if (initializing) {
     return (
-      <div style={{
-        display: 'flex', minHeight: '100vh', alignItems: 'center', justifyContent: 'center',
-        backgroundColor: 'hsl(var(--bg-base))', color: 'hsl(var(--text-secondary))'
-      }}>
+      <div className="min-h-screen flex items-center justify-center bg-[var(--cms-bg)] text-sm text-[var(--cms-muted-fg)]">
         正在初始化控制台会话...
       </div>
     );
   }
 
-  // If not authenticated, only allow login route
   if (!token || !admin) {
     return (
       <Routes>
@@ -250,424 +226,107 @@ function AppContent() {
     );
   }
 
-  const filteredNavItems = navItems.filter(item => {
-    if (!item.roles) return true;
-    return item.roles.includes(admin.role);
-  });
+  const routeSubtitle =
+    location.pathname === '/recharge-templates/new'
+      ? ' · 新建'
+      : /^\/recharge-templates\/\d+\/edit$/.test(location.pathname)
+        ? ` · 编辑 #${location.pathname.split('/')[2]}`
+        : '';
 
   return (
-    <div style={{ display: 'flex', minHeight: '100vh', backgroundColor: 'hsl(var(--bg-base))' }}>
+    <div className="min-h-screen flex bg-[var(--cms-bg)] text-[var(--cms-fg)]">
+      <CmsSidebar
+        navTree={visibleNavTree}
+        admin={admin}
+        resolvedTheme={resolvedTheme}
+        collapsed={sidebarCollapsed}
+        onToggleCollapse={handleToggleCollapse}
+        expandedGroups={expandedGroups}
+        onToggleGroup={handleToggleGroup}
+        mobileOpen={mobileNavOpen}
+        onCloseMobile={() => setMobileNavOpen(false)}
+        onLogout={handleLogout}
+      />
 
-      {/* Sidebar Panel */}
-      <aside className="glass-panel" style={{
-        width: sidebarCollapsed ? '72px' : '200px',
-        borderWidth: '0 1px 0 0',
-        borderRadius: 0,
-        display: 'flex',
-        flexDirection: 'column',
-        padding: sidebarCollapsed ? '14px 8px' : '14px 16px',
-        backgroundColor: 'hsl(var(--bg-surface) / 0.95)',
-        transition: 'width 0.25s cubic-bezier(0.16, 1, 0.3, 1), padding 0.25s ease',
-        overflow: 'hidden'
-      }}>
-        {/* Sidebar Brand header */}
-        <div style={{
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: sidebarCollapsed ? 'center' : 'space-between',
-          marginBottom: '20px',
-          paddingLeft: sidebarCollapsed ? '0' : '4px'
-        }}>
-          {!sidebarCollapsed && (
-            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-              <img
-                src={theme === 'dark' ? '/assets/logo_dark.png?v=twin_exact' : '/assets/logo_light.png?v=twin_exact'}
-                alt="STAR NOVEL Logo"
-                style={{ width: '36px', height: '36px', objectFit: 'contain', borderRadius: '8px', border: '1px solid hsl(var(--border))' }}
-              />
-              <div>
-                <h3 style={{ fontSize: '0.9rem', fontWeight: 700 }} className="gradient-text">STAR NOVEL</h3>
-                {/* <span style={{ fontSize: '0.55rem', color: 'hsl(var(--text-muted))', letterSpacing: '0.05em' }}>小说管理系统</span> */}
-              </div>
-            </div>
-          )}
-          {sidebarCollapsed && (
-            <img
-              src={theme === 'dark' ? '/assets/logo_dark.png?v=twin_exact' : '/assets/logo_light.png?v=twin_exact'}
-              alt="STAR NOVEL Logo"
-              style={{ width: '36px', height: '36px', objectFit: 'contain', borderRadius: '8px', border: '1px solid hsl(var(--border))' }}
-            />
-          )}
-
-          {/* Sidebar Collapse Toggle Button */}
-          <button
-            onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
-            className="btn-secondary"
-            style={{
-              padding: '4px',
-              borderRadius: '6px',
-              border: 'none',
-              marginLeft: sidebarCollapsed ? '0' : '6px',
-              marginTop: '0',
-              display: 'inline-flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              cursor: 'pointer',
-              boxShadow: 'var(--shadow-sm)'
-            }}
-            title={sidebarCollapsed ? '展开导航栏' : '收起导航栏'}
-          >
-            {sidebarCollapsed ? <ChevronRight size={14} /> : <ChevronLeft size={14} />}
-          </button>
-        </div>
-
-        {/* Navigation links with React Router Link */}
-        <nav style={{ display: 'flex', flexDirection: 'column', gap: '6px', flex: 1 }}>
-          {filteredNavItems.map((item) => {
-            const hasChildren = item.children && item.children.length > 0;
-            const isChildPathActive = hasChildren && item.children.some(child => location.pathname.startsWith(child.path));
-            const active = hasChildren ? isChildPathActive : location.pathname === item.path;
-
-            const isExpanded = item.id === 'settings' ? settingsExpanded : adConfigExpanded;
-            const toggleExpanded = () => {
-              if (item.id === 'settings') {
-                setSettingsExpanded(!settingsExpanded);
-              } else {
-                setAdConfigExpanded(!adConfigExpanded);
-              }
-            };
-
-            if (hasChildren && !sidebarCollapsed) {
-              return (
-                <div key={item.id} style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                  <div
-                    onClick={toggleExpanded}
-                    style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'space-between',
-                      padding: '10px 12px',
-                      borderRadius: '8px',
-                      fontSize: '0.85rem',
-                      fontWeight: 500,
-                      cursor: 'pointer',
-                      width: '100%',
-                      backgroundColor: active ? 'hsl(var(--primary) / 0.05)' : 'transparent',
-                      color: active ? 'hsl(var(--text-primary))' : 'hsl(var(--text-secondary))',
-                      transition: 'all 0.2s ease'
-                    }}
-                  >
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                      <span style={{ color: active ? 'hsl(var(--primary))' : 'inherit', display: 'flex', alignItems: 'center' }}>
-                        {item.icon}
-                      </span>
-                      {item.label}
-                    </div>
-                    {isExpanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
-                  </div>
-
-                  {isExpanded && (
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', paddingLeft: '16px' }}>
-                      {item.children.map((child) => {
-                        const childActive = location.pathname === child.path;
-                        return (
-                          <Link
-                            key={child.id}
-                            to={child.path}
-                            style={{
-                              display: 'flex',
-                              alignItems: 'center',
-                              gap: '8px',
-                              padding: '8px 12px',
-                              borderRadius: '6px',
-                              fontSize: '0.8rem',
-                              fontWeight: 500,
-                              textDecoration: 'none',
-                              cursor: 'pointer',
-                              backgroundColor: childActive ? 'hsl(var(--primary) / 0.15)' : 'transparent',
-                              color: childActive ? 'hsl(var(--text-primary))' : 'hsl(var(--text-secondary))',
-                              border: childActive ? '1px solid hsl(var(--primary) / 0.25)' : '1px solid transparent',
-                              transition: 'all 0.2s ease'
-                            }}
-                          >
-                            <span style={{ color: childActive ? 'hsl(var(--primary))' : 'inherit', display: 'flex', alignItems: 'center' }}>
-                              {child.icon}
-                            </span>
-                            {child.label}
-                          </Link>
-                        );
-                      })}
-                    </div>
-                  )}
-                </div>
-              );
-            }
-
-            // Collapsed view or regular links
-            return (
-              <Link
-                key={item.id}
-                to={hasChildren ? item.children[0].path : item.path}
-                title={sidebarCollapsed ? item.label : undefined}
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: sidebarCollapsed ? 'center' : 'flex-start',
-                  gap: sidebarCollapsed ? '0' : '10px',
-                  padding: '10px 12px',
-                  borderRadius: '8px',
-                  fontSize: '0.85rem',
-                  fontWeight: 500,
-                  cursor: 'pointer',
-                  width: '100%',
-                  textAlign: 'left',
-                  textDecoration: 'none',
-                  backgroundColor: active ? 'hsl(var(--primary) / 0.15)' : 'transparent',
-                  color: active ? 'hsl(var(--text-primary))' : 'hsl(var(--text-secondary))',
-                  border: active ? '1px solid hsl(var(--primary) / 0.25)' : '1px solid transparent',
-                  transition: 'all 0.2s ease'
-                }}
-              >
-                <span style={{ color: active ? 'hsl(var(--primary))' : 'inherit', display: 'flex', alignItems: 'center' }}>
-                  {item.icon}
-                </span>
-                {!sidebarCollapsed && item.label}
-              </Link>
-            );
-          })}
-        </nav>
-
-      </aside>
-
-      {/* Main Content Area */}
-      <main style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column' }}>
-        {/* Header Bar */}
-        <header className="glass-panel" style={{
-          display: 'flex',
-          justifyContent: 'flex-end',
-          alignItems: 'center',
-          padding: '8px 24px',
-          borderWidth: '0 0 1px 0',
-          borderRadius: 0,
-          backgroundColor: 'hsl(var(--bg-surface) / 0.9)',
-          backdropFilter: 'blur(8px)',
-          position: 'sticky',
-          top: 0,
-          zIndex: 50,
-          gap: '16px'
-        }}>
-          {/* Theme Mode Toggle Button */}
-          <button
-            onClick={toggleTheme}
-            className="btn-secondary"
-            style={{
-              padding: '6px 12px',
-              fontSize: '0.8rem',
-              display: 'flex',
-              gap: '6px',
-              alignItems: 'center',
-              cursor: 'pointer',
-              borderRadius: '8px',
-              color: 'hsl(var(--text-primary))',
-              backgroundColor: 'hsl(var(--bg-card))',
-              border: '1px solid hsl(var(--border))',
-              transition: 'all 0.2s ease'
-            }}
-            title={theme === 'light' ? '切换为深色模式' : '切换为浅色模式'}
-          >
-            {theme === 'light' ? <Moon size={15} style={{ color: 'hsl(var(--primary))' }} /> : <Sun size={15} style={{ color: 'hsl(var(--accent-orange))' }} />}
-            <span>{theme === 'light' ? '深色模式' : '浅色模式'}</span>
-          </button>
-
-          {/* User Profile Dropdown */}
-          <div style={{ position: 'relative' }} onClick={(e) => e.stopPropagation()}>
-            <div
-              onClick={() => setUserMenuOpen(!userMenuOpen)}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: '8px',
-                cursor: 'pointer',
-                padding: '4px 8px',
-                borderRadius: '8px',
-                transition: 'all 0.15s ease',
-                backgroundColor: userMenuOpen ? 'hsl(var(--bg-card))' : 'transparent'
-              }}
-              onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = 'hsl(var(--bg-card))'; }}
-              onMouseLeave={(e) => { if (!userMenuOpen) e.currentTarget.style.backgroundColor = 'transparent'; }}
+      {/* Main Workspace */}
+      <div className="flex-1 min-w-0 flex flex-col">
+        {/* Compact Top Header */}
+        <header className="h-12 px-4 md:px-6 flex items-center justify-between gap-4 border-b border-[var(--cms-border)] bg-[var(--cms-bg)]/90 backdrop-blur-sm sticky top-0 z-10 shrink-0">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <button
+              type="button"
+              onClick={() => setMobileNavOpen(true)}
+              aria-label="打开导航菜单"
+              aria-expanded={mobileNavOpen}
+              aria-controls="mobile-nav-drawer"
+              className="md:hidden focus-ring w-8 h-8 rounded-lg border border-[var(--cms-border)] bg-[var(--cms-card)] hover:bg-[var(--cms-secondary)] text-[var(--cms-fg)] inline-flex items-center justify-center cursor-pointer transition-colors shrink-0"
             >
-              <div style={{
-                width: '32px', height: '32px', borderRadius: '16px', backgroundColor: 'hsl(var(--primary) / 0.15)',
-                display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 600, color: 'hsl(var(--primary))',
-                fontSize: '0.85rem'
-              }}>
-                {admin.nickname ? admin.nickname.charAt(0).toUpperCase() : 'A'}
-              </div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-                <div style={{ fontSize: '0.85rem', fontWeight: 500, color: 'hsl(var(--text-primary))' }}>
-                  {admin.nickname || admin.username}
-                </div>
-                <ChevronDown size={14} style={{ color: 'hsl(var(--text-secondary))', transform: userMenuOpen ? 'rotate(180deg)' : 'none', transition: 'transform 0.2s ease' }} />
-              </div>
-            </div>
+              <Menu size={16} aria-hidden="true" />
+            </button>
 
-            {userMenuOpen && (
-              <div
-                className="glass-panel"
-                style={{
-                  position: 'absolute',
-                  top: '44px',
-                  right: 0,
-                  width: '160px',
-                  backgroundColor: 'hsl(var(--bg-surface))',
-                  border: '1px solid hsl(var(--border))',
-                  borderRadius: '10px',
-                  boxShadow: 'var(--shadow-lg)',
-                  zIndex: 1000,
-                  padding: '4px 0',
-                  display: 'flex',
-                  flexDirection: 'column'
-                }}
-              >
-                <div style={{ padding: '8px 12px', fontSize: '0.75rem', color: 'hsl(var(--text-muted))', borderBottom: '1px solid hsl(var(--border))' }}>
-                  角色: {
-                    admin.role === 'SuperAdmin' ? '超级管理员' :
-                    admin.role === 'Admin' ? '管理员' :
-                    admin.role === 'Editor' ? '编辑' :
-                    admin.role === 'MediaBuyer' ? '投手' :
-                    admin.role === 'Finance' ? '财务' :
-                    admin.role === 'Support' ? '客服' : admin.role
-                  }
-                </div>
-                <div
-                  onClick={() => {
-                    setUserMenuOpen(false);
-                    handleLogout();
-                  }}
-                  style={{
-                    padding: '8px 12px',
-                    fontSize: '0.8rem',
-                    color: '#f87171',
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: '8px',
-                    cursor: 'pointer',
-                    borderRadius: '6px',
-                    margin: '2px 4px 0 4px',
-                    transition: 'background-color 0.15s ease'
-                  }}
-                  onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = 'rgba(239, 68, 68, 0.1)'; }}
-                  onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = 'transparent'; }}
-                >
-                  <LogOut size={14} />
-                  <span>退出登录</span>
-                </div>
-              </div>
-            )}
+            {/* Breadcrumb */}
+            <nav aria-label="当前位置" className="flex items-center gap-2 text-sm text-[var(--cms-muted-fg)] min-w-0">
+              {currentNavItem.groupLabel && (
+                <>
+                  <span className="hidden sm:inline truncate">{currentNavItem.groupLabel}</span>
+                  <span className="hidden sm:inline opacity-50" aria-hidden="true">
+                    /
+                  </span>
+                </>
+              )}
+              <h1 className="m-0 text-[15px] sm:text-base font-semibold tracking-tight text-[var(--cms-fg)] truncate">
+                {currentNavItem.label}
+                {routeSubtitle}
+              </h1>
+            </nav>
+          </div>
+
+          {/* Right Controls: Icon-Only Theme Switcher */}
+          <div className="flex items-center gap-2 shrink-0">
+            <ThemeSwitcher mode={mode} resolvedTheme={resolvedTheme} onChange={setMode} />
           </div>
         </header>
 
-        <Routes>
-          <Route path="/" element={<DashboardTab />} />
-          <Route path="/novels" element={<NovelsTab />} />
-          <Route path="/users" element={<UsersTab />} />
-          <Route path="/orders" element={<OrdersTab />} />
-          <Route path="/feedback" element={<FeedbackTab />} />
-          <Route path="/promotions" element={<PromotionsTab />} />
-          <Route path="/recharge-templates" element={<TemplatesTab />} />
-          <Route path="/meta-ad-stats" element={admin.role === 'SuperAdmin' ? <MetaAdStatsTab /> : <Navigate to="/" replace />} />
-          <Route path="/operations" element={<OperationsTab />} />
-          <Route path="/campaign" element={<CampaignTab />} />
-          <Route path="/ad-config/pixels" element={<PixelsTab />} />
-          <Route path="/ad-config/logs" element={<TrackingLogsTab />} />
-          <Route path="/ad-config" element={<Navigate to="/ad-config/pixels" replace />} />
-          <Route path="/settings/domains" element={admin.role === 'SuperAdmin' ? <DomainsTab /> : <Navigate to="/" replace />} />
-          <Route path="/settings/payment" element={admin.role === 'SuperAdmin' ? <PaymentTab /> : <Navigate to="/" replace />} />
-          <Route path="/settings/accounts" element={admin.role === 'SuperAdmin' ? <AccountsTab /> : <Navigate to="/" replace />} />
-          <Route path="/settings" element={admin.role === 'SuperAdmin' ? <Navigate to="/settings/domains" replace /> : <Navigate to="/" replace />} />
-          <Route path="*" element={<Navigate to="/" replace />} />
-        </Routes>
-      </main>
-
-      {toast && (
-        <div style={{
-          position: 'fixed',
-          top: '24px',
-          right: '24px',
-          backgroundColor: toast.type === 'success' ? '#10b981' : toast.type === 'error' ? '#ef4444' : 'hsl(var(--primary))',
-          color: '#ffffff',
-          padding: '12px 20px',
-          borderRadius: '8px',
-          boxShadow: '0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05)',
-          zIndex: 99999,
-          fontSize: '0.85rem',
-          fontWeight: 600,
-          display: 'flex',
-          alignItems: 'center',
-          gap: '8px'
-        }} className="animate-fade-in">
-          {toast.message}
-        </div>
-      )}
-
-      {confirmData && (
-        <div style={{
-          position: 'fixed',
-          top: 0,
-          left: 0,
-          right: 0,
-          bottom: 0,
-          backgroundColor: 'rgba(15, 23, 42, 0.35)',
-          backdropFilter: 'blur(2.5px)',
-          WebkitBackdropFilter: 'blur(2.5px)',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          zIndex: 999999,
-        }} className="animate-fade-in">
-          <div className="animate-scale-up" style={{
-            width: '420px',
-            padding: '24px',
-            borderRadius: '16px',
-            backgroundColor: 'hsl(var(--bg-surface))',
-            border: '1px solid hsl(var(--border))',
-            boxShadow: 'var(--shadow-lg)'
-          }}>
-            <h3 style={{
-              fontSize: '1.1rem',
-              fontWeight: 700,
-              color: 'hsl(var(--text-primary))',
-              marginBottom: '12px'
-            }}>确认操作</h3>
-            <p style={{
-              fontSize: '0.875rem',
-              color: 'hsl(var(--text-secondary))',
-              lineHeight: 1.6,
-              marginBottom: '24px'
-            }}>{confirmData.message}</p>
-            <div style={{
-              display: 'flex',
-              justifyContent: 'flex-end',
-              gap: '12px'
-            }}>
-              <button onClick={() => setConfirmData(null)} className="btn-secondary" style={{ padding: '8px 16px', fontSize: '0.85rem' }}>
-                取消
-              </button>
-              <button onClick={() => {
-                confirmData.onConfirm();
-                setConfirmData(null);
-              }} className="btn-primary" style={{
-                padding: '8px 16px',
-                fontSize: '0.85rem',
-                backgroundColor: '#ef4444',
-                borderColor: '#ef4444'
-              }}>
-                确定
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+        {/* Wide Spacious Page Container */}
+        <main className="flex-1 w-full max-w-[1600px] mx-auto px-4 md:px-6 py-4">
+          <Routes>
+            <Route path="/" element={<DashboardTab />} />
+            <Route path="/novels" element={<NovelsTab />} />
+            <Route path="/users" element={<UsersTab />} />
+            <Route path="/orders" element={<OrdersTab />} />
+            <Route path="/feedback" element={<FeedbackTab />} />
+            <Route path="/promotions" element={<PromotionsTab />} />
+            <Route path="/recharge-templates" element={<TemplatesTab />} />
+            <Route path="/recharge-templates/new" element={<TemplatesTab />} />
+            <Route path="/recharge-templates/:templateId/edit" element={<TemplatesTab />} />
+            <Route path="/operations" element={<OperationsTab />} />
+            <Route path="/campaign" element={<Navigate to="/operations?tab=campaigns" replace />} />
+            <Route path="/ad-config/pixels" element={<PixelsTab />} />
+            <Route
+              path="/ad-config/logs"
+              element={admin.role === 'SuperAdmin' ? <TrackingLogsTab /> : <Navigate to="/" replace />}
+            />
+            <Route path="/ad-config" element={<Navigate to="/ad-config/pixels" replace />} />
+            <Route
+              path="/settings/domains"
+              element={admin.role === 'SuperAdmin' ? <DomainsTab /> : <Navigate to="/" replace />}
+            />
+            <Route
+              path="/settings/payment"
+              element={admin.role === 'SuperAdmin' ? <PaymentTab /> : <Navigate to="/" replace />}
+            />
+            <Route
+              path="/settings/accounts"
+              element={admin.role === 'SuperAdmin' ? <AccountsTab /> : <Navigate to="/" replace />}
+            />
+            <Route
+              path="/settings"
+              element={admin.role === 'SuperAdmin' ? <Navigate to="/settings/domains" replace /> : <Navigate to="/" replace />}
+            />
+            <Route path="*" element={<Navigate to="/" replace />} />
+          </Routes>
+        </main>
+      </div>
     </div>
   );
 }

@@ -19,7 +19,6 @@ import (
 	"star-novel-cms/internal/db"
 	"star-novel-cms/internal/domain"
 	"star-novel-cms/internal/feedback"
-	"star-novel-cms/internal/meta"
 	"star-novel-cms/internal/novel"
 	"star-novel-cms/internal/operations"
 	"star-novel-cms/internal/redis"
@@ -174,11 +173,6 @@ func main() {
 		domainService := domain.NewService(domainRepo)
 		domainHandler := domain.NewHandler(domainService)
 		domainHandler.RegisterRoutes(api)
-
-		metaRepo := meta.NewRepository()
-		metaService := meta.NewService(metaRepo)
-		metaHandler := meta.NewHandler(metaService)
-		metaHandler.RegisterRoutes(api)
 
 		feedbackRepo := feedback.NewRepository()
 		feedbackService := feedback.NewService(feedbackRepo)
