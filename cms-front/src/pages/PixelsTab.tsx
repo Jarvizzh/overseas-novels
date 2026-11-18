@@ -1,12 +1,15 @@
-import { useState, useEffect } from 'react';
-import { createPortal } from 'react-dom';
+import { useEffect, useMemo, useState } from 'react';
+import { Plus } from 'lucide-react';
 import { apiRequest } from '../utils/api';
+import { CmsDialog } from '../components/ui/CmsDialog';
 import {
-  Plus,
-  Edit2,
-  Trash2,
-  X
-} from 'lucide-react';
+  RowActionMenu,
+  SearchInput,
+  SkeletonRows,
+  type TableDensity,
+  TableRegion,
+  ViewOptionsPopover,
+} from '../components/ui/Primitives';
 
 interface FBPixel {
   id: number;
@@ -18,41 +21,57 @@ interface FBPixel {
 
 export default function PixelsTab() {
   const [pixels, setPixels] = useState<FBPixel[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [hasLoadedOnce, setHasLoadedOnce] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [density, setDensity] = useState<TableDensity>('compact');
+
   const [editingPixel, setEditingPixel] = useState<FBPixel | null>(null);
   const [isPixelModalOpen, setIsPixelModalOpen] = useState(false);
   const [pixelForm, setPixelForm] = useState({
     name: '',
     pixel_id: '',
-    access_token: ''
+    access_token: '',
   });
 
   const fetchPixels = async () => {
+    setLoading(true);
     try {
       const data = await apiRequest('GET', '/fb-pixels');
       setPixels(data || []);
-    } catch (err: any) {
+      setHasLoadedOnce(true);
+    } catch (err) {
       console.error('Failed to load pixels:', err);
+      setHasLoadedOnce(true);
+    } finally {
+      setLoading(false);
     }
   };
 
   useEffect(() => {
-    fetchPixels();
+    void fetchPixels();
   }, []);
+
+  const handleClosePixelModal = () => {
+    setIsPixelModalOpen(false);
+    setEditingPixel(null);
+    setPixelForm({ name: '', pixel_id: '', access_token: '' });
+  };
 
   const handlePixelFormSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
       if (editingPixel) {
         await apiRequest('PUT', `/fb-pixels/${editingPixel.id}`, pixelForm);
-        window.showToast?.(`像素“${pixelForm.name}”更新成功。`, 'success');
+        window.showToast?.(`像素「${pixelForm.name}」更新成功。`, 'success');
       } else {
         await apiRequest('POST', '/fb-pixels', pixelForm);
-        window.showToast?.(`像素“${pixelForm.name}”创建成功。`, 'success');
+        window.showToast?.(`像素「${pixelForm.name}」创建成功。`, 'success');
       }
-      setIsPixelModalOpen(false);
-      fetchPixels();
-    } catch (err: any) {
-      window.showToast?.(err.message || '操作失败，请重试', 'error');
+      handleClosePixelModal();
+      void fetchPixels();
+    } catch (err: unknown) {
+      window.showToast?.((err instanceof Error ? err.message : '') || '操作失败，请重试', 'error');
     }
   };
 
@@ -61,196 +80,172 @@ export default function PixelsTab() {
     setPixelForm({
       name: pixel.name,
       pixel_id: pixel.pixel_id,
-      access_token: pixel.access_token
+      access_token: pixel.access_token,
     });
     setIsPixelModalOpen(true);
   };
 
-  const handleDeletePixel = async (id: number, name: string) => {
-    window.showConfirm?.(`您确定要永久删除像素 “${name}” 吗？此操作不可撤回！`, async () => {
+  const handleDeletePixel = (id: number, name: string) => {
+    window.showConfirm?.(`您确定要永久删除像素「${name}」吗？此操作不可撤回！`, async () => {
       try {
         await apiRequest('DELETE', `/fb-pixels/${id}`);
-        window.showToast?.(`像素 “${name}” 删除成功。`, 'success');
-        fetchPixels();
-      } catch (err: any) {
-        window.showToast?.(err.message || '删除失败', 'error');
+        window.showToast?.(`像素「${name}」删除成功。`, 'success');
+        void fetchPixels();
+      } catch (err: unknown) {
+        window.showToast?.((err instanceof Error ? err.message : '') || '删除失败', 'error');
       }
     });
   };
 
-  const handleCreatePixelClick = () => {
-    setEditingPixel(null);
-    setPixelForm({ name: '', pixel_id: '', access_token: '' });
-    setIsPixelModalOpen(true);
-  };
-
-  const handleClosePixelModal = () => {
-    setIsPixelModalOpen(false);
-    setEditingPixel(null);
-    setPixelForm({ name: '', pixel_id: '', access_token: '' });
-  };
+  const filteredPixels = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    if (!q) return pixels;
+    return pixels.filter((p) => p.name.toLowerCase().includes(q) || p.pixel_id.toLowerCase().includes(q));
+  }, [pixels, searchQuery]);
 
   return (
-    <div className="animate-fade-in" style={{ padding: '16px 24px 24px 24px' }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '24px' }}>
-        <h1 style={{ fontSize: '1.5rem', fontWeight: 700 }} className="gradient-text">
-          像素管理
-        </h1>
-        <button
-          onClick={handleCreatePixelClick}
-          className="btn-primary"
-          style={{ display: 'flex', gap: '6px', padding: '6px 12px', fontSize: '0.8rem' }}
-        >
-          <Plus size={14} /> 新增像素
-        </button>
-      </div>
+    <div className="space-y-4 animate-fade-in">
+      {/* Unified Borderless Filter Strip */}
+      <search className="flex flex-wrap items-center justify-between gap-2.5">
+        <SearchInput
+          className="w-full sm:w-80"
+          ariaLabel="搜索像素名称或 ID"
+          placeholder="搜索像素名称或像素 ID..."
+          value={searchQuery}
+          onChange={setSearchQuery}
+        />
 
-      <div className="glass-panel animate-fade-in" style={{ padding: '24px' }}>
-        <div style={{ overflowX: 'auto' }}>
-          <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left', fontSize: '0.85rem' }}>
-            <thead>
-              <tr style={{ borderBottom: '1px solid hsl(var(--border))', color: 'hsl(var(--text-secondary))' }}>
-                <th style={{ padding: '10px 8px' }}>像素名称</th>
-                <th style={{ padding: '10px 8px' }}>像素 ID</th>
-                <th style={{ padding: '10px 8px' }}>Access Token</th>
-                <th style={{ padding: '10px 8px' }}>创建时间</th>
-                <th style={{ padding: '10px 8px' }}>操作</th>
-              </tr>
-            </thead>
-            <tbody>
-              {pixels.length === 0 ? (
-                <tr>
-                  <td colSpan={5} style={{ padding: '20px 8px', textAlign: 'center', color: 'hsl(var(--text-muted))' }}>暂无像素配置</td>
-                </tr>
-              ) : (
-                pixels.map((pixel) => (
-                  <tr key={pixel.id} style={{ borderBottom: '1px solid hsl(var(--border) / 0.5)', fontSize: '0.9rem', color: 'hsl(var(--text-secondary))' }}>
-                    <td style={{ padding: '12px 8px' }}>{pixel.name}</td>
-                    <td style={{ padding: '12px 8px' }}>{pixel.pixel_id}</td>
-                    <td style={{ padding: '12px 8px', color: 'hsl(var(--text-secondary))', fontFamily: 'monospace' }}>
-                      {pixel.access_token.length > 20
-                        ? `${pixel.access_token.substring(0, 8)}...${pixel.access_token.substring(pixel.access_token.length - 8)}`
-                        : pixel.access_token
-                      }
-                    </td>
-                    <td style={{ padding: '12px 8px' }}>{new Date(pixel.created_at).toLocaleString()}</td>
-                    <td style={{ padding: '12px 8px' }}>
-                      <div style={{ display: 'flex', gap: '8px' }}>
-                        <button
-                          onClick={() => handleEditPixelClick(pixel)}
-                          className="btn-secondary"
-                          style={{ padding: '4px 8px', fontSize: '0.75rem', minWidth: 'auto', display: 'flex', gap: '4px', alignItems: 'center' }}
-                        >
-                          <Edit2 size={12} /> 编辑
-                        </button>
-                        <button
-                          onClick={() => handleDeletePixel(pixel.id, pixel.name)}
-                          className="btn-secondary"
-                          style={{ padding: '4px 8px', fontSize: '0.75rem', minWidth: 'auto', display: 'flex', gap: '4px', alignItems: 'center', color: '#ef4444', borderColor: 'rgba(239, 68, 68, 0.15)' }}
-                        >
-                          <Trash2 size={12} /> 删除
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                ))
-              )}
-            </tbody>
-          </table>
+        <div className="flex flex-wrap items-center gap-2 text-xs text-[var(--cms-muted-fg)]">
+          <span className="tabular-nums">共 {filteredPixels.length} 个像素</span>
+          <ViewOptionsPopover density={density} onDensityChange={setDensity} />
+          <button
+            type="button"
+            onClick={() => {
+              setEditingPixel(null);
+              setPixelForm({ name: '', pixel_id: '', access_token: '' });
+              setIsPixelModalOpen(true);
+            }}
+            className="btn-primary h-8 px-3.5 text-xs"
+          >
+            <Plus size={14} aria-hidden="true" />
+            <span>新增像素</span>
+          </button>
         </div>
-      </div>
+      </search>
 
-      {isPixelModalOpen && createPortal(
-        <div style={{
-          position: 'fixed',
-          top: 0,
-          left: 0,
-          right: 0,
-          bottom: 0,
-          backgroundColor: 'rgba(15, 23, 42, 0.35)',
-          backdropFilter: 'blur(2.5px)',
-          WebkitBackdropFilter: 'blur(2.5px)',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          zIndex: 10000,
-          padding: '20px',
-          overscrollBehavior: 'contain'
-        }}>
-          <div className="glass-panel animate-scale-in" style={{
-            width: '100%',
-            maxWidth: '480px',
-            padding: '24px',
-            position: 'relative',
-            backgroundColor: 'hsl(var(--bg-surface))',
-            border: '1px solid hsl(var(--border))',
-            borderRadius: '16px',
-            boxShadow: 'var(--shadow-lg)',
-            overflow: 'hidden'
-          }}>
-            <button
-              type="button"
-              aria-label="关闭窗口"
-              onClick={handleClosePixelModal}
-              style={{ position: 'absolute', top: '16px', right: '16px', background: 'transparent', border: 'none', color: 'hsl(var(--text-secondary))', cursor: 'pointer' }}
-            >
-              <X size={18} aria-hidden="true" />
+      <TableRegion ariaLabel="Facebook 像素配置列表">
+        <table className="cms-table min-w-[760px]" data-density={density}>
+          <thead>
+            <tr>
+              <th scope="col">像素名称</th>
+              <th scope="col">像素 ID</th>
+              <th scope="col">Access Token</th>
+              <th scope="col">创建时间</th>
+              <th scope="col" className="text-right w-px whitespace-nowrap">
+                操作
+              </th>
+            </tr>
+          </thead>
+          <tbody className={loading && hasLoadedOnce ? 'opacity-65 transition-opacity' : ''}>
+            {!hasLoadedOnce && loading ? (
+              <SkeletonRows rows={4} cols={5} />
+            ) : filteredPixels.length === 0 ? (
+              <tr>
+                <td colSpan={5} className="py-16 text-center text-[var(--cms-muted-fg)]">
+                  暂无像素配置
+                </td>
+              </tr>
+            ) : (
+              filteredPixels.map((pixel) => (
+                <tr key={pixel.id}>
+                  <td className="text-[var(--cms-fg)]">{pixel.name}</td>
+                  <td className="tabular-nums text-[var(--cms-fg)]">{pixel.pixel_id}</td>
+                  <td className="text-[var(--cms-muted-fg)]">
+                    {pixel.access_token.length > 20
+                      ? `${pixel.access_token.substring(0, 8)}...${pixel.access_token.substring(pixel.access_token.length - 8)}`
+                      : pixel.access_token}
+                  </td>
+                  <td className="tabular-nums text-[var(--cms-muted-fg)] whitespace-nowrap">
+                    {new Date(pixel.created_at).toLocaleString()}
+                  </td>
+                  <td className="text-right whitespace-nowrap">
+                    <div className="inline-flex items-center justify-end gap-0.5 whitespace-nowrap">
+                      <button type="button" onClick={() => handleEditPixelClick(pixel)} className="btn-detail whitespace-nowrap">
+                        编辑
+                      </button>
+                      <RowActionMenu
+                        ariaLabel={`像素 ${pixel.name} 更多操作`}
+                        items={[
+                          {
+                            label: '删除像素',
+                            tone: 'danger',
+                            onClick: () => handleDeletePixel(pixel.id, pixel.name),
+                          },
+                        ]}
+                      />
+                    </div>
+                  </td>
+                </tr>
+              ))
+            )}
+          </tbody>
+        </table>
+      </TableRegion>
+
+      <CmsDialog
+        open={isPixelModalOpen}
+        onClose={handleClosePixelModal}
+        variant="drawer"
+        title={editingPixel ? '编辑像素' : '添加像素'}
+        size="md"
+        footer={
+          <>
+            <button type="button" className="btn-secondary" onClick={handleClosePixelModal}>
+              取消
             </button>
-            <h3 style={{ fontSize: '1.2rem', fontWeight: 600, marginBottom: '20px' }}>
-              {editingPixel ? '编辑像素' : '添加像素'}
-            </h3>
-
-            <form onSubmit={handlePixelFormSubmit}>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', marginBottom: '24px' }}>
-                <div>
-                  <label style={{ display: 'block', fontSize: '0.8rem', color: 'hsl(var(--text-secondary))', marginBottom: '6px' }}>像素名称</label>
-                  <input
-                    type="text"
-                    className="input-field"
-                    placeholder="e.g. 主站像素 / 欧美投放像素"
-                    value={pixelForm.name}
-                    onChange={(e) => setPixelForm({ ...pixelForm, name: e.target.value })}
-                    required
-                  />
-                </div>
-                <div>
-                  <label style={{ display: 'block', fontSize: '0.8rem', color: 'hsl(var(--text-secondary))', marginBottom: '6px' }}>像素 ID</label>
-                  <input
-                    type="text"
-                    className="input-field"
-                    placeholder="e.g. 102938475610293"
-                    value={pixelForm.pixel_id}
-                    onChange={(e) => setPixelForm({ ...pixelForm, pixel_id: e.target.value })}
-                    required
-                  />
-                </div>
-                <div>
-                  <label style={{ display: 'block', fontSize: '0.8rem', color: 'hsl(var(--text-secondary))', marginBottom: '6px' }}>Access Token (Conversions API Token)</label>
-                  <textarea
-                    className="input-field"
-                    rows={4}
-                    placeholder="EAAG..."
-                    value={pixelForm.access_token}
-                    onChange={(e) => setPixelForm({ ...pixelForm, access_token: e.target.value })}
-                    required
-                    style={{ resize: 'vertical', width: '100%', maxWidth: '100%', backgroundColor: 'hsl(var(--bg-surface))', color: 'hsl(var(--text-primary))' }}
-                  />
-                </div>
-              </div>
-
-              <div style={{ display: 'flex', gap: '12px' }}>
-                <button type="button" className="btn-secondary" style={{ flex: 1, gap: '6px' }} onClick={handleClosePixelModal}>
-                  取消
-                </button>
-                <button type="submit" className="btn-primary" style={{ flex: 1.5, gap: '6px' }}>
-                  确认保存
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>,
-        document.body
-      )}
+            <button type="submit" form="pixel-form" className="btn-primary">
+              确认保存
+            </button>
+          </>
+        }
+      >
+        <form id="pixel-form" onSubmit={handlePixelFormSubmit} className="space-y-4 text-xs">
+          <label className="block space-y-1.5">
+            <span className="block font-medium text-[var(--cms-muted-fg)]">像素名称</span>
+            <input
+              type="text"
+              autoFocus
+              className="input-field"
+              placeholder="e.g. 主站像素 / 欧美投放像素"
+              value={pixelForm.name}
+              onChange={(e) => setPixelForm({ ...pixelForm, name: e.target.value })}
+              required
+            />
+          </label>
+          <label className="block space-y-1.5">
+            <span className="block font-medium text-[var(--cms-muted-fg)]">像素 ID</span>
+            <input
+              type="text"
+              className="input-field font-mono-code"
+              placeholder="e.g. 102938475610293"
+              value={pixelForm.pixel_id}
+              onChange={(e) => setPixelForm({ ...pixelForm, pixel_id: e.target.value })}
+              required
+            />
+          </label>
+          <label className="block space-y-1.5">
+            <span className="block font-medium text-[var(--cms-muted-fg)]">Access Token (Conversions API Token)</span>
+            <textarea
+              className="input-field font-mono-code text-xs"
+              rows={4}
+              placeholder="EAAG..."
+              value={pixelForm.access_token}
+              onChange={(e) => setPixelForm({ ...pixelForm, access_token: e.target.value })}
+              required
+            />
+          </label>
+        </form>
+      </CmsDialog>
     </div>
   );
 }

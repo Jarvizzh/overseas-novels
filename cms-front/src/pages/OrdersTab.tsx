@@ -1,16 +1,36 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
+import { CreditCard, SlidersHorizontal } from 'lucide-react';
 import { apiRequest } from '../utils/api';
-import { CreditCard, ChevronLeft, ChevronRight, Eye } from 'lucide-react';
 import CustomSelect from '../components/CustomSelect';
 import { ThirdPartyPaymentModal, type ThirdPartyPaymentDetail } from '../components/ThirdPartyPaymentModal';
+import { Pagination } from '../components/ui/Pagination';
+import {
+  type ColumnOption,
+  type FilterChip,
+  FilterChipsBar,
+  SearchInput,
+  SkeletonRows,
+  StatusDot,
+  type TableDensity,
+  TableRegion,
+  ToolbarPopover,
+  ViewOptionsPopover,
+} from '../components/ui/Primitives';
 
 const statusFilterOptions = [
-  { value: '', label: '所有订单状态' },
+  { value: '', label: '全部订单状态' },
   { value: 'Success', label: '交易成功 (Paid)' },
   { value: 'RefundPending', label: '退款处理中' },
   { value: 'Refunded', label: '已退款 (Refunded)' },
   { value: 'Pending', label: '待付款 (Pending)' },
-  { value: 'Failed', label: '支付失败 (Failed)' }
+  { value: 'Failed', label: '支付失败 (Failed)' },
+];
+
+const orderTypeFilterOptions = [
+  { value: '', label: '全部订单类型' },
+  { value: 'single', label: '金币充值' },
+  { value: 'vip', label: 'VIP 订阅' },
+  { value: 'whole_book', label: '整本购买' },
 ];
 
 interface Order {
@@ -22,7 +42,7 @@ interface Order {
   coins: number;
   bonus_coins_credited: number;
   payment_method: string;
-  status: string; // Success, Refunded, Pending, Failed
+  status: string;
   utm_source: string;
   utm_campaign: string;
   paid_at?: string;
@@ -32,23 +52,102 @@ interface Order {
   created_at: string;
 }
 
+interface OrderFilterState {
+  userId: string;
+  status: string;
+  orderType: string;
+  promotionLinkId: string;
+  paidStart: string;
+  paidEnd: string;
+}
+
+const EMPTY_FILTER: OrderFilterState = {
+  userId: '',
+  status: '',
+  orderType: '',
+  promotionLinkId: '',
+  paidStart: '',
+  paidEnd: '',
+};
+
+type OrderColKey = 'attribution' | 'created_at' | 'paid_at';
+
+function getOrderStatusMeta(status: string): {
+  label: string;
+  tone: 'success' | 'warning' | 'error' | 'muted';
+} {
+  if (status === 'Success' || status === 'Paid') return { label: '支付成功', tone: 'success' };
+  if (status === 'Refunded') return { label: '已退款', tone: 'error' };
+  if (status === 'RefundPending') return { label: '退款处理中', tone: 'warning' };
+  if (status === 'Pending') return { label: '待付款', tone: 'warning' };
+  return { label: status, tone: 'muted' };
+}
+
+function getOrderTypeLabel(orderType?: string): string {
+  if (orderType === 'vip') return 'VIP 订阅';
+  if (orderType === 'whole_book') return '整本购买';
+  return '金币充值';
+}
+
 export default function OrdersTab() {
+  const searchFormId = useId();
   const [orders, setOrders] = useState<Order[]>([]);
   const [total, setTotal] = useState(0);
-  const [page, setPage] = useState(1);
-  const [statusFilter, setStatusFilter] = useState('');
-  const [searchUserID, setSearchUserID] = useState('');
-  const [orderTypeFilter, setOrderTypeFilter] = useState('');
-  const [promotionLinkFilter, setPromotionLinkFilter] = useState('');
-  const [paidStartFilter, setPaidStartFilter] = useState('');
-  const [paidEndFilter, setPaidEndFilter] = useState('');
+  const [draft, setDraft] = useState<OrderFilterState>(EMPTY_FILTER);
+  const [queryState, setQueryState] = useState<OrderFilterState & { page: number; nonce: number }>({
+    page: 1,
+    nonce: 0,
+    ...EMPTY_FILTER,
+  });
+  const [dateError, setDateError] = useState('');
   const [loading, setLoading] = useState(true);
+  const [hasLoadedOnce, setHasLoadedOnce] = useState(false);
 
-  // Third-party payment details modal state
+  const [density, setDensity] = useState<TableDensity>('compact');
+  const [visibleCols, setVisibleCols] = useState<Record<OrderColKey, boolean>>({
+    attribution: true,
+    created_at: true,
+    paid_at: true,
+  });
+
   const [detailModalOpen, setDetailModalOpen] = useState(false);
   const [selectedOrderForDetail, setSelectedOrderForDetail] = useState<number | string | null>(null);
   const [paymentDetails, setPaymentDetails] = useState<ThirdPartyPaymentDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
+
+  const fetchSeqRef = useRef(0);
+
+  const fetchOrders = useCallback(async () => {
+    const seq = ++fetchSeqRef.current;
+    setLoading(true);
+    try {
+      const params = new URLSearchParams({ page: String(queryState.page) });
+      if (queryState.status) params.set('status', queryState.status);
+      if (queryState.userId) params.set('user_id', queryState.userId);
+      if (queryState.orderType) params.set('order_type', queryState.orderType);
+      if (queryState.promotionLinkId) params.set('promotion_link_id', queryState.promotionLinkId);
+      if (queryState.paidStart) params.set('paid_start', `${queryState.paidStart}T00:00:00Z`);
+      if (queryState.paidEnd) params.set('paid_end', `${queryState.paidEnd}T23:59:59Z`);
+
+      const data = await apiRequest('GET', `/orders?${params.toString()}`);
+      if (seq !== fetchSeqRef.current) return;
+      setOrders(data.orders || []);
+      setTotal(data.total || 0);
+      setHasLoadedOnce(true);
+    } catch (e) {
+      if (seq !== fetchSeqRef.current) return;
+      console.error(e);
+      setHasLoadedOnce(true);
+    } finally {
+      if (seq === fetchSeqRef.current) {
+        setLoading(false);
+      }
+    }
+  }, [queryState]);
+
+  useEffect(() => {
+    void fetchOrders();
+  }, [fetchOrders]);
 
   const handleOpenPaymentDetails = async (orderId: number | string) => {
     setSelectedOrderForDetail(orderId);
@@ -57,290 +156,421 @@ export default function OrdersTab() {
     try {
       const res = await apiRequest('GET', `/orders/${orderId}/payment-details`);
       setPaymentDetails(res.details || null);
-    } catch (err: any) {
-      console.error("Failed to fetch payment details:", err);
+    } catch (err) {
+      console.error('Failed to fetch payment details:', err);
       setPaymentDetails(null);
     } finally {
       setDetailLoading(false);
     }
   };
 
-  useEffect(() => {
-    fetchOrders();
-  }, [page, statusFilter, searchUserID, orderTypeFilter, promotionLinkFilter, paidStartFilter, paidEndFilter]);
-
-  const fetchOrders = async () => {
-    setLoading(true);
-    try {
-      let path = `/orders?page=${page}`;
-      if (statusFilter) path += `&status=${statusFilter}`;
-      if (searchUserID) path += `&user_id=${searchUserID}`;
-      if (orderTypeFilter) path += `&order_type=${orderTypeFilter}`;
-      if (promotionLinkFilter) path += `&promotion_link_id=${promotionLinkFilter}`;
-      if (paidStartFilter) path += `&paid_start=${paidStartFilter}T00:00:00Z`;
-      if (paidEndFilter) path += `&paid_end=${paidEndFilter}T23:59:59Z`;
-
-      const data = await apiRequest('GET', path);
-      setOrders(data.orders || []);
-      setTotal(data.total || 0);
-    } catch (e) {
-      console.error(e);
-    } finally {
-      setLoading(false);
+  const commitQuery = (nextDraft: OrderFilterState) => {
+    if (nextDraft.paidStart && nextDraft.paidEnd && nextDraft.paidStart > nextDraft.paidEnd) {
+      setDateError('支付开始日期不能晚于结束日期');
+      return false;
     }
+    setDateError('');
+    setQueryState((prev) => ({
+      page: 1,
+      nonce: prev.nonce + 1,
+      userId: nextDraft.userId.trim(),
+      status: nextDraft.status,
+      orderType: nextDraft.orderType,
+      promotionLinkId: nextDraft.promotionLinkId.trim(),
+      paidStart: nextDraft.paidStart,
+      paidEnd: nextDraft.paidEnd,
+    }));
+    return true;
   };
 
-  if (loading && orders.length === 0) {
-    return <div style={{ color: 'hsl(var(--text-secondary))', padding: '20px' }}>正在加载充值交易记录...</div>;
-  }
+  const resetFilters = () => {
+    setDateError('');
+    setDraft(EMPTY_FILTER);
+    setQueryState((prev) => ({
+      page: 1,
+      nonce: prev.nonce + 1,
+      ...EMPTY_FILTER,
+    }));
+  };
+
+  const advFilterCount =
+    (queryState.promotionLinkId ? 1 : 0) + (queryState.paidStart || queryState.paidEnd ? 1 : 0);
+
+  const hasAnyFilter = Boolean(
+    draft.userId ||
+      draft.status ||
+      draft.orderType ||
+      draft.promotionLinkId ||
+      draft.paidStart ||
+      draft.paidEnd ||
+      queryState.userId ||
+      queryState.status ||
+      queryState.orderType ||
+      queryState.promotionLinkId ||
+      queryState.paidStart ||
+      queryState.paidEnd,
+  );
+
+  const filterChips = useMemo<FilterChip[]>(() => {
+    const chips: FilterChip[] = [];
+    if (queryState.userId) {
+      chips.push({
+        key: 'userId',
+        label: `UID: ${queryState.userId}`,
+        onClear: () => {
+          const next = { ...draft, userId: '' };
+          setDraft(next);
+          setQueryState((prev) => ({ ...prev, page: 1, userId: '' }));
+        },
+      });
+    }
+    if (queryState.status) {
+      const label = statusFilterOptions.find((o) => o.value === queryState.status)?.label || queryState.status;
+      chips.push({
+        key: 'status',
+        label: `状态: ${label}`,
+        onClear: () => {
+          setDraft((prev) => ({ ...prev, status: '' }));
+          setQueryState((prev) => ({ ...prev, page: 1, status: '' }));
+        },
+      });
+    }
+    if (queryState.orderType) {
+      const label = orderTypeFilterOptions.find((o) => o.value === queryState.orderType)?.label || queryState.orderType;
+      chips.push({
+        key: 'orderType',
+        label: `类型: ${label}`,
+        onClear: () => {
+          setDraft((prev) => ({ ...prev, orderType: '' }));
+          setQueryState((prev) => ({ ...prev, page: 1, orderType: '' }));
+        },
+      });
+    }
+    if (queryState.promotionLinkId) {
+      chips.push({
+        key: 'promo',
+        label: `推广链接 #${queryState.promotionLinkId}`,
+        onClear: () => {
+          setDraft((prev) => ({ ...prev, promotionLinkId: '' }));
+          setQueryState((prev) => ({ ...prev, page: 1, promotionLinkId: '' }));
+        },
+      });
+    }
+    if (queryState.paidStart || queryState.paidEnd) {
+      chips.push({
+        key: 'paidDate',
+        label: `支付时间: ${queryState.paidStart || '不限'} ~ ${queryState.paidEnd || '至今'}`,
+        onClear: () => {
+          setDateError('');
+          setDraft((prev) => ({ ...prev, paidStart: '', paidEnd: '' }));
+          setQueryState((prev) => ({ ...prev, page: 1, paidStart: '', paidEnd: '' }));
+        },
+      });
+    }
+    return chips;
+  }, [draft, queryState]);
+
+  const columnOptions: ColumnOption[] = [
+    { key: 'attribution', label: '推广 / 书籍归因', visible: visibleCols.attribution },
+    { key: 'paid_at', label: '支付时间', visible: visibleCols.paid_at },
+    { key: 'created_at', label: '创建时间', visible: visibleCols.created_at },
+  ];
+
+  const colSpan =
+    6 + (visibleCols.attribution ? 1 : 0) + (visibleCols.paid_at ? 1 : 0) + (visibleCols.created_at ? 1 : 0);
 
   return (
-    <div className="animate-fade-in" style={{ padding: '16px 24px 24px 24px' }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '24px' }}>
-        <div>
-          <h1 style={{ fontSize: '1.5rem', fontWeight: 700 }} className="gradient-text">订单管理</h1>
-        </div>
-      </div>
+    <div className="space-y-4 animate-fade-in">
+      {/* Unified Borderless Filter Strip */}
+      <search className="block space-y-2">
+        <div className="flex flex-wrap items-center justify-between gap-2.5">
+          <div className="flex flex-wrap items-center gap-2 flex-1 min-w-[260px]">
+            <form
+              id={searchFormId}
+              onSubmit={(e) => {
+                e.preventDefault();
+                commitQuery(draft);
+              }}
+              className="w-full sm:w-56"
+            >
+              <SearchInput
+                className="w-full"
+                ariaLabel="精确用户 ID"
+                placeholder="精确用户 ID..."
+                value={draft.userId}
+                onChange={(val) => setDraft((prev) => ({ ...prev, userId: val }))}
+                onClear={() => {
+                  const next = { ...draft, userId: '' };
+                  setDraft(next);
+                  if (queryState.userId) commitQuery(next);
+                }}
+              />
+            </form>
 
-      {/* Filter and Search Bar */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '16px', marginBottom: '24px', position: 'relative', zIndex: 10 }}>
-        {/* User ID */}
-        <div>
-          <label style={{ display: 'block', fontSize: '0.8rem', color: 'hsl(var(--text-secondary))', marginBottom: '6px' }}>用户 ID</label>
-          <input
-            type="text"
-            className="input-field"
-            placeholder="输入精确用户 ID"
-            value={searchUserID}
-            onChange={(e) => {
-              setSearchUserID(e.target.value);
-              setPage(1);
-            }}
+            <CustomSelect
+              aria-label="筛选订单状态"
+              options={statusFilterOptions}
+              value={queryState.status}
+              onChange={(val) => {
+                setDraft((prev) => ({ ...prev, status: val }));
+                setQueryState((prev) => ({ ...prev, page: 1, status: val }));
+              }}
+              width="148px"
+            />
+
+            <CustomSelect
+              aria-label="筛选订单类型"
+              options={orderTypeFilterOptions}
+              value={queryState.orderType}
+              onChange={(val) => {
+                setDraft((prev) => ({ ...prev, orderType: val }));
+                setQueryState((prev) => ({ ...prev, page: 1, orderType: val }));
+              }}
+              width="140px"
+            />
+
+            <ToolbarPopover
+              align="start"
+              label="更多筛选"
+              icon={<SlidersHorizontal size={13} className="text-[var(--cms-muted-fg)]" aria-hidden="true" />}
+              badgeCount={advFilterCount}
+              panelClassName="w-80 p-4"
+            >
+              {({ close }) => (
+                <form
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    if (commitQuery(draft)) close();
+                  }}
+                  className="space-y-3.5"
+                >
+                  <div className="font-semibold text-[var(--cms-fg)]">归因与支付日期筛选</div>
+                  <label className="block space-y-1">
+                    <span className="block text-[var(--cms-muted-fg)]">推广链接 ID</span>
+                    <input
+                      type="text"
+                      className="input-field tabular-nums"
+                      placeholder="输入推广链接 ID..."
+                      value={draft.promotionLinkId}
+                      onChange={(e) => setDraft((prev) => ({ ...prev, promotionLinkId: e.target.value }))}
+                    />
+                  </label>
+
+                  <div className="grid grid-cols-2 gap-2.5">
+                    <label className="block space-y-1">
+                      <span className="block text-[var(--cms-muted-fg)]">支付起始</span>
+                      <input
+                        type="date"
+                        aria-label="支付起始日期"
+                        className="input-field"
+                        value={draft.paidStart}
+                        onChange={(e) => {
+                          setDateError('');
+                          setDraft((prev) => ({ ...prev, paidStart: e.target.value }));
+                        }}
+                      />
+                    </label>
+                    <label className="block space-y-1">
+                      <span className="block text-[var(--cms-muted-fg)]">支付结束</span>
+                      <input
+                        type="date"
+                        aria-label="支付结束日期"
+                        className="input-field"
+                        value={draft.paidEnd}
+                        onChange={(e) => {
+                          setDateError('');
+                          setDraft((prev) => ({ ...prev, paidEnd: e.target.value }));
+                        }}
+                      />
+                    </label>
+                  </div>
+
+                  {dateError && (
+                    <p role="status" className="text-xs text-[var(--cms-error)] m-0">
+                      {dateError}
+                    </p>
+                  )}
+
+                  <div className="pt-2 border-t border-[var(--cms-border)] flex items-center justify-end gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const cleared = { ...draft, promotionLinkId: '', paidStart: '', paidEnd: '' };
+                        setDateError('');
+                        setDraft(cleared);
+                        commitQuery(cleared);
+                        close();
+                      }}
+                      className="btn-ghost text-[var(--cms-muted-fg)]"
+                    >
+                      清空
+                    </button>
+                    <button type="submit" className="btn-primary h-8 px-3 text-xs">
+                      应用筛选
+                    </button>
+                  </div>
+                </form>
+              )}
+            </ToolbarPopover>
+
+            <button
+              type="submit"
+              form={searchFormId}
+              className="btn-secondary h-9 px-3 text-xs font-normal whitespace-nowrap"
+            >
+              查询
+            </button>
+
+            {hasAnyFilter && (
+              <button type="button" onClick={resetFilters} className="btn-ghost h-9 text-xs text-[var(--cms-muted-fg)]">
+                重置
+              </button>
+            )}
+          </div>
+
+          <div className="flex items-center gap-2 text-xs text-[var(--cms-muted-fg)]">
+            <span className="tabular-nums">共 {total} 笔</span>
+            <ViewOptionsPopover
+              density={density}
+              onDensityChange={setDensity}
+              columns={columnOptions}
+              onToggleColumn={(k) =>
+                setVisibleCols((prev) => ({ ...prev, [k as OrderColKey]: !prev[k as OrderColKey] }))
+              }
+            />
+          </div>
+        </div>
+
+        <FilterChipsBar chips={filterChips} onResetAll={resetFilters} />
+      </search>
+
+      {/* Airy Orders Table + External Pagination */}
+      <TableRegion
+        ariaLabel="充值交易订单列表"
+        footer={
+          <Pagination
+            page={queryState.page}
+            pageSize={10}
+            total={total}
+            disabled={loading}
+            onPageChange={(nextPage) => setQueryState((prev) => ({ ...prev, page: nextPage }))}
+            itemLabel="笔订单"
           />
-        </div>
-
-        {/* Order Status */}
-        <div>
-          <label style={{ display: 'block', fontSize: '0.8rem', color: 'hsl(var(--text-secondary))', marginBottom: '6px' }}>订单状态</label>
-          <CustomSelect
-            options={statusFilterOptions}
-            value={statusFilter}
-            onChange={(val) => {
-              setStatusFilter(val);
-              setPage(1);
-            }}
-            width="100%"
-            placeholder="所有订单状态"
-          />
-        </div>
-
-        {/* Order Type */}
-        <div>
-          <label style={{ display: 'block', fontSize: '0.8rem', color: 'hsl(var(--text-secondary))', marginBottom: '6px' }}>订单类型</label>
-          <CustomSelect
-            options={[
-              { value: '', label: '所有订单类型' },
-              { value: 'single', label: '金币充值 (single)' },
-              { value: 'vip', label: 'VIP订阅 (vip)' },
-              { value: 'whole_book', label: '整本购买 (whole_book)' }
-            ]}
-            value={orderTypeFilter}
-            onChange={(val) => {
-              setOrderTypeFilter(val);
-              setPage(1);
-            }}
-            width="100%"
-            placeholder="所有订单类型"
-          />
-        </div>
-
-        {/* Promotion Link ID */}
-        <div>
-          <label style={{ display: 'block', fontSize: '0.8rem', color: 'hsl(var(--text-secondary))', marginBottom: '6px' }}>推广链接 ID</label>
-          <input
-            type="text"
-            className="input-field"
-            placeholder="输入推广链接 ID"
-            value={promotionLinkFilter}
-            onChange={(e) => {
-              setPromotionLinkFilter(e.target.value);
-              setPage(1);
-            }}
-          />
-        </div>
-
-        {/* Paid Start Time */}
-        <div>
-          <label style={{ display: 'block', fontSize: '0.8rem', color: 'hsl(var(--text-secondary))', marginBottom: '6px' }}>支付时间 (起)</label>
-          <input
-            type="date"
-            className="input-field"
-            value={paidStartFilter}
-            onChange={(e) => {
-              setPaidStartFilter(e.target.value);
-              setPage(1);
-            }}
-          />
-        </div>
-
-        {/* Paid End Time */}
-        <div>
-          <label style={{ display: 'block', fontSize: '0.8rem', color: 'hsl(var(--text-secondary))', marginBottom: '6px' }}>支付时间 (止)</label>
-          <input
-            type="date"
-            className="input-field"
-            value={paidEndFilter}
-            onChange={(e) => {
-              setPaidEndFilter(e.target.value);
-              setPage(1);
-            }}
-          />
-        </div>
-      </div>
-
-      {/* Orders Table */}
-      <div className="glass-panel" style={{ padding: '8px', overflowX: 'auto' }}>
-        <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left' }}>
+        }
+      >
+        <table className="cms-table min-w-[920px]" data-density={density}>
           <thead>
-            <tr style={{ borderBottom: '1px solid hsl(var(--border))', color: 'hsl(var(--text-secondary))', fontSize: '0.8rem' }}>
-              <th style={{ padding: '12px 16px' }}>订单 ID</th>
-              <th style={{ padding: '12px 16px' }}>用户 ID</th>
-              <th style={{ padding: '12px 16px' }}>流水凭证</th>
-              <th style={{ padding: '12px 16px' }}>订单类型</th>
-              <th style={{ padding: '12px 16px' }}>所得金币</th>
-              <th style={{ padding: '12px 16px' }}>支付金额</th>
-              <th style={{ padding: '12px 16px' }}>推广/书籍</th>
-              <th style={{ padding: '12px 16px' }}>创建时间</th>
-              <th style={{ padding: '12px 16px' }}>支付时间</th>
-              <th style={{ padding: '12px 16px' }}>订单状态</th>
-              <th style={{ padding: '12px 16px', textAlign: 'center' }}>操作</th>
+            <tr>
+              <th scope="col">订单 / 用户</th>
+              <th scope="col">支付凭证</th>
+              <th scope="col">类型</th>
+              <th scope="col" className="text-right">
+                发放金币
+              </th>
+              <th scope="col" className="text-right">
+                实付金额
+              </th>
+              {visibleCols.attribution && <th scope="col">推广 / 书籍归因</th>}
+              {visibleCols.paid_at && <th scope="col">支付时间</th>}
+              {visibleCols.created_at && <th scope="col">创建时间</th>}
+              <th scope="col">状态</th>
+              <th scope="col" className="text-right w-px whitespace-nowrap">
+                操作
+              </th>
             </tr>
           </thead>
-          <tbody>
-            {orders.length === 0 ? (
+          <tbody className={loading && hasLoadedOnce ? 'opacity-65 transition-opacity' : ''}>
+            {!hasLoadedOnce && loading ? (
+              <SkeletonRows rows={6} cols={colSpan} />
+            ) : orders.length === 0 ? (
               <tr>
-                <td colSpan={11} style={{ padding: '20px', textAlign: 'center', color: 'hsl(var(--text-muted))' }}>暂无充值交易订单记录。</td>
+                <td colSpan={colSpan} className="py-16 text-center text-[var(--cms-muted-fg)]">
+                  暂无充值交易订单记录
+                </td>
               </tr>
             ) : (
-              orders.map((o) => (
-                <tr key={o.id} style={{ borderBottom: '1px solid hsl(var(--border) / 0.5)', fontSize: '0.9rem', color: 'hsl(var(--text-secondary))' }}>
-                  <td style={{ padding: '14px 16px', fontFamily: 'monospace', fontSize: '0.8rem' }} title={String(o.id)}>
-                    {o.id}
-                  </td>
-                  <td style={{ padding: '14px 16px', fontFamily: 'monospace', fontSize: '0.8rem' }}>{o.user_id}</td>
-                  <td style={{ padding: '14px 16px', color: 'hsl(var(--text-secondary))' }}>
-                    <div
-                      style={{ display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer' }}
-                      onClick={() => handleOpenPaymentDetails(o.id)}
-                      title="点击查看第三方支付凭据"
-                    >
-                      <CreditCard size={14} style={{ color: 'hsl(var(--primary))' }} />
-                      <span style={{ fontSize: '0.8rem', textDecoration: 'underline', textUnderlineOffset: '2px' }}>
-                        {o.payment_method.toUpperCase()}: {o.external_ref_id || '无'}
-                      </span>
-                    </div>
-                  </td>
-                  <td style={{ padding: '14px 16px' }}>
-                    <span className={`badge ${o.order_type === 'whole_book' ? 'badge-blue' : 'badge-gray'}`} style={{ fontSize: '0.75rem' }}>
-                      {o.order_type === 'vip' ? 'VIP订阅' : o.order_type === 'whole_book' ? '整本购买' : '金币充值'}
-                    </span>
-                  </td>
-                  <td style={{ padding: '14px 16px', fontSize: '0.8rem' }}>
-                    <span>
-                      {o.coins}
-                      {o.bonus_coins_credited > 0 && `+${o.bonus_coins_credited}`}
-                    </span>
-                  </td>
-                  <td style={{ padding: '14px 16px', fontSize: '0.8rem', fontWeight: 500 }}>
-                    ${(o.amount_cents / 100).toFixed(2)}
-                  </td>
-                  <td style={{ padding: '14px 16px' }}>
-                    {o.promotion_link_id || o.novel_id ? (
-                      <div style={{ fontSize: '0.8rem' }}>
-                        {o.promotion_link_id && <div>推广: #{o.promotion_link_id}</div>}
-                        {o.novel_id && <div style={{ color: 'hsl(var(--text-secondary))', fontSize: '0.75rem' }}>书籍: #{o.novel_id}</div>}
+              orders.map((o) => {
+                const statusMeta = getOrderStatusMeta(o.status);
+                return (
+                  <tr
+                    key={o.id}
+                    onClick={() => void handleOpenPaymentDetails(o.id)}
+                    className={`cursor-pointer ${selectedOrderForDetail === o.id && detailModalOpen ? 'row-selected' : ''}`}
+                  >
+                    <td className="tabular-nums">
+                      <div className="text-[var(--cms-fg)]" title={String(o.id)}>
+                        #{o.id}
                       </div>
-                    ) : (
-                      <span style={{ color: 'hsl(var(--text-muted))' }}>-</span>
+                      <div className="text-[var(--cms-muted-fg)] mt-0.5">UID {o.user_id}</div>
+                    </td>
+                    <td onClick={(e) => e.stopPropagation()}>
+                      <button
+                        type="button"
+                        onClick={() => void handleOpenPaymentDetails(o.id)}
+                        className="focus-ring inline-flex items-center gap-1.5 text-[var(--cms-fg)] hover:underline cursor-pointer tabular-nums"
+                        title="点击查看第三方支付凭据"
+                      >
+                        <CreditCard size={13} className="text-[var(--cms-muted-fg)] shrink-0" aria-hidden="true" />
+                        <span>
+                          {o.payment_method.toUpperCase()}: {o.external_ref_id || '无'}
+                        </span>
+                      </button>
+                    </td>
+                    <td className="text-[var(--cms-muted-fg)] whitespace-nowrap">
+                      {getOrderTypeLabel(o.order_type)}
+                    </td>
+                    <td className="text-right tabular-nums text-[var(--cms-fg)] whitespace-nowrap">
+                      {o.coins}
+                      {o.bonus_coins_credited > 0 && (
+                        <span className="text-[var(--cms-muted-fg)]"> +{o.bonus_coins_credited}</span>
+                      )}
+                    </td>
+                    <td className="text-right tabular-nums text-[var(--cms-fg)] whitespace-nowrap">
+                      ${(o.amount_cents / 100).toFixed(2)}
+                    </td>
+                    {visibleCols.attribution && (
+                      <td className="text-[var(--cms-muted-fg)] tabular-nums">
+                        {o.promotion_link_id || o.novel_id ? (
+                          <div>
+                            {o.promotion_link_id && <span>推广 #{o.promotion_link_id}</span>}
+                            {o.promotion_link_id && o.novel_id && <span className="mx-1">·</span>}
+                            {o.novel_id && <span>书籍 #{o.novel_id}</span>}
+                          </div>
+                        ) : (
+                          '-'
+                        )}
+                      </td>
                     )}
-                  </td>
-                  <td style={{ padding: '14px 16px', fontSize: '0.8rem' }}>
-                    {new Date(o.created_at).toLocaleString('zh-CN', { hour12: false })}
-                  </td>
-                  <td style={{ padding: '14px 16px', fontSize: '0.8rem' }}>
-                    {o.paid_at ? (
-                      <span>
-                        {new Date(o.paid_at).toLocaleString('zh-CN', { hour12: false })}
-                      </span>
-                    ) : (
-                      <span style={{ color: 'hsl(var(--text-muted))' }}>未支付</span>
+                    {visibleCols.paid_at && (
+                      <td className="tabular-nums text-[var(--cms-muted-fg)] whitespace-nowrap">
+                        {o.paid_at ? new Date(o.paid_at).toLocaleString('zh-CN', { hour12: false }) : '未支付'}
+                      </td>
                     )}
-                  </td>
-                  <td style={{ padding: '14px 16px' }}>
-                    <span className={`badge ${o.status === 'Success' || o.status === 'Paid' ? 'badge-green' :
-                      o.status === 'Refunded' ? 'badge-red' :
-                        o.status === 'Pending' || o.status === 'RefundPending' ? 'badge-orange' : 'badge-gray'
-                      }`} style={{ fontSize: '0.7rem' }}>
-                      {o.status === 'Success' || o.status === 'Paid' ? '支付成功' :
-                        o.status === 'Refunded' ? '已退款' :
-                          o.status === 'RefundPending' ? '退款处理中' :
-                            o.status === 'Pending' ? '待付款' : o.status}
-                    </span>
-                  </td>
-                  <td style={{ padding: '14px 16px', textAlign: 'center' }}>
-                    <button
-                      className="btn-secondary"
-                      onClick={() => handleOpenPaymentDetails(o.id)}
-                      style={{
-                        padding: '4px 10px',
-                        fontSize: '0.75rem',
-                        borderRadius: '6px',
-                        display: 'inline-flex',
-                        alignItems: 'center',
-                        gap: '4px',
-                        cursor: 'pointer'
-                      }}
-                      title="查看第三方支付凭据明细"
-                    >
-                      <Eye size={13} style={{ color: 'hsl(var(--primary))' }} />
-                      <span>明细</span>
-                    </button>
-                  </td>
-                </tr>
-              ))
+                    {visibleCols.created_at && (
+                      <td className="tabular-nums text-[var(--cms-muted-fg)] whitespace-nowrap">
+                        {new Date(o.created_at).toLocaleString('zh-CN', { hour12: false })}
+                      </td>
+                    )}
+                    <td>
+                      <StatusDot tone={statusMeta.tone} label={statusMeta.label} />
+                    </td>
+                    <td className="text-right" onClick={(e) => e.stopPropagation()}>
+                      <button
+                        type="button"
+                        onClick={() => void handleOpenPaymentDetails(o.id)}
+                        className="btn-detail"
+                      >
+                        明细
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })
             )}
           </tbody>
         </table>
+      </TableRegion>
 
-        {/* Pagination Footer */}
-        {!loading && orders.length > 0 && (
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '14px 16px', borderTop: '1px solid hsl(var(--border) / 0.5)' }}>
-            <span style={{ fontSize: '0.8rem', color: 'hsl(var(--text-secondary))' }}>
-              共 {total} 个订单，第 {page} / {Math.ceil(total / 10) || 1} 页
-            </span>
-            <div style={{ display: 'flex', gap: '8px' }}>
-              <button
-                className="btn-secondary"
-                disabled={page <= 1}
-                onClick={() => setPage(page - 1)}
-                style={{ padding: '6px 12px', fontSize: '0.8rem', borderRadius: '6px', display: 'inline-flex', alignItems: 'center', gap: '4px' }}
-              >
-                <ChevronLeft size={14} /> 上一页
-              </button>
-              <button
-                className="btn-secondary"
-                disabled={page >= (Math.ceil(total / 10) || 1)}
-                onClick={() => setPage(page + 1)}
-                style={{ padding: '6px 12px', fontSize: '0.8rem', borderRadius: '6px', display: 'inline-flex', alignItems: 'center', gap: '4px' }}
-              >
-                下一页 <ChevronRight size={14} />
-              </button>
-            </div>
-          </div>
-        )}
-      </div>
-
-      {/* Third Party Payment Details Modal */}
       <ThirdPartyPaymentModal
         isOpen={detailModalOpen}
         onClose={() => {
@@ -352,7 +582,7 @@ export default function OrdersTab() {
         details={paymentDetails}
         onRefresh={() => {
           if (selectedOrderForDetail) {
-            handleOpenPaymentDetails(selectedOrderForDetail);
+            void handleOpenPaymentDetails(selectedOrderForDetail);
           }
         }}
       />

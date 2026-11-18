@@ -1,6 +1,6 @@
 -- =========================================================================
 -- STAR NOVEL - 生产级统一数据库表结构 (Unified Database Schema)
--- 包含：用户/鉴权、小说/章节、钱包/交易、充值/模板、投放/像素、Meta大盘、反馈等
+-- 包含：用户/鉴权、小说/章节、钱包/交易、充值/模板、投放/像素、反馈等
 -- 安全原则：全部采用 IF NOT EXISTS / ADD COLUMN IF NOT EXISTS，严禁 DROP TABLE
 -- =========================================================================
 
@@ -351,88 +351,7 @@ CREATE TABLE IF NOT EXISTS feedback (
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
--- 22. Meta 广告大盘表群 (Meta Marketing API & Daily Insights)
-CREATE TABLE IF NOT EXISTS meta_accounts (
-    id VARCHAR(64) PRIMARY KEY,
-    name VARCHAR(255) NOT NULL,
-    currency VARCHAR(10) DEFAULT 'USD',
-    timezone VARCHAR(50) DEFAULT 'UTC',
-    status VARCHAR(50) DEFAULT 'ACTIVE',
-    bm_id VARCHAR(64) DEFAULT '',
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE IF NOT EXISTS meta_campaigns (
-    id VARCHAR(64) PRIMARY KEY,
-    account_id VARCHAR(64) NOT NULL,
-    name VARCHAR(255) NOT NULL,
-    objective VARCHAR(64) DEFAULT '',
-    status VARCHAR(50) DEFAULT 'ACTIVE',
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE IF NOT EXISTS meta_adsets (
-    id VARCHAR(64) PRIMARY KEY,
-    campaign_id VARCHAR(64) NOT NULL,
-    account_id VARCHAR(64) NOT NULL,
-    name VARCHAR(255) NOT NULL,
-    daily_budget NUMERIC(12,4) DEFAULT 0,
-    status VARCHAR(50) DEFAULT 'ACTIVE',
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE IF NOT EXISTS meta_ads (
-    id VARCHAR(64) PRIMARY KEY,
-    ad_set_id VARCHAR(64) NOT NULL,
-    campaign_id VARCHAR(64) NOT NULL,
-    account_id VARCHAR(64) NOT NULL,
-    name VARCHAR(255) NOT NULL,
-    status VARCHAR(50) DEFAULT 'ACTIVE',
-    created_time TIMESTAMP WITH TIME ZONE,
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE IF NOT EXISTS meta_daily_insights (
-    id VARCHAR(128) PRIMARY KEY,
-    entity_level VARCHAR(20) NOT NULL,
-    entity_id VARCHAR(64) NOT NULL,
-    stat_date VARCHAR(10) NOT NULL,
-    spend NUMERIC(12,4) DEFAULT 0,
-    impressions BIGINT DEFAULT 0,
-    reach BIGINT DEFAULT 0,
-    frequency NUMERIC(8,4) DEFAULT 0,
-    cpm NUMERIC(12,4) DEFAULT 0,
-    clicks BIGINT DEFAULT 0,
-    cpc NUMERIC(12,4) DEFAULT 0,
-    ctr NUMERIC(8,4) DEFAULT 0,
-    link_clicks BIGINT DEFAULT 0,
-    cost_per_link_click NUMERIC(12,4) DEFAULT 0,
-    link_ctr NUMERIC(8,4) DEFAULT 0,
-    landing_page_views BIGINT DEFAULT 0,
-    cost_per_landing_page_view NUMERIC(12,4) DEFAULT 0,
-    view_content_count BIGINT DEFAULT 0,
-    cost_per_view_content NUMERIC(12,4) DEFAULT 0,
-    add_to_cart_count BIGINT DEFAULT 0,
-    cost_per_add_to_cart NUMERIC(12,4) DEFAULT 0,
-    initiate_checkout_count BIGINT DEFAULT 0,
-    cost_per_initiate_checkout NUMERIC(12,4) DEFAULT 0,
-    complete_registration_count BIGINT DEFAULT 0,
-    cost_per_complete_registration NUMERIC(12,4) DEFAULT 0,
-    purchase_count BIGINT DEFAULT 0,
-    cost_per_purchase NUMERIC(12,4) DEFAULT 0,
-    purchase_value NUMERIC(14,4) DEFAULT 0,
-    purchase_roas NUMERIC(10,4) DEFAULT 0,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE IF NOT EXISTS meta_configs (
-    key VARCHAR(64) PRIMARY KEY,
-    value TEXT NOT NULL,
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-);
-
--- 23. Facebook CAPI 事件日志表 (Facebook CAPI Logs)
+-- 22. Facebook CAPI 事件日志表 (Facebook CAPI Logs)
 CREATE TABLE IF NOT EXISTS facebook_capi_logs (
     id BIGSERIAL PRIMARY KEY,
     pixel_id VARCHAR(50) NOT NULL,
@@ -447,7 +366,7 @@ CREATE TABLE IF NOT EXISTS facebook_capi_logs (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
--- 24. 性能索引构建 (Indexes)
+-- 23. 性能索引构建 (Indexes)
 CREATE INDEX IF NOT EXISTS idx_novels_status_publish_views ON novels(status, publish_status, view_count DESC, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_novels_status_publish_created ON novels(status, publish_status, created_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_novels_genres_gin ON novels USING GIN (genres);
@@ -465,20 +384,13 @@ CREATE INDEX IF NOT EXISTS idx_gift_code_redemptions_user ON gift_code_redemptio
 CREATE INDEX IF NOT EXISTS idx_admin_audit_logs_admin ON admin_audit_logs(admin_id);
 CREATE INDEX IF NOT EXISTS idx_feedback_user ON feedback(user_id);
 CREATE INDEX IF NOT EXISTS idx_feedback_status ON feedback(status);
-CREATE INDEX IF NOT EXISTS idx_meta_camp_acc ON meta_campaigns(account_id);
-CREATE INDEX IF NOT EXISTS idx_meta_adset_camp ON meta_adsets(campaign_id);
-CREATE INDEX IF NOT EXISTS idx_meta_adset_acc ON meta_adsets(account_id);
-CREATE INDEX IF NOT EXISTS idx_meta_ad_adset ON meta_ads(ad_set_id);
-CREATE INDEX IF NOT EXISTS idx_meta_ad_camp ON meta_ads(campaign_id);
-CREATE INDEX IF NOT EXISTS idx_meta_ad_acc ON meta_ads(account_id);
-CREATE INDEX IF NOT EXISTS idx_meta_insight_entity_date ON meta_daily_insights(entity_level, entity_id, stat_date);
 
 -- 每日签到防刷唯一偏索引 (使用 UTC 转换保证 IMMUTABLE)
 CREATE UNIQUE INDEX IF NOT EXISTS idx_unique_user_daily_checkin 
 ON transactions(user_id, ((created_at AT TIME ZONE 'UTC')::date)) 
 WHERE biz_type = 'checkin';
 
--- 25. 第三方支付订单详情表 (Third Party Payment Orders)
+-- 24. 第三方支付订单详情表 (Third Party Payment Orders)
 CREATE TABLE IF NOT EXISTS third_party_payment_orders (
     id BIGSERIAL PRIMARY KEY,
     order_id BIGINT NOT NULL REFERENCES recharge_orders(id) ON DELETE CASCADE,

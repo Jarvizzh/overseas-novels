@@ -1,7 +1,6 @@
 import React from 'react';
-import { createPortal } from 'react-dom';
-import { X } from 'lucide-react';
 import CustomSelect from '../CustomSelect';
+import { CmsDialog } from '../ui/CmsDialog';
 import type { SystemDomain } from '../../utils/api';
 
 export interface FBPixel {
@@ -56,268 +55,175 @@ export const PromotionLinkModal: React.FC<PromotionLinkModalProps> = ({
   generatedLink,
   onCopyLink,
 }) => {
-  if (!isOpen) return null;
+  const activeDomains = (domains || []).filter((d) => d.status === 1);
+  const defaultDomain =
+    activeDomains.find((d) => d.is_default) ||
+    activeDomains.find((d) => d.type === 'main') ||
+    activeDomains[0];
 
-  return createPortal(
-    <div
-      style={{
-        position: 'fixed',
-        top: 0,
-        left: 0,
-        right: 0,
-        bottom: 0,
-        backgroundColor: 'rgba(15, 23, 42, 0.35)',
-        backdropFilter: 'blur(2.5px)',
-        WebkitBackdropFilter: 'blur(2.5px)',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        zIndex: 10000,
-        padding: '20px',
-        overscrollBehavior: 'contain',
-      }}
-    >
-      <div
-        className="glass-panel animate-fade-in"
-        style={{
-          width: '100%',
-          maxWidth: '520px',
-          backgroundColor: 'hsl(var(--bg-surface))',
-          border: '1px solid hsl(var(--border))',
-          borderRadius: '16px',
-          display: 'flex',
-          flexDirection: 'column',
-          boxShadow: 'var(--shadow-lg)',
-          overflow: 'hidden',
-        }}
-      >
-        {/* Modal Header */}
-        <div
-          style={{
-            padding: '20px 24px',
-            borderBottom: '1px solid hsl(var(--border))',
-            display: 'flex',
-            justifyContent: 'space-between',
-            alignItems: 'center',
-          }}
-        >
-          <h3 style={{ fontSize: '1.25rem', fontWeight: 600 }}>生成书籍推广链接</h3>
-          <button
-            type="button"
-            aria-label="关闭窗口"
-            onClick={onClose}
-            style={{
-              background: 'transparent',
-              border: 'none',
-              padding: '6px',
-              borderRadius: '8px',
-              display: 'inline-flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              color: 'hsl(var(--text-secondary))',
-              cursor: 'pointer',
-            }}
-          >
-            <X size={20} aria-hidden="true" />
+  return (
+    <CmsDialog
+      open={isOpen}
+      onClose={onClose}
+      variant="drawer"
+      title="生成书籍推广链接"
+      subtitle={promotionForm.title ? `${promotionForm.title} · #${promotionForm.novelId}` : undefined}
+      size="md"
+      closedBy="any"
+      footer={
+        <>
+          <button type="button" className="btn-secondary" onClick={onClose}>
+            取消
           </button>
-        </div>
+          <button type="button" className="btn-primary" onClick={onGenerateLink}>
+            生成并保存推广链接
+          </button>
+        </>
+      }
+    >
+      <div className="space-y-4 text-xs">
+        <label className="block space-y-1.5">
+          <span className="block font-medium text-[var(--cms-muted-fg)]">推广活动名称</span>
+          <input
+            type="text"
+            autoFocus
+            className="input-field"
+            placeholder="e.g. FB_BlackFriday_Campaign"
+            value={promotionForm.name}
+            onChange={(e) => setPromotionForm({ ...promotionForm, name: e.target.value })}
+          />
+        </label>
 
-        {/* Modal Body */}
-        <div style={{ padding: '24px', display: 'flex', flexDirection: 'column', gap: '16px' }}>
-          <div>
-            <label style={{ display: 'block', fontSize: '0.75rem', color: 'hsl(var(--text-secondary))', marginBottom: '4px' }}>
-              推广活动名称
-            </label>
-            <input
-              type="text"
-              className="input-field"
-              placeholder="e.g. FB_BlackFriday_Campaign"
-              value={promotionForm.name}
-              onChange={(e) => setPromotionForm({ ...promotionForm, name: e.target.value })}
-            />
-          </div>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <label className="space-y-1.5">
+            <span className="block font-medium text-[var(--cms-muted-fg)]">目标书籍</span>
+            <input type="text" className="input-field" value={promotionForm.title} disabled />
+          </label>
 
-          <div>
-            <label style={{ display: 'block', fontSize: '0.75rem', color: 'hsl(var(--text-secondary))', marginBottom: '4px' }}>
-              目标书籍 (自动填充)
-            </label>
-            <input type="text" className="input-field" value={promotionForm.title} disabled style={{ opacity: 0.7 }} />
-          </div>
-
-          <div>
-            <label style={{ display: 'block', fontSize: '0.75rem', color: 'hsl(var(--text-secondary))', marginBottom: '4px' }}>
-              投放落地页域名 (可选，不选则默认主域名)
-            </label>
-            {(() => {
-              const activeDomains = (domains || []).filter((d) => d.status === 1);
-              const defaultDomain = activeDomains.find((d) => d.is_default) || activeDomains.find((d) => d.type === 'main') || activeDomains[0];
-              return (
-                <CustomSelect
-                  options={[
-                    {
-                      value: '',
-                      label: `-- 默认主域名 (${defaultDomain?.domain || '主站默认域名'}) --`
-                    },
-                    ...activeDomains.map((d) => ({
-                      value: String(d.id),
-                      label: `${d.name} (${d.domain}) ${d.is_default ? '[默认主域名]' : ''}`
-                    }))
-                  ]}
-                  value={promotionForm.domainId || ''}
-                  onChange={(val) => setPromotionForm({ ...promotionForm, domainId: val })}
-                  width="100%"
-                />
-              );
-            })()}
-          </div>
-
-          <div>
-            <label style={{ display: 'block', fontSize: '0.75rem', color: 'hsl(var(--text-secondary))', marginBottom: '4px' }}>
-              落地章节序号 (从第几章开始阅读)
-            </label>
+          <label className="space-y-1.5">
+            <span className="block font-medium text-[var(--cms-muted-fg)]">落地章节序号</span>
             <input
               type="number"
-              className="input-field"
+              className="input-field tabular-nums"
               min={0}
               value={promotionForm.chapterIndex}
               onChange={(e) => setPromotionForm({ ...promotionForm, chapterIndex: e.target.value })}
             />
-          </div>
+          </label>
+        </div>
 
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
-            <div>
-              <label style={{ display: 'block', fontSize: '0.75rem', color: 'hsl(var(--text-secondary))', marginBottom: '4px' }}>
-                渠道 utm_source
-              </label>
-              <input
-                type="text"
-                className="input-field"
-                placeholder="e.g. facebook"
-                value={promotionForm.utmSource}
-                onChange={(e) => setPromotionForm({ ...promotionForm, utmSource: e.target.value })}
-              />
-            </div>
-            <div>
-              <label style={{ display: 'block', fontSize: '0.75rem', color: 'hsl(var(--text-secondary))', marginBottom: '4px' }}>
-                绑定 Facebook 像素 <span style={{ color: '#f87171' }}>*</span>
-              </label>
-              <CustomSelect
-                options={[
-                  { value: '', label: pixels.length === 0 ? '-- 请先添加像素配置 --' : '-- 选择绑定的 Facebook 像素 (必选) --' },
-                  ...pixels.map((p) => ({ value: String(p.id), label: `${p.name} (${p.pixel_id})` })),
-                ]}
-                value={promotionForm.fbPixelId}
-                onChange={(val) => setPromotionForm({ ...promotionForm, fbPixelId: val })}
-                width="100%"
-              />
-            </div>
-          </div>
+        <label className="block space-y-1.5">
+          <span className="block font-medium text-[var(--cms-muted-fg)]">
+            投放落地页域名（不选则默认主域名）
+          </span>
+          <CustomSelect
+            width="100%"
+            value={promotionForm.domainId || ''}
+            onChange={(val) => setPromotionForm({ ...promotionForm, domainId: val })}
+            options={[
+              {
+                value: '',
+                label: `-- 默认主域名 (${defaultDomain?.domain || '主站默认域名'}) --`,
+              },
+              ...activeDomains.map((d) => ({
+                value: String(d.id),
+                label: `${d.name} (${d.domain}) ${d.is_default ? '[默认主域名]' : ''}`,
+              })),
+            ]}
+          />
+        </label>
 
-          <div>
-            <label style={{ display: 'block', fontSize: '0.75rem', color: 'hsl(var(--text-secondary))', marginBottom: '4px' }}>
-              营销系列 utm_campaign (可选)
-            </label>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <label className="space-y-1.5">
+            <span className="block font-medium text-[var(--cms-muted-fg)]">渠道 utm_source</span>
             <input
               type="text"
               className="input-field"
-              placeholder="e.g. blackfriday_adset1"
-              value={promotionForm.utmCampaign}
-              onChange={(e) => setPromotionForm({ ...promotionForm, utmCampaign: e.target.value })}
+              placeholder="e.g. facebook"
+              value={promotionForm.utmSource}
+              onChange={(e) => setPromotionForm({ ...promotionForm, utmSource: e.target.value })}
             />
-          </div>
+          </label>
 
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
-            <div>
-              <label style={{ display: 'block', fontSize: '0.75rem', color: 'hsl(var(--text-secondary))', marginBottom: '4px' }}>
-                专属千字计费 (可选)
-              </label>
-              <input
-                type="number"
-                className="input-field"
-                placeholder="留空继承书籍/全局"
-                min={0}
-                value={promotionForm.coinCostPerThousand}
-                onChange={(e) => setPromotionForm({ ...promotionForm, coinCostPerThousand: e.target.value })}
-              />
-            </div>
-            <div>
-              <label style={{ display: 'block', fontSize: '0.75rem', color: 'hsl(var(--text-secondary))', marginBottom: '4px' }}>
-                专属起付章节 (可选)
-              </label>
-              <input
-                type="number"
-                className="input-field"
-                placeholder="留空继承书籍/全局"
-                min={1}
-                value={promotionForm.startPayChapterIndex}
-                onChange={(e) => setPromotionForm({ ...promotionForm, startPayChapterIndex: e.target.value })}
-              />
-            </div>
-          </div>
-
-          <div>
-            <label style={{ display: 'block', fontSize: '0.75rem', color: 'hsl(var(--text-secondary))', marginBottom: '4px' }}>
-              绑定充值模板 (可选)
-            </label>
+          <label className="space-y-1.5">
+            <span className="block font-medium text-[var(--cms-muted-fg)]">
+              绑定 Facebook 像素 <span className="text-[var(--cms-error)]">*</span>
+            </span>
             <CustomSelect
-              options={[
-                { value: '', label: '-- 使用默认激活模板 --' },
-                ...templates.map((t) => ({ value: String(t.id), label: `${t.name} ${t.is_default ? '(默认)' : ''}` })),
-              ]}
-              value={promotionForm.rechargeTemplateId}
-              onChange={(val) => setPromotionForm({ ...promotionForm, rechargeTemplateId: val })}
               width="100%"
+              value={promotionForm.fbPixelId}
+              onChange={(val) => setPromotionForm({ ...promotionForm, fbPixelId: val })}
+              options={[
+                {
+                  value: '',
+                  label: pixels.length === 0 ? '-- 请先添加像素配置 --' : '-- 选择绑定的 Facebook 像素 (必选) --',
+                },
+                ...pixels.map((p) => ({ value: String(p.id), label: `${p.name} (${p.pixel_id})` })),
+              ]}
             />
-          </div>
-
-          <div
-            style={{
-              paddingTop: '16px',
-              borderTop: '1px solid hsl(var(--border))',
-              display: 'flex',
-              justifyContent: 'flex-end',
-              alignItems: 'center',
-              gap: '12px',
-              width: '100%',
-              boxSizing: 'border-box',
-            }}
-          >
-            <button type="button" className="btn-secondary" onClick={onClose} style={{ marginLeft: 'auto' }}>
-              取消
-            </button>
-            <button type="button" className="btn-primary" onClick={onGenerateLink}>
-              生成并保存推广链接
-            </button>
-          </div>
-
-          {generatedLink && (
-            <div
-              style={{
-                marginTop: '12px',
-                padding: '12px',
-                borderRadius: '8px',
-                backgroundColor: 'hsl(var(--bg-card))',
-                border: '1px solid hsl(var(--border))',
-                display: 'flex',
-                flexDirection: 'column',
-                gap: '8px',
-              }}
-            >
-              <div style={{ fontSize: '0.75rem', color: 'hsl(var(--text-secondary))' }}>推广链接地址：</div>
-              <input type="text" className="input-field" readOnly value={generatedLink} style={{ fontSize: '0.8rem' }} />
-              <button
-                type="button"
-                className="btn-secondary"
-                style={{ width: '100%', fontSize: '0.8rem' }}
-                onClick={onCopyLink}
-              >
-                复制链接到剪贴板
-              </button>
-            </div>
-          )}
+          </label>
         </div>
+
+        <label className="block space-y-1.5">
+          <span className="block font-medium text-[var(--cms-muted-fg)]">营销系列 utm_campaign（可选）</span>
+          <input
+            type="text"
+            className="input-field"
+            placeholder="e.g. blackfriday_adset1"
+            value={promotionForm.utmCampaign}
+            onChange={(e) => setPromotionForm({ ...promotionForm, utmCampaign: e.target.value })}
+          />
+        </label>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <label className="space-y-1.5">
+            <span className="block font-medium text-[var(--cms-muted-fg)]">专属千字计费（可选）</span>
+            <input
+              type="number"
+              className="input-field tabular-nums"
+              placeholder="留空继承书籍/全局"
+              min={0}
+              value={promotionForm.coinCostPerThousand}
+              onChange={(e) => setPromotionForm({ ...promotionForm, coinCostPerThousand: e.target.value })}
+            />
+          </label>
+
+          <label className="space-y-1.5">
+            <span className="block font-medium text-[var(--cms-muted-fg)]">专属起付章节（可选）</span>
+            <input
+              type="number"
+              className="input-field tabular-nums"
+              placeholder="留空继承书籍/全局"
+              min={1}
+              value={promotionForm.startPayChapterIndex}
+              onChange={(e) => setPromotionForm({ ...promotionForm, startPayChapterIndex: e.target.value })}
+            />
+          </label>
+        </div>
+
+        <label className="block space-y-1.5">
+          <span className="block font-medium text-[var(--cms-muted-fg)]">绑定充值模板（可选）</span>
+          <CustomSelect
+            width="100%"
+            value={promotionForm.rechargeTemplateId}
+            onChange={(val) => setPromotionForm({ ...promotionForm, rechargeTemplateId: val })}
+            options={[
+              { value: '', label: '-- 使用默认激活模板 --' },
+              ...templates.map((t) => ({ value: String(t.id), label: `${t.name} ${t.is_default ? '(默认)' : ''}` })),
+            ]}
+          />
+        </label>
+
+        {generatedLink && (
+          <div className="p-3.5 rounded-xl bg-[var(--cms-content)] border border-[var(--cms-border)] space-y-2">
+            <div className="text-xs font-medium text-[var(--cms-muted-fg)]">已生成的推广链接地址</div>
+            <input type="text" className="input-field font-mono-code text-xs" readOnly value={generatedLink} />
+            <button type="button" className="btn-secondary w-full" onClick={onCopyLink}>
+              复制链接到剪贴板
+            </button>
+          </div>
+        )}
       </div>
-    </div>,
-    document.body
+    </CmsDialog>
   );
 };
