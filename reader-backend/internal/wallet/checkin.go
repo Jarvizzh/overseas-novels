@@ -3,12 +3,39 @@ package wallet
 import (
 	"context"
 	"fmt"
+	"strconv"
+	"strings"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"reader-backend/internal/db"
 )
 
 var checkInRewards = [...]int{10, 15, 20, 25, 30, 35, 50}
+
+func resolveCheckInRewards(ctx context.Context, tx pgx.Tx) []int {
+	fallback := make([]int, len(checkInRewards))
+	copy(fallback, checkInRewards[:])
+
+	var raw string
+	err := tx.QueryRow(ctx, `SELECT value FROM system_configs WHERE key = 'checkin_reward_gradient'`).Scan(&raw)
+	if err != nil {
+		return fallback
+	}
+	parts := strings.Split(raw, ",")
+	if len(parts) != len(checkInRewards) {
+		return fallback
+	}
+	parsed := make([]int, len(checkInRewards))
+	for i, part := range parts {
+		n, convErr := strconv.Atoi(strings.TrimSpace(part))
+		if convErr != nil || n < 1 || n > 10000 {
+			return fallback
+		}
+		parsed[i] = n
+	}
+	return parsed
+}
 
 type CheckInState struct {
 	CheckedIn    bool  `json:"checked_in"`
@@ -29,6 +56,7 @@ func (r *dbRepository) CheckIn(ctx context.Context, userID int64, claim bool) (*
 			return nil, err
 		}
 	}
+	rewards := resolveCheckInRewards(ctx, tx)
 	var checked bool
 	var streak int
 	err = tx.QueryRow(ctx, `
@@ -48,16 +76,16 @@ func (r *dbRepository) CheckIn(ctx context.Context, userID int64, claim bool) (*
 	if err != nil {
 		return nil, err
 	}
-	day := (streak+len(checkInRewards)-1)%len(checkInRewards) + 1
+	day := (streak+len(rewards)-1)%len(rewards) + 1
 	if streak == 0 {
 		day = 0
 	}
-	state := &CheckInState{CheckedIn: checked, Day: day, Rewards: checkInRewards[:]}
+	state := &CheckInState{CheckedIn: checked, Day: day, Rewards: rewards}
 	if !claim || checked {
 		return state, nil
 	}
-	day = streak%len(checkInRewards) + 1
-	reward := checkInRewards[day-1]
+	day = streak%len(rewards) + 1
+	reward := rewards[day-1]
 	_, err = tx.Exec(ctx, `INSERT INTO wallets(user_id, bonus_coins) VALUES ($1,$2)
 		ON CONFLICT (user_id) DO UPDATE SET bonus_coins=wallets.bonus_coins+$2, updated_at=now()`, userID, reward)
 	if err != nil {

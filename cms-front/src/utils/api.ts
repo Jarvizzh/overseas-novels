@@ -107,6 +107,8 @@ export const feedbackApi = {
 
 export type RankingSortRule = 'views' | 'rating' | 'latest' | 'manual';
 export type RecommendationGroupName = 'editor_pick' | 'curated' | 'ranking';
+export type NovelPickerSort = 'latest' | 'views' | 'rating' | 'updated';
+export type PreviewNovelSource = 'pinned' | 'auto' | 'fallback';
 
 export interface RankingConfig {
   sort_rule: RankingSortRule;
@@ -121,6 +123,7 @@ export interface RecommendationNovel {
   rating: number;
   status: string;
   publish_status: string;
+  synopsis?: string;
   view_count: number;
   genres: string[];
 }
@@ -135,9 +138,15 @@ export interface RecommendationEntry {
   novel?: RecommendationNovel;
 }
 
+export interface CheckInConfig {
+  rewards: number[];
+}
+
 export interface OperationsConfigResponse {
   ranking_config: RankingConfig;
+  checkin_config?: CheckInConfig;
   groups: Record<RecommendationGroupName, RecommendationEntry[]>;
+  available_genres?: string[];
 }
 
 export interface GroupItemInput {
@@ -147,11 +156,72 @@ export interface GroupItemInput {
   scheduled_end?: string | null;
 }
 
+export interface SaveRankingPayload {
+  ranking_config?: RankingConfig;
+  items?: GroupItemInput[];
+}
+
+export interface SaveRankingResponse {
+  ranking_config: RankingConfig;
+  items: RecommendationEntry[];
+}
+
+export interface PreviewNovelItem {
+  novel: RecommendationNovel;
+  source: PreviewNovelSource;
+}
+
+export interface OperationsPreviewRequest {
+  at?: string;
+  ranking_config?: RankingConfig;
+  groups?: Partial<Record<RecommendationGroupName, GroupItemInput[]>>;
+}
+
+export interface OperationsPreviewResponse {
+  at: string;
+  ranking_config: RankingConfig;
+  featured: PreviewNovelItem[];
+  featured_is_fallback: boolean;
+  new_releases: PreviewNovelItem[];
+  curated: PreviewNovelItem[];
+  curated_is_override: boolean;
+  rankings: PreviewNovelItem[];
+  ranking_manual_fallback: boolean;
+}
+
+export interface PublishedNovelsQuery {
+  search?: string;
+  author?: string;
+  genre?: string;
+  status?: string;
+  sort?: NovelPickerSort;
+  page?: number;
+  pageSize?: number;
+  signal?: AbortSignal;
+}
+
 export const operationsApi = {
   getConfig: (): Promise<OperationsConfigResponse> => apiRequest('GET', '/operations'),
   saveRankingConfig: (data: RankingConfig) => apiRequest('PUT', '/operations/ranking-config', data),
+  saveRanking: (data: SaveRankingPayload): Promise<SaveRankingResponse> =>
+    apiRequest('PUT', '/operations/ranking', data),
+  saveCheckInConfig: (rewards: number[]): Promise<{ checkin_config: CheckInConfig }> =>
+    apiRequest('PUT', '/operations/campaigns/checkin', { rewards }),
   saveGroup: (group: RecommendationGroupName, items: GroupItemInput[]) =>
     apiRequest('PUT', `/operations/groups/${group}`, { items }),
-  searchPublishedNovels: (search: string, page = 1, pageSize = 30, signal?: AbortSignal) =>
-    apiRequest('GET', `/novels?publish_status=published&page=${page}&page_size=${pageSize}&search=${encodeURIComponent(search)}`, undefined, false, signal),
+  preview: (data: OperationsPreviewRequest, signal?: AbortSignal): Promise<OperationsPreviewResponse> =>
+    apiRequest('POST', '/operations/preview', data, false, signal),
+  searchPublishedNovels: (query: PublishedNovelsQuery) => {
+    const params = new URLSearchParams({
+      publish_status: 'published',
+      page: String(query.page ?? 1),
+      page_size: String(query.pageSize ?? 20),
+    });
+    if (query.search?.trim()) params.set('search', query.search.trim());
+    if (query.author?.trim()) params.set('author', query.author.trim());
+    if (query.genre?.trim()) params.set('genre', query.genre.trim());
+    if (query.status?.trim()) params.set('status', query.status.trim());
+    if (query.sort?.trim()) params.set('sort', query.sort.trim());
+    return apiRequest('GET', `/novels?${params.toString()}`, undefined, false, query.signal);
+  },
 };

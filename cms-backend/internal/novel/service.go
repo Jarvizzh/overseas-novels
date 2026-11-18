@@ -92,6 +92,7 @@ type NovelListFilter struct {
 	Author        string
 	CreatedStart  string
 	CreatedEnd    string
+	Sort          string
 }
 
 type BatchPublishSkippedItem struct {
@@ -341,6 +342,20 @@ func (s *novelService) ListNovels(ctx context.Context, page, pageSize int, filte
 		argCount++
 	}
 
+	orderSQL := "ORDER BY created_at DESC, id DESC"
+	switch strings.TrimSpace(filter.Sort) {
+	case "", "latest":
+		orderSQL = "ORDER BY created_at DESC, id DESC"
+	case "views":
+		orderSQL = "ORDER BY view_count DESC, created_at DESC, id DESC"
+	case "rating":
+		orderSQL = "ORDER BY rating DESC, view_count DESC, id DESC"
+	case "updated":
+		orderSQL = "ORDER BY updated_at DESC, id DESC"
+	default:
+		return nil, 0, fmt.Errorf("%w: invalid sort %q", ErrInvalidFilterParam, filter.Sort)
+	}
+
 	whereSQL := ""
 	if len(whereClauses) > 0 {
 		whereSQL = "WHERE " + strings.Join(whereClauses, " AND ")
@@ -356,8 +371,8 @@ func (s *novelService) ListNovels(ctx context.Context, page, pageSize int, filte
 		SELECT %s
 		FROM novels
 		%s
-		ORDER BY created_at DESC, id DESC
-		LIMIT $%d OFFSET $%d`, novelSelectColumns, whereSQL, argCount, argCount+1)
+		%s
+		LIMIT $%d OFFSET $%d`, novelSelectColumns, whereSQL, orderSQL, argCount, argCount+1)
 
 	args = append(args, pageSize, offset)
 	novels, err := s.repo.ListNovels(ctx, selectQuery, args)

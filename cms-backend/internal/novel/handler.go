@@ -99,6 +99,7 @@ func (h *Handler) ListNovels(c *gin.Context) {
 		Author:        c.Query("author"),
 		CreatedStart:  c.Query("created_start"),
 		CreatedEnd:    c.Query("created_end"),
+		Sort:          c.Query("sort"),
 	}
 
 	ctx := c.Request.Context()

@@ -1155,3 +1155,38 @@ func TestBatchImportNovelsEndpoint(t *testing.T) {
 		t.Fatalf("expected unreferenced cover cleanup on rollback, res=%+v cleaned=%v err=%v", batchRes, cleanedCovers, err)
 	}
 }
+
+func TestListNovelsSortOptions(t *testing.T) {
+	repo := newFakeNovelRepo()
+	svc := NewNovelService(repo, nil, nil)
+	ctx := context.Background()
+
+	cases := []struct {
+		sort      string
+		wantOrder string
+		wantErr   bool
+	}{
+		{"", "ORDER BY created_at DESC, id DESC", false},
+		{"latest", "ORDER BY created_at DESC, id DESC", false},
+		{"views", "ORDER BY view_count DESC, created_at DESC, id DESC", false},
+		{"rating", "ORDER BY rating DESC, view_count DESC, id DESC", false},
+		{"updated", "ORDER BY updated_at DESC, id DESC", false},
+		{"unknown", "", true},
+	}
+
+	for _, tc := range cases {
+		_, _, err := svc.ListNovels(ctx, 1, 10, NovelListFilter{Sort: tc.sort})
+		if tc.wantErr {
+			if !errors.Is(err, ErrInvalidFilterParam) {
+				t.Fatalf("sort=%q expected ErrInvalidFilterParam, got %v", tc.sort, err)
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatalf("sort=%q unexpected error: %v", tc.sort, err)
+		}
+		if !strings.Contains(repo.lastListSelectQuery, tc.wantOrder) {
+			t.Fatalf("sort=%q expected query to contain %q, got %s", tc.sort, tc.wantOrder, repo.lastListSelectQuery)
+		}
+	}
+}
