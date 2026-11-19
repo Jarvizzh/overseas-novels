@@ -94,8 +94,9 @@ export default function OrdersTab() {
   const [orders, setOrders] = useState<Order[]>([]);
   const [total, setTotal] = useState(0);
   const [draft, setDraft] = useState<OrderFilterState>(EMPTY_FILTER);
-  const [queryState, setQueryState] = useState<OrderFilterState & { page: number; nonce: number }>({
+  const [queryState, setQueryState] = useState<OrderFilterState & { page: number; pageSize: number; nonce: number }>({
     page: 1,
+    pageSize: 10,
     nonce: 0,
     ...EMPTY_FILTER,
   });
@@ -103,7 +104,7 @@ export default function OrdersTab() {
   const [loading, setLoading] = useState(true);
   const [hasLoadedOnce, setHasLoadedOnce] = useState(false);
 
-  const [density, setDensity] = useState<TableDensity>('compact');
+  const [density, setDensity] = useState<TableDensity>('comfortable');
   const [visibleCols, setVisibleCols] = useState<Record<OrderColKey, boolean>>({
     attribution: true,
     created_at: true,
@@ -122,7 +123,10 @@ export default function OrdersTab() {
     const seq = ++fetchSeqRef.current;
     setLoading(true);
     try {
-      const params = new URLSearchParams({ page: String(queryState.page) });
+      const params = new URLSearchParams({
+        page: String(queryState.page),
+        page_size: String(queryState.pageSize),
+      });
       if (queryState.status) params.set('status', queryState.status);
       if (queryState.userId) params.set('user_id', queryState.userId);
       if (queryState.orderType) params.set('order_type', queryState.orderType);
@@ -181,6 +185,7 @@ export default function OrdersTab() {
     }
     setDateError('');
     setQueryState((prev) => ({
+      ...prev,
       page: 1,
       nonce: prev.nonce + 1,
       userId: nextDraft.userId.trim(),
@@ -197,6 +202,7 @@ export default function OrdersTab() {
     setDateError('');
     setDraft(EMPTY_FILTER);
     setQueryState((prev) => ({
+      ...prev,
       page: 1,
       nonce: prev.nonce + 1,
       ...EMPTY_FILTER,
@@ -460,10 +466,11 @@ export default function OrdersTab() {
         footer={
           <Pagination
             page={queryState.page}
-            pageSize={10}
+            pageSize={queryState.pageSize}
             total={total}
             disabled={loading}
             onPageChange={(nextPage) => setQueryState((prev) => ({ ...prev, page: nextPage }))}
+            onPageSizeChange={(nextSize) => setQueryState((prev) => ({ ...prev, page: 1, pageSize: nextSize }))}
             itemLabel="笔订单"
           />
         }

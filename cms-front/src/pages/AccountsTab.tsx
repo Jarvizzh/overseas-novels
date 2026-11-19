@@ -46,7 +46,7 @@ export default function AccountsTab() {
   const [hasLoadedOnce, setHasLoadedOnce] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [roleFilter, setRoleFilter] = useState('');
-  const [density, setDensity] = useState<TableDensity>('compact');
+  const [density, setDensity] = useState<TableDensity>('comfortable');
 
   const [editingAdmin, setEditingAdmin] = useState<AdminUserResponse | null>(null);
   const [isModalOpen, setIsModalOpen] = useState(false);

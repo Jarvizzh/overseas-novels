@@ -224,8 +224,8 @@ export default function TemplatesTab() {
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
   const [currentPage, setCurrentPage] = useState(1);
-  const [density, setDensity] = useState<TableDensity>('compact');
-  const pageSize = 10;
+  const [pageSize, setPageSize] = useState(10);
+  const [density, setDensity] = useState<TableDensity>('comfortable');
 
   // Editor state
   const [editID, setEditID] = useState<number | null>(null);
@@ -807,6 +807,10 @@ export default function TemplatesTab() {
                 pageSize={pageSize}
                 total={filteredTemplates.length}
                 onPageChange={setCurrentPage}
+                onPageSizeChange={(nextSize) => {
+                  setPageSize(nextSize);
+                  setCurrentPage(1);
+                }}
                 itemLabel="套模板"
               />
             }

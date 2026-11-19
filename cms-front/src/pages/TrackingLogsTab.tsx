@@ -55,14 +55,14 @@ function formatJSON(jsonStr: string) {
 export default function TrackingLogsTab() {
   const [logs, setLogs] = useState<CAPILog[]>([]);
   const [total, setTotal] = useState(0);
-  const pageSize = 10;
   const [loading, setLoading] = useState(true);
   const [hasLoadedOnce, setHasLoadedOnce] = useState(false);
-  const [density, setDensity] = useState<TableDensity>('compact');
+  const [density, setDensity] = useState<TableDensity>('comfortable');
 
   const [pixelFilter, setPixelFilter] = useState('');
   const [queryState, setQueryState] = useState({
     page: 1,
+    pageSize: 10,
     pixelId: '',
     eventName: '',
     statusCode: '',
@@ -77,7 +77,7 @@ export default function TrackingLogsTab() {
     try {
       const params = new URLSearchParams();
       params.set('page', String(queryState.page));
-      params.set('page_size', String(pageSize));
+      params.set('page_size', String(queryState.pageSize));
       if (queryState.pixelId) params.set('pixel_id', queryState.pixelId);
       if (queryState.eventName) params.set('event_name', queryState.eventName);
       if (queryState.statusCode) params.set('status_code', queryState.statusCode);
@@ -115,6 +115,7 @@ export default function TrackingLogsTab() {
   const handleReset = () => {
     setPixelFilter('');
     setQueryState((prev) => ({
+      ...prev,
       page: 1,
       pixelId: '',
       eventName: '',
@@ -223,10 +224,11 @@ export default function TrackingLogsTab() {
         footer={
           <Pagination
             page={queryState.page}
-            pageSize={pageSize}
+            pageSize={queryState.pageSize}
             total={total}
             disabled={loading}
             onPageChange={(nextPage) => setQueryState((prev) => ({ ...prev, page: nextPage }))}
+            onPageSizeChange={(nextSize) => setQueryState((prev) => ({ ...prev, page: 1, pageSize: nextSize }))}
             itemLabel="条日志"
           />
         }

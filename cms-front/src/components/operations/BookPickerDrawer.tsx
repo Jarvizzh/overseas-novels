@@ -77,7 +77,7 @@ export const BookPickerDrawer: React.FC<BookPickerDrawerProps> = ({
 }) => {
   const [searchDraft, setSearchDraft] = useState('');
   const [queryState, setQueryState] = useState<PickerQueryState>(INITIAL_QUERY);
-  const pageSize = 20;
+  const [pageSize, setPageSize] = useState(20);
 
   const [novels, setNovels] = useState<RecommendationNovel[]>([]);
   const [total, setTotal] = useState(0);
@@ -161,7 +161,7 @@ export const BookPickerDrawer: React.FC<BookPickerDrawerProps> = ({
       });
 
     return () => controller.abort();
-  }, [open, queryState]);
+  }, [open, queryState, pageSize]);
 
   // Prune any already-added books out of selection if user single-adds them
   useEffect(() => {
@@ -560,9 +560,14 @@ export const BookPickerDrawer: React.FC<BookPickerDrawerProps> = ({
         insideCard
         page={queryState.page}
         pageSize={pageSize}
+        pageSizeOptions={[10, 20, 50]}
         total={total}
         disabled={loading}
         onPageChange={(nextPage) => setQueryState((prev) => ({ ...prev, page: nextPage }))}
+        onPageSizeChange={(nextSize) => {
+          setPageSize(nextSize);
+          setQueryState((prev) => ({ ...prev, page: 1 }));
+        }}
         itemLabel="本书"
       />
     </CmsDialog>

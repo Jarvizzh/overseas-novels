@@ -26,7 +26,7 @@ export default function PixelsTab() {
   const [loading, setLoading] = useState(true);
   const [hasLoadedOnce, setHasLoadedOnce] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
-  const [density, setDensity] = useState<TableDensity>('compact');
+  const [density, setDensity] = useState<TableDensity>('comfortable');
 
   const [editingPixel, setEditingPixel] = useState<FBPixel | null>(null);
   const [isPixelModalOpen, setIsPixelModalOpen] = useState(false);

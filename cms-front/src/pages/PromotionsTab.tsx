@@ -60,8 +60,8 @@ export default function PromotionsTab() {
   const [searchQuery, setSearchQuery] = useState('');
   const [sourceFilter, setSourceFilter] = useState('');
   const [page, setPage] = useState(1);
-  const pageSize = 15;
-  const [density, setDensity] = useState<TableDensity>('compact');
+  const [pageSize, setPageSize] = useState(15);
+  const [density, setDensity] = useState<TableDensity>('comfortable');
   const [showCreatedAt, setShowCreatedAt] = useState(true);
 
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
@@ -302,8 +302,13 @@ export default function PromotionsTab() {
           <Pagination
             page={safePage}
             pageSize={pageSize}
+            pageSizeOptions={[10, 15, 20, 50, 100]}
             total={filteredLinks.length}
             onPageChange={setPage}
+            onPageSizeChange={(nextSize) => {
+              setPageSize(nextSize);
+              setPage(1);
+            }}
             itemLabel="条链接"
           />
         }
