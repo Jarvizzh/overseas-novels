@@ -152,13 +152,13 @@ export default function NovelsTab() {
   const [loading, setLoading] = useState(true);
   const [hasLoadedOnce, setHasLoadedOnce] = useState(false);
 
-  const [novelQuery, setNovelQuery] = useState<NovelListFilterDraft & { page: number }>({
+  const [novelQuery, setNovelQuery] = useState<NovelListFilterDraft & { page: number; pageSize: number }>({
     page: 1,
+    pageSize: 10,
     ...EMPTY_NOVEL_FILTER,
   });
   const [filterDraft, setFilterDraft] = useState<NovelListFilterDraft>(EMPTY_NOVEL_FILTER);
   const [dateFilterError, setDateFilterError] = useState('');
-  const pageSize = 10;
 
   // Table density & optional columns
   const [density, setDensity] = useState<TableDensity>('compact');
@@ -182,7 +182,7 @@ export default function NovelsTab() {
   const [chapters, setChapters] = useState<Chapter[]>([]);
   const [chaptersLoading, setChaptersLoading] = useState(false);
   const [chapterPage, setChapterPage] = useState(1);
-  const chapterPageSize = 15;
+  const [chapterPageSize, setChapterPageSize] = useState(15);
 
   // Chapter reader preview state (inside Book Detail Drawer)
   const [previewChapter, setPreviewChapter] = useState<Chapter | null>(null);
@@ -338,7 +338,7 @@ export default function NovelsTab() {
       .catch((err) => console.error('加载域名列表失败:', err));
   }, []);
 
-  const fetchNovels = useCallback(async (targetQuery: NovelListFilterDraft & { page: number }) => {
+  const fetchNovels = useCallback(async (targetQuery: NovelListFilterDraft & { page: number; pageSize: number }) => {
     novelsAbortRef.current?.abort();
     const controller = new AbortController();
     novelsAbortRef.current = controller;
@@ -348,7 +348,7 @@ export default function NovelsTab() {
     try {
       const query = new URLSearchParams({
         page: String(targetQuery.page),
-        page_size: String(pageSize),
+        page_size: String(targetQuery.pageSize),
       });
       if (targetQuery.titleOrId) query.set('title_or_id', targetQuery.titleOrId);
       if (targetQuery.author) query.set('author', targetQuery.author);
@@ -927,14 +927,15 @@ export default function NovelsTab() {
       return false;
     }
     setDateFilterError('');
-    setNovelQuery({
+    setNovelQuery((prev) => ({
+      ...prev,
       page: 1,
       titleOrId: nextDraft.titleOrId.trim(),
       author: nextDraft.author.trim(),
       publishStatus: nextDraft.publishStatus,
       createdStart: nextDraft.createdStart,
       createdEnd: nextDraft.createdEnd,
-    });
+    }));
     return true;
   };
 
@@ -956,6 +957,7 @@ export default function NovelsTab() {
     setDateFilterError('');
     setFilterDraft((prev) => ({ ...EMPTY_NOVEL_FILTER, publishStatus: prev.publishStatus }));
     setNovelQuery((prev) => ({
+      ...prev,
       ...EMPTY_NOVEL_FILTER,
       publishStatus: prev.publishStatus,
       page: 1,
@@ -1381,10 +1383,11 @@ export default function NovelsTab() {
         footer={
           <Pagination
             page={currentPage}
-            pageSize={pageSize}
+            pageSize={novelQuery.pageSize}
             total={totalNovels}
             disabled={loading}
             onPageChange={(nextPage) => setNovelQuery((prev) => ({ ...prev, page: nextPage }))}
+            onPageSizeChange={(nextSize) => setNovelQuery((prev) => ({ ...prev, page: 1, pageSize: nextSize }))}
             itemLabel="本书"
           />
         }
@@ -1827,13 +1830,18 @@ export default function NovelsTab() {
                   )}
                 </div>
 
-                {chapters.length > chapterPageSize && (
+                {chapters.length > 10 && (
                   <Pagination
                     insideCard
                     page={chapterPage}
                     pageSize={chapterPageSize}
+                    pageSizeOptions={[10, 15, 30, 50]}
                     total={chapters.length}
                     onPageChange={setChapterPage}
+                    onPageSizeChange={(nextSize) => {
+                      setChapterPageSize(nextSize);
+                      setChapterPage(1);
+                    }}
                     itemLabel="章"
                   />
                 )}

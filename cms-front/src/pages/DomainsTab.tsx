@@ -23,7 +23,7 @@ export default function DomainsTab() {
   const [hasLoadedOnce, setHasLoadedOnce] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [typeFilter, setTypeFilter] = useState<string>('all');
-  const [density, setDensity] = useState<TableDensity>('compact');
+  const [density, setDensity] = useState<TableDensity>('comfortable');
 
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);

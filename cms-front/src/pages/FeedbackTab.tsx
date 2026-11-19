@@ -34,13 +34,14 @@ export default function FeedbackTab() {
   const [keyword, setKeyword] = useState('');
   const [queryState, setQueryState] = useState({
     page: 1,
+    pageSize: 15,
     statusFilter: '',
     keyword: '',
     nonce: 0,
   });
   const [loading, setLoading] = useState(true);
   const [hasLoadedOnce, setHasLoadedOnce] = useState(false);
-  const [density, setDensity] = useState<TableDensity>('compact');
+  const [density, setDensity] = useState<TableDensity>('comfortable');
   const fetchSeqRef = useRef(0);
 
   const [selectedItem, setSelectedItem] = useState<FeedbackItem | null>(null);
@@ -54,7 +55,7 @@ export default function FeedbackTab() {
     try {
       const data = await feedbackApi.getFeedbackList({
         page: queryState.page,
-        limit: 15,
+        limit: queryState.pageSize,
         status: queryState.statusFilter,
         keyword: queryState.keyword,
       });
@@ -91,6 +92,7 @@ export default function FeedbackTab() {
   const handleReset = () => {
     setKeyword('');
     setQueryState((prev) => ({
+      ...prev,
       page: 1,
       statusFilter: '',
       keyword: '',
@@ -208,10 +210,12 @@ export default function FeedbackTab() {
         footer={
           <Pagination
             page={queryState.page}
-            pageSize={15}
+            pageSize={queryState.pageSize}
+            pageSizeOptions={[10, 15, 20, 50, 100]}
             total={total}
             disabled={loading}
             onPageChange={(nextPage) => setQueryState((prev) => ({ ...prev, page: nextPage }))}
+            onPageSizeChange={(nextSize) => setQueryState((prev) => ({ ...prev, page: 1, pageSize: nextSize }))}
             itemLabel="条留言"
           />
         }

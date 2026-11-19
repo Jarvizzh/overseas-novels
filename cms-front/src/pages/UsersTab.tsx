@@ -90,16 +90,16 @@ export default function UsersTab() {
   const [users, setUsers] = useState<User[]>([]);
   const [total, setTotal] = useState(0);
   const [searchDraft, setSearchDraft] = useState('');
-  const [queryState, setQueryState] = useState({ page: 1, search: '', nonce: 0 });
+  const [queryState, setQueryState] = useState({ page: 1, pageSize: 10, search: '', nonce: 0 });
   const [loading, setLoading] = useState(true);
   const [hasLoadedOnce, setHasLoadedOnce] = useState(false);
-  const [density, setDensity] = useState<TableDensity>('compact');
+  const [density, setDensity] = useState<TableDensity>('comfortable');
 
   const [selectedUser, setSelectedUser] = useState<UserDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailTab, setDetailTab] = useState<'profile' | 'vip_shelf' | 'adjust'>('profile');
   const [shelfPage, setShelfPage] = useState(1);
-  const shelfPageSize = 5;
+  const [shelfPageSize, setShelfPageSize] = useState(5);
 
   const [adjustAmount, setAdjustAmount] = useState('100');
   const [adjustType, setAdjustType] = useState<'bonus' | 'charged'>('bonus');
@@ -116,6 +116,7 @@ export default function UsersTab() {
     try {
       const params = new URLSearchParams({
         page: String(queryState.page),
+        page_size: String(queryState.pageSize),
         search: queryState.search,
       });
       const data = await apiRequest('GET', `/users?${params.toString()}`);
@@ -220,6 +221,7 @@ export default function UsersTab() {
   const handleSearchSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     setQueryState((prev) => ({
+      ...prev,
       page: 1,
       search: searchDraft.trim(),
       nonce: prev.nonce + 1,
@@ -229,6 +231,7 @@ export default function UsersTab() {
   const handleReset = () => {
     setSearchDraft('');
     setQueryState((prev) => ({
+      ...prev,
       page: 1,
       search: '',
       nonce: prev.nonce + 1,
@@ -293,10 +296,11 @@ export default function UsersTab() {
         footer={
           <Pagination
             page={queryState.page}
-            pageSize={10}
+            pageSize={queryState.pageSize}
             total={total}
             disabled={loading}
             onPageChange={(nextPage) => setQueryState((prev) => ({ ...prev, page: nextPage }))}
+            onPageSizeChange={(nextSize) => setQueryState((prev) => ({ ...prev, page: 1, pageSize: nextSize }))}
             itemLabel="位用户"
           />
         }
@@ -847,13 +851,18 @@ export default function UsersTab() {
                       </div>
                     )}
 
-                    {(selectedUser.bookshelf?.length || 0) > shelfPageSize && (
+                    {(selectedUser.bookshelf?.length || 0) > 5 && (
                       <Pagination
                         insideCard
                         page={shelfPage}
                         pageSize={shelfPageSize}
+                        pageSizeOptions={[5, 10, 20, 50]}
                         total={selectedUser.bookshelf?.length || 0}
                         onPageChange={setShelfPage}
+                        onPageSizeChange={(nextSize) => {
+                          setShelfPageSize(nextSize);
+                          setShelfPage(1);
+                        }}
                         itemLabel="本书"
                       />
                     )}

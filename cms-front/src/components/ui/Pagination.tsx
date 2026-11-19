@@ -6,9 +6,21 @@ interface PaginationProps {
   pageSize: number;
   total: number;
   onPageChange: (nextPage: number) => void;
+  onPageSizeChange?: (nextPageSize: number) => void;
+  pageSizeOptions?: number[];
   disabled?: boolean;
   itemLabel?: string;
   insideCard?: boolean;
+}
+
+const DEFAULT_PAGE_SIZE_OPTIONS = [10, 20, 50, 100];
+
+function resolvePageSizeOptions(pageSize: number, options: number[] = DEFAULT_PAGE_SIZE_OPTIONS): number[] {
+  const merged = new Set(options.filter((n) => Number.isInteger(n) && n > 0));
+  if (Number.isInteger(pageSize) && pageSize > 0) {
+    merged.add(pageSize);
+  }
+  return Array.from(merged).sort((a, b) => a - b);
 }
 
 function getPageNumbers(current: number, totalPages: number): Array<number | 'ellipsis'> {
@@ -31,6 +43,8 @@ export const Pagination: React.FC<PaginationProps> = ({
   pageSize,
   total,
   onPageChange,
+  onPageSizeChange,
+  pageSizeOptions,
   disabled = false,
   itemLabel = '条记录',
   insideCard = false,
@@ -40,6 +54,7 @@ export const Pagination: React.FC<PaginationProps> = ({
   const startItem = total === 0 ? 0 : (safePage - 1) * pageSize + 1;
   const endItem = Math.min(safePage * pageSize, total);
   const pageNumbers = getPageNumbers(safePage, totalPages);
+  const resolvedSizeOptions = resolvePageSizeOptions(pageSize, pageSizeOptions);
   const [jumpInput, setJumpInput] = useState('');
 
   const onPageChangeRef = useRef(onPageChange);
@@ -79,9 +94,35 @@ export const Pagination: React.FC<PaginationProps> = ({
         <span className="font-medium text-[var(--cms-fg)]">{total}</span> {itemLabel}
       </div>
 
-      {totalPages > 1 && (
-        <div className="flex items-center gap-2.5">
-          <nav aria-label="分页导航" className="flex items-center gap-1">
+      {(totalPages > 1 || Boolean(onPageSizeChange)) && (
+        <div className="flex flex-wrap items-center gap-2.5">
+          {onPageSizeChange && (
+            <label className="inline-flex items-center gap-1.5">
+              <span>每页</span>
+              <select
+                aria-label="每页显示条数"
+                disabled={disabled}
+                value={pageSize}
+                onChange={(e) => {
+                  const nextSize = Number(e.target.value);
+                  if (Number.isInteger(nextSize) && nextSize > 0 && nextSize !== pageSize) {
+                    onPageSizeChange(nextSize);
+                  }
+                }}
+                className="focus-ring h-7 px-2 rounded-lg border border-[var(--cms-border)] bg-[var(--cms-card)] text-xs text-[var(--cms-fg)] tabular-nums cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                {resolvedSizeOptions.map((opt) => (
+                  <option key={opt} value={opt}>
+                    {opt} 条
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+
+          {totalPages > 1 && (
+            <>
+              <nav aria-label="分页导航" className="flex items-center gap-1">
             <button
               type="button"
               disabled={disabled || safePage <= 1}
@@ -128,23 +169,25 @@ export const Pagination: React.FC<PaginationProps> = ({
             </button>
           </nav>
 
-          {!insideCard && totalPages > 5 && (
-            <form
-              onSubmit={handleJumpSubmit}
-              className="hidden sm:inline-flex items-center gap-1.5 pl-2.5 border-l border-[var(--cms-border)]"
-            >
-              <span>跳至</span>
-              <input
-                type="number"
-                min={1}
-                max={totalPages}
-                aria-label="跳转到页码"
-                value={jumpInput}
-                onChange={(e) => setJumpInput(e.target.value)}
-                className="focus-ring w-11 h-7 px-1.5 rounded-lg border border-[var(--cms-border)] bg-[var(--cms-card)] text-xs text-[var(--cms-fg)] text-center tabular-nums outline-none"
-              />
-              <span>页</span>
-            </form>
+              {!insideCard && totalPages > 5 && (
+                <form
+                  onSubmit={handleJumpSubmit}
+                  className="hidden sm:inline-flex items-center gap-1.5 pl-2.5 border-l border-[var(--cms-border)]"
+                >
+                  <span>跳至</span>
+                  <input
+                    type="number"
+                    min={1}
+                    max={totalPages}
+                    aria-label="跳转到页码"
+                    value={jumpInput}
+                    onChange={(e) => setJumpInput(e.target.value)}
+                    className="focus-ring w-11 h-7 px-1.5 rounded-lg border border-[var(--cms-border)] bg-[var(--cms-card)] text-xs text-[var(--cms-fg)] text-center tabular-nums outline-none"
+                  />
+                  <span>页</span>
+                </form>
+              )}
+            </>
           )}
         </div>
       )}
