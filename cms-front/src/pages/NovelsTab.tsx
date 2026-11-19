@@ -2,6 +2,7 @@ import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import {
   AlertCircle,
   BookOpen,
+  Copy,
   Edit,
   Link2,
   Plus,
@@ -177,6 +178,7 @@ export default function NovelsTab() {
 
   // Book Detail Drawer state
   const [selectedNovel, setSelectedNovel] = useState<Novel | null>(null);
+  const [isDetailOpen, setIsDetailOpen] = useState(false);
   const [chapters, setChapters] = useState<Chapter[]>([]);
   const [chaptersLoading, setChaptersLoading] = useState(false);
   const [chapterPage, setChapterPage] = useState(1);
@@ -493,9 +495,20 @@ export default function NovelsTab() {
     setIsEditing(true);
   };
 
+  const openEditFromList = (novel: Novel) => {
+    chaptersFetchSeqRef.current += 1;
+    clearPreviewState();
+    setIsDetailOpen(false);
+    setSelectedNovel(novel);
+    setChapters([]);
+    openEditNovelModal(novel);
+    void fetchChapters(novel.id, false);
+  };
+
   const closeDetailDrawer = () => {
     chaptersFetchSeqRef.current += 1;
     clearPreviewState();
+    setIsDetailOpen(false);
     setIsEditing(false);
     setEditImportFile(null);
     setEditChapterMapping('');
@@ -513,9 +526,18 @@ export default function NovelsTab() {
     setEditChapterIdentities([]);
     setEditModalError('');
     setSelectedNovel(novel);
+    setIsDetailOpen(true);
     setChapters([]);
     setChapterPage(1);
     void fetchChapters(novel.id, true);
+  };
+
+  const handleCopyTitle = async (title: string) => {
+    const ok = await copyTextToClipboard(title);
+    window.showToast?.(
+      ok ? '书名已复制到剪贴板！' : '复制失败，请手动复制书名',
+      ok ? 'success' : 'error',
+    );
   };
 
   const resetCreateModalState = () => {
@@ -765,12 +787,16 @@ export default function NovelsTab() {
         window.showToast?.('书籍信息更新成功', 'success');
       }
 
-      setSelectedNovel(updated);
       setEditImportFile(null);
       setEditChapterMapping('');
       setIsEditing(false);
       void fetchNovels(novelQuery);
-      void fetchChapters(selectedNovel.id, true);
+      if (isDetailOpen) {
+        setSelectedNovel(updated);
+        void fetchChapters(selectedNovel.id, true);
+      } else {
+        setSelectedNovel(null);
+      }
     } catch (err: unknown) {
       if (savedDuringRun) {
         setSelectedNovel(savedDuringRun);
@@ -1419,7 +1445,7 @@ export default function NovelsTab() {
               novels.map((novel) => {
                 const pubMeta = getPublishStatusMeta(novel.publish_status);
                 const isSelected = selectedNovelIds.includes(novel.id);
-                const isViewing = selectedNovel?.id === novel.id;
+                const isViewing = isDetailOpen && selectedNovel?.id === novel.id;
                 const effectiveCost =
                   novel.coin_cost_per_thousand != null
                     ? novel.coin_cost_per_thousand
@@ -1430,11 +1456,10 @@ export default function NovelsTab() {
                 return (
                   <tr
                     key={novel.id}
-                    onClick={() => handleNovelClick(novel)}
-                    className={`cursor-pointer ${isSelected || isViewing ? 'row-selected' : ''}`}
+                    className={isSelected || isViewing ? 'row-selected' : undefined}
                   >
                     {canEditNovels && (
-                      <td className="text-center" onClick={(e) => e.stopPropagation()}>
+                      <td className="text-center">
                         <input
                           type="checkbox"
                           aria-label={`选择书籍《${novel.title}》`}
@@ -1459,8 +1484,19 @@ export default function NovelsTab() {
                           className="w-10 h-14 object-cover rounded-lg border border-[var(--cms-border)] shrink-0"
                         />
                         <div className="min-w-0">
-                          <div className="text-[var(--cms-fg)] truncate max-w-[230px]" title={novel.title}>
-                            {novel.title}
+                          <div className="flex items-center gap-1 min-w-0 max-w-[260px]">
+                            <span className="text-[var(--cms-fg)] truncate" title={novel.title}>
+                              {novel.title}
+                            </span>
+                            <button
+                              type="button"
+                              aria-label={`复制书名《${novel.title}》`}
+                              title="复制书名"
+                              onClick={() => void handleCopyTitle(novel.title)}
+                              className="focus-ring shrink-0 p-1 rounded-md text-[var(--cms-muted-fg)] hover:text-[var(--cms-fg)] hover:bg-[var(--cms-secondary)] inline-flex items-center justify-center cursor-pointer transition-colors"
+                            >
+                              <Copy size={12} aria-hidden="true" />
+                            </button>
                           </div>
                           <div className="text-[var(--cms-muted-fg)] mt-0.5 truncate tabular-nums">
                             {novel.author} <span className="mx-1">·</span> #{novel.id}
@@ -1522,6 +1558,13 @@ export default function NovelsTab() {
                     )}
                     <td className="text-right whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
                       <div className="inline-flex items-center justify-end gap-0.5 whitespace-nowrap">
+                        <button
+                          type="button"
+                          onClick={() => handleNovelClick(novel)}
+                          className="btn-detail whitespace-nowrap"
+                        >
+                          详情
+                        </button>
                         {canCreatePromo && (
                           <button
                             type="button"
@@ -1531,18 +1574,16 @@ export default function NovelsTab() {
                             推广
                           </button>
                         )}
-                        <button
-                          type="button"
-                          onClick={() => handleNovelClick(novel)}
-                          className="btn-detail whitespace-nowrap"
-                        >
-                          详情
-                        </button>
                         <RowActionMenu
                           ariaLabel={`《${novel.title}》更多操作`}
                           items={[
                             ...(canEditNovels
                               ? [
+                                  {
+                                    label: '编辑',
+                                    tone: 'primary' as const,
+                                    onClick: () => openEditFromList(novel),
+                                  },
                                   {
                                     label:
                                       publishUpdatingId === novel.id
@@ -1582,10 +1623,11 @@ export default function NovelsTab() {
 
       {/* Slide-Over Book Detail & Chapter Reader Drawer */}
       <CmsDialog
-        open={Boolean(selectedNovel)}
+        open={Boolean(isDetailOpen && selectedNovel)}
         onClose={closeDetailDrawer}
         variant="drawer"
         size="xl"
+        wrapTitle
         title={selectedNovel ? selectedNovel.title : undefined}
         subtitle={
           selectedNovel
@@ -2018,7 +2060,7 @@ export default function NovelsTab() {
         isOpen={isEditing}
         isEditing={true}
         isSubmitting={isSubmittingNovel}
-        hasChapters={chapters.length > 0}
+        hasChapters={chapters.length > 0 || (chaptersLoading && (selectedNovel?.word_count ?? 0) > 0)}
         globalCoinCost={globalCoinCost}
         formData={editNovelForm}
         setFormData={(data) => setEditNovelForm(data)}
@@ -2027,6 +2069,9 @@ export default function NovelsTab() {
           setIsEditing(false);
           setEditImportFile(null);
           setEditModalError('');
+          if (!isDetailOpen) {
+            setSelectedNovel(null);
+          }
         }}
         chapterImportType={editImportType}
         onChapterImportTypeChange={setEditImportType}

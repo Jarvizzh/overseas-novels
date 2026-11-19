@@ -759,7 +759,7 @@ tr:focus-within .row-actions-secondary {
 dialog.cms-dialog {
   position: fixed;
   inset: 0;
-  margin: auto;
+  margin: auto !important;
   height: fit-content;
   padding: 0;
   border: 1px solid var(--cms-border);
@@ -860,6 +860,7 @@ dialog.cms-nav-drawer::backdrop {
   border-radius: 12px;
   box-shadow: var(--shadow-lg);
   padding: 6px;
+  white-space: normal;
 }
 [popover].cms-popover:is(:popover-open, .\:popover-open) {
   display: block;
@@ -955,4 +956,14 @@ dialog.cms-nav-drawer::backdrop {
 .file-upload-dropzone:has(input:focus-visible) {
   border-color: var(--cms-primary) !important;
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--cms-primary) 18%, transparent);
+}
+
+.h5-no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+.h5-no-scrollbar::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
 }

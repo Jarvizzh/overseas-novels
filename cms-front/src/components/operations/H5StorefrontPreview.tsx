@@ -11,10 +11,7 @@ import {
   Star,
   User,
 } from 'lucide-react';
-import type {
-  OperationsPreviewResponse,
-  PreviewNovelItem,
-} from '../../utils/api';
+import type { OperationsPreviewResponse } from '../../utils/api';
 import {
   FALLBACK_COVER,
   formatCompactDateTime,
@@ -59,58 +56,6 @@ export const H5StorefrontPreview: React.FC<H5StorefrontPreviewProps> = ({
   const newReleases = preview?.new_releases || [];
   const curated = preview?.curated || [];
   const rankings = preview?.rankings || [];
-
-  const pinnedRankCount = rankings.filter((r) => r.source === 'pinned').length;
-  const autoRankCount = rankings.length - pinnedRankCount;
-
-  const renderSourceBadge = (item: PreviewNovelItem) => {
-    if (item.source === 'pinned') {
-      return (
-        <span
-          style={{
-            fontSize: '0.625rem',
-            fontWeight: 600,
-            padding: '1px 6px',
-            borderRadius: '999px',
-            backgroundColor: 'var(--h5-accent-light)',
-            color: 'var(--h5-accent-text)',
-          }}
-        >
-          人工
-        </span>
-      );
-    }
-    if (item.source === 'fallback') {
-      return (
-        <span
-          style={{
-            fontSize: '0.625rem',
-            fontWeight: 500,
-            padding: '1px 6px',
-            borderRadius: '999px',
-            backgroundColor: 'var(--h5-bg-tertiary)',
-            color: 'var(--h5-text-tertiary)',
-          }}
-        >
-          兜底
-        </span>
-      );
-    }
-    return (
-      <span
-        style={{
-          fontSize: '0.625rem',
-          fontWeight: 500,
-          padding: '1px 6px',
-          borderRadius: '999px',
-          backgroundColor: 'var(--h5-bg-tertiary)',
-          color: 'var(--h5-text-tertiary)',
-        }}
-      >
-        自动
-      </span>
-    );
-  };
 
   return (
     <div className="xl:sticky xl:top-16 space-y-2.5">
@@ -296,7 +241,7 @@ export const H5StorefrontPreview: React.FC<H5StorefrontPreviewProps> = ({
 
         {/* H5 Scrollable Content */}
         <div
-          className="flex-1 min-h-0 overflow-y-auto p-3.5 space-y-5"
+          className="flex-1 min-h-0 overflow-y-auto h5-no-scrollbar p-3.5 space-y-5"
           style={{ backgroundColor: 'var(--h5-bg-primary)' }}
         >
           {activeView === 'discover' ? (
@@ -328,18 +273,6 @@ export const H5StorefrontPreview: React.FC<H5StorefrontPreviewProps> = ({
                       Featured Stories
                     </h4>
                   </div>
-                  <span
-                    style={{
-                      fontSize: '0.625rem',
-                      padding: '2px 7px',
-                      borderRadius: '999px',
-                      backgroundColor: preview?.featured_is_fallback ? 'var(--h5-bg-tertiary)' : 'var(--h5-accent-light)',
-                      color: preview?.featured_is_fallback ? 'var(--h5-text-tertiary)' : 'var(--h5-accent-text)',
-                      fontWeight: 600,
-                    }}
-                  >
-                    {preview?.featured_is_fallback ? '热门兜底 · 前4本' : `人工精选 · ${featured.length}本`}
-                  </span>
                 </div>
 
                 {featured.length === 0 ? (
@@ -354,9 +287,8 @@ export const H5StorefrontPreview: React.FC<H5StorefrontPreviewProps> = ({
                     暂无已上架书籍可预览
                   </div>
                 ) : (
-                  <div className="flex gap-2.5 overflow-x-auto pb-1">
+                  <div className="flex gap-2.5 overflow-x-auto h5-no-scrollbar pb-1">
                     {featured.map((item) => {
-                      const isPinned = item.source === 'pinned';
                       return (
                         <div
                           key={`feat-${item.novel.id}`}
@@ -385,16 +317,6 @@ export const H5StorefrontPreview: React.FC<H5StorefrontPreviewProps> = ({
                                   <Star size={10} fill="currentColor" strokeWidth={0} aria-hidden="true" />
                                   {item.novel.rating}
                                 </span>
-                              </span>
-                              <span
-                                className="px-1.5 py-0.5 rounded-full shrink-0"
-                                style={{
-                                  backgroundColor: isPinned ? 'rgba(212,174,104,0.2)' : 'rgba(255,255,255,0.1)',
-                                  color: isPinned ? '#E2BB6B' : 'rgba(250,248,245,0.7)',
-                                  fontSize: '9px',
-                                }}
-                              >
-                                {isPinned ? '人工' : '兜底'}
                               </span>
                             </div>
 
@@ -448,9 +370,6 @@ export const H5StorefrontPreview: React.FC<H5StorefrontPreviewProps> = ({
                     >
                       New Releases
                     </h4>
-                    <span style={{ fontSize: '0.625rem', color: 'var(--h5-text-tertiary)' }}>
-                      系统自动 · 最新 6 本
-                    </span>
                   </div>
 
                   <div className="grid grid-cols-3 gap-2">
@@ -513,18 +432,6 @@ export const H5StorefrontPreview: React.FC<H5StorefrontPreviewProps> = ({
                   >
                     Curated For You
                   </h4>
-                  <span
-                    style={{
-                      fontSize: '0.625rem',
-                      padding: '2px 7px',
-                      borderRadius: '999px',
-                      backgroundColor: preview?.curated_is_override ? 'var(--h5-accent-light)' : 'var(--h5-bg-tertiary)',
-                      color: preview?.curated_is_override ? 'var(--h5-accent-text)' : 'var(--h5-text-tertiary)',
-                      fontWeight: 600,
-                    }}
-                  >
-                    {preview?.curated_is_override ? `已接管 · ${curated.length}本` : '默认目录流'}
-                  </span>
                 </div>
 
                 {curated.length === 0 ? (
@@ -562,7 +469,6 @@ export const H5StorefrontPreview: React.FC<H5StorefrontPreviewProps> = ({
                                 >
                                   {item.novel.title}
                                 </span>
-                                {renderSourceBadge(item)}
                               </div>
                               <p
                                 className="m-0 mt-0.5 line-clamp-2"
@@ -601,18 +507,7 @@ export const H5StorefrontPreview: React.FC<H5StorefrontPreviewProps> = ({
                   </div>
                 )}
 
-                {preview?.curated_is_override ? (
-                  <div
-                    className="text-center py-2 px-3 rounded-lg text-[11px]"
-                    style={{
-                      backgroundColor: 'var(--h5-bg-secondary)',
-                      border: '1px dashed var(--h5-border)',
-                      color: 'var(--h5-text-tertiary)',
-                    }}
-                  >
-                    当前已接管精选列表 · H5 不展示 Load More 分页按钮
-                  </div>
-                ) : (
+                {!preview?.curated_is_override && (
                   <div
                     className="w-full py-2 text-center rounded-xl text-xs font-semibold"
                     style={{
@@ -654,23 +549,7 @@ export const H5StorefrontPreview: React.FC<H5StorefrontPreviewProps> = ({
                     Popular Rankings
                   </h4>
                 </div>
-                <span className="tabular-nums" style={{ fontSize: '0.6875rem', color: 'var(--h5-text-tertiary)' }}>
-                  置顶 {pinnedRankCount} + 补全 {autoRankCount} = {rankings.length} 本
-                </span>
               </div>
-
-              {preview?.ranking_manual_fallback && (
-                <div
-                  className="p-2.5 rounded-xl text-[11px] leading-relaxed"
-                  style={{
-                    backgroundColor: 'var(--h5-accent-light)',
-                    color: 'var(--h5-accent-text)',
-                    border: '1px solid var(--h5-accent)',
-                  }}
-                >
-                  纯人工模式当前无生效书籍，H5 端已按阅读量自动兜底展示。
-                </div>
-              )}
 
               {rankings.length === 0 ? (
                 <div
@@ -735,7 +614,6 @@ export const H5StorefrontPreview: React.FC<H5StorefrontPreviewProps> = ({
                             >
                               {item.novel.title}
                             </span>
-                            {renderSourceBadge(item)}
                           </div>
                           <div
                             className="truncate mt-0.5"

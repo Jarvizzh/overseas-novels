@@ -145,7 +145,7 @@ export const H5RewardsPreview: React.FC<H5RewardsPreviewProps> = ({
         </div>
 
         {/* Scrollable Mobile Viewport Body */}
-        <div className="flex-1 overflow-y-auto p-3.5" style={{ backgroundColor: 'var(--h5-bg-primary)' }}>
+        <div className="flex-1 overflow-y-auto h5-no-scrollbar p-3.5" style={{ backgroundColor: 'var(--h5-bg-primary)' }}>
           <div
             style={{
               backgroundColor: 'var(--h5-bg-secondary)',

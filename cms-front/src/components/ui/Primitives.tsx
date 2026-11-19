@@ -104,7 +104,7 @@ function useAnchoredPopover(align: PopoverAlign = 'end') {
 export interface RowActionItem {
   label: string;
   onClick: () => void;
-  tone?: 'default' | 'success' | 'warning' | 'danger';
+  tone?: 'default' | 'primary' | 'success' | 'warning' | 'danger';
   dividerBefore?: boolean;
   disabled?: boolean;
 }
@@ -138,7 +138,7 @@ export const RowActionMenu: React.FC<{
         popover="auto"
         onToggle={handleToggle}
         style={{ positionAnchor: anchorName } as React.CSSProperties}
-        className={`cms-popover ${anchorClass} w-44 text-left text-xs space-y-0.5`}
+        className={`cms-popover ${anchorClass} w-max min-w-[6.5rem] text-left text-xs space-y-0.5`}
       >
         {visibleItems.map((item, idx) => (
           <React.Fragment key={`${item.label}-${idx}`}>
@@ -150,14 +150,16 @@ export const RowActionMenu: React.FC<{
                 hidePopover();
                 item.onClick();
               }}
-              className={`focus-ring w-full text-left px-3 py-2 rounded-lg cursor-pointer transition-colors font-medium disabled:opacity-40 disabled:cursor-not-allowed ${
+              className={`block whitespace-nowrap focus-ring w-full text-left px-2.5 py-1.5 rounded-lg cursor-pointer transition-colors font-medium disabled:opacity-40 disabled:cursor-not-allowed ${
                 item.tone === 'danger'
                   ? 'text-[var(--cms-error)] hover:bg-[color-mix(in_srgb,var(--cms-error)_12%,transparent)]'
                   : item.tone === 'warning'
                     ? 'text-[var(--cms-warning)] hover:bg-[var(--cms-secondary)]'
                     : item.tone === 'success'
                       ? 'text-[var(--cms-success)] hover:bg-[var(--cms-secondary)]'
-                      : 'text-[var(--cms-fg)] hover:bg-[var(--cms-secondary)]'
+                      : item.tone === 'primary'
+                        ? 'text-[var(--cms-primary)] hover:bg-[var(--cms-accent)] hover:text-[var(--cms-primary-hover)]'
+                        : 'text-[var(--cms-fg)] hover:bg-[var(--cms-secondary)]'
               }`}
             >
               {item.label}

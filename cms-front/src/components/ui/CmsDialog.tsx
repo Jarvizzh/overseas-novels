@@ -6,6 +6,7 @@ interface CmsDialogProps {
   onClose: () => void;
   title?: React.ReactNode;
   subtitle?: React.ReactNode;
+  wrapTitle?: boolean;
   variant?: 'modal' | 'drawer';
   size?: 'sm' | 'md' | 'lg' | 'xl';
   closedBy?: 'any' | 'closerequest' | 'none';
@@ -35,6 +36,7 @@ export const CmsDialog: React.FC<CmsDialogProps> = ({
   onClose,
   title,
   subtitle,
+  wrapTitle = false,
   variant = 'modal',
   size = 'md',
   closedBy = 'any',
@@ -120,10 +122,10 @@ export const CmsDialog: React.FC<CmsDialogProps> = ({
       {open && (
         <>
           {(title || headerExtra) && (
-            <div className="px-6 py-4 border-b border-[var(--cms-border)] flex items-center justify-between gap-4 shrink-0 bg-[var(--cms-card)]">
+            <div className={`px-6 py-4 border-b border-[var(--cms-border)] flex ${wrapTitle ? 'items-start' : 'items-center'} justify-between gap-4 shrink-0 bg-[var(--cms-card)]`}>
               <div className="min-w-0 flex-1">
                 {title && (
-                  <h2 id={titleId} className="text-base font-semibold text-[var(--cms-fg)] truncate m-0">
+                  <h2 id={titleId} className={`text-base font-semibold text-[var(--cms-fg)] m-0 ${wrapTitle ? 'break-words leading-snug' : 'truncate'}`}>
                     {title}
                   </h2>
                 )}
