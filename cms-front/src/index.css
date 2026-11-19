@@ -698,7 +698,8 @@ select.custom-select option {
   white-space: nowrap;
   padding: 13px 16px;
 }
-.cms-table tbody td {
+.cms-table tbody td,
+.cms-table tbody th {
   padding: 14px 16px;
   border-bottom: 1px solid color-mix(in srgb, var(--cms-border) 60%, transparent);
   vertical-align: middle;
@@ -706,6 +707,9 @@ select.custom-select option {
   font-weight: 400;
   color: var(--cms-fg);
   transition: background-color 0.14s ease, padding 0.14s ease;
+}
+.cms-table tbody th {
+  text-align: left;
 }
 .cms-table tbody .btn-ghost {
   height: 30px;
@@ -721,17 +725,21 @@ select.custom-select option {
 .cms-table tbody td:last-child {
   white-space: nowrap;
 }
-.cms-table[data-density="compact"] tbody td {
+.cms-table[data-density="compact"] tbody td,
+.cms-table[data-density="compact"] tbody th {
   padding-top: 9px;
   padding-bottom: 9px;
 }
-.cms-table tbody tr:last-child td {
+.cms-table tbody tr:last-child td,
+.cms-table tbody tr:last-child th {
   border-bottom: none;
 }
-.cms-table tbody tr:hover td {
+.cms-table tbody tr:hover td,
+.cms-table tbody tr:hover th {
   background-color: color-mix(in srgb, var(--cms-content) 75%, transparent);
 }
-.cms-table tbody tr.row-selected td {
+.cms-table tbody tr.row-selected td,
+.cms-table tbody tr.row-selected th {
   background-color: color-mix(in srgb, var(--cms-primary) 6%, var(--cms-card));
 }
 .row-actions-secondary {

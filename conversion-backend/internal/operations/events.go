@@ -14,8 +14,9 @@ import (
 const eventProjection = `jsonb_strip_nulls(jsonb_build_object(
 	'id',e.id::text,'integration_id',e.integration_id::text,'source',i.source,'source_event_type',e.source_event_type,
 	'source_event_id',e.source_event_id,'event_name',e.event_name,'order_id',e.source_order_id,'promotion_id',e.promotion_id,
-	'attribution_state',e.attribution_state,'reason',e.reason,'occurred_at',e.occurred_at,'created_at',e.created_at,
-	'enqueued_at',e.received_at,'deliveries',outbound.items,'deliveries_truncated',outbound.truncated))`
+	'attribution_state',e.attribution_state,'reason',e.reason,'amount',e.amount::text,'currency',e.currency,
+	'occurred_at',e.occurred_at,'created_at',e.created_at,'enqueued_at',e.received_at,
+	'deliveries',outbound.items,'deliveries_truncated',outbound.truncated))`
 
 func (repo Repository) handleEvent(w http.ResponseWriter, r *http.Request) {
 	id, ok := positiveID(r.PathValue("id"))
@@ -96,10 +97,23 @@ func (repo Repository) handleEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	sourceEventID := q.Get("source_event_id")
+	if len(sourceEventID) > 256 {
+		writeError(w, http.StatusBadRequest, "invalid_filter")
+		return
+	}
+	partnerReportState := q.Get("partner_report_state")
+	switch partnerReportState {
+	case "", "pending", "blocked", "outcome_unknown", "confirmed":
+	default:
+		writeError(w, http.StatusBadRequest, "invalid_filter")
+		return
+	}
+
 	var from, to, cursorAt *time.Time
 	now := time.Now()
 	fallback := now.Add(-24 * time.Hour)
-	if q.Get("order_id") == "" && q.Get("event_id") == "" {
+	if q.Get("order_id") == "" && q.Get("event_id") == "" && sourceEventID == "" {
 		from = &fallback
 	}
 	for key, target := range map[string]**time.Time{"from": &from, "to": &to} {
@@ -140,7 +154,8 @@ func (repo Repository) handleEvents(w http.ResponseWriter, r *http.Request) {
 	var out json.RawMessage
 	err = repo.Pool.QueryRow(r.Context(), eventListSQL, repo.Environment, from, to, cursorAt, cursorID, limit,
 		q.Get("source"), integration, q.Get("event_name"), q.Get("order_id"), q.Get("promotion_id"),
-		q.Get("pixel_id"), q.Get("delivery_state"), q.Get("attribution_state"), eventID).Scan(&out)
+		q.Get("pixel_id"), q.Get("delivery_state"), q.Get("attribution_state"), eventID,
+		sourceEventID, partnerReportState).Scan(&out)
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, "reconciliation_unavailable")
 		return
@@ -158,16 +173,29 @@ const eventListSQL = `
 			AND ($9='' OR e.event_name=$9) AND ($10='' OR e.source_order_id=$10)
 			AND ($11='' OR e.promotion_id=$11) AND ($14='' OR e.attribution_state=$14)
 			AND ($15::bigint=0 OR e.id=$15)
+			AND ($16='' OR e.source_event_id=$16)
 			AND (($12='' AND $13='') OR EXISTS (
 				SELECT 1 FROM conversion.deliveries d JOIN conversion.destinations x ON x.id=d.destination_id
 				WHERE d.event_id=e.id AND ($12='' OR x.pixel_id=$12) AND ($13='' OR d.state=$13)))
+			AND ($17='' OR EXISTS (
+				SELECT 1 FROM conversion.partner_reports r
+				WHERE r.event_id=e.id AND r.integration_id=e.integration_id AND r.state=$17))
 		ORDER BY e.created_at DESC,e.id DESC LIMIT $6::integer+1
 	), page AS (
 		SELECT m.id,m.created_at FROM matched m ORDER BY m.created_at DESC,m.id DESC LIMIT $6
 	), projected AS (
-		SELECT p.id,p.created_at,` + eventProjection + ` AS item
+		SELECT p.id,p.created_at,
+			` + eventProjection + ` || jsonb_strip_nulls(jsonb_build_object('partner_report',receipt.item)) AS item
 		FROM page p JOIN conversion.events e ON e.id=p.id JOIN conversion.integrations i ON i.id=e.integration_id
 		` + deliveryDetails + `
+		LEFT JOIN LATERAL (
+			SELECT jsonb_strip_nulls(jsonb_build_object(
+				'id',r.id::text,'status',r.report_status,'state',r.state,
+				'reason',r.reason,'next_attempt_at',CASE WHEN r.state='pending' THEN r.next_attempt_at END)) AS item
+			FROM conversion.partner_reports r
+			WHERE r.integration_id=e.integration_id AND r.event_id=e.id
+			ORDER BY r.id LIMIT 1
+		) receipt ON true
 	)
 	SELECT jsonb_build_object('events',COALESCE((SELECT jsonb_agg(item ORDER BY created_at DESC,id DESC) FROM projected),'[]'),
 		'next_cursor',CASE WHEN (SELECT count(*) FROM matched)>$6 THEN

@@ -25,13 +25,18 @@ import AccountsTab from './pages/AccountsTab';
 import PixelsTab from './pages/PixelsTab';
 import TemplatesTab from './pages/TemplatesTab';
 import PromotionsTab from './pages/PromotionsTab';
-import TrackingLogsTab from './pages/TrackingLogsTab';
+import ConversionCenterTab from './pages/ConversionCenterTab';
 import DomainsTab from './pages/DomainsTab';
 import FeedbackTab from './pages/FeedbackTab';
 import OperationsTab from './pages/OperationsTab';
 
 const SIDEBAR_COLLAPSED_KEY = 'cms_sidebar_collapsed';
 const NAV_EXPANDED_GROUPS_KEY = 'cms_nav_expanded_groups';
+
+function LegacyAdLogsRedirect() {
+  const { search } = useLocation();
+  return <Navigate to={`/conversions${search}`} replace />;
+}
 
 function readInitialSidebarCollapsed(): boolean {
   try {
@@ -306,31 +311,32 @@ function AppContent() {
             <Route path="/recharge-templates/:templateId/edit" element={<TemplatesTab />} />
             <Route path="/operations" element={<OperationsTab />} />
             <Route path="/campaign" element={<Navigate to="/operations?tab=campaigns" replace />} />
-            <Route path="/ad-config/pixels" element={CONVERSION_READ_ROLES.includes(admin.role) ? <PixelsTab /> : <Navigate to="/" replace />} />
+            <Route path="/pixels" element={CONVERSION_READ_ROLES.includes(admin.role) ? <PixelsTab /> : <Navigate to="/" replace />} />
             <Route
-              path="/ad-config/logs"
+              path="/conversions"
               element={
                 CONVERSION_READ_ROLES.includes(admin.role)
-                  ? <TrackingLogsTab showHistory={admin.role === 'SuperAdmin'} canWrite={admin.role === 'SuperAdmin' || admin.role === 'Admin'} />
+                  ? <ConversionCenterTab showHistory={admin.role === 'SuperAdmin'} canWrite={admin.role === 'SuperAdmin' || admin.role === 'Admin'} />
                   : <Navigate to="/" replace />
               }
             />
-            <Route path="/ad-config" element={<Navigate to="/ad-config/pixels" replace />} />
+            <Route path="/ad-config/logs" element={<LegacyAdLogsRedirect />} />
+            <Route path="/ad-config" element={<Navigate to="/pixels" replace />} />
             <Route
-              path="/settings/domains"
+              path="/domains"
               element={admin.role === 'SuperAdmin' ? <DomainsTab /> : <Navigate to="/" replace />}
             />
             <Route
-              path="/settings/payment"
+              path="/payment"
               element={admin.role === 'SuperAdmin' ? <PaymentTab /> : <Navigate to="/" replace />}
             />
             <Route
-              path="/settings/accounts"
+              path="/accounts"
               element={admin.role === 'SuperAdmin' ? <AccountsTab /> : <Navigate to="/" replace />}
             />
             <Route
               path="/settings"
-              element={admin.role === 'SuperAdmin' ? <Navigate to="/settings/domains" replace /> : <Navigate to="/" replace />}
+              element={admin.role === 'SuperAdmin' ? <Navigate to="/domains" replace /> : <Navigate to="/" replace />}
             />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>

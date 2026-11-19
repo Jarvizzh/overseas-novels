@@ -75,9 +75,9 @@ export const NAV_TREE: NavNode[] = [
     icon: <Target size={16} aria-hidden="true" />,
     children: [
       { id: 'promotions', label: '推广链接', path: '/promotions' },
-      { id: 'ad-pixels', label: '像素管理', path: '/ad-config/pixels', roles: CONVERSION_READ_ROLES },
-      { id: 'ad-logs', label: '回传日志', path: '/ad-config/logs', roles: CONVERSION_READ_ROLES },
       { id: 'templates', label: '充值模板', path: '/recharge-templates' },
+      { id: 'ad-pixels', label: '像素管理', path: '/pixels', roles: CONVERSION_READ_ROLES },
+      { id: 'ad-conversions', label: '回传中心', path: '/conversions', roles: CONVERSION_READ_ROLES },
     ],
   },
   {
@@ -92,9 +92,9 @@ export const NAV_TREE: NavNode[] = [
     icon: <Settings size={16} aria-hidden="true" />,
     roles: ['SuperAdmin'],
     children: [
-      { id: 'settings-domains', label: '域名管理', path: '/settings/domains', roles: ['SuperAdmin'] },
-      { id: 'settings-payment', label: '支付管理', path: '/settings/payment', roles: ['SuperAdmin'] },
-      { id: 'settings-accounts', label: '账号管理', path: '/settings/accounts', roles: ['SuperAdmin'] },
+      { id: 'settings-domains', label: '域名管理', path: '/domains', roles: ['SuperAdmin'] },
+      { id: 'settings-payment', label: '支付管理', path: '/payment', roles: ['SuperAdmin'] },
+      { id: 'settings-accounts', label: '账号管理', path: '/accounts', roles: ['SuperAdmin'] },
     ],
   },
 ];

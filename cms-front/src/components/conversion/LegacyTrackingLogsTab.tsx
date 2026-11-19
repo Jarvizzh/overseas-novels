@@ -1,10 +1,8 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { apiRequest } from '../utils/api';
-import CustomSelect from '../components/CustomSelect';
-import ConversionOrdersPanel from './ConversionOrdersPanel';
-import ConversionEventsPanel from './ConversionEventsPanel';
-import ConversionSummaryPanel from './ConversionSummaryPanel';
-import { Pagination } from '../components/ui/Pagination';
+import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { History } from 'lucide-react';
+import { apiRequest } from '../../utils/api';
+import CustomSelect from '../CustomSelect';
+import { Pagination } from '../ui/Pagination';
 import {
   type FilterChip,
   FilterChipsBar,
@@ -14,19 +12,8 @@ import {
   type TableDensity,
   TableRegion,
   ViewOptionsPopover,
-} from '../components/ui/Primitives';
-
-interface CAPILog {
-  id: string;
-  pixel_id: string;
-  event_name: string;
-  user_id: string | null;
-  value: number | null;
-  currency: string | null;
-  test: boolean;
-  status_code: number;
-  created_at: string;
-}
+} from '../ui/Primitives';
+import type { CAPILog } from './types';
 
 const eventOptions = [
   { value: '', label: '全部事件' },
@@ -44,25 +31,7 @@ const statusOptions = [
   { value: '-4', label: '-4 (网络请求失败)' },
 ];
 
-export default function TrackingLogsTab({ showHistory, canWrite }: { showHistory: boolean; canWrite: boolean }) {
-  const [historyOpen, setHistoryOpen] = useState(false);
-
-  return (
-    <div className="space-y-6">
-      <ConversionEventsPanel canWrite={canWrite} />
-      <ConversionOrdersPanel />
-      <ConversionSummaryPanel />
-      {showHistory && (
-        <details onToggle={(event) => setHistoryOpen(event.currentTarget.open)} className="space-y-4">
-          <summary className="cursor-pointer text-sm font-semibold">历史回传日志</summary>
-          {historyOpen && <LegacyTrackingLogs />}
-        </details>
-      )}
-    </div>
-  );
-}
-
-function LegacyTrackingLogs() {
+export function LegacyTrackingLogsTab() {
   const [logs, setLogs] = useState<CAPILog[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -98,7 +67,7 @@ function LegacyTrackingLogs() {
       setHasLoadedOnce(true);
     } catch (e) {
       if (seq !== fetchSeqRef.current) return;
-      window.showToast?.(`加载历史回传日志失败： ${e}`, 'error');
+      window.showToast?.(`加载历史回传日志失败：${e}`, 'error');
       setHasLoadedOnce(true);
     } finally {
       if (seq === fetchSeqRef.current) {
@@ -111,7 +80,7 @@ function LegacyTrackingLogs() {
     void fetchLogs();
   }, [fetchLogs]);
 
-  const handleSearchSubmit = (e: React.FormEvent) => {
+  const handleSearchSubmit = (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     setQueryState((prev) => ({
       ...prev,
@@ -121,7 +90,7 @@ function LegacyTrackingLogs() {
     }));
   };
 
-  const handleReset = () => {
+  const handleReset = useCallback(() => {
     setPixelFilter('');
     setQueryState((prev) => ({
       ...prev,
@@ -131,7 +100,7 @@ function LegacyTrackingLogs() {
       statusCode: '',
       nonce: prev.nonce + 1,
     }));
-  };
+  }, []);
 
   const filterChips = useMemo<FilterChip[]>(() => {
     const chips: FilterChip[] = [];
@@ -162,10 +131,19 @@ function LegacyTrackingLogs() {
     return chips;
   }, [queryState]);
 
-  const hasFilter = Boolean(pixelFilter || queryState.pixelId || queryState.eventName || queryState.statusCode);
+  const hasFilter = Boolean(
+    pixelFilter || queryState.pixelId || queryState.eventName || queryState.statusCode,
+  );
 
   return (
     <div className="space-y-4 animate-fade-in">
+      <div className="px-4 py-2.5 rounded-xl bg-[var(--cms-content)] border border-[var(--cms-border)] flex items-center gap-2 text-xs text-[var(--cms-muted-fg)]">
+        <History size={14} className="shrink-0 text-[var(--cms-primary)]" aria-hidden="true" />
+        <span>
+          此视图仅展示统一回传架构升级前的旧 <code className="font-mono-code">capi_logs</code> 脱敏审计记录（只读，仅 SuperAdmin 可访问）。
+        </span>
+      </div>
+
       {/* Unified Borderless Filter Strip */}
       <search className="block space-y-2">
         <form onSubmit={handleSearchSubmit} className="flex flex-wrap items-center justify-between gap-2.5">
@@ -229,7 +207,7 @@ function LegacyTrackingLogs() {
 
       {/* Table + External Pagination */}
       <TableRegion
-        ariaLabel="CAPI 回传审计日志"
+        ariaLabel="CAPI 历史回传审计日志"
         footer={
           <Pagination
             page={queryState.page}
@@ -237,7 +215,9 @@ function LegacyTrackingLogs() {
             total={total}
             disabled={loading}
             onPageChange={(nextPage) => setQueryState((prev) => ({ ...prev, page: nextPage }))}
-            onPageSizeChange={(nextSize) => setQueryState((prev) => ({ ...prev, page: 1, pageSize: nextSize }))}
+            onPageSizeChange={(nextSize) =>
+              setQueryState((prev) => ({ ...prev, page: 1, pageSize: nextSize }))
+            }
             itemLabel="条日志"
           />
         }
@@ -263,26 +243,38 @@ function LegacyTrackingLogs() {
             ) : logs.length === 0 ? (
               <tr>
                 <td colSpan={8} className="py-16 text-center text-[var(--cms-muted-fg)]">
-                  暂无回传日志记录
+                  暂无历史回传日志记录
                 </td>
               </tr>
             ) : (
               logs.map((log) => (
                 <tr key={log.id}>
                   <td className="tabular-nums text-[var(--cms-muted-fg)]">#{log.id}</td>
-                  <td className="tabular-nums text-[var(--cms-fg)]">{log.pixel_id}</td>
+                  <td className="tabular-nums font-mono-code text-[var(--cms-fg)]">{log.pixel_id}</td>
                   <td className="text-[var(--cms-fg)]">{log.event_name}</td>
                   <td className="text-[var(--cms-muted-fg)] tabular-nums">
-                    {log.user_id ? `UID ${log.user_id}` : '-'}
+                    {log.user_id ? `UID ${log.user_id}` : '—'}
                   </td>
                   <td className="text-right tabular-nums text-[var(--cms-fg)] whitespace-nowrap">
-                    {log.value ? `${log.value}${log.currency ? ` ${log.currency}` : ''}` : <span className="text-[var(--cms-muted-fg)]">-</span>}
+                    {log.value ? (
+                      `${log.value}${log.currency ? ` ${log.currency}` : ''}`
+                    ) : (
+                      <span className="text-[var(--cms-muted-fg)]">—</span>
+                    )}
                   </td>
                   <td className="text-[var(--cms-muted-fg)]">{log.test ? '是' : '—'}</td>
                   <td>
                     <StatusDot
-                      tone={log.status_code === 200 ? 'success' : log.status_code === 0 ? 'warning' : 'error'}
-                      label={`${log.status_code} ${log.status_code === 200 ? 'OK' : log.status_code === 0 ? 'Dry Run' : 'Error'}`}
+                      tone={
+                        log.status_code === 200
+                          ? 'success'
+                          : log.status_code === 0
+                            ? 'warning'
+                            : 'error'
+                      }
+                      label={`${log.status_code} ${
+                        log.status_code === 200 ? 'OK' : log.status_code === 0 ? 'Dry Run' : 'Error'
+                      }`}
                     />
                   </td>
                   <td className="tabular-nums text-[var(--cms-muted-fg)] whitespace-nowrap">

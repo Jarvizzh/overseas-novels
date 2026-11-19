@@ -78,7 +78,7 @@ GRANT UPDATE (id) ON conversion.events TO :"api_role";
 GRANT INSERT,UPDATE ON conversion.deliveries TO :"api_role";
 GRANT UPDATE (state,next_attempt_at,reason) ON conversion.partner_reports TO :"api_role";
 GRANT UPDATE (environment_evidence,resolution) ON conversion.legacy_outbox_imports TO :"api_role";
-GRANT INSERT ON conversion.operation_audit TO :"api_role";
+GRANT SELECT, INSERT ON conversion.operation_audit TO :"api_role";
 
 GRANT SELECT (fulfilled_at,capi_expectation) ON recharge_orders TO :"collector_role";
 GRANT SELECT (business_key,environment,created_at,consumed_at,processing_error) ON reader_conversion_outbox TO :"collector_role";

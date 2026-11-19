@@ -1,5 +1,17 @@
 const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8081/api/v1/admin';
 
+export class ApiError extends Error {
+  readonly status: number;
+  readonly code?: string;
+
+  constructor(message: string, status: number, code?: string) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+    this.code = code;
+  }
+}
+
 export interface AdminUser {
   id: string;
   username: string;
@@ -37,21 +49,23 @@ export async function apiRequest(
   if (response.status === 401) {
     const errorData = await response.json().catch(() => ({}));
     const errorMsg = errorData.error || '用户名或密码错误';
+    const errorCode = typeof errorData.code === 'string' ? errorData.code : undefined;
 
     // 如果是登录或注册接口本身的 401，不触发全局页面跳转，直接抛出错误供表单展示提示
     if (path.includes('/auth/login') || path.includes('/auth/register')) {
-      throw new Error(errorMsg);
+      throw new ApiError(errorMsg, response.status, errorCode);
     }
 
     localStorage.removeItem('cms_token');
     localStorage.removeItem('cms_admin');
     window.location.href = '/';
-    throw new Error('登录凭证已失效，请重新登录');
+    throw new ApiError('登录凭证已失效，请重新登录', response.status, errorCode);
   }
 
   if (!response.ok) {
     const errorData = await response.json().catch(() => ({}));
-    throw new Error(errorData.error || `请求失败 (${response.status})`);
+    const errorCode = typeof errorData.code === 'string' ? errorData.code : undefined;
+    throw new ApiError(errorData.error || `请求失败 (${response.status})`, response.status, errorCode);
   }
 
   return response.json();

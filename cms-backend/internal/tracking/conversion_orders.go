@@ -58,6 +58,7 @@ func RegisterConversionOrders(rg *gin.RouterGroup, admins adminLookup, rawURL, t
 		{http.MethodGet, "/conversion/destinations", func(*gin.Context) []string { return []string{"destinations"} }},
 		{http.MethodPost, "/conversion/destinations", func(*gin.Context) []string { return []string{"destinations"} }},
 		{http.MethodPatch, "/conversion/destinations/:id", func(c *gin.Context) []string { return []string{"destinations", c.Param("id")} }},
+		{http.MethodGet, "/conversion/audit", func(*gin.Context) []string { return []string{"audit"} }},
 	} {
 		rg.Handle(route.method, route.pattern, auth.AuthMiddleware(), func(c *gin.Context) {
 			path := route.path(c)
@@ -141,14 +142,8 @@ func (c *conversionOrderClient) request(ctx context.Context, admin *auth.Admin, 
 	}
 	defer res.Body.Close()
 	switch res.StatusCode {
-	case http.StatusBadRequest:
-		return []byte(`{"code":"invalid_order_key","error":"查询或操作参数格式错误"}`), res.StatusCode
-	case http.StatusNotFound:
-		return []byte(`{"code":"order_not_found","error":"未找到指定记录"}`), res.StatusCode
-	case http.StatusConflict:
-		return []byte(`{"code":"state_conflict","error":"记录状态、投递窗口或授权已变化，请刷新后核对"}`), res.StatusCode
-	case http.StatusForbidden:
-		return []byte(`{"code":"operator_forbidden","error":"当前账号无权执行此操作"}`), res.StatusCode
+	case http.StatusBadRequest, http.StatusForbidden, http.StatusNotFound, http.StatusConflict:
+		return mapConversionUpstreamError(res.StatusCode, res.Body), res.StatusCode
 	case http.StatusOK, http.StatusCreated, http.StatusAccepted:
 		const maxResponse = 8 << 20
 		body, err := io.ReadAll(io.LimitReader(res.Body, maxResponse+1))
@@ -157,4 +152,67 @@ func (c *conversionOrderClient) request(ctx context.Context, admin *auth.Admin, 
 		}
 	}
 	return reconciliationUnavailable, http.StatusServiceUnavailable
+}
+
+type conversionErrorEntry struct {
+	Code  string `json:"code"`
+	Error string `json:"error"`
+}
+
+var conversionUpstreamErrorCatalog = map[int]map[string]string{
+	http.StatusBadRequest: {
+		"invalid_time":           "时间范围格式错误，或开始时间晚于结束时间",
+		"invalid_cursor":         "分页游标无效，请返回首页重新查询",
+		"invalid_limit":          "每页条数超出允许范围",
+		"invalid_id":             "编号参数格式错误，须为正整数",
+		"invalid_event_id":       "编号参数格式错误，须为正整数",
+		"invalid_delivery_id":    "编号参数格式错误，须为正整数",
+		"invalid_attempt_cursor": "编号参数格式错误，须为正整数",
+		"invalid_filter":         "筛选参数格式错误",
+		"invalid_order_key":      "订单号或接入 ID 格式错误",
+		"invalid_summary_filter": "统计筛选参数无效（小时数须在 1 至 168 之间）",
+		"invalid_operation":      "操作参数无效，请核对必填字段与原因长度（1-500 字）",
+	},
+	http.StatusForbidden: {
+		"operator_forbidden": "当前账号无权执行此操作",
+	},
+	http.StatusNotFound: {
+		"order_not_found":    "未找到指定订单记录",
+		"resource_not_found": "未找到指定的事件、投递或目标记录",
+	},
+	http.StatusConflict: {
+		"state_conflict": "记录状态已变化，或存在重复 Pixel/接入账户与推广链绑定冲突，请刷新后核对",
+	},
+}
+
+var conversionUpstreamFallbackErrors = map[int]conversionErrorEntry{
+	http.StatusBadRequest: {Code: "invalid_order_key", Error: "查询或操作参数格式错误"},
+	http.StatusForbidden:  {Code: "operator_forbidden", Error: "当前账号无权执行此操作"},
+	http.StatusNotFound:   {Code: "order_not_found", Error: "未找到指定记录"},
+	http.StatusConflict:   {Code: "state_conflict", Error: "记录状态已变化，或存在重复 Pixel/接入账户与推广链绑定冲突，请刷新后核对"},
+}
+
+func mapConversionUpstreamError(status int, body io.Reader) []byte {
+	const maxErrorBody = 4 << 10
+	raw, _ := io.ReadAll(io.LimitReader(body, maxErrorBody))
+	var parsed struct {
+		Code string `json:"code"`
+	}
+	if len(raw) > 0 && json.Unmarshal(raw, &parsed) == nil {
+		if msg, ok := conversionUpstreamErrorCatalog[status][parsed.Code]; ok {
+			encoded, err := json.Marshal(conversionErrorEntry{Code: parsed.Code, Error: msg})
+			if err == nil {
+				return encoded
+			}
+		}
+	}
+	fallback, ok := conversionUpstreamFallbackErrors[status]
+	if !ok {
+		return reconciliationUnavailable
+	}
+	encoded, err := json.Marshal(fallback)
+	if err != nil {
+		return reconciliationUnavailable
+	}
+	return encoded
 }

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -180,5 +181,101 @@ func TestEventDetailShowsBoundedPartnerAttemptEvidence(t *testing.T) {
 		first.SendingAt == nil || first.RespondedAt == nil || first.RecordedAt == nil || first.RetryAt == nil ||
 		detail.Reports[0].Attempts[1].HTTPStatus != 400 {
 		t.Fatalf("unexpected report evidence: %+v", first)
+	}
+}
+
+func TestEventsFilterValidation(t *testing.T) {
+	handler := NewHandler(Repository{Environment: "test"}, "service-fixture")
+	cases := []struct {
+		name  string
+		query string
+	}{
+		{name: "invalid partner_report_state", query: "?partner_report_state=unknown_state"},
+		{name: "overlong source_event_id", query: "?source_event_id=" + strings.Repeat("a", 257)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/internal/conversion/events"+tc.query, nil)
+			req.Header.Set("Authorization", "Bearer service-fixture")
+			req.Header.Set("X-Operator-ID", "test-admin")
+			req.Header.Set("X-Operator-Role", "Finance")
+			res := httptest.NewRecorder()
+			handler.ServeHTTP(res, req)
+			if res.Code != http.StatusBadRequest || !strings.Contains(res.Body.String(), "invalid_filter") {
+				t.Fatalf("status=%d body=%s", res.Code, res.Body.String())
+			}
+		})
+	}
+}
+
+func TestEventsListProjectionAndFilters(t *testing.T) {
+	ctx, pool := operationsTestPool(t)
+	mustExec(t, ctx, pool, `
+		INSERT INTO conversion.integrations(environment,source,account_key,contract_version,enabled)
+		VALUES ('test','sinan','partner','sinan-mock-v1',true);
+		INSERT INTO conversion.destinations(environment,media,pixel_id) VALUES ('test','meta','123');
+		INSERT INTO conversion.events(integration_id,environment,source_event_type,source_event_id,event_name,source_order_id,
+			attribution_state,occurred_at,received_at,created_at,amount,currency,matching_data)
+		VALUES (1,'test','recharge-paid','sinan-evt-48h','Purchase','ext-48h','matched',
+			now()-interval '48 hours',now()-interval '48 hours',now()-interval '48 hours',19.99,'USD','{}');
+		INSERT INTO conversion.deliveries(event_id,destination_id,environment,meta_event_id,role,deadline_at,finalized_at,state,reason)
+		VALUES (1,1,'test','sinan-evt-48h','original',now()-interval '1 hour',now()-interval '1 hour','failed','meta_no_confirmation');
+		INSERT INTO conversion.partner_reports(integration_id,event_id,original_delivery_id,report_status,contract_version,payload,state,reason,wire_payload)
+		VALUES (1,1,1,-1,'sinan-mock-v1','{"secret":"private-fixture"}','blocked','no_trace_contract_unconfirmed','private-wire-fixture');
+	`)
+
+	handler := NewHandler(Repository{Pool: pool, Environment: "test"}, "service-fixture")
+	doGet := func(target string) (int, []byte) {
+		req := httptest.NewRequest(http.MethodGet, "/internal/conversion"+target, nil)
+		req.Header.Set("Authorization", "Bearer service-fixture")
+		req.Header.Set("X-Operator-ID", "test-admin")
+		req.Header.Set("X-Operator-Role", "Finance")
+		res := httptest.NewRecorder()
+		handler.ServeHTTP(res, req)
+		return res.Code, res.Body.Bytes()
+	}
+
+	// 1. source_event_id bypasses default 24h window and projects amount/currency + partner_report summary
+	code, body := doGet("/events?source_event_id=sinan-evt-48h")
+	if code != http.StatusOK || strings.Contains(string(body), "private-") {
+		t.Fatalf("source_event_id status=%d body=%s", code, string(body))
+	}
+	var listResp struct {
+		Events []struct {
+			ID            string `json:"id"`
+			Amount        string `json:"amount"`
+			Currency      string `json:"currency"`
+			PartnerReport *struct {
+				ID     string `json:"id"`
+				Status int    `json:"status"`
+				State  string `json:"state"`
+				Reason string `json:"reason"`
+			} `json:"partner_report"`
+		} `json:"events"`
+	}
+	if err := json.Unmarshal(body, &listResp); err != nil {
+		t.Fatal(err)
+	}
+	if len(listResp.Events) != 1 || listResp.Events[0].Amount != "19.99" || listResp.Events[0].Currency != "USD" ||
+		listResp.Events[0].PartnerReport == nil || listResp.Events[0].PartnerReport.State != "blocked" ||
+		listResp.Events[0].PartnerReport.Status != -1 || listResp.Events[0].PartnerReport.Reason != "no_trace_contract_unconfirmed" {
+		t.Fatalf("unexpected list projection: %s", string(body))
+	}
+
+	// 2. partner_report_state filter within explicit window
+	from72h := url.QueryEscape(time.Now().Add(-72 * time.Hour).UTC().Format(time.RFC3339))
+	code, body = doGet("/events?from=" + from72h + "&partner_report_state=blocked")
+	if code != http.StatusOK || !strings.Contains(string(body), "sinan-evt-48h") {
+		t.Fatalf("partner_report_state=blocked status=%d body=%s", code, string(body))
+	}
+	code, body = doGet("/events?from=" + from72h + "&partner_report_state=confirmed")
+	if code != http.StatusOK || strings.Contains(string(body), "sinan-evt-48h") {
+		t.Fatalf("partner_report_state=confirmed should be empty, status=%d body=%s", code, string(body))
+	}
+
+	// 3. event detail also projects amount and currency
+	code, body = doGet("/events/" + listResp.Events[0].ID)
+	if code != http.StatusOK || !strings.Contains(string(body), `"amount":"19.99"`) || !strings.Contains(string(body), `"currency":"USD"`) {
+		t.Fatalf("detail projection status=%d body=%s", code, string(body))
 	}
 }

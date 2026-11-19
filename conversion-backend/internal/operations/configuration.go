@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
 
 	"conversion-backend/internal/delivery"
 	"conversion-backend/internal/partner/sinan"
@@ -15,6 +16,7 @@ import (
 func (repo Repository) registerConfiguration(mux *http.ServeMux, svc delivery.Service) {
 	mux.HandleFunc("GET /internal/conversion/destinations", repo.configurationList(destinationsSQL))
 	mux.HandleFunc("GET /internal/conversion/integrations", repo.configurationList(integrationsSQL))
+	mux.HandleFunc("GET /internal/conversion/audit", repo.handleAudit)
 	destination := func(w http.ResponseWriter, r *http.Request) {
 		id, ok := configurationID(r)
 		var input struct {
@@ -111,6 +113,75 @@ func (repo Repository) configurationList(sql string) http.HandlerFunc {
 		writeJSON(w, http.StatusOK, out)
 	}
 }
+
+func (repo Repository) handleAudit(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	var actions []string
+	switch q.Get("subject_type") {
+	case "destination":
+		actions = []string{"configure_destination"}
+	case "integration":
+		actions = []string{"configure_integration", "configure_sinan_mock"}
+	default:
+		writeError(w, http.StatusBadRequest, "invalid_filter")
+		return
+	}
+	subjectID, ok := positiveID(q.Get("subject_id"))
+	if !ok {
+		writeError(w, http.StatusBadRequest, "invalid_id")
+		return
+	}
+	limit := 20
+	if raw := q.Get("limit"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 1 || parsed > 50 {
+			writeError(w, http.StatusBadRequest, "invalid_limit")
+			return
+		}
+		limit = parsed
+	}
+	var beforeID int64
+	if raw := q.Get("before_id"); raw != "" {
+		parsed, valid := positiveID(raw)
+		if !valid {
+			writeError(w, http.StatusBadRequest, "invalid_id")
+			return
+		}
+		beforeID = parsed
+	}
+	var out json.RawMessage
+	err := repo.Pool.QueryRow(r.Context(), auditListSQL, repo.Environment, actions, strconv.FormatInt(subjectID, 10), beforeID, limit).Scan(&out)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "operation_unavailable")
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+const auditListSQL = `
+	WITH matched AS (
+		SELECT id,action,subject_id,operator_id,operator_role,reason,evidence_reference,
+			before_state,after_state,created_at
+		FROM conversion.operation_audit
+		WHERE environment=$1
+			AND action=ANY($2::text[])
+			AND subject_id=$3
+			AND ($4::bigint=0 OR id<$4)
+		ORDER BY id DESC
+		LIMIT $5::integer+1
+	), page AS (
+		SELECT * FROM matched ORDER BY id DESC LIMIT $5
+	)
+	SELECT jsonb_build_object(
+		'records',COALESCE((SELECT jsonb_agg(jsonb_strip_nulls(jsonb_build_object(
+			'id',id::text,'action',action,'subject_id',subject_id,
+			'operator_id',operator_id,'operator_role',operator_role,
+			'reason',reason,'evidence_reference',evidence_reference,
+			'before_state',before_state,'after_state',after_state,
+			'created_at',created_at)) ORDER BY id DESC) FROM page),'[]'),
+		'has_more',(SELECT count(*) FROM matched)>$5
+	)
+`
 
 const destinationsSQL = `
 	SELECT COALESCE(jsonb_agg(jsonb_strip_nulls(jsonb_build_object('id',x.id::text,'pixel_id',x.pixel_id,
