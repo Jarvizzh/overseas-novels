@@ -171,6 +171,9 @@ func TestConfigurationAuditQueryAndRestrictedRole(t *testing.T) {
 		`{"display_name":"Main Pixel v2","reason":"rename pixel"}`); res.Code != http.StatusOK {
 		t.Fatalf("patch destination: %d %s", res.Code, res.Body.String())
 	}
+	if res := doReq(http.MethodGet, "/destinations", "MediaBuyer", ""); res.Code != http.StatusOK || !strings.Contains(res.Body.String(), `"Main Pixel v2"`) {
+		t.Fatalf("get destinations: %d %s", res.Code, res.Body.String())
+	}
 
 	// Update integration + sinan-mock on integration #2
 	if res := doReq(http.MethodPatch, "/integrations/2", "Admin",

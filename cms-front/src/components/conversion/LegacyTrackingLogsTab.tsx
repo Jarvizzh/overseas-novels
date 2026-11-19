@@ -2,6 +2,7 @@ import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } fro
 import { History } from 'lucide-react';
 import { apiRequest } from '../../utils/api';
 import CustomSelect from '../CustomSelect';
+import { CmsDialog } from '../ui/CmsDialog';
 import { Pagination } from '../ui/Pagination';
 import {
   type FilterChip,
@@ -31,12 +32,22 @@ const statusOptions = [
   { value: '-4', label: '-4 (网络请求失败)' },
 ];
 
+function formatJSON(jsonStr?: string) {
+  if (!jsonStr) return '（无内容）';
+  try {
+    return JSON.stringify(JSON.parse(jsonStr), null, 2);
+  } catch {
+    return jsonStr;
+  }
+}
+
 export function LegacyTrackingLogsTab() {
   const [logs, setLogs] = useState<CAPILog[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [hasLoadedOnce, setHasLoadedOnce] = useState(false);
   const [density, setDensity] = useState<TableDensity>('comfortable');
+  const [selectedLog, setSelectedLog] = useState<CAPILog | null>(null);
 
   const [pixelFilter, setPixelFilter] = useState('');
   const [queryState, setQueryState] = useState({
@@ -140,7 +151,7 @@ export function LegacyTrackingLogsTab() {
       <div className="px-4 py-2.5 rounded-xl bg-[var(--cms-content)] border border-[var(--cms-border)] flex items-center gap-2 text-xs text-[var(--cms-muted-fg)]">
         <History size={14} className="shrink-0 text-[var(--cms-primary)]" aria-hidden="true" />
         <span>
-          此视图仅展示统一回传架构升级前的旧 <code className="font-mono-code">capi_logs</code> 脱敏审计记录（只读，仅 SuperAdmin 可访问）。
+          此视图展示统一回传架构升级前的旧 <code className="font-mono-code">capi_logs</code> 历史记录（只读，仅 SuperAdmin 可访问），点击任意行或「详情」可查看完整请求载荷与响应包体。
         </span>
       </div>
 
@@ -232,23 +243,30 @@ export function LegacyTrackingLogsTab() {
               <th scope="col" className="text-right">
                 回传金额
               </th>
-              <th scope="col">测试</th>
+              <th scope="col">测试代码</th>
               <th scope="col">状态码</th>
               <th scope="col">回传时间</th>
+              <th scope="col" className="text-right w-px whitespace-nowrap">
+                操作
+              </th>
             </tr>
           </thead>
           <tbody className={loading && hasLoadedOnce ? 'opacity-65 transition-opacity' : ''}>
             {!hasLoadedOnce && loading ? (
-              <SkeletonRows rows={6} cols={8} />
+              <SkeletonRows rows={6} cols={9} />
             ) : logs.length === 0 ? (
               <tr>
-                <td colSpan={8} className="py-16 text-center text-[var(--cms-muted-fg)]">
+                <td colSpan={9} className="py-16 text-center text-[var(--cms-muted-fg)]">
                   暂无历史回传日志记录
                 </td>
               </tr>
             ) : (
               logs.map((log) => (
-                <tr key={log.id}>
+                <tr
+                  key={log.id}
+                  onClick={() => setSelectedLog(log)}
+                  className={`cursor-pointer ${selectedLog?.id === log.id ? 'row-selected' : ''}`}
+                >
                   <td className="tabular-nums text-[var(--cms-muted-fg)]">#{log.id}</td>
                   <td className="tabular-nums font-mono-code text-[var(--cms-fg)]">{log.pixel_id}</td>
                   <td className="text-[var(--cms-fg)]">{log.event_name}</td>
@@ -262,7 +280,9 @@ export function LegacyTrackingLogsTab() {
                       <span className="text-[var(--cms-muted-fg)]">—</span>
                     )}
                   </td>
-                  <td className="text-[var(--cms-muted-fg)]">{log.test ? '是' : '—'}</td>
+                  <td className="text-[var(--cms-muted-fg)] font-mono-code">
+                    {log.test_event_code || (log.test ? '测试' : '—')}
+                  </td>
                   <td>
                     <StatusDot
                       tone={
@@ -280,12 +300,101 @@ export function LegacyTrackingLogsTab() {
                   <td className="tabular-nums text-[var(--cms-muted-fg)] whitespace-nowrap">
                     {new Date(log.created_at).toLocaleString()}
                   </td>
+                  <td className="text-right" onClick={(e) => e.stopPropagation()}>
+                    <button
+                      type="button"
+                      onClick={() => setSelectedLog(log)}
+                      className="btn-detail"
+                    >
+                      详情
+                    </button>
+                  </td>
                 </tr>
               ))
             )}
           </tbody>
         </table>
       </TableRegion>
+
+      {/* Right Slide-Over Log Inspector Drawer */}
+      <CmsDialog
+        open={Boolean(selectedLog)}
+        onClose={() => setSelectedLog(null)}
+        variant="drawer"
+        title={selectedLog ? `回传日志 #${selectedLog.id}` : ''}
+        subtitle={
+          selectedLog
+            ? `${selectedLog.event_name} · Pixel ${selectedLog.pixel_id} · ${new Date(selectedLog.created_at).toLocaleString()}`
+            : undefined
+        }
+        size="lg"
+        footer={
+          <button type="button" className="btn-secondary" onClick={() => setSelectedLog(null)}>
+            关闭
+          </button>
+        }
+      >
+        {selectedLog && (
+          <div className="space-y-4 text-xs">
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 p-3 rounded-xl bg-[var(--cms-content)] border border-[var(--cms-border)]">
+              <div>
+                <div className="text-[11px] text-[var(--cms-muted-fg)]">关联用户</div>
+                <div className="mt-0.5 font-medium tabular-nums text-[var(--cms-fg)]">
+                  {selectedLog.user_id ? `UID ${selectedLog.user_id}` : '—'}
+                </div>
+              </div>
+              <div>
+                <div className="text-[11px] text-[var(--cms-muted-fg)]">回传金额</div>
+                <div className="mt-0.5 font-medium tabular-nums text-[var(--cms-fg)]">
+                  {selectedLog.value
+                    ? `${selectedLog.value}${selectedLog.currency ? ` ${selectedLog.currency}` : ''}`
+                    : '—'}
+                </div>
+              </div>
+              <div>
+                <div className="text-[11px] text-[var(--cms-muted-fg)]">测试代码</div>
+                <div className="mt-0.5 font-medium font-mono-code text-[var(--cms-fg)]">
+                  {selectedLog.test_event_code || (selectedLog.test ? '测试' : '—')}
+                </div>
+              </div>
+              <div>
+                <div className="text-[11px] text-[var(--cms-muted-fg)]">状态码</div>
+                <div
+                  className="mt-0.5 font-medium tabular-nums"
+                  style={{
+                    color:
+                      selectedLog.status_code === 200
+                        ? 'var(--cms-success)'
+                        : selectedLog.status_code === 0
+                          ? 'var(--cms-warning)'
+                          : 'var(--cms-error)',
+                  }}
+                >
+                  {selectedLog.status_code}
+                </div>
+              </div>
+            </div>
+            <div className="space-y-1.5">
+              <div className="font-medium text-[var(--cms-muted-fg)]">Request Payload (请求载荷)</div>
+              <pre className="p-4 rounded-xl bg-[var(--cms-content)] border border-[var(--cms-border)] font-mono-code text-xs max-h-72 overflow-auto text-[var(--cms-fg)] m-0 leading-relaxed">
+                {formatJSON(selectedLog.payload)}
+              </pre>
+            </div>
+            <div className="space-y-1.5">
+              <div className="font-medium text-[var(--cms-muted-fg)]">Response Body (响应包体)</div>
+              <pre
+                className="p-4 rounded-xl bg-[var(--cms-content)] border border-[var(--cms-border)] font-mono-code text-xs max-h-72 overflow-auto m-0 leading-relaxed"
+                style={{
+                  color:
+                    selectedLog.status_code === 200 ? 'var(--cms-success)' : 'var(--cms-error)',
+                }}
+              >
+                {formatJSON(selectedLog.response)}
+              </pre>
+            </div>
+          </div>
+        )}
+      </CmsDialog>
     </div>
   );
 }

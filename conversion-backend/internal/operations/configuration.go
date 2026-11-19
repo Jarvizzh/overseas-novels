@@ -185,7 +185,7 @@ const auditListSQL = `
 
 const destinationsSQL = `
 	SELECT COALESCE(jsonb_agg(jsonb_strip_nulls(jsonb_build_object('id',x.id::text,'pixel_id',x.pixel_id,
-		'name',x.display_name,'enabled',x.enabled,'retired_at',x.retired_at,'created_at',x.created_at,
+		'name',x.display_name,'enabled',x.enabled,'retired_at',x.retired_at,
 		'credential_configured',x.credential_id IS NOT NULL,'promotion_dependencies',
 		(SELECT count(*) FROM promotion_links p WHERE p.fb_pixel_id=x.legacy_fb_pixel_id)))
 		ORDER BY x.id DESC),'[]')

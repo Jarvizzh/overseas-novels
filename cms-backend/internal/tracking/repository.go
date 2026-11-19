@@ -57,7 +57,7 @@ func (r *pgRepository) ListLogs(ctx context.Context, page, pageSize int, pixelID
 
 	// 2. Query page logs
 	query := fmt.Sprintf(`
-		SELECT id::text, pixel_id, event_name, user_id::text, value, currency, COALESCE(test_event_code,'')<>'', status_code, created_at
+		SELECT id::text, pixel_id, event_name, user_id::text, value, currency, test_event_code, COALESCE(test_event_code,'')<>'', status_code, COALESCE(payload,''), COALESCE(response,''), created_at
 		FROM facebook_capi_logs
 		%s
 		ORDER BY id DESC
@@ -82,8 +82,11 @@ func (r *pgRepository) ListLogs(ctx context.Context, page, pageSize int, pixelID
 			&log.UserID,
 			&log.Value,
 			&log.Currency,
+			&log.TestEventCode,
 			&log.Test,
 			&log.StatusCode,
+			&log.Payload,
+			&log.Response,
 			&log.CreatedAt,
 		)
 		if err != nil {

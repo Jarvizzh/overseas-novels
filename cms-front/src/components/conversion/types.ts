@@ -268,8 +268,11 @@ export interface CAPILog {
   user_id: string | null;
   value: number | null;
   currency: string | null;
+  test_event_code?: string | null;
   test: boolean;
   status_code: number;
+  payload?: string;
+  response?: string;
   created_at: string;
 }
 
