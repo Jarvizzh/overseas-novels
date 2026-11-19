@@ -9,6 +9,7 @@ import { useThemeMode } from './utils/theme';
 import { ThemeSwitcher } from './components/ThemeSwitcher';
 import { CmsSidebar } from './components/CmsSidebar';
 import {
+  CONVERSION_READ_ROLES,
   DEFAULT_EXPANDED_GROUPS,
   flattenNavEntries,
   getVisibleNavTree,
@@ -305,10 +306,14 @@ function AppContent() {
             <Route path="/recharge-templates/:templateId/edit" element={<TemplatesTab />} />
             <Route path="/operations" element={<OperationsTab />} />
             <Route path="/campaign" element={<Navigate to="/operations?tab=campaigns" replace />} />
-            <Route path="/ad-config/pixels" element={<PixelsTab />} />
+            <Route path="/ad-config/pixels" element={CONVERSION_READ_ROLES.includes(admin.role) ? <PixelsTab /> : <Navigate to="/" replace />} />
             <Route
               path="/ad-config/logs"
-              element={admin.role === 'SuperAdmin' ? <TrackingLogsTab /> : <Navigate to="/" replace />}
+              element={
+                CONVERSION_READ_ROLES.includes(admin.role)
+                  ? <TrackingLogsTab showHistory={admin.role === 'SuperAdmin'} canWrite={admin.role === 'SuperAdmin' || admin.role === 'Admin'} />
+                  : <Navigate to="/" replace />
+              }
             />
             <Route path="/ad-config" element={<Navigate to="/ad-config/pixels" replace />} />
             <Route

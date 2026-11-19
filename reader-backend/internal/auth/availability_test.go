@@ -90,6 +90,12 @@ func TestAccountSessionAndBinding(t *testing.T) {
 	if _, err := session.refresh(ctx, raw); err == nil {
 		t.Fatal("expired credential accepted")
 	}
+	var registrations int
+	if err := p.QueryRow(ctx, `SELECT count(*) FROM reader_conversion_outbox
+		WHERE event_name='CompleteRegistration' AND occurred_at IS NOT NULL`).Scan(&registrations); err != nil || registrations != 2 {
+		t.Fatalf("registration conversion count=%d, err=%v", registrations, err)
+	}
+
 }
 func TestUntrustedForwardedHeadersDoNotBypassLimiter(t *testing.T) {
 	gin.SetMode(gin.TestMode)

@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { apiRequest } from '../utils/api';
 import CustomSelect from '../components/CustomSelect';
-import { CmsDialog } from '../components/ui/CmsDialog';
+import ConversionOrdersPanel from './ConversionOrdersPanel';
+import ConversionEventsPanel from './ConversionEventsPanel';
+import ConversionSummaryPanel from './ConversionSummaryPanel';
 import { Pagination } from '../components/ui/Pagination';
 import {
   type FilterChip,
@@ -15,16 +17,14 @@ import {
 } from '../components/ui/Primitives';
 
 interface CAPILog {
-  id: number;
+  id: string;
   pixel_id: string;
   event_name: string;
-  user_id: number | null;
+  user_id: string | null;
   value: number | null;
   currency: string | null;
-  test_event_code: string | null;
+  test: boolean;
   status_code: number;
-  payload: string;
-  response: string;
   created_at: string;
 }
 
@@ -44,15 +44,25 @@ const statusOptions = [
   { value: '-4', label: '-4 (网络请求失败)' },
 ];
 
-function formatJSON(jsonStr: string) {
-  try {
-    return JSON.stringify(JSON.parse(jsonStr), null, 2);
-  } catch {
-    return jsonStr;
-  }
+export default function TrackingLogsTab({ showHistory, canWrite }: { showHistory: boolean; canWrite: boolean }) {
+  const [historyOpen, setHistoryOpen] = useState(false);
+
+  return (
+    <div className="space-y-6">
+      <ConversionEventsPanel canWrite={canWrite} />
+      <ConversionOrdersPanel />
+      <ConversionSummaryPanel />
+      {showHistory && (
+        <details onToggle={(event) => setHistoryOpen(event.currentTarget.open)} className="space-y-4">
+          <summary className="cursor-pointer text-sm font-semibold">历史回传日志</summary>
+          {historyOpen && <LegacyTrackingLogs />}
+        </details>
+      )}
+    </div>
+  );
 }
 
-export default function TrackingLogsTab() {
+function LegacyTrackingLogs() {
   const [logs, setLogs] = useState<CAPILog[]>([]);
   const [total, setTotal] = useState(0);
   const pageSize = 10;
@@ -68,7 +78,6 @@ export default function TrackingLogsTab() {
     statusCode: '',
     nonce: 0,
   });
-  const [selectedLog, setSelectedLog] = useState<CAPILog | null>(null);
   const fetchSeqRef = useRef(0);
 
   const fetchLogs = useCallback(async () => {
@@ -89,7 +98,7 @@ export default function TrackingLogsTab() {
       setHasLoadedOnce(true);
     } catch (e) {
       if (seq !== fetchSeqRef.current) return;
-      window.showToast?.(`加载回传日志失败: ${e}`, 'error');
+      window.showToast?.(`加载历史回传日志失败： ${e}`, 'error');
       setHasLoadedOnce(true);
     } finally {
       if (seq === fetchSeqRef.current) {
@@ -241,30 +250,23 @@ export default function TrackingLogsTab() {
               <th scope="col" className="text-right">
                 回传金额
               </th>
-              <th scope="col">测试代码</th>
+              <th scope="col">测试</th>
               <th scope="col">状态码</th>
               <th scope="col">回传时间</th>
-              <th scope="col" className="text-right w-px whitespace-nowrap">
-                操作
-              </th>
             </tr>
           </thead>
           <tbody className={loading && hasLoadedOnce ? 'opacity-65 transition-opacity' : ''}>
             {!hasLoadedOnce && loading ? (
-              <SkeletonRows rows={6} cols={9} />
+              <SkeletonRows rows={6} cols={8} />
             ) : logs.length === 0 ? (
               <tr>
-                <td colSpan={9} className="py-16 text-center text-[var(--cms-muted-fg)]">
+                <td colSpan={8} className="py-16 text-center text-[var(--cms-muted-fg)]">
                   暂无回传日志记录
                 </td>
               </tr>
             ) : (
               logs.map((log) => (
-                <tr
-                  key={log.id}
-                  onClick={() => setSelectedLog(log)}
-                  className={`cursor-pointer ${selectedLog?.id === log.id ? 'row-selected' : ''}`}
-                >
+                <tr key={log.id}>
                   <td className="tabular-nums text-[var(--cms-muted-fg)]">#{log.id}</td>
                   <td className="tabular-nums text-[var(--cms-fg)]">{log.pixel_id}</td>
                   <td className="text-[var(--cms-fg)]">{log.event_name}</td>
@@ -274,7 +276,7 @@ export default function TrackingLogsTab() {
                   <td className="text-right tabular-nums text-[var(--cms-fg)] whitespace-nowrap">
                     {log.value ? `${log.value}${log.currency ? ` ${log.currency}` : ''}` : <span className="text-[var(--cms-muted-fg)]">-</span>}
                   </td>
-                  <td className="text-[var(--cms-muted-fg)]">{log.test_event_code || '-'}</td>
+                  <td className="text-[var(--cms-muted-fg)]">{log.test ? '是' : '—'}</td>
                   <td>
                     <StatusDot
                       tone={log.status_code === 200 ? 'success' : log.status_code === 0 ? 'warning' : 'error'}
@@ -284,60 +286,12 @@ export default function TrackingLogsTab() {
                   <td className="tabular-nums text-[var(--cms-muted-fg)] whitespace-nowrap">
                     {new Date(log.created_at).toLocaleString()}
                   </td>
-                  <td className="text-right" onClick={(e) => e.stopPropagation()}>
-                    <button
-                      type="button"
-                      onClick={() => setSelectedLog(log)}
-                      className="btn-detail"
-                    >
-                      详情
-                    </button>
-                  </td>
                 </tr>
               ))
             )}
           </tbody>
         </table>
       </TableRegion>
-
-      {/* Right Slide-Over Log Inspector Drawer */}
-      <CmsDialog
-        open={Boolean(selectedLog)}
-        onClose={() => setSelectedLog(null)}
-        variant="drawer"
-        title={selectedLog ? `回传日志 #${selectedLog.id}` : ''}
-        subtitle={
-          selectedLog
-            ? `${selectedLog.event_name} · Pixel ${selectedLog.pixel_id} · ${new Date(selectedLog.created_at).toLocaleString()}`
-            : undefined
-        }
-        size="lg"
-        footer={
-          <button type="button" className="btn-secondary" onClick={() => setSelectedLog(null)}>
-            关闭
-          </button>
-        }
-      >
-        {selectedLog && (
-          <div className="space-y-4 text-xs">
-            <div className="space-y-1.5">
-              <div className="font-medium text-[var(--cms-muted-fg)]">Request Payload (请求载荷)</div>
-              <pre className="p-4 rounded-xl bg-[var(--cms-content)] border border-[var(--cms-border)] font-mono-code text-xs max-h-72 overflow-auto text-[var(--cms-fg)] m-0 leading-relaxed">
-                {formatJSON(selectedLog.payload)}
-              </pre>
-            </div>
-            <div className="space-y-1.5">
-              <div className="font-medium text-[var(--cms-muted-fg)]">Response Body (响应包体)</div>
-              <pre
-                className="p-4 rounded-xl bg-[var(--cms-content)] border border-[var(--cms-border)] font-mono-code text-xs max-h-72 overflow-auto m-0 leading-relaxed"
-                style={{ color: selectedLog.status_code === 200 ? 'var(--cms-success)' : 'var(--cms-error)' }}
-              >
-                {formatJSON(selectedLog.response)}
-              </pre>
-            </div>
-          </div>
-        )}
-      </CmsDialog>
     </div>
   );
 }

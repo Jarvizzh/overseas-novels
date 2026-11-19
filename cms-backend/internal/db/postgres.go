@@ -53,10 +53,17 @@ func InitDB(migrate bool) {
 }
 
 const (
-	baselineSchemaVersion    int64 = 2026111701
-	chapterSchemaVersion     int64 = 2026111702
-	readerPerformanceVersion int64 = 2026111703
-	RequiredSchemaVersion    int64 = 2026111704
+	baselineSchemaVersion       int64 = 2026111701
+	chapterSchemaVersion        int64 = 2026111702
+	readerPerformanceVersion    int64 = 2026111703
+	readerQueueVersion          int64 = 2026111704
+	conversionSchemaVersion     int64 = 2026111901
+	readerConversionVersion     int64 = 2026111902
+	legacyConversionVersion     int64 = 2026111903
+	conversionReconcileVersion  int64 = 2026111904
+	conversionOperationsVersion int64 = 2026111905
+	conversionReviewVersion     int64 = 2026111906
+	RequiredSchemaVersion       int64 = 2026111907
 )
 
 func autoMigrate(ctx context.Context, pool *pgxpool.Pool) error {
@@ -106,7 +113,42 @@ func autoMigrate(ctx context.Context, pool *pgxpool.Pool) error {
 			return fmt.Errorf("schema migration %d: %w", readerPerformanceVersion, err)
 		}
 	}
-	if _, err := tx.Exec(ctx, dbassets.ReaderQueueAndShelfSQL); err != nil {
+	if version < readerQueueVersion {
+		if _, err := tx.Exec(ctx, dbassets.ReaderQueueAndShelfSQL); err != nil {
+			return fmt.Errorf("schema migration %d: %w", readerQueueVersion, err)
+		}
+	}
+	if version < conversionSchemaVersion {
+		if _, err := tx.Exec(ctx, dbassets.ConversionReportingSQL); err != nil {
+			return fmt.Errorf("schema migration %d: %w", conversionSchemaVersion, err)
+		}
+	}
+	if version < readerConversionVersion {
+		if _, err := tx.Exec(ctx, dbassets.ReaderConversionSQL); err != nil {
+			return fmt.Errorf("schema migration %d: %w", readerConversionVersion, err)
+		}
+	}
+	if version < legacyConversionVersion {
+		if _, err := tx.Exec(ctx, dbassets.LegacyConversionSQL); err != nil {
+			return fmt.Errorf("schema migration %d: %w", legacyConversionVersion, err)
+		}
+	}
+	if version < conversionReconcileVersion {
+		if _, err := tx.Exec(ctx, dbassets.ConversionReconciliationSQL); err != nil {
+			return fmt.Errorf("schema migration %d: %w", conversionReconcileVersion, err)
+		}
+	}
+	if version < conversionOperationsVersion {
+		if _, err := tx.Exec(ctx, dbassets.ConversionOperationsSQL); err != nil {
+			return fmt.Errorf("schema migration %d: %w", conversionOperationsVersion, err)
+		}
+	}
+	if version < conversionReviewVersion {
+		if _, err := tx.Exec(ctx, dbassets.ConversionReviewSQL); err != nil {
+			return fmt.Errorf("schema migration %d: %w", conversionReviewVersion, err)
+		}
+	}
+	if _, err := tx.Exec(ctx, dbassets.SinanConversionSQL); err != nil {
 		return fmt.Errorf("schema migration %d: %w", RequiredSchemaVersion, err)
 	}
 	return tx.Commit(ctx)

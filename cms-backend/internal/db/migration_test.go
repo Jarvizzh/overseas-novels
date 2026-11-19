@@ -22,21 +22,28 @@ func migrationPool(t *testing.T) (*pgxpool.Pool, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	schema := "cms_test_" + uuid.NewString()[:8]
-	if _, err = admin.Exec(ctx, "CREATE SCHEMA "+schema); err != nil {
+	database := "cms_test_" + uuid.NewString()[:8]
+	if _, err = admin.Exec(ctx, "CREATE DATABASE "+database); err != nil {
+		admin.Close()
 		t.Fatal(err)
 	}
+	t.Cleanup(func() {
+		if _, err := admin.Exec(ctx, "DROP DATABASE "+database+" WITH (FORCE)"); err != nil {
+			t.Error(err)
+		}
+		admin.Close()
+	})
 	cfg, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg.ConnConfig.RuntimeParams["search_path"] = schema + ",public"
+	cfg.ConnConfig.Database = database
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { pool.Close(); _, _ = admin.Exec(ctx, "DROP SCHEMA "+schema+" CASCADE"); admin.Close() })
-	return pool, schema
+	t.Cleanup(pool.Close)
+	return pool, "public"
 }
 
 func TestMigrationAtomicityAndVersionGate(t *testing.T) {
@@ -153,5 +160,42 @@ func TestMigrationSkipsBaselineOnUpgradeAndConcurrentRestart(t *testing.T) {
 	var title string
 	if err := pool.QueryRow(restartCtx, "SELECT title FROM novels WHERE id=1").Scan(&title); err != nil || title != "Book" {
 		t.Fatalf("reader query blocked: %q %v", title, err)
+	}
+}
+
+func TestConversionMigrationUpgradesReaderQueueVersionAtomically(t *testing.T) {
+	pool, _ := migrationPool(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	for _, migration := range []string{
+		dbassets.SchemaSQL, dbassets.ChapterPublicationSQL, dbassets.ReaderPerformanceSQL, dbassets.ReaderQueueAndShelfSQL,
+	} {
+		if _, err := pool.Exec(ctx, migration); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	original := dbassets.ConversionReportingSQL
+	defer func() { dbassets.ConversionReportingSQL = original }()
+	dbassets.ConversionReportingSQL += "\nSELECT 1/0;"
+	if err := autoMigrate(ctx, pool); err == nil {
+		t.Fatal("conversion migration failure ignored")
+	}
+	var version int64
+	var conversionTable *string
+	err := pool.QueryRow(ctx, "SELECT max(version), to_regclass('conversion.events')::text FROM reader_schema_migrations").
+		Scan(&version, &conversionTable)
+	if err != nil || version != readerQueueVersion || conversionTable != nil {
+		t.Fatalf("failed upgrade changed schema: version=%d, conversion=%v, err=%v", version, conversionTable, err)
+	}
+
+	dbassets.ConversionReportingSQL = original
+	if err := autoMigrate(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	err = pool.QueryRow(ctx, "SELECT max(version), to_regclass('conversion.events')::text FROM reader_schema_migrations").
+		Scan(&version, &conversionTable)
+	if err != nil || version != RequiredSchemaVersion || conversionTable == nil {
+		t.Fatalf("upgrade did not install schema: version=%d, conversion=%v, err=%v", version, conversionTable, err)
 	}
 }

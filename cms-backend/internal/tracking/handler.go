@@ -29,7 +29,7 @@ func (h *Handler) ListLogs(c *gin.Context) {
 
 	logs, total, err := h.srv.GetLogs(c.Request.Context(), page, pageSize, pixelID, eventName, statusCode)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "历史回传日志暂不可用"})
 		return
 	}
 

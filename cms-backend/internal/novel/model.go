@@ -57,11 +57,10 @@ type PromotionLink struct {
 }
 
 type FBPixel struct {
-	ID          int       `json:"id"`
-	Name        string    `json:"name"`
-	PixelID     string    `json:"pixel_id"`
-	AccessToken string    `json:"access_token"`
-	CreatedAt   time.Time `json:"created_at"`
+	ID        int       `json:"id"`
+	Name      string    `json:"name"`
+	PixelID   string    `json:"pixel_id"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 type SystemConfig struct {

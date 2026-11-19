@@ -3,11 +3,14 @@ package testdb
 
 import (
 	"context"
+	"os"
+	"strings"
+	"testing"
+
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"os"
+
 	"reader-backend/internal/db"
-	"testing"
 )
 
 func Open(t *testing.T) *pgxpool.Pool {
@@ -38,7 +41,7 @@ func Open(t *testing.T) *pgxpool.Pool {
 	t.Cleanup(func() {
 		db.DB = nil
 		pool.Close()
-		_, _ = admin.Exec(ctx, "DROP SCHEMA "+schema+" CASCADE")
+		_, _ = admin.Exec(ctx, "DROP SCHEMA IF EXISTS "+schema+"_conversion, "+schema+" CASCADE")
 		admin.Close()
 	})
 	sql, err := os.ReadFile("../../../cms-backend/db/schema.sql")
@@ -48,20 +51,27 @@ func Open(t *testing.T) *pgxpool.Pool {
 	if _, err = pool.Exec(ctx, string(sql)); err != nil {
 		t.Fatal(err)
 	}
-	applyMigrations(t, pool)
+	applyMigrations(t, pool, schema)
 
 	db.DB = pool
 	return pool
 }
 
-func applyMigrations(t *testing.T, pool *pgxpool.Pool) {
+func applyMigrations(t *testing.T, pool *pgxpool.Pool, schema string) {
 	t.Helper()
-	for _, version := range []string{"2026111702", "2026111703", "2026111704"} {
+	for _, version := range []string{"2026111702", "2026111703", "2026111704", "2026111901", "2026111902", "2026111903", "2026111904", "2026111905", "2026111906", "2026111907"} {
 		sql, err := os.ReadFile("../../../cms-backend/db/migrations/" + version + ".sql")
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := pool.Exec(context.Background(), string(sql)); err != nil {
+		migration := string(sql)
+		if version >= "2026111901" {
+			// Preserve schema isolation for tests that share a database.
+			migration = strings.NewReplacer("CREATE SCHEMA conversion;", "CREATE SCHEMA "+schema+"_conversion;", "conversion.", schema+"_conversion.", "public.admins", schema+".admins", "public.recharge_orders", schema+".recharge_orders", "public.payment_event_outbox", schema+".payment_event_outbox",
+				"public.promotion_links", schema+".promotion_links", "public.fb_pixels", schema+".fb_pixels",
+				"pg_catalog, public, pg_temp", "pg_catalog, "+schema+", pg_temp").Replace(migration)
+		}
+		if _, err := pool.Exec(context.Background(), migration); err != nil {
 			t.Fatal(err)
 		}
 	}

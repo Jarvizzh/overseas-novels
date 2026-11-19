@@ -73,9 +73,6 @@ func (h *Handler) RegisterRoutes(rg *gin.RouterGroup) {
 	pixels := rg.Group("/fb-pixels", auth.AuthMiddleware())
 	{
 		pixels.GET("", h.ListFBPixels)
-		pixels.POST("", promoWriteRoles, h.CreateFBPixel)
-		pixels.PUT("/:id", promoWriteRoles, h.UpdateFBPixel)
-		pixels.DELETE("/:id", promoWriteRoles, h.DeleteFBPixel)
 	}
 }
 
@@ -1074,81 +1071,4 @@ func (h *Handler) ListFBPixels(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, pixels)
-}
-
-type CreateFBPixelRequest struct {
-	Name        string `json:"name" binding:"required"`
-	PixelID     string `json:"pixel_id" binding:"required"`
-	AccessToken string `json:"access_token" binding:"required"`
-}
-
-func (h *Handler) CreateFBPixel(c *gin.Context) {
-	var req CreateFBPixelRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	ctx := c.Request.Context()
-	pixel := &FBPixel{
-		Name:        req.Name,
-		PixelID:     req.PixelID,
-		AccessToken: req.AccessToken,
-	}
-
-	created, err := h.service.CreateFBPixel(ctx, pixel)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-
-	c.JSON(http.StatusOK, created)
-}
-
-type UpdateFBPixelRequest struct {
-	Name        string `json:"name" binding:"required"`
-	PixelID     string `json:"pixel_id" binding:"required"`
-	AccessToken string `json:"access_token" binding:"required"`
-}
-
-func (h *Handler) UpdateFBPixel(c *gin.Context) {
-	idStr := c.Param("id")
-	id, err := strconv.Atoi(idStr)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid ID"})
-		return
-	}
-
-	var req UpdateFBPixelRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	ctx := c.Request.Context()
-	err = h.service.UpdateFBPixel(ctx, id, req.Name, req.PixelID, req.AccessToken)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{"message": "Pixel updated successfully"})
-}
-
-func (h *Handler) DeleteFBPixel(c *gin.Context) {
-	idStr := c.Param("id")
-	id, err := strconv.Atoi(idStr)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid ID"})
-		return
-	}
-
-	ctx := c.Request.Context()
-	err = h.service.DeleteFBPixel(ctx, id)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{"message": "Pixel deleted successfully"})
 }

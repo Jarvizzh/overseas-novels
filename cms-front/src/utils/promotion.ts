@@ -12,7 +12,7 @@ export function getCurrentAdminRole(): string {
   }
 }
 
-/** Match backend promoWriteRoles middleware on promotion links and FB pixels. */
+/** Match backend promoWriteRoles middleware on promotion links. */
 export function canWritePromotions(role = getCurrentAdminRole()): boolean {
   return (PROMO_WRITE_ROLES as readonly string[]).includes(role);
 }

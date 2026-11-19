@@ -2,17 +2,13 @@ package wallet
 
 import (
 	"context"
-	"encoding/json"
-	"io"
-	"net/http"
-	"strings"
 	"testing"
 	"time"
 
+	"reader-backend/internal/conversion"
 	"reader-backend/internal/model"
 	"reader-backend/internal/payment"
 	"reader-backend/internal/testdb"
-	"reader-backend/internal/tracking"
 )
 
 func TestTransactionalPaymentOutbox(t *testing.T) {
@@ -26,66 +22,45 @@ func TestTransactionalPaymentOutbox(t *testing.T) {
 	}
 	exec(`INSERT INTO users(id) VALUES(1);INSERT INTO fb_pixels(id,name,pixel_id,access_token) VALUES(1,'Test','pixel-test','test-secret');
  INSERT INTO recharge_orders(id,user_id,amount_cents,payment_method,status,fb_lead_metadata) VALUES(100,1,999,'paypal','Pending','{"pixel_id":"pixel-test","fbc":"original-click","source_url":"https://example.invalid"}')`)
-	tx, err := p.Begin(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := tx.Exec(ctx, `UPDATE recharge_orders SET status='Success',paid_at=now(),fulfilled_at=now(),payment_events_enabled=true WHERE id=100`); err != nil {
-		t.Fatal(err)
-	}
-	if err := tx.Rollback(ctx); err != nil {
-		t.Fatal(err)
-	}
-	var count int
-	if err := p.QueryRow(ctx, `SELECT count(*) FROM payment_event_outbox`).Scan(&count); err != nil || count != 0 {
-		t.Fatalf("rolled back event persisted: %d %v", count, err)
-	}
-	exec(`UPDATE recharge_orders SET status='Success',paid_at=now(),fulfilled_at=now(),payment_events_enabled=true WHERE id=100`)
-	exec(`UPDATE recharge_orders SET fb_lead_metadata='{"pixel_id":"different","fbc":"changed"}' WHERE id=100`)
-	if err := p.QueryRow(ctx, `SELECT count(*) FROM payment_event_outbox`).Scan(&count); err != nil || count != 1 {
-		t.Fatalf("duplicate event: %d %v", count, err)
-	}
-	original := http.DefaultTransport
-	defer func() { http.DefaultTransport = original }()
-	var first tracking.FacebookEvent
-	requests := 0
-	http.DefaultTransport = reviewTransport(func(req *http.Request) (*http.Response, error) {
-		if req.URL.Host != "graph.facebook.com" {
-			t.Fatalf("unexpected external request: %s", req.URL.Host)
-		}
-		var body tracking.FacebookCAPIRequest
-		if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+	captureTime := time.Date(2026, 11, 19, 3, 4, 5, 0, time.UTC)
+	for _, commit := range []bool{false, true} {
+		tx, err := p.Begin(ctx)
+		if err != nil {
 			t.Fatal(err)
 		}
-		if len(body.Data) != 1 || body.Data[0].UserData.Fbc != "original-click" {
-			t.Fatal("lost immutable attribution")
+		if _, err := tx.Exec(ctx, `UPDATE recharge_orders SET status='Success',paid_at=now(),fulfilled_at=now() WHERE id=100`); err != nil {
+			_ = tx.Rollback(ctx)
+			t.Fatal(err)
 		}
-		requests++
-		if requests == 1 {
-			first = body.Data[0]
-		} else if body.Data[0].EventID != first.EventID || body.Data[0].EventTime != first.EventTime {
-			t.Fatal("retry changed event identity")
+		if err := conversion.RecordPaymentTx(ctx, tx, 100, captureTime, "paypal_capture_create_time", false, false); err != nil {
+			_ = tx.Rollback(ctx)
+			t.Fatal(err)
 		}
-		status, payload := 503, `{}`
-		if requests > 1 {
-			status, payload = 200, `{"events_received":1}`
+		if !commit {
+			if err := tx.Rollback(ctx); err != nil {
+				t.Fatal(err)
+			}
+			var count int
+			if err := p.QueryRow(ctx, `SELECT count(*) FROM reader_conversion_outbox`).Scan(&count); err != nil || count != 0 {
+				t.Fatalf("rolled back event persisted: %d %v", count, err)
+			}
+			continue
 		}
-		return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(payload)), Header: make(http.Header)}, nil
-	})
-	svc := &service{}
-	svc.reconcilePaymentEvents(ctx)
-	var delivered bool
-	if err := p.QueryRow(ctx, `SELECT delivered_at IS NOT NULL FROM payment_event_outbox`).Scan(&delivered); err != nil || delivered {
-		t.Fatal("failed delivery acknowledged", err)
+		if err := tx.Commit(ctx); err != nil {
+			t.Fatal(err)
+		}
 	}
-	exec(`UPDATE payment_event_outbox SET next_attempt_at=now()`)
-	svc.reconcilePaymentEvents(ctx)
-	if err := p.QueryRow(ctx, `SELECT delivered_at IS NOT NULL FROM payment_event_outbox`).Scan(&delivered); err != nil || !delivered || requests != 2 {
-		t.Fatal("retry failed", err)
+	exec(`UPDATE recharge_orders SET fb_lead_metadata='{"pixel_id":"different","fbc":"changed"}' WHERE id=100`)
+	exec(`SELECT record_reader_payment_conversion(100,now(),'replayed','production',false,false)`)
+	var key, pixel string
+	var occurredAt time.Time
+	if err := p.QueryRow(ctx, `SELECT business_key,snapshot->'attribution'->>'pixel_id',occurred_at FROM reader_conversion_outbox`).
+		Scan(&key, &pixel, &occurredAt); err != nil || key != "payment:100:Purchase" || pixel != "pixel-test" || !occurredAt.Equal(captureTime) {
+		t.Fatalf("event snapshot = %s %s %v, %v", key, pixel, occurredAt, err)
 	}
-	svc.reconcilePaymentEvents(ctx)
-	if requests != 2 {
-		t.Fatal("delivered event reclaimed")
+	var count int
+	if err := p.QueryRow(ctx, `SELECT count(*) FROM reader_conversion_outbox`).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("duplicate event: %d %v", count, err)
 	}
 }
 
@@ -116,9 +91,23 @@ func TestSubscriptionKeepsCheckoutAttribution(t *testing.T) {
 		t.Fatal(err)
 	}
 	at := time.Now().UTC()
-	if _, err := r.RecordSubscriptionRenewalOrderTx(ctx, sub, "snapshot-sale", 999, "USD", at, at.AddDate(0, 1, 0), "ACTIVE", &model.ThirdPartyPaymentOrder{Status: "COMPLETED", RawPayload: "{}"}); err != nil {
+	if err := r.finishSubscriptionIntent(ctx, intent, &payment.SubscriptionResult{SubscriptionID: "I-SNAPSHOT", ApproveURL: "https://example.invalid/approve"}); err != nil {
 		t.Fatal(err)
 	}
+	results := make(chan error, 2)
+	for _, ref := range []string{"snapshot-sale", "snapshot-renewal"} {
+		go func() {
+			_, err := r.RecordSubscriptionRenewalOrderTx(ctx, sub, ref, 999, "USD", at, at.AddDate(0, 1, 0), "ACTIVE",
+				&model.ThirdPartyPaymentOrder{Status: "COMPLETED", RawPayload: "{}"})
+			results <- err
+		}()
+	}
+	for range 2 {
+		if err := <-results; err != nil {
+			t.Fatal(err)
+		}
+	}
+
 	var click, pixel, campaign string
 	if err := p.QueryRow(ctx, `SELECT fb_lead_metadata->>'fbc',fb_lead_metadata->>'pixel_id',utm_campaign FROM recharge_orders WHERE external_ref_id='snapshot-sale'`).Scan(&click, &pixel, &campaign); err != nil {
 		t.Fatal(err)
@@ -126,10 +115,20 @@ func TestSubscriptionKeepsCheckoutAttribution(t *testing.T) {
 	if click != "original-click" || pixel != "original-pixel" || campaign != "original-campaign" {
 		t.Fatalf("snapshot changed: %s %s %s", click, pixel, campaign)
 	}
-	var count int
-	if err := p.QueryRow(ctx, `SELECT count(*) FROM payment_event_outbox`).Scan(&count); err != nil || count != 2 {
-		t.Fatalf("purchase and subscribe: %d %v", count, err)
+	var purchases, subscribes, checkouts int
+	var owner int64
+	if err := p.QueryRow(ctx, `SELECT count(*) FILTER (WHERE event_name='Purchase'), count(*) FILTER (WHERE event_name='Subscribe'),
+		count(*) FILTER (WHERE event_name='InitiateCheckout'), max(order_id) FILTER (WHERE event_name='Subscribe')
+		FROM reader_conversion_outbox`).Scan(&purchases, &subscribes, &checkouts, &owner); err != nil ||
+		purchases != 2 || subscribes != 1 || checkouts != 1 {
+		t.Fatalf("checkout/purchase/subscribe counts=%d/%d/%d, err=%v", checkouts, purchases, subscribes, err)
 	}
+	var claimedOrder int64
+	if err := p.QueryRow(ctx, `SELECT capi_subscribe_order_id FROM user_subscriptions
+		WHERE subscription_id='I-SNAPSHOT' AND capi_subscribe_state='claimed'`).Scan(&claimedOrder); err != nil || claimedOrder != owner {
+		t.Fatalf("subscribe owner=%d, want %d, err=%v", claimedOrder, owner, err)
+	}
+
 }
 
 func TestProviderPlansRequireBoundIdentity(t *testing.T) {
@@ -163,46 +162,14 @@ func TestRefundBeforeFulfillmentLeavesNoPaymentEvent(t *testing.T) {
 	if _, err := tx.Exec(ctx, `INSERT INTO users(id) VALUES(1);INSERT INTO recharge_orders(id,user_id,amount_cents,payment_method,status,fulfilled_at,paid_at,payment_events_enabled) VALUES(100,1,999,'paypal','Success',now(),now(),true);UPDATE recharge_orders SET status='Refunded',fulfilled_at=NULL WHERE id=100`); err != nil {
 		t.Fatal(err)
 	}
+	if err := conversion.RecordPaymentTx(ctx, tx, 100, time.Time{}, "missing", false, false); err != nil {
+		t.Fatal(err)
+	}
 	if err := tx.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
 	var count int
-	if err := p.QueryRow(ctx, `SELECT count(*) FROM payment_event_outbox`).Scan(&count); err != nil || count != 0 {
+	if err := p.QueryRow(ctx, `SELECT count(*) FROM reader_conversion_outbox WHERE event_name IN ('Purchase','Subscribe')`).Scan(&count); err != nil || count != 0 {
 		t.Fatalf("unfulfilled refund emitted payment: %d %v", count, err)
-	}
-}
-
-func TestOutboxLeaseFencesCrashedWorkers(t *testing.T) {
-	p := testdb.Open(t)
-	ctx := context.Background()
-	if _, err := p.Exec(ctx, `INSERT INTO users(id) VALUES(1);INSERT INTO recharge_orders(id,user_id,amount_cents,payment_method,status,fulfilled_at,paid_at,fb_lead_metadata,payment_events_enabled) VALUES(100,1,999,'paypal','Success',now(),now(),'{"pixel_id":"test"}',true)`); err != nil {
-		t.Fatal(err)
-	}
-	first, err := claimPaymentEvents(ctx)
-	if err != nil || len(first) != 1 {
-		t.Fatal("first claim", err)
-	}
-	if next, err := claimPaymentEvents(ctx); err != nil || len(next) != 0 {
-		t.Fatal("live lease claimed twice", err)
-	}
-	if _, err := p.Exec(ctx, `UPDATE payment_event_outbox SET lease_until=now()-interval '1 second'`); err != nil {
-		t.Fatal(err)
-	}
-	second, err := claimPaymentEvents(ctx)
-	if err != nil || len(second) != 1 || first[0].lease == second[0].lease {
-		t.Fatal("crashed lease not recovered", err)
-	}
-	if err := finishPaymentEvent(ctx, first[0], nil); err != nil {
-		t.Fatal(err)
-	}
-	var delivered bool
-	if err := p.QueryRow(ctx, `SELECT delivered_at IS NOT NULL FROM payment_event_outbox`).Scan(&delivered); err != nil || delivered {
-		t.Fatal("stale worker acknowledged current lease", err)
-	}
-	if err := finishPaymentEvent(ctx, second[0], nil); err != nil {
-		t.Fatal(err)
-	}
-	if err := p.QueryRow(ctx, `SELECT delivered_at IS NOT NULL FROM payment_event_outbox`).Scan(&delivered); err != nil || !delivered {
-		t.Fatal("current worker could not acknowledge", err)
 	}
 }

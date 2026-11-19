@@ -119,7 +119,7 @@ func TestPaymentMetricsTrackUnattributedExactlyAndCollectOnce(t *testing.T) {
 			t.Fatal(err)
 		}
 		for _, item := range status {
-			if item.Kind == "unattributed" {
+			if item.Kind == "legacy_unattributed" {
 				var date string
 				if item.OldestAt != nil {
 					date = item.OldestAt.UTC().Format(time.DateOnly)

@@ -176,6 +176,36 @@ flowchart TD
    WHERE subscription_id IS NULL AND submitted_at < now()-interval '24 hours';
    ```
 
+#### 统一转化回传切换（schema 2026111907）
+
+本次发布同时更新 Reader、CMS、转化 Worker、私网 API 和独立 Collector。测试与生产使用独立数据库及 Pixel。私网 API 只接受 CMS 网络内的调用。
+
+1. 在维护窗口备份数据库，记录版本账本、旧队列各状态数量和已确认的 Meta 事件 ID。暂停旧业务写入和旧 CAPI 消费，等待旧在途请求及租约结束。使用本次 CMS 镜像和迁移所有者连接运行 `-migrate`，升级至 `2026111907`。
+2. 使用同一迁移所有者单独执行 `cms-backend/db/conversion_query_indexes.sql`。脚本必须保持自动提交。核对新增索引的 `pg_index.indisvalid`，并在接近生产规模的副本上检查执行时间和查询计划。
+3. 为 Reader、CMS、Worker、API、Collector、保留期命令准备独立的 PostgreSQL 登录角色，由部署平台管理凭据。Reader、CMS 保有已授权的业务表权限，运行角色使用非表所有者账号且不继承其他运行模式账号。按下例赋予转化相关权限。
+
+   ```bash
+   psql -X -f cms-backend/db/conversion_role_grants.sql \
+     -v reader_role=sn_reader -v cms_role=sn_cms -v worker_role=sn_conversion_worker \
+     -v api_role=sn_conversion_api -v collector_role=sn_conversion_collector \
+     -v retention_role=sn_conversion_retention
+   ```
+
+4. 使用单独的维护期导入账号运行[历史队列接管](conversion-backend/README.md#历史队列接管)。该账号需要读取旧 Pixel 凭据并写入历史导入账本。导入完成后将其从服务运行环境移除。补齐旧投递的环境证据后可用 `review-legacy-environment` 审计复核。确认切换完成后再清理旧明文凭据。
+5. 构建转化镜像，三个运行模式分别使用各自的 PostgreSQL 连接串，设置相同的 `CONVERSION_ENVIRONMENT`。初次启动先关闭 Meta 发送。私网 API 设置 `CONVERSION_PRIVATE_ADDR=:8092`。CMS 配置同一个 `CONVERSION_PRIVATE_TOKEN` 和 `CONVERSION_PRIVATE_URL=http://conversion-api:8092`（同一私网容器网络）。API 通过 `CONVERSION_CREDENTIAL_KEY_VERSION` 选择凭据写入密钥版本，Worker 持有读取现用及轮换期凭据的密钥版本。Worker 设置本次验收的 `META_GRAPH_VERSION`。
+
+   ```bash
+   docker build -t star-conversion:release conversion-backend
+   docker run -d --restart unless-stopped --name conversion-api --network "$STAR_NOVEL_PRIVATE_NETWORK" --env-file conversion-api.env star-conversion:release --mode=api
+   docker run -d --restart unless-stopped --name conversion-worker --network "$STAR_NOVEL_PRIVATE_NETWORK" --env-file conversion-worker.env star-conversion:release --mode=worker
+   docker run -d --restart unless-stopped --name conversion-collector --network "$STAR_NOVEL_PRIVATE_NETWORK" --env-file conversion-collector.env star-conversion:release --mode=collector
+   ```
+
+6. 启动新版 Reader、CMS 和 H5，先恢复有限测试流量。以测试环境的一笔订单核对业务事务入队、CMS 逐单资格和各 Pixel 任务。启用测试 Pixel 后核对原目标的结构化接收结果和汇总。保持 Collector 运行，停止 Worker 并用测试积压验证心跳告警。恢复 Worker 后验证告警解除，在 Collector 日志核对 `opened` 与 `resolved`，再按架构文档放量。
+7. PayPal 对账继续使用 `payment-ops`。转化重排、旧环境复核、缺行补建和保留期清理使用[转化运维命令](conversion-backend/README.md#运行与运维)。迁移失败时先核对账本和结构。迁移提交后先暂停故障链路，再用匹配当前 schema 的版本修复或前滚。回退旧代码前须核对切换后的新增业务、未发任务和已接收证据。
+
+8. 司南阶段 C 使用独立测试库、测试凭据与模拟端点。按[模拟联调步骤](conversion-backend/README.md#司南阶段-c-模拟联调)核对三个回调、原 Pixel 最终回告和租约恢复，再按架构文档 §7.2 开展正式联调。
+
 ### 3.2 自建 Redis 生产配置
 修改 Redis 所在机器的 `/etc/redis/redis.conf`：
 ```ini
@@ -524,7 +554,7 @@ server {
 | **2. 负载均衡与健康探测** | 手动停止其中一台 `reader-backend` 节点 | 刷新读者端页面无任何报错，网关自动将请求无缝转发到存活节点 |
 | **3. 行锁扣费与章节解锁** | 连续快速点击“解锁付费章节” | 数据库 `wallets` 余额正常扣减，无负余额，无并发双扣，流水记录完整 |
 | **4. 每日签到防刷** | 模拟并发请求 `/wallet/checkin` 接口 | 首次签到成功，后续并发请求被 Redis 分布式锁与偏唯一索引拦截并提示已签到 |
-| **5. 广告 CAPI 归因** | 查看 `facebook_capi_logs` 数据库表 | 成功记录回传事件，`payload` 中的 `client_ip_address` 为真实用户 IP 而非 127.0.0.1 |
+| **5. 广告 CAPI 归因** | CMS 回传日志按测试订单查询，并检查独立 Collector | 原 Pixel 显示已确认接收，失败条件触发相应告警，查询结果为脱敏字段 |
 | **6. CMS 管理端操作** | 登录 `https://admin.star-novel.com` (`admin` / `admin123`) | 仪表盘加载正常，小说章节拆分导入、6卡位充值模板修改即时生效 |
 
 ---

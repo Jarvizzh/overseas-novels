@@ -54,9 +54,6 @@ type NovelRepository interface {
 	DeletePromotionLink(ctx context.Context, id int) error
 
 	ListFBPixels(ctx context.Context) ([]FBPixel, error)
-	CreateFBPixel(ctx context.Context, pixel *FBPixel) (int, error)
-	UpdateFBPixel(ctx context.Context, id int, name, pixelID, token string) error
-	DeleteFBPixel(ctx context.Context, id int) error
 }
 
 type dbNovelRepository struct{}
@@ -456,7 +453,12 @@ func (r *dbNovelRepository) ListPromotionLinks(ctx context.Context) ([]Promotion
 func (r *dbNovelRepository) CreatePromotionLink(ctx context.Context, link *PromotionLink) (int, error) {
 	query := `
 		INSERT INTO promotion_links (name, novel_id, novel_title, chapter_index, utm_source, utm_campaign, generated_url, fb_pixel_id, recharge_template_id, domain_id, domain, coin_cost_per_thousand, start_pay_chapter_index)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+		SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13
+		WHERE $8::int IS NULL OR EXISTS (
+			SELECT 1 FROM conversion.destinations x JOIN conversion.integration_destinations b ON b.destination_id=x.id
+			JOIN conversion.integrations i ON i.id=b.integration_id
+			WHERE x.legacy_fb_pixel_id=$8 AND x.enabled AND x.retired_at IS NULL
+			  AND i.source='starnovel' AND i.account_key='reader')
 		RETURNING id, created_at`
 	var id int
 	err := db.DB.QueryRow(ctx, query, link.Name, link.NovelID, link.NovelTitle, link.ChapterIndex, link.UtmSource, link.UtmCampaign, link.GeneratedURL, link.FBPixelID, link.RechargeTemplateID, link.DomainID, link.Domain, link.CoinCostPerThousand, link.StartPayChapterIndex).Scan(&id, &link.CreatedAt)
@@ -472,8 +474,15 @@ func (r *dbNovelRepository) UpdatePromotionLink(ctx context.Context, id int, nam
 	query := `
 		UPDATE promotion_links
 		SET name = $1, chapter_index = $2, utm_source = $3, utm_campaign = $4, generated_url = $5, fb_pixel_id = $6, recharge_template_id = $7, domain_id = $8, domain = $9, coin_cost_per_thousand = $10, start_pay_chapter_index = $11
-		WHERE id = $12`
-	_, err := db.DB.Exec(ctx, query, name, chapterIndex, source, campaign, url, pixelID, templateID, domainID, domain, coinCost, startPayIndex, id)
+		WHERE id = $12 AND (fb_pixel_id IS NOT DISTINCT FROM $6 OR $6::int IS NULL OR EXISTS (
+			SELECT 1 FROM conversion.destinations x JOIN conversion.integration_destinations b ON b.destination_id=x.id
+			JOIN conversion.integrations i ON i.id=b.integration_id
+			WHERE x.legacy_fb_pixel_id=$6 AND x.enabled AND x.retired_at IS NULL
+			  AND i.source='starnovel' AND i.account_key='reader'))`
+	tag, err := db.DB.Exec(ctx, query, name, chapterIndex, source, campaign, url, pixelID, templateID, domainID, domain, coinCost, startPayIndex, id)
+	if err == nil && tag.RowsAffected() != 1 {
+		return pgx.ErrNoRows
+	}
 	return err
 }
 
@@ -483,7 +492,11 @@ func (r *dbNovelRepository) DeletePromotionLink(ctx context.Context, id int) err
 }
 
 func (r *dbNovelRepository) ListFBPixels(ctx context.Context) ([]FBPixel, error) {
-	query := `SELECT id, name, pixel_id, access_token, created_at FROM fb_pixels ORDER BY created_at DESC`
+	query := `SELECT p.id,x.display_name,p.pixel_id,p.created_at FROM fb_pixels p
+			JOIN conversion.destinations x ON x.legacy_fb_pixel_id=p.id
+			JOIN conversion.integration_destinations b ON b.destination_id=x.id
+			JOIN conversion.integrations i ON i.id=b.integration_id AND i.source='starnovel' AND i.account_key='reader'
+			WHERE x.enabled AND x.retired_at IS NULL ORDER BY p.created_at DESC`
 	rows, err := db.DB.Query(ctx, query)
 	if err != nil {
 		return nil, err
@@ -493,7 +506,7 @@ func (r *dbNovelRepository) ListFBPixels(ctx context.Context) ([]FBPixel, error)
 	var pixels []FBPixel
 	for rows.Next() {
 		var pixel FBPixel
-		err = rows.Scan(&pixel.ID, &pixel.Name, &pixel.PixelID, &pixel.AccessToken, &pixel.CreatedAt)
+		err = rows.Scan(&pixel.ID, &pixel.Name, &pixel.PixelID, &pixel.CreatedAt)
 		if err != nil {
 			return nil, err
 		}
@@ -503,28 +516,4 @@ func (r *dbNovelRepository) ListFBPixels(ctx context.Context) ([]FBPixel, error)
 		return nil, err
 	}
 	return pixels, nil
-}
-
-func (r *dbNovelRepository) CreateFBPixel(ctx context.Context, pixel *FBPixel) (int, error) {
-	query := `
-		INSERT INTO fb_pixels (name, pixel_id, access_token)
-		VALUES ($1, $2, $3)
-		RETURNING id, created_at`
-	var id int
-	err := db.DB.QueryRow(ctx, query, pixel.Name, pixel.PixelID, pixel.AccessToken).Scan(&id, &pixel.CreatedAt)
-	return id, err
-}
-
-func (r *dbNovelRepository) UpdateFBPixel(ctx context.Context, id int, name, pixelID, token string) error {
-	query := `
-		UPDATE fb_pixels
-		SET name = $1, pixel_id = $2, access_token = $3
-		WHERE id = $4`
-	_, err := db.DB.Exec(ctx, query, name, pixelID, token, id)
-	return err
-}
-
-func (r *dbNovelRepository) DeleteFBPixel(ctx context.Context, id int) error {
-	_, err := db.DB.Exec(ctx, "DELETE FROM fb_pixels WHERE id = $1", id)
-	return err
 }

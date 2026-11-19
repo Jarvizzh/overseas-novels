@@ -172,20 +172,21 @@ func (p *PayPalClient) getAccessToken(ctx context.Context) (string, error) {
 }
 
 type PayPalCaptureResult struct {
-	OrderID                string `json:"order_id"`
-	CaptureID              string `json:"capture_id"`
-	CustomID               string `json:"custom_id"`
-	CurrencyCode           string `json:"currency_code"`
-	GrossAmount            string `json:"gross_amount"`
-	FeeAmount              string `json:"fee_amount"`
-	NetAmount              string `json:"net_amount"`
-	PayerID                string `json:"payer_id"`
-	PayerEmail             string `json:"payer_email"`
-	PayerName              string `json:"payer_name"`
-	PayerCountry           string `json:"payer_country"`
-	Status                 string `json:"status"`
-	SellerProtectionStatus string `json:"seller_protection_status"`
-	RawPayload             string `json:"raw_payload"`
+	OccurredAt             time.Time `json:"-"`
+	OrderID                string    `json:"order_id"`
+	CaptureID              string    `json:"capture_id"`
+	CustomID               string    `json:"custom_id"`
+	CurrencyCode           string    `json:"currency_code"`
+	GrossAmount            string    `json:"gross_amount"`
+	FeeAmount              string    `json:"fee_amount"`
+	NetAmount              string    `json:"net_amount"`
+	PayerID                string    `json:"payer_id"`
+	PayerEmail             string    `json:"payer_email"`
+	PayerName              string    `json:"payer_name"`
+	PayerCountry           string    `json:"payer_country"`
+	Status                 string    `json:"status"`
+	SellerProtectionStatus string    `json:"seller_protection_status"`
+	RawPayload             string    `json:"raw_payload"`
 }
 
 type CaptureResponse struct {
@@ -490,7 +491,9 @@ func (p *PayPalClient) readCapture(ctx context.Context, orderID string, captureO
 				net = capture.Amount.Value
 			}
 
+			occurredAt, _ := time.Parse(time.RFC3339, capture.CreateTime)
 			return &PayPalCaptureResult{
+				OccurredAt:             occurredAt,
 				OrderID:                orderID,
 				CaptureID:              capture.ID,
 				CustomID:               customID,

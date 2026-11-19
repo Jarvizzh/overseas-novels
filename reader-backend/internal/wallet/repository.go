@@ -2,13 +2,13 @@ package wallet
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"math"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"reader-backend/internal/conversion"
 	"reader-backend/internal/db"
 	"reader-backend/internal/model"
 	"reader-backend/internal/novel"
@@ -32,7 +32,6 @@ type Repository interface {
 	UnlockChapterTx(ctx context.Context, userID int64, novelID int64, chapterIndex, promoID int, quote ChapterQuote) error
 	AddCoins(ctx context.Context, userID int64, amount int, isBonus bool, bizType string, description string) error
 	CheckIn(context.Context, int64, bool) (*CheckInState, error)
-	GetUserEmail(ctx context.Context, userID int64) (string, error)
 	GetRechargeTemplateByID(ctx context.Context, templateID int) (*model.RechargeTemplate, error)
 	GetDefaultRechargeTemplate(ctx context.Context) (*model.RechargeTemplate, error)
 	GetFirstRechargeTemplate(ctx context.Context) (*model.RechargeTemplate, error)
@@ -274,19 +273,6 @@ func (r *dbRepository) AddCoins(ctx context.Context, userID int64, amount int, i
 	}
 
 	return tx.Commit(ctx)
-}
-
-func (r *dbRepository) GetUserEmail(ctx context.Context, userID int64) (string, error) {
-	var email sql.NullString
-	query := "SELECT email FROM users WHERE id = $1"
-	err := db.Pool(ctx).QueryRow(ctx, query, userID).Scan(&email)
-	if err != nil {
-		if err == pgx.ErrNoRows {
-			return "", nil
-		}
-		return "", err
-	}
-	return email.String, nil
 }
 
 func (r *dbRepository) GetRechargeTemplateByID(ctx context.Context, templateID int) (*model.RechargeTemplate, error) {
@@ -553,11 +539,11 @@ func (r *dbRepository) RecordSubscriptionRenewalOrderTx(
 	err = tx.QueryRow(ctx, `INSERT INTO recharge_orders
 		(user_id, external_ref_id, amount_cents,currency,coins,bonus_coins_credited,payment_method,status,
 		paid_at, order_type, subscription_id, recharge_slot_id, recharge_template_id, fulfilled_at, paid_period_start, paid_period_end,
-		utm_source, utm_campaign, promotion_link_id, novel_id, reconciliation_note, paypal_refund_reported,fb_lead_metadata,payment_events_enabled)
+		utm_source, utm_campaign, promotion_link_id, novel_id, reconciliation_note, paypal_refund_reported,fb_lead_metadata)
 		SELECT u.id,$2,$3,$4,0,0,$5,'Success',$6,'subscription',$7::text,$8,
 			(SELECT id FROM recharge_templates WHERE id=$9),CASE WHEN $10::timestamptz IS NOT NULL THEN now() END,CASE WHEN $10::timestamptz IS NOT NULL THEN $6::timestamptz END,$10,COALESCE((SELECT attribution->>'utm_source' FROM user_subscriptions WHERE subscription_id=$7::text),u.utm_source),COALESCE((SELECT attribution->>'utm_campaign' FROM user_subscriptions WHERE subscription_id=$7::text),u.utm_campaign),p.id,p.novel_id,
  CASE WHEN $11 THEN 'PayPal reports refunded sale; match refund ID'
- WHEN $10::timestamptz IS NULL THEN 'PayPal settled amount verified; billing period needs review' END,$11,(SELECT attribution FROM user_subscriptions WHERE subscription_id=$7::text) || jsonb_build_object('payer_email',$12::text),true
+ WHEN $10::timestamptz IS NULL THEN 'PayPal settled amount verified; billing period needs review' END,$11,(SELECT attribution FROM user_subscriptions WHERE subscription_id=$7::text) || jsonb_build_object('payer_email',$12::text)
 		FROM users u LEFT JOIN LATERAL (
 			SELECT id,novel_id FROM reader_promotion_for_user(u.id)
 		) p ON TRUE WHERE u.id=$1
@@ -603,11 +589,15 @@ func (r *dbRepository) RecordSubscriptionRenewalOrderTx(
 		return false, err
 	}
 	if refunded {
+		if err := conversion.RecordPaymentTx(ctx, tx, orderID, paidAt, "paypal_subscription_ledger", false, false); err != nil {
+			return false, err
+		}
 		return false, tx.Commit(ctx)
 	}
-	var firstPayment bool
-	err = tx.QueryRow(ctx, `SELECT last_payment_time IS NULL FROM user_subscriptions WHERE subscription_id=$1 FOR UPDATE`,
-		sub.SubscriptionID).Scan(&firstPayment)
+	var previousPayment *time.Time
+	var subscribeState string
+	err = tx.QueryRow(ctx, `SELECT last_payment_time, capi_subscribe_state FROM user_subscriptions WHERE subscription_id=$1 FOR UPDATE`,
+		sub.SubscriptionID).Scan(&previousPayment, &subscribeState)
 	if err != nil {
 		return false, err
 	}
@@ -639,7 +629,18 @@ func (r *dbRepository) RecordSubscriptionRenewalOrderTx(
 	if err != nil {
 		return false, err
 	}
-	return firstPayment, tx.Commit(ctx)
+	firstConversion := subscribeState == "eligible"
+	if firstConversion {
+		if _, err := tx.Exec(ctx, `UPDATE user_subscriptions SET capi_subscribe_state='claimed',
+			capi_subscribe_order_id=$2 WHERE subscription_id=$1 AND capi_subscribe_state='eligible'`, sub.SubscriptionID, orderID); err != nil {
+			return false, err
+		}
+	}
+	if err := conversion.RecordPaymentTx(ctx, tx, orderID, paidAt, "paypal_subscription_ledger",
+		firstConversion, previousPayment != nil && paidAt.After(*previousPayment)); err != nil {
+		return false, err
+	}
+	return previousPayment == nil, tx.Commit(ctx)
 }
 
 func (r *dbRepository) CompletePayPalRefund(ctx context.Context, refundID, captureID string, amount int64, currency string) error {

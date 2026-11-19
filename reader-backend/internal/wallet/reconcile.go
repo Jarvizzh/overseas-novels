@@ -23,7 +23,7 @@ func (s *service) RunReconciliation(ctx context.Context) {
 		interval time.Duration
 	}
 	scheduled := []scheduledWorker{
-		{s.reconcilePaymentEvents, 15 * time.Second}, {s.reconcilePayPalEvents, 15 * time.Second}, {s.reconcilePayPalOrders, 15 * time.Second},
+		{s.reconcilePayPalEvents, 15 * time.Second}, {s.reconcilePayPalOrders, 15 * time.Second},
 		{s.reconcilePayPalCancellations, 15 * time.Second}, {s.reconcilePayPalSubscriptions, 15 * time.Second},
 	}
 	if config.AppConfig.PaymentTaskMetrics {
