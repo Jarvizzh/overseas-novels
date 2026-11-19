@@ -1,4 +1,4 @@
--- Run outside a transaction after applying migration 2026111907.
+-- Run outside a transaction after applying migration 2026111909.
 CREATE INDEX CONCURRENTLY IF NOT EXISTS recharge_orders_conversion_fulfilled_at
     ON recharge_orders (fulfilled_at, id) WHERE fulfilled_at IS NOT NULL;
 

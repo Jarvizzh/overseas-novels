@@ -105,17 +105,11 @@ func route(ctx context.Context, tx pgx.Tx, environment string, integration, inbo
 	if err != nil {
 		return nil, errors.Join(errors.New("original Sinan destination disappeared"), err)
 	}
-	var mismatch bool
-	if local := localPromotionID(p.Callback.PromotionID); local != nil {
-		err = tx.QueryRow(ctx, "SELECT conversion.promotion_pixel_mismatch($1,$2)", *local, p.Callback.PixelID).Scan(&mismatch)
-		if err != nil {
-			return nil, err
-		}
-	}
+	boundPixel := config.PromotionPixels[string(p.Callback.AppID)][string(p.Callback.PromotionID)]
 	switch {
 	case !enabled || !authorized || !config.allows(string(p.Callback.AppID), string(p.Callback.PixelID)):
 		original.BlockedReason = "partner_route_not_authorized"
-	case mismatch:
+	case boundPixel != "" && boundPixel != string(p.Callback.PixelID):
 		original.BlockedReason = "promotion_pixel_mismatch"
 	case !active:
 		original.BlockedReason = "destination_disabled"

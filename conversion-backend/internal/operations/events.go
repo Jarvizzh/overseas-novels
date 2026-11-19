@@ -56,7 +56,20 @@ const eventDetailsSQL = `
 	SELECT ` + eventProjection + ` || jsonb_build_object(
 		'partner_reports',COALESCE((SELECT jsonb_agg(jsonb_strip_nulls(jsonb_build_object(
 		    'id',r.id::text,'state',r.state,'reason',r.reason,'status',r.report_status,'next_attempt_at',
-		    CASE WHEN r.state='pending' THEN r.next_attempt_at END))) FROM conversion.partner_reports r
+		    CASE WHEN r.state='pending' THEN r.next_attempt_at END,
+		    'attempt_count',r.attempts,'attempts',COALESCE(history.items,'[]'))) ORDER BY r.id)
+		    FROM conversion.partner_reports r
+		    LEFT JOIN LATERAL (
+		        SELECT jsonb_agg(jsonb_strip_nulls(jsonb_build_object(
+		            'number',a.attempt_no,'started_at',a.started_at,'sending_at',a.sending_at,
+		            'responded_at',a.responded_at,'recorded_at',a.recorded_at,'outcome',a.outcome,'reason',a.reason,
+		            'http_status',a.http_status,'business_code',a.business_code::text,'retry_at',a.retry_at))
+		            ORDER BY a.attempt_no DESC) AS items
+		        FROM (
+		            SELECT attempt_no,started_at,sending_at,responded_at,recorded_at,outcome,reason,http_status,business_code,retry_at
+		            FROM conversion.partner_report_attempts WHERE report_id=r.id ORDER BY attempt_no DESC LIMIT 20
+		        ) a
+		    ) history ON true
 		    WHERE r.event_id=e.id AND r.integration_id=e.integration_id),'[]'),
 		'attempts',COALESCE((SELECT jsonb_agg(jsonb_strip_nulls(jsonb_build_object(
 			'number',a.attempt_no,'started_at',a.started_at,'sending_at',a.sending_at,'responded_at',a.responded_at,

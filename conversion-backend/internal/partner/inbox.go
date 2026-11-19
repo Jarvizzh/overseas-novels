@@ -4,12 +4,21 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"regexp"
 	"time"
 
 	"conversion-backend/internal/delivery"
 
 	"github.com/jackc/pgx/v5"
 )
+
+var externalOrderID = regexp.MustCompile(`^[^\p{C}\s/]{1,128}$`)
+
+func ValidOrderID(id string) bool {
+	return id != "." && id != ".." && externalOrderID.MatchString(id)
+}
+
+const unversionedInboxDigest int16 = 1
 
 type Receipt struct {
 	IntegrationID int64
@@ -19,6 +28,8 @@ type Receipt struct {
 	ReceivedAt    time.Time
 	Payload       []byte
 	Digest        []byte
+	DigestVersion int16
+	LegacyDigest  func() ([]byte, error)
 	Quarantine    string
 }
 
@@ -27,30 +38,42 @@ type Receipt struct {
 func StoreInboxTx(ctx context.Context, tx pgx.Tx, r Receipt) (conflict bool, err error) {
 	if r.Quarantine == "" {
 		tag, err := tx.Exec(ctx, `
-			INSERT INTO conversion.inbox(integration_id,source_event_type,source_event_id,source_order_id,received_at,payload,payload_digest)
-			VALUES($1,$2,$3,NULLIF($4,''),$5,$6,$7)
+			INSERT INTO conversion.inbox(integration_id,source_event_type,source_event_id,source_order_id,received_at,payload,payload_digest,digest_version)
+			VALUES($1,$2,$3,NULLIF($4,''),$5,$6,$7,$8)
 			ON CONFLICT (integration_id,source_event_type,source_event_id) WHERE state<>'quarantined' DO NOTHING`,
-			r.IntegrationID, r.SourceType, r.SourceID, r.OrderID, r.ReceivedAt, r.Payload, r.Digest)
+			r.IntegrationID, r.SourceType, r.SourceID, r.OrderID, r.ReceivedAt, r.Payload, r.Digest, r.DigestVersion)
 		if err != nil || tag.RowsAffected() == 1 {
 			return false, err
 		}
 		// The new statement sees a concurrently committed first submission.
 		var existing []byte
-		if err := tx.QueryRow(ctx, `SELECT payload_digest FROM conversion.inbox
+		var version int16
+		if err := tx.QueryRow(ctx, `SELECT payload_digest,digest_version FROM conversion.inbox
 			WHERE integration_id=$1 AND source_event_type=$2 AND source_event_id=$3 AND state<>'quarantined'`,
-			r.IntegrationID, r.SourceType, r.SourceID).Scan(&existing); err != nil {
+			r.IntegrationID, r.SourceType, r.SourceID).Scan(&existing, &version); err != nil {
 			return false, err
 		}
-		if bytes.Equal(existing, r.Digest) {
+		// Before digests were versioned, one release used the full field set
+		// and earlier releases omitted the partner's network aliases.
+		if (version == r.DigestVersion || version == unversionedInboxDigest) && bytes.Equal(existing, r.Digest) {
 			return false, nil
+		}
+		if version == unversionedInboxDigest && r.LegacyDigest != nil {
+			legacy, err := r.LegacyDigest()
+			if err != nil {
+				return false, err
+			}
+			if bytes.Equal(existing, legacy) {
+				return false, nil
+			}
 		}
 		r.Quarantine = "source_event_conflict"
 		conflict = true
 	}
 	_, err = tx.Exec(ctx, `
-		INSERT INTO conversion.inbox(integration_id,source_event_type,source_event_id,source_order_id,received_at,payload,payload_digest,state,reason)
-		VALUES($1,$2,NULLIF($3,''),NULLIF($4,''),$5,$6,$7,'quarantined',$8)`,
-		r.IntegrationID, r.SourceType, r.SourceID, r.OrderID, r.ReceivedAt, r.Payload, r.Digest, r.Quarantine)
+		INSERT INTO conversion.inbox(integration_id,source_event_type,source_event_id,source_order_id,received_at,payload,payload_digest,digest_version,state,reason)
+		VALUES($1,$2,NULLIF($3,''),NULLIF($4,''),$5,$6,$7,$8,'quarantined',$9)`,
+		r.IntegrationID, r.SourceType, r.SourceID, r.OrderID, r.ReceivedAt, r.Payload, r.Digest, r.DigestVersion, r.Quarantine)
 	return conflict, err
 }
 

@@ -83,6 +83,14 @@ func (w Reporter) Process(ctx context.Context, job ReportJob) error {
 		return w.Queue.Finish(dbCtx, job, result, false)
 	}
 	err := finish()
+	if err != nil && result.confirmed() {
+		dbCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), reportDBTimeout)
+		receiptErr := w.Queue.RecordReceipt(dbCtx, job, result)
+		cancel()
+		if !errors.Is(receiptErr, ErrReportLeaseLost) {
+			w.logError("partner acknowledgement persistence failed", job.ID, receiptErr)
+		}
+	}
 	if err != nil && !errors.Is(err, ErrReportLeaseLost) {
 		// Retry only persistence, never the signed HTTP request.
 		err = finish()

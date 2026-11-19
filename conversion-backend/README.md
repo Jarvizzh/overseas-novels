@@ -1,6 +1,6 @@
 # Star Novel 转化服务
 
-转化服务消费 Reader 事务 Outbox，创建统一事件与各 Pixel 投递任务。迁移由 CMS 的 `-migrate` 入口管理，Worker 启动时要求 schema `2026111907`。应用架构、实施顺序与验收标准见 [统一转化回传架构升级与开发文档](../docs/conversion-reporting-architecture.md)。
+转化服务消费 Reader 事务 Outbox，创建统一事件与各 Pixel 投递任务。迁移由 CMS 的 `-migrate` 入口管理，Worker 启动时要求 schema `2026111909`。应用架构、实施顺序与验收标准见 [统一转化回传架构升级与开发文档](../docs/conversion-reporting-architecture.md)。
 
 从本目录运行 `go run ./cmd/conversion`。配置如下。
 
@@ -78,13 +78,14 @@ psql -X -f cms-backend/db/conversion_sinan_mock_grants.sql \
 3. 启动 `conversion --mode=callback`。设置 `CONVERSION_SINAN_MOCK_ENABLED=true` 和密钥配置。入口默认 `127.0.0.1:8093`，可通过 `CONVERSION_CALLBACK_ADDR` 换成其他回环地址。启动 `--mode=worker` 归一化 Inbox。模拟验收保持 `CONVERSION_META_ENABLED=false`，使用自动测试中的 Meta 接收证据。
 4. 独立启动 `conversion --mode=partner-worker`。沿用测试环境及密钥，设置 `CONVERSION_PARTNER_REPORT_ENABLED=true` 开启回告发送。回告目标使用同一网络命名空间内的回环 IP。队列和租约独立于 Meta。Collector 监测 `normalize_inbox`、`partner_report` 心跳、回告阻塞和结果未知。
 
-私网配置请求体示例。应用和 Pixel ID 用字符串。原目标取回调中的 Pixel，`source_hosts` 按小写主机名精确匹配来源 URL。
+私网配置请求体示例。应用和 Pixel ID 用字符串。原目标取回调中的 Pixel。`promotion_pixels` 可按应用配置司南推广链 ID 对应的授权 Pixel。缺少显式映射时沿用已授权的原 Pixel。`source_hosts` 按小写主机名精确匹配来源 URL。
 
 ```json
 {
   "reason": "配置隔离模拟账户",
   "config": {
     "app_pixels": {"1": ["123", "456"]},
+    "promotion_pixels": {"1": {"987": "123"}},
     "source_hosts": ["reader.example"],
     "endpoint": "http://127.0.0.1:8094/final",
     "max_age_seconds": 86400,
@@ -96,7 +97,7 @@ psql -X -f cms-backend/db/conversion_sinan_mock_grants.sql \
 }
 ```
 
-- 回调使用 `Authorization: Bearer <测试 Token>` 和 `Content-Type: application/json`。模拟契约使用字符串 `event_id`、Unix 秒 `event_time`、原始 `app_id` 和 `pixel_id`。订单入口同时提供 `order_id`，支付提供 `recharge_type`（1 或 2）、十进制 `amount` 和 ISO 4217 `currency`。回调 JSON 中的数字 ID 可用十进制字符串或整数表示。
-- 模拟回告按 `message`、`adset_id` 和字符串 ID 编码。模拟结果 `1`、`-1` 使用原投递定稿时间的 Unix 秒作为 `report_time`，`0` 省略时间、消息和 trace。签名使用 Ed25519，签名原文依次为 `POST`、转义路径、Unix 秒、十六进制 nonce、业务请求体 SHA-256 十六进制摘要，使用换行连接。头字段为 `X-Sinan-Timestamp`、`X-Sinan-Nonce` 和 `X-Sinan-Signature`，签名值用标准 Base64。模拟成功条件为 HTTP 200 与 JSON `code=0`。
-- 无真实 trace 的失败默认阻塞。模拟接收方确认省略或空字符串后，设置 `no_trace_encoding=omit` 或 `empty`，通过 CMS 或 `conversion-ops retry-partner-report` 审计重排。明确拒收的限流按 `Retry-After` 和退避重试。只有模拟账户明确配置 `replay_supported=true` 时才自动重放结果未知的回告。业务请求体从首次进入发送起冻结。
+- 回调使用 `Authorization: Bearer <测试 Token>` 和 `Content-Type: application/json`。模拟契约使用字符串 `event_id`、Unix 秒 `event_time`、原始 `app_id` 和 `pixel_id`。订单入口同时提供 `order_id`，支付提供 `recharge_type`（1 或 2）、十进制 `amount` 和 ISO 4217 `currency`。回调中的 `order_id`、`device_id` 用字符串保存原值。浏览器数据从 `client_ip`、`user_agent` 读取。Inbox 按已存摘要核对重试。迁移前未标记版本的记录先核对完整摘要，再核对旧字段口径。版本 2 始终核对包含这两个浏览器字段的完整摘要。旧记录的摘要和快照原样保留。
+- 模拟回告按 `message` 和字段表的 `ad_set_id` 编码。应用、投手和推广链 ID 用 int64，订单、设备、广告及 Pixel ID 保持字符串。模拟结果 `1`、`-1` 使用原投递定稿时间的 Unix 秒作为 `report_time`，`0` 省略时间、消息和 trace。签名使用 Ed25519，签名原文依次为 `POST`、转义路径、Unix 秒、十六进制 nonce、业务请求体 SHA-256 十六进制摘要，使用换行连接。头字段为 `X-Sinan-Timestamp`、`X-Sinan-Nonce` 和 `X-Sinan-Signature`，签名值用标准 Base64。模拟成功条件为 HTTP 200 与 JSON `code=0`。
+- 无真实 trace 的失败默认阻塞。模拟接收方确认省略或空字符串后，设置 `no_trace_encoding=omit` 或 `empty`，通过 CMS 或 `conversion-ops retry-partner-report` 审计重排。明确拒收的限流按 `Retry-After` 和退避重试。只有模拟账户明确配置 `replay_supported=true` 时才自动重放结果未知的回告。业务请求体从首次进入发送起冻结。司南返回 HTTP 200 且业务码为 0 后，如果首次定稿失败，Worker 会按原发送尝试及其租约令牌保存确认。扫描已收回租约时，若后续尝试尚未发送，可据此确认回告并结束已领取但未发送的重试。后续尝试已发送时，原确认保留为历史证据。CMS 事件详情显示最近 20 次回告的 HTTP 状态、业务码、尝试时间和重试计划。
 - 正式上线依赖架构文档 §7.2 的真实样本和联调结果，包括入站验证、签名及字段、无 trace 失败回告和结果未知后的重放语义。模拟模式只接受测试环境和回环地址。

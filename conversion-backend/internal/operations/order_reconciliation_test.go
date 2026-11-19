@@ -112,7 +112,7 @@ func operationsTestPool(t *testing.T) (context.Context, *pgxpool.Pool) {
 	t.Cleanup(pool.Close)
 	for _, asset := range []string{"schema.sql", "migrations/2026111702.sql", "migrations/2026111703.sql",
 		"migrations/2026111704.sql", "migrations/2026111901.sql", "migrations/2026111902.sql", "migrations/2026111903.sql",
-		"migrations/2026111904.sql", "migrations/2026111905.sql", "migrations/2026111906.sql", "migrations/2026111907.sql"} {
+		"migrations/2026111904.sql", "migrations/2026111905.sql", "migrations/2026111906.sql", "migrations/2026111907.sql", "migrations/2026111908.sql", "migrations/2026111909.sql"} {
 		sql, err := os.ReadFile("../../../cms-backend/db/" + asset)
 		if err != nil {
 			t.Fatal(err)
@@ -126,5 +126,59 @@ func mustExec(t *testing.T, ctx context.Context, pool *pgxpool.Pool, sql string)
 	t.Helper()
 	if _, err := pool.Exec(ctx, sql); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestEventDetailShowsBoundedPartnerAttemptEvidence(t *testing.T) {
+	ctx, pool := operationsTestPool(t)
+	mustExec(t, ctx, pool, `
+		INSERT INTO conversion.integrations(environment,source,account_key,contract_version)
+		VALUES ('test','sinan','fixture','sinan-mock-v1');
+		INSERT INTO conversion.destinations(environment,media,pixel_id) VALUES ('test','meta','123');
+		INSERT INTO conversion.events(integration_id,environment,source_event_type,source_event_id,event_name,attribution_state,received_at)
+		VALUES(1,'test','order-created','fixture-event','InitiateCheckout','matched',now());
+		INSERT INTO conversion.deliveries(event_id,destination_id,environment,meta_event_id,role,deadline_at,state,finalized_at)
+		VALUES(1,1,'test','fixture-event','original',now(),'succeeded',now());
+		INSERT INTO conversion.partner_reports(integration_id,event_id,original_delivery_id,report_status,contract_version,payload,attempts,wire_payload)
+		VALUES(1,1,1,1,'sinan-mock-v1','{"raw":"private-payload-fixture"}',21,'private-wire-fixture');
+		INSERT INTO conversion.partner_report_attempts(report_id,attempt_no,sending_at,responded_at,recorded_at,outcome,reason,retry_at,http_status,business_code)
+		SELECT 1,n,now(),now(),now(),'rejected','partner_rejected',now()+interval '1 minute',
+		       CASE WHEN n=21 THEN 401 ELSE 400 END,9223372036854775807
+		FROM generate_series(1,21) n;
+	`)
+	req := httptest.NewRequest(http.MethodGet, "/internal/conversion/events/1", nil)
+	req.Header.Set("Authorization", "Bearer service-fixture")
+	req.Header.Set("X-Operator-ID", "test-admin")
+	req.Header.Set("X-Operator-Role", "Finance")
+	response := httptest.NewRecorder()
+	NewHandler(Repository{Pool: pool, Environment: "test"}, "service-fixture").ServeHTTP(response, req)
+	if response.Code != http.StatusOK || strings.Contains(response.Body.String(), "private-") {
+		t.Fatalf("status=%d result=%s", response.Code, response.Body)
+	}
+	var detail struct {
+		Reports []struct {
+			AttemptCount int `json:"attempt_count"`
+			Attempts     []struct {
+				Number       int        `json:"number"`
+				HTTPStatus   int        `json:"http_status"`
+				BusinessCode string     `json:"business_code"`
+				SendingAt    *time.Time `json:"sending_at"`
+				RespondedAt  *time.Time `json:"responded_at"`
+				RecordedAt   *time.Time `json:"recorded_at"`
+				RetryAt      *time.Time `json:"retry_at"`
+			} `json:"attempts"`
+		} `json:"partner_reports"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &detail); err != nil {
+		t.Fatal(err)
+	}
+	if len(detail.Reports) != 1 || detail.Reports[0].AttemptCount != 21 || len(detail.Reports[0].Attempts) != 20 {
+		t.Fatalf("unexpected report history length: %s", response.Body)
+	}
+	first := detail.Reports[0].Attempts[0]
+	if first.Number != 21 || first.HTTPStatus != 401 || first.BusinessCode != "9223372036854775807" ||
+		first.SendingAt == nil || first.RespondedAt == nil || first.RecordedAt == nil || first.RetryAt == nil ||
+		detail.Reports[0].Attempts[1].HTTPStatus != 400 {
+		t.Fatalf("unexpected report evidence: %+v", first)
 	}
 }

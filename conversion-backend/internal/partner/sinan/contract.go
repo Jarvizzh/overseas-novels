@@ -13,18 +13,21 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"conversion-backend/internal/partner"
 )
 
 const MockContract = "sinan-mock-v1"
 
 type Config struct {
-	AppPixels   map[string][]string `json:"app_pixels"`
-	SourceHosts []string            `json:"source_hosts"`
-	Endpoint    string              `json:"endpoint"`
-	NoTrace     string              `json:"no_trace_encoding"`
-	Replay      bool                `json:"replay_supported"`
-	MaxAge      int                 `json:"max_age_seconds"`
-	AlertAfter  int                 `json:"alert_after_seconds,omitempty"`
+	AppPixels       map[string][]string          `json:"app_pixels"`
+	PromotionPixels map[string]map[string]string `json:"promotion_pixels,omitempty"`
+	SourceHosts     []string                     `json:"source_hosts"`
+	Endpoint        string                       `json:"endpoint"`
+	NoTrace         string                       `json:"no_trace_encoding"`
+	Replay          bool                         `json:"replay_supported"`
+	MaxAge          int                          `json:"max_age_seconds"`
+	AlertAfter      int                          `json:"alert_after_seconds,omitempty"`
 }
 
 func (c Config) allows(app, pixel string) bool {
@@ -41,11 +44,21 @@ func (c Config) Validate() bool {
 		return false
 	}
 	for app, pixels := range c.AppPixels {
-		if !decimalID.MatchString(app) || len(pixels) == 0 || len(pixels) > 100 {
+		if !validIntegerID(app) || len(pixels) == 0 || len(pixels) > 100 {
 			return false
 		}
 		for _, pixel := range pixels {
 			if !decimalID.MatchString(pixel) {
+				return false
+			}
+		}
+	}
+	for app, promotions := range c.PromotionPixels {
+		if len(c.AppPixels[app]) == 0 {
+			return false
+		}
+		for promotion, pixel := range promotions {
+			if !validIntegerID(promotion) || !c.allows(app, pixel) {
 				return false
 			}
 		}
@@ -96,15 +109,67 @@ func (v *identifier) UnmarshalJSON(raw []byte) error {
 	return nil
 }
 
+// integerID keeps the canonical Inbox representation while enforcing the
+// partner's signed 64-bit range.
+type integerID string
+
+func validIntegerID(s string) bool {
+	_, err := strconv.ParseInt(s, 10, 64)
+	return err == nil && decimalID.MatchString(s)
+}
+
+func (v *integerID) UnmarshalJSON(raw []byte) error {
+	var id identifier
+	if err := json.Unmarshal(raw, &id); err != nil {
+		return err
+	}
+	if id != "" && !validIntegerID(string(id)) {
+		return errors.New("identifier exceeds int64")
+	}
+	*v = integerID(id)
+	return nil
+}
+
+func (v integerID) number() int64 {
+	n, _ := strconv.ParseInt(string(v), 10, 64)
+	return n
+}
+
+type opaqueID string
+
+var opaqueIDPattern = regexp.MustCompile(`^[^\p{C}]{1,128}$`)
+
+func (v *opaqueID) UnmarshalJSON(raw []byte) error {
+	if bytes.Equal(raw, []byte("null")) {
+		return nil
+	}
+	var id string
+	if len(raw) > 0 && raw[0] == '"' {
+		if err := json.Unmarshal(raw, &id); err != nil {
+			return err
+		}
+	} else if decimalID.Match(raw) {
+		// Existing mock callers may still send these opaque IDs as integers.
+		id = string(raw)
+	} else {
+		return errors.New("expected opaque identifier")
+	}
+	if id != "" && (!opaqueIDPattern.MatchString(id) || strings.TrimSpace(id) != id) {
+		return errors.New("invalid opaque identifier")
+	}
+	*v = opaqueID(id)
+	return nil
+}
+
 type sourceFields struct {
-	AppID         identifier `json:"app_id"`
+	AppID         integerID  `json:"app_id"`
 	PixelID       identifier `json:"pixel_id"`
-	DistributorID identifier `json:"distributor_id,omitempty"`
-	PromotionID   identifier `json:"promotion_id,omitempty"`
-	AdID          identifier `json:"ad_id,omitempty"`
-	AdSetID       identifier `json:"adset_id,omitempty"`
-	OrderID       identifier `json:"order_id,omitempty"`
-	DeviceID      identifier `json:"device_id,omitempty"`
+	DistributorID integerID  `json:"distributor_id,omitempty"`
+	PromotionID   integerID  `json:"promotion_id,omitempty"`
+	AdID          opaqueID   `json:"ad_id,omitempty"`
+	AdSetID       opaqueID   `json:"adset_id,omitempty"`
+	OrderID       opaqueID   `json:"order_id,omitempty"`
+	DeviceID      opaqueID   `json:"device_id,omitempty"`
 }
 
 type callback struct {
@@ -124,14 +189,44 @@ type callback struct {
 	SourceURL    string      `json:"event_source_url,omitempty"`
 }
 
-func parseCallback(body []byte) (callback, error) {
-	var data callback
+func parseCallback(body []byte) (callback, callback, error) {
 	if !utf8.Valid(body) {
-		return data, errors.New("invalid JSON encoding")
+		return callback{}, callback{}, errors.New("invalid JSON encoding")
 	}
-	if err := decodeObject(body, &data); err != nil {
-		return data, err
+	// Retain the historic snapshot keys to consume already-persisted rows and
+	// compare semantic digests across retries made before this upgrade.
+	var input struct {
+		callback
+		PartnerIP *string `json:"client_ip"`
+		PartnerUA *string `json:"user_agent"`
 	}
+	if err := decodeObject(body, &input); err != nil {
+		return callback{}, callback{}, err
+	}
+	data := input.callback
+	// Version 1 encoded only the legacy network keys. Keep the business
+	// fields and their JSON representation identical across the two versions.
+	data.canonicalize()
+	legacy := data
+	if input.PartnerIP != nil {
+		if input.ClientIP != "" && input.ClientIP != *input.PartnerIP {
+			return callback{}, callback{}, errors.New("conflicting client IP fields")
+		}
+		data.ClientIP = *input.PartnerIP
+		if ip := net.ParseIP(data.ClientIP); ip != nil {
+			data.ClientIP = ip.String()
+		}
+	}
+	if input.PartnerUA != nil {
+		if data.UserAgent != "" && data.UserAgent != *input.PartnerUA {
+			return callback{}, callback{}, errors.New("conflicting user agent fields")
+		}
+		data.UserAgent = *input.PartnerUA
+	}
+	return data, legacy, nil
+}
+
+func (data *callback) canonicalize() {
 	data.ExternalHash = strings.ToLower(data.ExternalHash)
 	data.EmailHash = strings.ToLower(data.EmailHash)
 	data.CountryHash = strings.ToLower(data.CountryHash)
@@ -140,7 +235,6 @@ func parseCallback(body []byte) (callback, error) {
 	if ip := net.ParseIP(data.ClientIP); ip != nil {
 		data.ClientIP = ip.String()
 	}
-	return data, nil
 }
 
 func decodeObject(body []byte, output any) error {
@@ -235,6 +329,8 @@ func (p callback) invalidReason(now time.Time, eventType string) string {
 		return "event_time_invalid"
 	case (eventType == "order-created" || eventType == "recharge-paid") && p.OrderID == "":
 		return "order_id_missing"
+	case p.OrderID != "" && !partner.ValidOrderID(string(p.OrderID)):
+		return "order_id_invalid"
 	case eventType == "recharge-paid" && p.RechargeType != 1 && p.RechargeType != 2:
 		return "recharge_type_invalid"
 	default:
@@ -255,12 +351,4 @@ func (p callback) matchingData() map[string]any {
 		}
 	}
 	return out
-}
-
-func localPromotionID(p identifier) *int64 {
-	id, err := strconv.ParseInt(string(p), 10, 32)
-	if err != nil {
-		return nil
-	}
-	return &id
 }

@@ -40,7 +40,7 @@ func TestDurableDeliveryLifecycle(t *testing.T) {
 	}
 	defer pool.Close()
 	for _, asset := range []string{"schema.sql", "migrations/2026111702.sql", "migrations/2026111703.sql",
-		"migrations/2026111704.sql", "migrations/2026111901.sql", "migrations/2026111902.sql", "migrations/2026111903.sql", "migrations/2026111904.sql", "migrations/2026111905.sql", "migrations/2026111906.sql", "migrations/2026111907.sql"} {
+		"migrations/2026111704.sql", "migrations/2026111901.sql", "migrations/2026111902.sql", "migrations/2026111903.sql", "migrations/2026111904.sql", "migrations/2026111905.sql", "migrations/2026111906.sql", "migrations/2026111907.sql", "migrations/2026111908.sql", "migrations/2026111909.sql"} {
 		sql, err := os.ReadFile("../../../cms-backend/db/" + asset)
 		if err != nil {
 			t.Fatal(err)

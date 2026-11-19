@@ -36,7 +36,7 @@ GRANT UPDATE (normalized_at,original_send_started_at) ON reader_conversion_repai
 GRANT SELECT (status,domain) ON system_domains TO :"worker_role";
 GRANT SELECT (id,fb_pixel_id) ON promotion_links TO :"worker_role";
 GRANT SELECT (id,pixel_id) ON fb_pixels TO :"worker_role";
-GRANT EXECUTE ON FUNCTION conversion.promotion_pixel_mismatch(bigint,text), conversion.sinan_route_issue(bigint,bigint) TO :"worker_role", :"api_role";
+GRANT EXECUTE ON FUNCTION conversion.sinan_route_issue(bigint,bigint) TO :"worker_role", :"api_role";
 GRANT SELECT ON conversion.inbox TO :"worker_role";
 GRANT UPDATE (state,reason) ON conversion.inbox TO :"worker_role";
 GRANT UPDATE (id) ON conversion.integrations TO :"worker_role";
@@ -66,6 +66,8 @@ GRANT UPDATE (normalized_at) ON reader_conversion_repair_facts TO :"api_role";
 GRANT SELECT ON conversion.integrations,conversion.integration_destinations,conversion.destinations,conversion.events,
     conversion.deliveries,conversion.delivery_attempts,conversion.partner_reports,
     conversion.legacy_outbox_imports,conversion.worker_heartbeats,conversion.alerts TO :"api_role";
+GRANT SELECT (report_id,attempt_no,started_at,sending_at,responded_at,recorded_at,outcome,reason,retry_at,http_status,business_code)
+    ON conversion.partner_report_attempts TO :"api_role";
 GRANT SELECT (id,integration_id,source_order_id,source_event_type,source_event_id,received_at,state,reason)
     ON conversion.inbox TO :"api_role";
 GRANT SELECT (id), INSERT (ciphertext,key_version) ON conversion.credentials TO :"api_role";

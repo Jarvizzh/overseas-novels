@@ -10,9 +10,9 @@ GRANT UPDATE (id) ON conversion.integrations TO :"callback_role";
 GRANT SELECT (id,key_version,ciphertext) ON conversion.credentials TO :"callback_role";
 GRANT SELECT (integration_id,destination_id,environment) ON conversion.integration_destinations TO :"callback_role";
 GRANT SELECT (id,pixel_id,media) ON conversion.destinations TO :"callback_role";
-GRANT INSERT (integration_id,source_event_type,source_event_id,source_order_id,received_at,payload,payload_digest,state,reason)
+GRANT INSERT (integration_id,source_event_type,source_event_id,source_order_id,received_at,payload,payload_digest,digest_version,state,reason)
     ON conversion.inbox TO :"callback_role";
-GRANT SELECT (integration_id,source_event_type,source_event_id,state,payload_digest)
+GRANT SELECT (integration_id,source_event_type,source_event_id,state,payload_digest,digest_version)
     ON conversion.inbox TO :"callback_role";
 
 GRANT SELECT (id,environment,source,enabled,contract_version,report_config,report_credential_id)
@@ -22,7 +22,7 @@ GRANT SELECT ON conversion.partner_reports,conversion.partner_report_attempts,co
     TO :"partner_worker_role";
 GRANT UPDATE (state,reason,next_attempt_at,attempts,lease_token,lease_until,wire_payload)
     ON conversion.partner_reports TO :"partner_worker_role";
-GRANT INSERT (report_id,attempt_no), UPDATE (sending_at,recorded_at,outcome,reason,retry_at,replay_allowed)
+GRANT INSERT (report_id,attempt_no,lease_token), UPDATE (sending_at,recorded_at,outcome,reason,retry_at,replay_allowed,http_status,business_code,responded_at)
     ON conversion.partner_report_attempts TO :"partner_worker_role";
 GRANT INSERT, UPDATE ON conversion.worker_heartbeats TO :"partner_worker_role";
 COMMIT;

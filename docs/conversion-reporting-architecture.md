@@ -105,7 +105,7 @@ StarNovel 支付消息继续受现有履约、退款前置校验和历史权益�
 
 ### 3.3 路由与 Meta ID
 
-1. **归属目标。** StarNovel 一次性结账与购买共用订单的 `fb_lead_metadata`，订阅结账使用意向的 `attribution`，订阅付款沿用转存后的原始归因。注册沿用服务端解析出的推广快照。司南以 Callback 自带的原始 `pixel_id` 为主目标，经 `app_id`、接入账户和目标授权校验。若本地已登记该 `promotion_id`，核对绑定 Pixel。不匹配时进入阻塞并告警，保留原目标及原因。
+1. **归属目标。** StarNovel 一次性结账与购买共用订单的 `fb_lead_metadata`，订阅结账使用意向的 `attribution`，订阅付款沿用转存后的原始归因。注册沿用服务端解析出的推广快照。司南以 Callback 自带的原始 `pixel_id` 为主目标，经 `app_id`、接入账户和目标授权校验。若该接入账户及应用已显式绑定司南 `promotion_id`，核对绑定 Pixel。不匹配时进入阻塞并告警，保留原目标及原因。
 2. **同时发多个 Pixel。** 仅在接入为该事件来源明确配置授权附加目标时生成任务。按物理目标去重，主目标和附加目标分别记录 Meta 回执。附加目标标记为额外投递。
 3. **历史追加目标。** 在 CMS 按事件 ID 操作，选择授权的目标并填写原因。校验原始时间、匹配字段和 Meta 窗口，新增目标任务，同一操作重放返回原任务。回告继续锚定原目标。如果此前的目标已经收到事件，追加目标仍是一次独立投递。
 4. **ID 分层。** 保存业务事件 ID、各来源的原始 ID 和投递时使用的 Meta `event_id`。纯服务端事件默认使用稳定的来源命名空间和业务键。若某 Pixel 同时有对应浏览器事件，按接入协议保存其经过验证的同名同 ID，实际发送时冻结每个目标使用的 Meta ID。旧事件接管保留原 Meta ID。平台结果回告使用平台原始 `event_id`。 [Meta 去重规则](https://developers.facebook.com/documentation/ads-commerce/conversions-api/deduplicate-pixel-and-server-events)

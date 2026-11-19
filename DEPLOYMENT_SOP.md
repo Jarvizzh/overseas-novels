@@ -176,11 +176,11 @@ flowchart TD
    WHERE subscription_id IS NULL AND submitted_at < now()-interval '24 hours';
    ```
 
-#### 统一转化回传切换（schema 2026111907）
+#### 统一转化回传切换（schema 2026111909）
 
 本次发布同时更新 Reader、CMS、转化 Worker、私网 API 和独立 Collector。测试与生产使用独立数据库及 Pixel。私网 API 只接受 CMS 网络内的调用。
 
-1. 在维护窗口备份数据库，记录版本账本、旧队列各状态数量和已确认的 Meta 事件 ID。暂停旧业务写入和旧 CAPI 消费，等待旧在途请求及租约结束。使用本次 CMS 镜像和迁移所有者连接运行 `-migrate`，升级至 `2026111907`。
+1. 在维护窗口备份数据库，记录版本账本、旧队列各状态数量和已确认的 Meta 事件 ID。暂停旧业务写入和旧 CAPI 消费；如已启动司南模拟服务，同时暂停回调入口和回告 Worker。等待在途请求及租约结束。使用本次 CMS 镜像和迁移所有者连接运行 `-migrate`，升级至 `2026111909`。
 2. 使用同一迁移所有者单独执行 `cms-backend/db/conversion_query_indexes.sql`。脚本必须保持自动提交。核对新增索引的 `pg_index.indisvalid`，并在接近生产规模的副本上检查执行时间和查询计划。
 3. 为 Reader、CMS、Worker、API、Collector、保留期命令准备独立的 PostgreSQL 登录角色，由部署平台管理凭据。Reader、CMS 保有已授权的业务表权限，运行角色使用非表所有者账号且不继承其他运行模式账号。按下例赋予转化相关权限。
 

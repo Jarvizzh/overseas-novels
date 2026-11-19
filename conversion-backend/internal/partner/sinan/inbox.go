@@ -130,7 +130,7 @@ func (s Inbox) accept(ctx context.Context, key, token, eventType string, body []
 	if !enabled || !slices.Contains(events, eventType) {
 		return http.StatusForbidden, "callback_not_authorized"
 	}
-	p, err := parseCallback(body)
+	p, legacy, err := parseCallback(body)
 	if err != nil {
 		return http.StatusBadRequest, "invalid_payload"
 	}
@@ -153,11 +153,10 @@ func (s Inbox) accept(ctx context.Context, key, token, eventType string, body []
 		return http.StatusServiceUnavailable, unavailable
 	}
 
-	canonical, err := json.Marshal(p)
+	digest, err := callbackDigest(p)
 	if err != nil {
 		return http.StatusBadRequest, "invalid_payload"
 	}
-	digest := sha256.Sum256(canonical)
 	reason := p.invalidReason(received, eventType)
 	p.sanitize(config)
 	snapshot, err := json.Marshal(inboxPayload{Callback: p, DestinationID: destination})
@@ -166,7 +165,11 @@ func (s Inbox) accept(ctx context.Context, key, token, eventType string, body []
 	}
 	receipt := partner.Receipt{
 		IntegrationID: id, SourceType: eventType, SourceID: p.EventID, OrderID: string(p.OrderID),
-		ReceivedAt: received, Payload: snapshot, Digest: digest[:], Quarantine: reason,
+		ReceivedAt: received, Payload: snapshot, Digest: digest, DigestVersion: 2, Quarantine: reason,
+		LegacyDigest: func() ([]byte, error) { return callbackDigest(legacy) },
+	}
+	if reason == "order_id_invalid" {
+		receipt.OrderID, receipt.Payload = "", nil
 	}
 	if reason == "event_id_invalid" {
 		// Invalid identifiers may contain control characters or arbitrary data.
@@ -183,4 +186,13 @@ func (s Inbox) accept(ctx context.Context, key, token, eventType string, body []
 		return http.StatusUnprocessableEntity, reason
 	}
 	return http.StatusOK, "success"
+}
+
+func callbackDigest(p callback) ([]byte, error) {
+	canonical, err := json.Marshal(p)
+	if err != nil {
+		return nil, err
+	}
+	digest := sha256.Sum256(canonical)
+	return digest[:], nil
 }

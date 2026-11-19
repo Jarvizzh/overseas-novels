@@ -5,6 +5,74 @@ import { TableRegion } from '../components/ui/Primitives';
 import { type Delivery, TargetResults } from './ConversionOrdersPanel';
 import { sourceEventLabel, status, timestamp } from '../utils/conversionStatus';
 
+interface PartnerReport {
+  id: string;
+  state: string;
+  status: number;
+  reason?: string;
+  next_attempt_at?: string;
+  attempt_count: number;
+  attempts?: {
+    number: number;
+    outcome?: string;
+    reason?: string;
+    http_status?: number;
+    business_code?: string;
+    started_at: string;
+    sending_at?: string;
+    responded_at?: string;
+    recorded_at?: string;
+    retry_at?: string;
+  }[];
+}
+
+function PartnerReportAttempts({ report }: { report: PartnerReport }) {
+  const attempts = report.attempts ?? [];
+  if (!attempts.length) return null;
+
+  return (
+    <TableRegion ariaLabel="司南回告尝试">
+      <table className="cms-table min-w-[900px]" data-density="compact">
+        <caption className="sr-only">司南回告尝试</caption>
+        <thead className="sticky top-0">
+          <tr>
+            <th scope="col">次数</th>
+            <th scope="col">结果</th>
+            <th scope="col">HTTP</th>
+            <th scope="col">司南业务码</th>
+            <th scope="col">领取时间</th>
+            <th scope="col">发送时间</th>
+            <th scope="col">响应时间</th>
+            <th scope="col">记录时间</th>
+            <th scope="col">计划重试时间</th>
+          </tr>
+        </thead>
+        <tbody>
+          {attempts.map((attempt) => (
+            <tr key={attempt.number}>
+              <th scope="row">{attempt.number}</th>
+              <td>
+                {attempt.outcome ? status(attempt.outcome) : '进行中'}
+                {attempt.reason && <div>{status(attempt.reason)}</div>}
+              </td>
+              <td>{attempt.http_status ?? '—'}</td>
+              <td>{attempt.business_code ?? '—'}</td>
+              <td>{timestamp(attempt.started_at)}</td>
+              <td>{timestamp(attempt.sending_at)}</td>
+              <td>{timestamp(attempt.responded_at)}</td>
+              <td>{timestamp(attempt.recorded_at)}</td>
+              <td>{timestamp(attempt.retry_at)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {report.attempt_count > attempts.length && (
+        <p className="text-xs text-[var(--cms-muted-fg)]">已显示最近 {attempts.length} 次</p>
+      )}
+    </TableRegion>
+  );
+}
+
 interface ConversionEvent {
   id: string;
   integration_id: string;
@@ -18,7 +86,7 @@ interface ConversionEvent {
   created_at: string;
   deliveries: Delivery[];
   deliveries_truncated: boolean;
-  partner_reports?: { id: string; state: string; status: number; reason?: string }[];
+  partner_reports?: PartnerReport[];
 }
 
 interface EventPage {
@@ -312,18 +380,22 @@ function EventDetail({
         ))}
       </div>
       {detail.partner_reports?.map((report) => (
-        <p key={report.id} className="flex flex-wrap items-center gap-2 text-xs">
-          回告 · {status(report.state)} · {report.status} {report.reason && status(report.reason)}
-          {canWrite && report.state !== 'confirmed' && (
-            <button
-              type="button"
-              className="btn-secondary"
-              onClick={() => setAction({ kind: 'report', id: report.id })}
-            >
-              重排回告
-            </button>
-          )}
-        </p>
+        <div key={report.id} className="space-y-2">
+          <p className="flex flex-wrap items-center gap-2 text-xs">
+            回告 · {status(report.state)} · {report.status} {report.reason && status(report.reason)}
+            {report.next_attempt_at && ` · 下次尝试 ${timestamp(report.next_attempt_at)}`}
+            {canWrite && report.state !== 'confirmed' && (
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={() => setAction({ kind: 'report', id: report.id })}
+              >
+                重排回告
+              </button>
+            )}
+          </p>
+          <PartnerReportAttempts report={report} />
+        </div>
       ))}
       {action && (
         <ActionForm

@@ -31,12 +31,19 @@ type reportSnapshot struct {
 }
 
 type reportBody struct {
-	sourceFields
-	EventID    string  `json:"event_id"`
-	Status     int     `json:"report_status"`
-	ReportTime *int64  `json:"report_time,omitempty"`
-	TraceID    *string `json:"fbtrace_id,omitempty"`
-	Message    string  `json:"message,omitempty"`
+	AppID         int64      `json:"app_id"`
+	PixelID       identifier `json:"pixel_id"`
+	DistributorID int64      `json:"distributor_id,omitempty"`
+	PromotionID   int64      `json:"promotion_id,omitempty"`
+	AdID          opaqueID   `json:"ad_id,omitempty"`
+	AdSetID       opaqueID   `json:"ad_set_id,omitempty"`
+	OrderID       opaqueID   `json:"order_id,omitempty"`
+	DeviceID      opaqueID   `json:"device_id,omitempty"`
+	EventID       string     `json:"event_id"`
+	Status        int        `json:"report_status"`
+	ReportTime    *int64     `json:"report_time,omitempty"`
+	TraceID       *string    `json:"fbtrace_id,omitempty"`
+	Message       string     `json:"message,omitempty"`
 }
 
 func buildReport(status int, snapshot []byte, noTrace string) ([]byte, string) {
@@ -45,7 +52,13 @@ func buildReport(status int, snapshot []byte, noTrace string) ([]byte, string) {
 		original.SourceFields.AppID == "" || original.PixelID == "" || original.PixelID != original.SourceFields.PixelID {
 		return nil, "invalid_report_snapshot"
 	}
-	report := reportBody{sourceFields: original.SourceFields, EventID: original.EventID, Status: status}
+	fields := original.SourceFields
+	report := reportBody{
+		AppID: fields.AppID.number(), PixelID: original.PixelID,
+		DistributorID: fields.DistributorID.number(), PromotionID: fields.PromotionID.number(),
+		AdID: fields.AdID, AdSetID: fields.AdSetID, OrderID: fields.OrderID, DeviceID: fields.DeviceID,
+		EventID: original.EventID, Status: status,
+	}
 	switch status {
 	case 0:
 		// A skipped event has no send time, trace or message in this fixture.
@@ -176,23 +189,30 @@ func sendReport(client *http.Client, request *http.Request) partner.ReportResult
 	defer res.Body.Close()
 	const maxResponse = 8 << 10
 	body, err := io.ReadAll(io.LimitReader(res.Body, maxResponse+1))
+	now := time.Now()
+	result := partner.ReportResult{Outcome: partner.ReportUnknown, Reason: "partner_response_unconfirmed",
+		RespondedAt: &now}
+	if res.StatusCode >= 100 && res.StatusCode <= 599 {
+		result.HTTPStatus = &res.StatusCode
+	}
 	var answer struct {
-		Code *int `json:"code"`
+		Code *int64 `json:"code"`
 	}
 	if err != nil || len(body) > maxResponse || decodeObject(body, &answer) != nil || answer.Code == nil {
-		return partner.ReportResult{Outcome: partner.ReportUnknown, Reason: "partner_response_unconfirmed"}
+		return result
 	}
+	result.BusinessCode = answer.Code
 	switch {
 	case res.StatusCode == http.StatusOK && *answer.Code == 0:
-		return partner.ReportResult{Outcome: partner.ReportAccepted}
+		result.Outcome, result.Reason = partner.ReportAccepted, ""
 	case res.StatusCode == http.StatusTooManyRequests && *answer.Code == http.StatusTooManyRequests:
-		return partner.ReportResult{Outcome: partner.ReportRetry, Reason: "partner_rate_limited", RetryAfter: retryAfter(res.Header.Get("Retry-After"), time.Now())}
+		result.Outcome, result.Reason = partner.ReportRetry, "partner_rate_limited"
+		result.RetryAfter = retryAfter(res.Header.Get("Retry-After"), now)
 	case res.StatusCode == http.StatusOK && *answer.Code != 0 ||
-		res.StatusCode >= 400 && res.StatusCode < 500 && res.StatusCode != http.StatusRequestTimeout && *answer.Code == res.StatusCode:
-		return partner.ReportResult{Outcome: partner.ReportRejected, Reason: "partner_rejected"}
-	default:
-		return partner.ReportResult{Outcome: partner.ReportUnknown, Reason: "partner_response_unconfirmed"}
+		res.StatusCode >= 400 && res.StatusCode < 500 && res.StatusCode != http.StatusRequestTimeout && *answer.Code == int64(res.StatusCode):
+		result.Outcome, result.Reason = partner.ReportRejected, "partner_rejected"
 	}
+	return result
 }
 
 func retryAfter(value string, now time.Time) time.Time {

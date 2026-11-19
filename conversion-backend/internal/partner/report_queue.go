@@ -61,8 +61,8 @@ func (q ReportQueue) Claim(ctx context.Context) (ReportJob, error) {
 				UPDATE conversion.partner_reports r SET lease_token=gen_random_uuid(),lease_until=now()+$2::interval,attempts=attempts+1
 				FROM candidate c WHERE r.id=c.id RETURNING r.*
 			), attempt AS (
-				INSERT INTO conversion.partner_report_attempts(report_id,attempt_no)
-				SELECT id,attempts FROM claimed RETURNING report_id
+				INSERT INTO conversion.partner_report_attempts(report_id,attempt_no,lease_token)
+				SELECT id,attempts,lease_token FROM claimed RETURNING report_id
 			)
 			SELECT r.id,r.lease_token::text,r.attempts,r.report_status,r.created_at,r.payload,r.wire_payload,
 			       i.report_config,c.id,c.key_version,c.ciphertext,
@@ -89,7 +89,7 @@ func (q ReportQueue) Start(ctx context.Context, j ReportJob, wire []byte, replay
 			  AND i.report_config=$5 AND c.id=$6 AND c.ciphertext=$7 AND c.key_version=$12
 			  AND (r.wire_payload IS NULL OR r.wire_payload=$8)
 			  AND EXISTS(SELECT 1 FROM conversion.partner_report_attempts a WHERE a.report_id=r.id AND a.attempt_no=r.attempts
-			             AND a.sending_at IS NULL AND a.recorded_at IS NULL)
+			             AND a.lease_token=r.lease_token AND a.sending_at IS NULL AND a.recorded_at IS NULL)
 			RETURNING r.id
 		)
 		UPDATE conversion.partner_report_attempts a SET sending_at=clock_timestamp(),replay_allowed=$9
@@ -107,9 +107,12 @@ type ReportPolicy struct {
 }
 
 type ReportResult struct {
-	Outcome    string
-	Reason     string
-	RetryAfter time.Time
+	Outcome      string
+	Reason       string
+	RetryAfter   time.Time
+	HTTPStatus   *int
+	BusinessCode *int64
+	RespondedAt  *time.Time
 }
 
 const (
@@ -120,6 +123,83 @@ const (
 	ReportUnknown  = "outcome_unknown"
 	ReportBlocked  = "blocked"
 )
+
+func (r ReportResult) confirmed() bool {
+	return r.Outcome == ReportAccepted && r.HTTPStatus != nil && *r.HTTPStatus == 200 &&
+		r.BusinessCode != nil && *r.BusinessCode == 0 && r.RespondedAt != nil
+}
+
+// RecordReceipt stores a positive reply against the original sending attempt,
+// even if recovery has cleared the report's lease.
+func (q ReportQueue) RecordReceipt(ctx context.Context, j ReportJob, result ReportResult) error {
+	if !result.confirmed() {
+		return errors.New("missing partner acknowledgement")
+	}
+	return pgx.BeginFunc(ctx, q.Pool, func(tx pgx.Tx) error {
+		// Claim, Start, Finish and Sweep all serialize on this report. Read the
+		// attempt history in fresh statements after acquiring the lock.
+		var state string
+		err := tx.QueryRow(ctx, `
+			SELECT r.state FROM conversion.partner_reports r
+			JOIN conversion.integrations i ON i.id=r.integration_id
+			WHERE r.id=$1 AND i.environment=$2 AND i.source=$3 AND r.contract_version=$4
+			FOR UPDATE OF r`, j.ID, q.Environment, q.Source, q.Contract).Scan(&state)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrReportLeaseLost
+		}
+		if err != nil {
+			return err
+		}
+		var open bool
+		err = tx.QueryRow(ctx, `
+			UPDATE conversion.partner_report_attempts a
+			SET http_status=$4,business_code=$5,responded_at=COALESCE(a.responded_at,$6)
+			WHERE a.report_id=$1 AND a.attempt_no=$2 AND a.lease_token=$3::uuid
+			  AND a.sending_at IS NOT NULL AND (a.recorded_at IS NULL OR a.outcome='outcome_unknown')
+			RETURNING a.recorded_at IS NULL`, j.ID, j.Attempt, j.Token,
+			result.HTTPStatus, result.BusinessCode, result.RespondedAt).Scan(&open)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrReportLeaseLost
+		}
+		if err != nil || open || state == "confirmed" {
+			return err
+		}
+
+		var newerSent bool
+		err = tx.QueryRow(ctx, `
+			SELECT EXISTS(SELECT 1 FROM conversion.partner_report_attempts
+			    WHERE report_id=$1 AND attempt_no>$2 AND sending_at IS NOT NULL)`,
+			j.ID, j.Attempt).Scan(&newerSent)
+		if err != nil || newerSent {
+			// Keep the late evidence on its original attempt. A later send
+			// retains ownership of the report state.
+			return err
+		}
+		return confirmRecoveredReceipt(ctx, tx, j)
+	})
+}
+
+func confirmRecoveredReceipt(ctx context.Context, tx pgx.Tx, j ReportJob) error {
+	// Close any merely claimed successor before clearing the report lease.
+	// Start cannot cross the same report lock until this transaction commits.
+	if _, err := tx.Exec(ctx, `
+		UPDATE conversion.partner_report_attempts
+		SET outcome='not_sent',reason='superseded_by_partner_receipt',recorded_at=clock_timestamp()
+		WHERE report_id=$1 AND attempt_no>$2 AND sending_at IS NULL AND recorded_at IS NULL`,
+		j.ID, j.Attempt); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE conversion.partner_report_attempts SET outcome='accepted',reason=NULL,retry_at=NULL
+		WHERE report_id=$1 AND attempt_no=$2`, j.ID, j.Attempt); err != nil {
+		return err
+	}
+	_, err := tx.Exec(ctx, `
+		UPDATE conversion.partner_reports
+		SET state='confirmed',reason=NULL,next_attempt_at=clock_timestamp(),lease_token=NULL,lease_until=NULL
+		WHERE id=$1`, j.ID)
+	return err
+}
 
 func (config ReportPolicy) Deadline(created time.Time) time.Time {
 	if config.MaxAge < 1 || config.MaxAge > 30*24*60*60 {
@@ -166,14 +246,17 @@ func (q ReportQueue) finishTx(ctx context.Context, tx pgx.Tx, j ReportJob, resul
 	var config ReportPolicy
 	var raw []byte
 	var sending, replay bool
+	var receipt ReportResult
 	err := tx.QueryRow(ctx, `
-		SELECT clock_timestamp(),i.report_config,a.sending_at IS NOT NULL,a.replay_allowed
+		SELECT clock_timestamp(),i.report_config,a.sending_at IS NOT NULL,a.replay_allowed,
+		       a.http_status,a.business_code,a.responded_at
 		FROM conversion.partner_reports r JOIN conversion.integrations i ON i.id=r.integration_id
 		JOIN conversion.partner_report_attempts a ON a.report_id=r.id AND a.attempt_no=r.attempts
 		WHERE r.id=$1 AND r.lease_token=$2::uuid AND r.attempts=$3 AND r.state='pending'
-		  AND i.environment=$4 AND a.recorded_at IS NULL
+		  AND i.environment=$4 AND a.lease_token=r.lease_token AND a.recorded_at IS NULL
 		  AND ($5 OR r.lease_until>clock_timestamp())
-		FOR UPDATE OF r`, j.ID, j.Token, j.Attempt, q.Environment, fromSweep).Scan(&now, &raw, &sending, &replay)
+		FOR UPDATE OF r`, j.ID, j.Token, j.Attempt, q.Environment, fromSweep).Scan(
+		&now, &raw, &sending, &replay, &receipt.HTTPStatus, &receipt.BusinessCode, &receipt.RespondedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrReportLeaseLost
 	}
@@ -187,18 +270,26 @@ func (q ReportQueue) finishTx(ctx context.Context, tx pgx.Tx, j ReportJob, resul
 	if fromSweep {
 		result = ReportResult{Outcome: ReportNotSent, Reason: "partner_lease_expired_before_send"}
 		if sending {
-			result = ReportResult{Outcome: ReportUnknown, Reason: "partner_lease_expired_after_send"}
+			receipt.Outcome = ReportAccepted
+			if receipt.confirmed() {
+				result = receipt
+			} else {
+				result = ReportResult{Outcome: ReportUnknown, Reason: "partner_lease_expired_after_send"}
+			}
 		}
 	}
-	if result.Outcome == ReportAccepted && !sending {
+	if result.Outcome == ReportAccepted && (!sending || !result.confirmed()) {
 		return ErrReportLeaseLost
 	}
 	allowReplay := config.Replay && (!sending || replay)
 	state, reason, next := reportTransition(j, now, result, allowReplay, config.Deadline(j.CreatedAt))
 	recorded, err := tx.Exec(ctx, `
 		UPDATE conversion.partner_report_attempts SET outcome=$3,reason=NULLIF($4,''),recorded_at=$5,
-		    retry_at=CASE WHEN $6='pending' THEN $7::timestamptz END
-		WHERE report_id=$1 AND attempt_no=$2 AND recorded_at IS NULL`, j.ID, j.Attempt, result.Outcome, result.Reason, now, state, next)
+		    retry_at=CASE WHEN $6='pending' THEN $7::timestamptz END,
+		    http_status=COALESCE($8,http_status),business_code=COALESCE($9,business_code),
+		    responded_at=COALESCE(responded_at,$10)
+		WHERE report_id=$1 AND attempt_no=$2 AND recorded_at IS NULL`, j.ID, j.Attempt, result.Outcome, result.Reason, now, state, next,
+		result.HTTPStatus, result.BusinessCode, result.RespondedAt)
 	if err != nil {
 		return err
 	}

@@ -61,3 +61,13 @@ var ConversionReviewSQL string
 //
 //go:embed migrations/2026111907.sql
 var SinanConversionSQL string
+
+// SinanReviewSQL adds structured partner receipts and account-scoped promotion routing.
+//
+//go:embed migrations/2026111908.sql
+var SinanReviewSQL string
+
+// SinanRecheckSQL versions Inbox digests and preserves partner attempt identity.
+//
+//go:embed migrations/2026111909.sql
+var SinanRecheckSQL string

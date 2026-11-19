@@ -63,7 +63,9 @@ const (
 	conversionReconcileVersion  int64 = 2026111904
 	conversionOperationsVersion int64 = 2026111905
 	conversionReviewVersion     int64 = 2026111906
-	RequiredSchemaVersion       int64 = 2026111907
+	sinanConversionVersion      int64 = 2026111907
+	sinanReviewVersion          int64 = 2026111908
+	RequiredSchemaVersion       int64 = 2026111909
 )
 
 func autoMigrate(ctx context.Context, pool *pgxpool.Pool) error {
@@ -148,7 +150,17 @@ func autoMigrate(ctx context.Context, pool *pgxpool.Pool) error {
 			return fmt.Errorf("schema migration %d: %w", conversionReviewVersion, err)
 		}
 	}
-	if _, err := tx.Exec(ctx, dbassets.SinanConversionSQL); err != nil {
+	if version < sinanConversionVersion {
+		if _, err := tx.Exec(ctx, dbassets.SinanConversionSQL); err != nil {
+			return fmt.Errorf("schema migration %d: %w", sinanConversionVersion, err)
+		}
+	}
+	if version < sinanReviewVersion {
+		if _, err := tx.Exec(ctx, dbassets.SinanReviewSQL); err != nil {
+			return fmt.Errorf("schema migration %d: %w", sinanReviewVersion, err)
+		}
+	}
+	if _, err := tx.Exec(ctx, dbassets.SinanRecheckSQL); err != nil {
 		return fmt.Errorf("schema migration %d: %w", RequiredSchemaVersion, err)
 	}
 	return tx.Commit(ctx)

@@ -2,10 +2,11 @@ package operations
 
 import (
 	"context"
-	"conversion-backend/internal/delivery"
 	"encoding/json"
-	"regexp"
 	"strconv"
+
+	"conversion-backend/internal/delivery"
+	"conversion-backend/internal/partner"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -21,8 +22,6 @@ type OrderKey struct {
 	IntegrationID int64
 }
 
-var externalOrderID = regexp.MustCompile(`^[^\p{C}\s/]{1,128}$`)
-
 func ParseOrderKey(id, integration string) (OrderKey, bool) {
 	key := OrderKey{ID: id}
 	if integration == "" {
@@ -34,7 +33,7 @@ func ParseOrderKey(id, integration string) (OrderKey, bool) {
 		return key, true
 	}
 	n, ok := positiveID(integration)
-	if !ok || id == "." || id == ".." || !externalOrderID.MatchString(id) {
+	if !ok || !partner.ValidOrderID(id) {
 		return OrderKey{}, false
 	}
 	key.IntegrationID = n
