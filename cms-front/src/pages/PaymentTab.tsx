@@ -48,7 +48,7 @@ export default function PaymentTab() {
 
   const handleSavePayPal = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!configLoaded || configLoadFailed) return;
+    if (!configLoaded || configLoadFailed || paypalSaving) return;
     setPaypalSaving(true);
     try {
       await apiRequest('POST', '/settings', {
@@ -67,7 +67,7 @@ export default function PaymentTab() {
 
   const handleSaveStripe = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!configLoaded || configLoadFailed) return;
+    if (!configLoaded || configLoadFailed || stripeSaving) return;
     setStripeSaving(true);
     try {
       await apiRequest('POST', '/settings', {

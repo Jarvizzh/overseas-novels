@@ -33,6 +33,7 @@ export interface PromotionFormData {
 interface PromotionLinkModalProps {
   isOpen: boolean;
   onClose: () => void;
+  submitting?: boolean;
   promotionForm: PromotionFormData;
   setPromotionForm: (form: PromotionFormData) => void;
   pixels: FBPixel[];
@@ -46,6 +47,7 @@ interface PromotionLinkModalProps {
 export const PromotionLinkModal: React.FC<PromotionLinkModalProps> = ({
   isOpen,
   onClose,
+  submitting = false,
   promotionForm,
   setPromotionForm,
   pixels,
@@ -64,19 +66,20 @@ export const PromotionLinkModal: React.FC<PromotionLinkModalProps> = ({
   return (
     <CmsDialog
       open={isOpen}
-      onClose={onClose}
+      onClose={() => !submitting && onClose()}
       variant="drawer"
       title="生成书籍推广链接"
       subtitle={promotionForm.title ? `${promotionForm.title} · #${promotionForm.novelId}` : undefined}
       size="md"
-      closedBy="any"
+      closedBy={submitting ? 'none' : 'any'}
+      closeDisabled={submitting}
       footer={
         <>
-          <button type="button" className="btn-secondary" onClick={onClose}>
+          <button type="button" disabled={submitting} className="btn-secondary" onClick={() => !submitting && onClose()}>
             取消
           </button>
-          <button type="button" className="btn-primary" onClick={onGenerateLink}>
-            生成并保存推广链接
+          <button type="button" disabled={submitting} className="btn-primary" onClick={onGenerateLink}>
+            {submitting ? '生成中...' : '生成并保存推广链接'}
           </button>
         </>
       }

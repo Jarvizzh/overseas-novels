@@ -11,6 +11,7 @@ import {
 import { apiRequest, domainApi } from '../utils/api';
 import type { SystemDomain } from '../utils/api';
 import { copyTextToClipboard } from '../utils/clipboard';
+import { canWritePromotions, getCurrentAdminRole, validateAndBuildPromotionPayload } from '../utils/promotion';
 import { FALLBACK_COVER } from '../components/operations/operationsUtils';
 import { DEFAULT_CHAPTER_DELIMITER_REGEX } from '../components/novels/ChapterUploadFields';
 import { MAX_GENRES_LENGTH, NovelFormModal, type NovelFormData } from '../components/novels/NovelFormModal';
@@ -140,17 +141,10 @@ function getPublishStatusMeta(publishStatus?: string): {
 }
 
 export default function NovelsTab() {
-  const currentAdminRole = (() => {
-    try {
-      const saved = localStorage.getItem('cms_admin');
-      return saved ? JSON.parse(saved).role || '' : '';
-    } catch {
-      return '';
-    }
-  })();
+  const currentAdminRole = getCurrentAdminRole();
   const canEditNovels = ['SuperAdmin', 'Admin', 'Editor'].includes(currentAdminRole);
   const canEditGlobalSettings = ['SuperAdmin', 'Admin'].includes(currentAdminRole);
-  const canCreatePromo = ['SuperAdmin', 'Admin', 'Editor', 'MediaBuyer'].includes(currentAdminRole);
+  const canCreatePromo = canWritePromotions(currentAdminRole);
 
   const [novels, setNovels] = useState<Novel[]>([]);
   const [totalNovels, setTotalNovels] = useState(0);
@@ -263,6 +257,7 @@ export default function NovelsTab() {
 
   // Promo builder states
   const [isPromoModalOpen, setIsPromoModalOpen] = useState(false);
+  const [promoSubmitting, setPromoSubmitting] = useState(false);
   const [pixels, setPixels] = useState<FBPixel[]>([]);
   const [templates, setTemplates] = useState<RechargeTemplate[]>([]);
   const [domains, setDomains] = useState<SystemDomain[]>([]);
@@ -996,83 +991,46 @@ export default function NovelsTab() {
   };
 
   const handleGeneratePromotionLink = async () => {
-    if (!promotionForm.fbPixelId) {
-      window.showToast?.('推广链接必须显式绑定 Facebook 像素！请先选择像素。', 'error');
+    if (!canCreatePromo || promoSubmitting) return;
+
+    const built = validateAndBuildPromotionPayload(
+      {
+        novelId: promotionForm.novelId,
+        name: promotionForm.name,
+        novelTitle: promotionForm.title,
+        chapterIndex: promotionForm.chapterIndex,
+        utmSource: promotionForm.utmSource,
+        utmCampaign: promotionForm.utmCampaign,
+        domainId: promotionForm.domainId || '',
+        fbPixelId: promotionForm.fbPixelId,
+        rechargeTemplateId: promotionForm.rechargeTemplateId,
+        coinCostPerThousand: promotionForm.coinCostPerThousand,
+        startPayChapterIndex: promotionForm.startPayChapterIndex,
+      },
+      domains,
+      pixels,
+    );
+
+    if (built.error || !built.payload || !built.params || !built.baseUrl || !built.path || !built.finalUrl) {
+      window.showToast?.(built.error || '推广参数无效', 'error');
       return;
     }
 
-    const rawPromoCost = String(promotionForm.coinCostPerThousand ?? '').trim();
-    if (rawPromoCost !== '') {
-      const parsedCost = Number(rawPromoCost);
-      if (!Number.isInteger(parsedCost) || parsedCost < 0) {
-        window.showToast?.('推广覆写单价（千字金币）必须为大于等于 0 的整数。', 'error');
-        return;
-      }
-    }
-
-    const rawPromoStartPay = String(promotionForm.startPayChapterIndex ?? '').trim();
-    if (rawPromoStartPay !== '') {
-      const parsedStartPay = Number(promotionForm.startPayChapterIndex);
-      if (!Number.isInteger(parsedStartPay) || parsedStartPay < 1) {
-        window.showToast?.('推广覆写起始付费章节必须为大于等于 1 的整数。', 'error');
-        return;
-      }
-    }
-
-    const activeDomains = (domains || []).filter((d) => d.status === 1);
-    const targetDomainObj = activeDomains.find((d) => String(d.id) === promotionForm.domainId);
-    const defaultDomainObj =
-      activeDomains.find((d) => d.is_default) || activeDomains.find((d) => d.type === 'main') || activeDomains[0];
-    const domainHost = targetDomainObj
-      ? targetDomainObj.domain
-      : defaultDomainObj
-        ? defaultDomainObj.domain
-        : window.location.host;
-
-    let baseUrl = domainHost.startsWith('http://') || domainHost.startsWith('https://') ? domainHost : `https://${domainHost}`;
-    baseUrl = baseUrl.replace(/\/+$/, '');
-
-    const params = new URLSearchParams();
-    params.set('novel_id', String(promotionForm.novelId));
-    if (promotionForm.chapterIndex) params.set('chapter_index', promotionForm.chapterIndex);
-    if (promotionForm.utmSource) params.set('utm_source', promotionForm.utmSource);
-    if (promotionForm.utmCampaign) params.set('utm_campaign', promotionForm.utmCampaign);
-
-    const targetPixel = pixels.find((p) => p.id === parseInt(promotionForm.fbPixelId, 10));
-    if (targetPixel) params.set('pixel_id', targetPixel.pixel_id);
-    if (promotionForm.rechargeTemplateId) params.set('template_id', promotionForm.rechargeTemplateId);
-    if (rawPromoCost !== '') params.set('cost', rawPromoCost);
-    if (rawPromoStartPay !== '') params.set('pay_ch', rawPromoStartPay);
-
-    const path = promotionForm.chapterIndex ? '/content' : '/detail';
-    const finalUrl = `${baseUrl}${path}?${params.toString()}`;
-
+    setPromoSubmitting(true);
     try {
-      const created = await apiRequest('POST', '/promotion-links', {
-        name: promotionForm.name,
-        novel_id: promotionForm.novelId,
-        novel_title: promotionForm.title,
-        chapter_index: promotionForm.chapterIndex ? parseInt(promotionForm.chapterIndex, 10) : 0,
-        utm_source: promotionForm.utmSource,
-        utm_campaign: promotionForm.utmCampaign,
-        generated_url: finalUrl,
-        domain_id: targetDomainObj ? targetDomainObj.id : defaultDomainObj ? defaultDomainObj.id : null,
-        domain: targetDomainObj ? targetDomainObj.domain : defaultDomainObj ? defaultDomainObj.domain : '',
-        fb_pixel_id: promotionForm.fbPixelId ? parseInt(promotionForm.fbPixelId, 10) : null,
-        recharge_template_id: promotionForm.rechargeTemplateId ? parseInt(promotionForm.rechargeTemplateId, 10) : null,
-        coin_cost_per_thousand: rawPromoCost !== '' ? parseInt(rawPromoCost, 10) : null,
-        start_pay_chapter_index: rawPromoStartPay !== '' ? parseInt(rawPromoStartPay, 10) : null,
-      });
+      const created = await apiRequest('POST', '/promotion-links', built.payload);
 
-      let resolvedUrl = finalUrl;
+      let resolvedUrl = built.finalUrl;
       if (created && created.id) {
-        params.set('link_id', String(created.id));
-        resolvedUrl = `${baseUrl}${path}?${params.toString()}`;
+        built.params.set('link_id', String(created.id));
+        resolvedUrl = `${built.baseUrl}${built.path}?${built.params.toString()}`;
       }
       setGeneratedLink(created?.generated_url || resolvedUrl);
       window.showToast?.('推广链接已成功生成并记录！', 'success');
     } catch (err: unknown) {
       window.showToast?.(`保存推广链接失败：${err instanceof Error ? err.message : ''}`, 'error');
+    } finally {
+      setPromoSubmitting(false);
     }
   };
 
@@ -2086,7 +2044,8 @@ export default function NovelsTab() {
       {/* Promotion Modal */}
       <PromotionLinkModal
         isOpen={isPromoModalOpen}
-        onClose={() => setIsPromoModalOpen(false)}
+        onClose={() => !promoSubmitting && setIsPromoModalOpen(false)}
+        submitting={promoSubmitting}
         promotionForm={promotionForm}
         setPromotionForm={setPromotionForm}
         pixels={pixels}

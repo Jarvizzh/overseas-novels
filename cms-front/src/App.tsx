@@ -201,6 +201,10 @@ function AppContent() {
     });
   }, []);
 
+  const handleCloseMobile = useCallback(() => {
+    setMobileNavOpen(false);
+  }, []);
+
   const handleLoginSuccess = (newToken: string, newAdmin: AdminUser) => {
     localStorage.setItem('cms_token', newToken);
     localStorage.setItem('cms_admin', JSON.stringify(newAdmin));
@@ -244,7 +248,7 @@ function AppContent() {
         expandedGroups={expandedGroups}
         onToggleGroup={handleToggleGroup}
         mobileOpen={mobileNavOpen}
-        onCloseMobile={() => setMobileNavOpen(false)}
+        onCloseMobile={handleCloseMobile}
         onLogout={handleLogout}
       />
 

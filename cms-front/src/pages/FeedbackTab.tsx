@@ -106,7 +106,7 @@ export default function FeedbackTab() {
 
   const handleUpdateSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!selectedItem) return;
+    if (!selectedItem || saving) return;
 
     setSaving(true);
     try {
@@ -294,7 +294,7 @@ export default function FeedbackTab() {
       {/* Right Slide-Over Ticket Drawer */}
       <CmsDialog
         open={Boolean(selectedItem)}
-        onClose={() => setSelectedItem(null)}
+        onClose={() => !saving && setSelectedItem(null)}
         variant="drawer"
         title={selectedItem ? `留言工单 #${selectedItem.id}` : ''}
         subtitle={selectedItem ? `${selectedItem.email} · ${selectedItem.subject || '常规咨询'}` : undefined}
@@ -303,7 +303,7 @@ export default function FeedbackTab() {
         closeDisabled={saving}
         footer={
           <>
-            <button type="button" className="btn-secondary" disabled={saving} onClick={() => setSelectedItem(null)}>
+            <button type="button" className="btn-secondary" disabled={saving} onClick={() => !saving && setSelectedItem(null)}>
               取消
             </button>
             <button type="submit" form="feedback-reply-form" disabled={saving} className="btn-primary">

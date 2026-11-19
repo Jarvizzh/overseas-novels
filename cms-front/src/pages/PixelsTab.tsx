@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Plus } from 'lucide-react';
 import { apiRequest } from '../utils/api';
+import { canWritePromotions } from '../utils/promotion';
 import { CmsDialog } from '../components/ui/CmsDialog';
 import {
   RowActionMenu,
@@ -20,6 +21,7 @@ interface FBPixel {
 }
 
 export default function PixelsTab() {
+  const canWrite = canWritePromotions();
   const [pixels, setPixels] = useState<FBPixel[]>([]);
   const [loading, setLoading] = useState(true);
   const [hasLoadedOnce, setHasLoadedOnce] = useState(false);
@@ -62,7 +64,7 @@ export default function PixelsTab() {
 
   const handlePixelFormSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (submitting) return;
+    if (!canWrite || submitting) return;
     setSubmitting(true);
     try {
       if (editingPixel) {
@@ -82,6 +84,7 @@ export default function PixelsTab() {
   };
 
   const handleEditPixelClick = (pixel: FBPixel) => {
+    if (!canWrite) return;
     setEditingPixel(pixel);
     setPixelForm({
       name: pixel.name,
@@ -124,18 +127,20 @@ export default function PixelsTab() {
         <div className="flex flex-wrap items-center gap-2 text-xs text-[var(--cms-muted-fg)]">
           <span className="tabular-nums">共 {filteredPixels.length} 个像素</span>
           <ViewOptionsPopover density={density} onDensityChange={setDensity} />
-          <button
-            type="button"
-            onClick={() => {
-              setEditingPixel(null);
-              setPixelForm({ name: '', pixel_id: '', access_token: '' });
-              setIsPixelModalOpen(true);
-            }}
-            className="btn-primary h-8 px-3.5 text-xs"
-          >
-            <Plus size={14} aria-hidden="true" />
-            <span>新增像素</span>
-          </button>
+          {canWrite && (
+            <button
+              type="button"
+              onClick={() => {
+                setEditingPixel(null);
+                setPixelForm({ name: '', pixel_id: '', access_token: '' });
+                setIsPixelModalOpen(true);
+              }}
+              className="btn-primary h-8 px-3.5 text-xs"
+            >
+              <Plus size={14} aria-hidden="true" />
+              <span>新增像素</span>
+            </button>
+          )}
         </div>
       </search>
 
@@ -175,21 +180,25 @@ export default function PixelsTab() {
                     {new Date(pixel.created_at).toLocaleString()}
                   </td>
                   <td className="text-right whitespace-nowrap">
-                    <div className="inline-flex items-center justify-end gap-0.5 whitespace-nowrap">
-                      <button type="button" onClick={() => handleEditPixelClick(pixel)} className="btn-detail whitespace-nowrap">
-                        编辑
-                      </button>
-                      <RowActionMenu
-                        ariaLabel={`像素 ${pixel.name} 更多操作`}
-                        items={[
-                          {
-                            label: '删除像素',
-                            tone: 'danger',
-                            onClick: () => handleDeletePixel(pixel.id, pixel.name),
-                          },
-                        ]}
-                      />
-                    </div>
+                    {canWrite ? (
+                      <div className="inline-flex items-center justify-end gap-0.5 whitespace-nowrap">
+                        <button type="button" onClick={() => handleEditPixelClick(pixel)} className="btn-detail whitespace-nowrap">
+                          编辑
+                        </button>
+                        <RowActionMenu
+                          ariaLabel={`像素 ${pixel.name} 更多操作`}
+                          items={[
+                            {
+                              label: '删除像素',
+                              tone: 'danger',
+                              onClick: () => handleDeletePixel(pixel.id, pixel.name),
+                            },
+                          ]}
+                        />
+                      </div>
+                    ) : (
+                      <span className="text-[var(--cms-muted-fg)]">只读</span>
+                    )}
                   </td>
                 </tr>
               ))

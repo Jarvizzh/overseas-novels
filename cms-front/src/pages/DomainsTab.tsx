@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { ExternalLink, Plus, RefreshCw } from 'lucide-react';
 import { domainApi } from '../utils/api';
 import type { SystemDomain } from '../utils/api';
+import { normalizeDomainHref } from '../utils/promotion';
 import CustomSelect from '../components/CustomSelect';
 import { CmsDialog } from '../components/ui/CmsDialog';
 import {
@@ -58,6 +59,7 @@ export default function DomainsTab() {
 
   const handleCreateSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (submitting) return;
     if (!formData.name.trim() || !formData.domain.trim()) {
       window.showToast?.('请填写完整的域名信息', 'error');
       return;
@@ -232,7 +234,7 @@ export default function DomainsTab() {
                   <td className="text-[var(--cms-fg)]">{item.name}</td>
                   <td>
                     <a
-                      href={`https://${item.domain}`}
+                      href={normalizeDomainHref(item.domain)}
                       target="_blank"
                       rel="noreferrer"
                       className="inline-flex items-center gap-1.5 text-[var(--cms-fg)] hover:underline"

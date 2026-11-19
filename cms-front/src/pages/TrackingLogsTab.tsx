@@ -272,7 +272,7 @@ export default function TrackingLogsTab() {
                     {log.user_id ? `UID ${log.user_id}` : '-'}
                   </td>
                   <td className="text-right tabular-nums text-[var(--cms-fg)] whitespace-nowrap">
-                    {log.value ? `${log.value} ${log.currency}` : <span className="text-[var(--cms-muted-fg)]">-</span>}
+                    {log.value ? `${log.value}${log.currency ? ` ${log.currency}` : ''}` : <span className="text-[var(--cms-muted-fg)]">-</span>}
                   </td>
                   <td className="text-[var(--cms-muted-fg)]">{log.test_event_code || '-'}</td>
                   <td>

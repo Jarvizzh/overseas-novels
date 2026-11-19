@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { apiRequest, domainApi } from '../utils/api';
 import type { SystemDomain } from '../utils/api';
 import { copyTextToClipboard } from '../utils/clipboard';
+import { canWritePromotions, validateAndBuildPromotionPayload } from '../utils/promotion';
 import CustomSelect from '../components/CustomSelect';
 import { CmsDialog } from '../components/ui/CmsDialog';
 import { Pagination } from '../components/ui/Pagination';
@@ -48,6 +49,7 @@ interface RechargeTemplate {
 }
 
 export default function PromotionsTab() {
+  const canWrite = canWritePromotions();
   const [links, setLinks] = useState<PromotionLink[]>([]);
   const [pixels, setPixels] = useState<FBPixel[]>([]);
   const [templates, setTemplates] = useState<RechargeTemplate[]>([]);
@@ -121,84 +123,33 @@ export default function PromotionsTab() {
 
   const handleEditSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!editingLink || editSubmitting) return;
+    if (!canWrite || !editingLink || editSubmitting) return;
 
-    if (!editForm.fbPixelId) {
-      window.showToast?.('推广链接必须显式绑定 Facebook 像素！', 'error');
+    const built = validateAndBuildPromotionPayload(
+      {
+        novelId: editingLink.novel_id,
+        name: editForm.name,
+        chapterIndex: editForm.chapterIndex,
+        utmSource: editForm.utmSource,
+        utmCampaign: editForm.utmCampaign,
+        domainId: editForm.domainId,
+        fbPixelId: editForm.fbPixelId,
+        rechargeTemplateId: editForm.rechargeTemplateId,
+        coinCostPerThousand: editForm.coinCostPerThousand,
+        startPayChapterIndex: editForm.startPayChapterIndex,
+        linkId: editingLink.id,
+      },
+      domains,
+      pixels,
+    );
+    if (built.error || !built.payload) {
+      window.showToast?.(built.error || '推广参数无效', 'error');
       return;
     }
 
-    const chapterIdxRaw = editForm.chapterIndex.trim();
-    if (chapterIdxRaw) {
-      const parsedCh = Number(chapterIdxRaw);
-      if (!Number.isInteger(parsedCh) || parsedCh < 0) {
-        window.showToast?.('落地章节索引须为非负整数', 'error');
-        return;
-      }
-    }
-
-    const costRaw = editForm.coinCostPerThousand.trim();
-    if (costRaw) {
-      const parsedCost = Number(costRaw);
-      if (!Number.isInteger(parsedCost) || parsedCost < 0) {
-        window.showToast?.('专属千字计费须为不小于 0 的整数', 'error');
-        return;
-      }
-    }
-
-    const payChRaw = editForm.startPayChapterIndex.trim();
-    if (payChRaw) {
-      const parsedPayCh = Number(payChRaw);
-      if (!Number.isInteger(parsedPayCh) || parsedPayCh < 1) {
-        window.showToast?.('专属起付章节须为不小于 1 的整数', 'error');
-        return;
-      }
-    }
-
-    const activeDomains = (domains || []).filter((d) => d.status === 1);
-    const targetDomainObj = activeDomains.find((d) => String(d.id) === editForm.domainId);
-    const defaultDomainObj =
-      activeDomains.find((d) => d.is_default) || activeDomains.find((d) => d.type === 'main') || activeDomains[0];
-    const domainHost = targetDomainObj
-      ? targetDomainObj.domain
-      : defaultDomainObj
-        ? defaultDomainObj.domain
-        : window.location.host;
-
-    let baseUrl = domainHost.startsWith('http://') || domainHost.startsWith('https://') ? domainHost : `https://${domainHost}`;
-    baseUrl = baseUrl.replace(/\/+$/, '');
-
-    const params = new URLSearchParams();
-    params.set('novel_id', String(editingLink.novel_id));
-    if (chapterIdxRaw) params.set('chapter_index', chapterIdxRaw);
-    if (editForm.utmSource.trim()) params.set('utm_source', editForm.utmSource.trim());
-    if (editForm.utmCampaign.trim()) params.set('utm_campaign', editForm.utmCampaign.trim());
-
-    const targetPixel = pixels.find((p) => p.id === parseInt(editForm.fbPixelId, 10));
-    if (targetPixel) params.set('pixel_id', targetPixel.pixel_id);
-    if (editForm.rechargeTemplateId) params.set('template_id', editForm.rechargeTemplateId);
-    if (costRaw) params.set('cost', costRaw);
-    if (payChRaw) params.set('pay_ch', payChRaw);
-    params.set('link_id', String(editingLink.id));
-
-    const path = chapterIdxRaw && Number(chapterIdxRaw) > 0 ? '/content' : '/detail';
-    const finalUrl = `${baseUrl}${path}?${params.toString()}`;
-
     setEditSubmitting(true);
     try {
-      await apiRequest('PUT', `/promotion-links/${editingLink.id}`, {
-        name: editForm.name,
-        chapter_index: chapterIdxRaw ? parseInt(chapterIdxRaw, 10) : 0,
-        utm_source: editForm.utmSource.trim(),
-        utm_campaign: editForm.utmCampaign.trim(),
-        generated_url: finalUrl,
-        domain_id: targetDomainObj ? targetDomainObj.id : defaultDomainObj ? defaultDomainObj.id : null,
-        domain: targetDomainObj ? targetDomainObj.domain : defaultDomainObj ? defaultDomainObj.domain : '',
-        fb_pixel_id: editForm.fbPixelId ? parseInt(editForm.fbPixelId, 10) : null,
-        recharge_template_id: editForm.rechargeTemplateId ? parseInt(editForm.rechargeTemplateId, 10) : null,
-        coin_cost_per_thousand: costRaw ? parseInt(costRaw, 10) : null,
-        start_pay_chapter_index: payChRaw ? parseInt(payChRaw, 10) : null,
-      });
+      await apiRequest('PUT', `/promotion-links/${editingLink.id}`, built.payload);
 
       window.showToast?.('修改推广链接成功！', 'success');
       setIsEditModalOpen(false);
@@ -471,18 +422,20 @@ export default function PromotionsTab() {
                         >
                           复制
                         </button>
-                        <RowActionMenu
-                          ariaLabel={`推广链接 ${link.name || link.id} 操作`}
-                          items={[
-                            { label: '编辑参数配置', onClick: () => handleEditClick(link) },
-                            {
-                              label: '删除推广链接',
-                              tone: 'danger',
-                              dividerBefore: true,
-                              onClick: () => handleDelete(link.id),
-                            },
-                          ]}
-                        />
+                        {canWrite && (
+                          <RowActionMenu
+                            ariaLabel={`推广链接 ${link.name || link.id} 操作`}
+                            items={[
+                              { label: '编辑参数配置', onClick: () => handleEditClick(link) },
+                              {
+                                label: '删除推广链接',
+                                tone: 'danger',
+                                dividerBefore: true,
+                                onClick: () => handleDelete(link.id),
+                              },
+                            ]}
+                          />
+                        )}
                       </div>
                     </td>
                   </tr>

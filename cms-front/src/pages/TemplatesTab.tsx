@@ -580,6 +580,7 @@ export default function TemplatesTab() {
   };
 
   const handleDeleteSlot = (index: number) => {
+    if (!canManageTemplates) return;
     if (slots.length <= 4) {
       window.showToast?.('单个模板至少保留 4 个卡位', 'error');
       return;
@@ -598,6 +599,7 @@ export default function TemplatesTab() {
   };
 
   const reorderSlots = (fromIdx: number, toIdx: number) => {
+    if (!canManageTemplates) return;
     if (fromIdx === toIdx || fromIdx < 0 || toIdx < 0 || fromIdx >= slots.length || toIdx >= slots.length) return;
     setSlots((prev) => {
       const next = [...prev];
@@ -615,6 +617,7 @@ export default function TemplatesTab() {
   };
 
   const handleSlotDragStart = (e: React.DragEvent<HTMLElement>, index: number) => {
+    if (!canManageTemplates) return;
     setDragSlotIdx(index);
     setDragOverIdx(index);
     e.dataTransfer.effectAllowed = 'move';
@@ -622,12 +625,14 @@ export default function TemplatesTab() {
   };
 
   const handleSlotDragOver = (e: React.DragEvent<HTMLElement>, index: number) => {
+    if (!canManageTemplates) return;
     e.preventDefault();
     e.dataTransfer.dropEffect = 'move';
     if (dragOverIdx !== index) setDragOverIdx(index);
   };
 
   const handleSlotDrop = (e: React.DragEvent<HTMLElement>, targetIndex: number) => {
+    if (!canManageTemplates) return;
     e.preventDefault();
     const raw = e.dataTransfer.getData('text/plain');
     const sourceIndex = dragSlotIdx !== null ? dragSlotIdx : raw !== '' ? Number(raw) : -1;
@@ -735,7 +740,9 @@ export default function TemplatesTab() {
       String(t.id).includes(searchQuery.trim()) ||
       t.name.toLowerCase().includes(searchQuery.trim().toLowerCase()),
   );
-  const startIndex = (currentPage - 1) * pageSize;
+  const totalPages = Math.max(1, Math.ceil(filteredTemplates.length / pageSize));
+  const safePage = Math.min(currentPage, totalPages);
+  const startIndex = (safePage - 1) * pageSize;
   const paginatedTemplates = filteredTemplates.slice(startIndex, startIndex + pageSize);
 
   const activeSlot = slots[selectedSlotIdx] || slots[0];
@@ -1192,7 +1199,7 @@ export default function TemplatesTab() {
             <div className="xl:sticky xl:top-20 space-y-2.5">
               <div className="flex items-center justify-between gap-2 px-1">
                 <span className="text-xs text-[var(--cms-muted-fg)]">
-                  H5 Reader 真实样式预览（可拖拽排序 · 双击编辑）
+                  {canManageTemplates ? 'H5 Reader 真实样式预览（可拖拽排序 · 双击编辑）' : 'H5 Reader 真实样式预览'}
                 </span>
                 <div className="flex items-center rounded-lg border border-[var(--cms-border)] bg-[var(--cms-card)] p-0.5 text-xs shrink-0">
                   <button
@@ -1290,23 +1297,23 @@ export default function TemplatesTab() {
                           return (
                             <div
                               key={slot._uid || slot.id || idx}
-                              draggable={!saving}
-                              onDragStart={(e) => handleSlotDragStart(e, idx)}
-                              onDragOver={(e) => handleSlotDragOver(e, idx)}
-                              onDrop={(e) => handleSlotDrop(e, idx)}
+                              draggable={canManageTemplates && !saving}
+                              onDragStart={(e) => canManageTemplates && handleSlotDragStart(e, idx)}
+                              onDragOver={(e) => canManageTemplates && handleSlotDragOver(e, idx)}
+                              onDrop={(e) => canManageTemplates && handleSlotDrop(e, idx)}
                               onDragEnd={handleSlotDragEnd}
                               role="button"
                               tabIndex={0}
                               onClick={() => setSelectedSlotIdx(idx)}
-                              onDoubleClick={() => openEditSlotModal(idx)}
+                              onDoubleClick={() => canManageTemplates && openEditSlotModal(idx)}
                               onKeyDown={(e) => {
                                 if (e.key === 'Enter' || e.key === ' ') {
                                   e.preventDefault();
                                   setSelectedSlotIdx(idx);
                                 }
                               }}
-                              title="点击选中 · 拖拽调整顺序 · 双击编辑属性"
-                              className={`text-left flex items-center justify-between gap-3 cursor-grab active:cursor-grabbing select-none transition-all ${
+                              title={canManageTemplates ? '点击选中 · 拖拽调整顺序 · 双击编辑属性' : '点击切换预览档位'}
+                              className={`text-left flex items-center justify-between gap-3 ${canManageTemplates ? 'cursor-grab active:cursor-grabbing' : 'cursor-pointer'} select-none transition-all ${
                                 isDragging ? 'opacity-45' : ''
                               }`}
                               style={{
@@ -1413,23 +1420,23 @@ export default function TemplatesTab() {
                           return (
                             <div
                               key={slot._uid || slot.id || idx}
-                              draggable={!saving}
-                              onDragStart={(e) => handleSlotDragStart(e, idx)}
-                              onDragOver={(e) => handleSlotDragOver(e, idx)}
-                              onDrop={(e) => handleSlotDrop(e, idx)}
+                              draggable={canManageTemplates && !saving}
+                              onDragStart={(e) => canManageTemplates && handleSlotDragStart(e, idx)}
+                              onDragOver={(e) => canManageTemplates && handleSlotDragOver(e, idx)}
+                              onDrop={(e) => canManageTemplates && handleSlotDrop(e, idx)}
                               onDragEnd={handleSlotDragEnd}
                               role="button"
                               tabIndex={0}
                               onClick={() => setSelectedSlotIdx(idx)}
-                              onDoubleClick={() => openEditSlotModal(idx)}
+                              onDoubleClick={() => canManageTemplates && openEditSlotModal(idx)}
                               onKeyDown={(e) => {
                                 if (e.key === 'Enter' || e.key === ' ') {
                                   e.preventDefault();
                                   setSelectedSlotIdx(idx);
                                 }
                               }}
-                              title="点击选中 · 拖拽调整顺序 · 双击编辑属性"
-                              className={`text-left flex flex-col justify-between gap-2.5 cursor-grab active:cursor-grabbing select-none transition-all ${
+                              title={canManageTemplates ? '点击选中 · 拖拽调整顺序 · 双击编辑属性' : '点击切换预览档位'}
+                              className={`text-left flex flex-col justify-between gap-2.5 ${canManageTemplates ? 'cursor-grab active:cursor-grabbing' : 'cursor-pointer'} select-none transition-all ${
                                 isDragging ? 'opacity-45' : ''
                               }`}
                               style={{
