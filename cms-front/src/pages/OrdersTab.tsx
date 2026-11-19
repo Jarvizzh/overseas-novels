@@ -577,7 +577,7 @@ export default function OrdersTab() {
                         onClick={() => void handleOpenPaymentDetails(o.id)}
                         className="btn-detail"
                       >
-                        明细
+                        详情
                       </button>
                     </td>
                   </tr>
