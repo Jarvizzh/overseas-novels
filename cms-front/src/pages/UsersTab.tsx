@@ -9,6 +9,7 @@ import {
 } from 'lucide-react';
 import { apiRequest } from '../utils/api';
 import CustomSelect from '../components/CustomSelect';
+import { FALLBACK_COVER } from '../components/operations/operationsUtils';
 import { CmsDialog } from '../components/ui/CmsDialog';
 import { Pagination } from '../components/ui/Pagination';
 import {
@@ -100,7 +101,7 @@ export default function UsersTab() {
   const [shelfPage, setShelfPage] = useState(1);
   const shelfPageSize = 5;
 
-  const [adjustAmount, setAdjustAmount] = useState(100);
+  const [adjustAmount, setAdjustAmount] = useState('100');
   const [adjustType, setAdjustType] = useState<'bonus' | 'charged'>('bonus');
   const [adjustReason, setAdjustReason] = useState('每日签到异常补偿发放');
   const [adjustSuccess, setAdjustSuccess] = useState('');
@@ -186,18 +187,27 @@ export default function UsersTab() {
   const handleAdjustWallet = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedUser || adjustSubmitting) return;
+    const trimmedAmount = adjustAmount.trim();
+    const parsedAmount = Number(trimmedAmount);
+    if (!trimmedAmount || !Number.isInteger(parsedAmount) || parsedAmount === 0) {
+      window.showToast?.('请输入非零整数的调整数量（正数增加，负数扣减）', 'error');
+      return;
+    }
+
+    const targetUserId = selectedUser.id;
+    const seq = detailSeqRef.current;
     setAdjustSubmitting(true);
     try {
-      await apiRequest('POST', `/users/${selectedUser.id}/adjust-wallet`, {
-        amount: adjustAmount,
+      await apiRequest('POST', `/users/${targetUserId}/adjust-wallet`, {
+        amount: parsedAmount,
         is_bonus: adjustType === 'bonus',
         reason: adjustReason,
       });
 
+      const data = await apiRequest('GET', `/users/${targetUserId}`);
+      if (seq !== detailSeqRef.current) return;
       setAdjustSuccess('钱包金币余额调整成功！已录入系统日志。');
       setAdjustReason('');
-
-      const data = await apiRequest('GET', `/users/${selectedUser.id}`);
       setSelectedUser(data);
       void fetchUsers();
     } catch (err: unknown) {
@@ -422,6 +432,8 @@ export default function UsersTab() {
       <CmsDialog
         open={Boolean(selectedUser || detailLoading)}
         onClose={closeDetailDrawer}
+        closedBy={adjustSubmitting ? 'none' : 'any'}
+        closeDisabled={adjustSubmitting}
         variant="drawer"
         size="xl"
         title={selectedUser ? selectedUser.nickname || '匿名读者' : '正在加载用户档案...'}
@@ -633,9 +645,10 @@ export default function UsersTab() {
                           <span className="block font-medium text-[var(--cms-muted-fg)]">调整数量（支持负数扣减）</span>
                           <input
                             type="number"
+                            step={1}
                             className="input-field tabular-nums"
                             value={adjustAmount}
-                            onChange={(e) => setAdjustAmount(Number(e.target.value))}
+                            onChange={(e) => setAdjustAmount(e.target.value)}
                             required
                           />
                         </label>
@@ -808,8 +821,14 @@ export default function UsersTab() {
                             className="p-3 rounded-xl bg-[var(--cms-content)] border border-[var(--cms-border)] flex items-center gap-3.5"
                           >
                             <img
-                              src={item.cover_url}
+                              src={item.cover_url || FALLBACK_COVER}
                               alt={item.novel_title}
+                              onError={(e) => {
+                                const img = e.currentTarget;
+                                if (img.dataset.fb) return;
+                                img.dataset.fb = '1';
+                                img.src = FALLBACK_COVER;
+                              }}
                               className="w-10 h-13 object-cover rounded-lg border border-[var(--cms-border)] shrink-0"
                             />
                             <div className="flex-1 min-w-0 space-y-0.5 text-xs">

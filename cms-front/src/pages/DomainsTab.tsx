@@ -77,6 +77,12 @@ export default function DomainsTab() {
     }
   };
 
+  const handleCloseModal = () => {
+    if (submitting) return;
+    setIsModalOpen(false);
+    setFormData({ name: '', domain: '', type: 'sub', is_default: false });
+  };
+
   const handleToggleStatus = async (domain: SystemDomain) => {
     const nextStatus = domain.status === 1 ? 2 : 1;
     try {
@@ -291,13 +297,15 @@ export default function DomainsTab() {
 
       <CmsDialog
         open={isModalOpen}
-        onClose={() => setIsModalOpen(false)}
+        onClose={handleCloseModal}
+        closedBy={submitting ? 'none' : 'any'}
+        closeDisabled={submitting}
         variant="drawer"
         title="新建域名 / 子域名"
         size="md"
         footer={
           <>
-            <button type="button" onClick={() => setIsModalOpen(false)} className="btn-secondary">
+            <button type="button" onClick={handleCloseModal} disabled={submitting} className="btn-secondary">
               取消
             </button>
             <button type="submit" form="domain-create-form" disabled={submitting} className="btn-primary">

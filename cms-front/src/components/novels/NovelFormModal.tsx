@@ -17,7 +17,7 @@ export interface NovelFormData {
   cover_preview_url?: string;
   status: string;
   publish_status?: string;
-  rating: number;
+  rating: number | string;
   synopsis: string;
   genres: string;
   coin_cost_per_thousand: number | string;
@@ -201,6 +201,12 @@ export const NovelFormModal: React.FC<NovelFormModalProps> = ({
     if (!isEditing && !chapterFile) {
       setChapterFileError('请先选择或拖拽上传书籍章节文件（支持 .txt 或 .zip）');
       chapterUploadBtnRef.current?.focus();
+      return;
+    }
+    const ratingRaw = String(formData.rating).trim();
+    const parsedRating = Number(ratingRaw);
+    if (!ratingRaw || !Number.isFinite(parsedRating) || parsedRating < 0 || parsedRating > 5) {
+      window.showToast?.('评分须为 0 到 5 之间的数字', 'error');
       return;
     }
     if (chapterFile && chapterImportType === 'single_txt' && !chapterRegex.trim()) {
@@ -467,7 +473,7 @@ export const NovelFormModal: React.FC<NovelFormModalProps> = ({
               max={5}
               step={0.1}
               value={formData.rating}
-              onChange={(e) => setFormData((prev) => ({ ...prev, rating: Number(e.target.value) }))}
+              onChange={(e) => setFormData((prev) => ({ ...prev, rating: e.target.value }))}
               required
             />
           </label>

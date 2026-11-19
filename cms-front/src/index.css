@@ -209,6 +209,46 @@
 
 [data-theme="light"] {
   color-scheme: light;
+  --bg-base: 210 40% 98%;
+  --bg-surface: 0 0% 100%;
+  --bg-card: 210 40% 96.1%;
+  --border: 220 13% 91%;
+  --border-focus: 221 83% 53%;
+  --text-primary: 222 47% 11%;
+  --text-secondary: 215 16% 47%;
+  --text-muted: 215 20% 65%;
+  --primary: 221 83% 53%;
+  --primary-glow: rgba(37, 99, 235, 0.14);
+  --accent-pink: 330 80% 55%;
+  --accent-green: 160 84% 39%;
+  --accent-blue: 200 85% 45%;
+  --accent-orange: 32 95% 44%;
+  --shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.04);
+  --shadow-md: 0 8px 24px -8px rgba(15, 23, 42, 0.08);
+  --shadow-lg: 0 24px 60px -16px rgba(2, 6, 23, 0.18);
+  --shadow-neon: 0 4px 14px rgba(37, 99, 235, 0.18);
+
+  --cms-bg: var(--light-bg);
+  --cms-content: var(--light-content);
+  --cms-sidebar: var(--light-sidebar);
+  --cms-card: var(--light-card);
+  --cms-border: var(--light-border);
+  --cms-fg: var(--light-fg);
+  --cms-muted-fg: var(--light-muted-fg);
+  --cms-placeholder: var(--light-placeholder);
+  --cms-primary: var(--light-primary);
+  --cms-primary-hover: var(--light-primary-hover);
+  --cms-detail: var(--light-detail);
+  --cms-secondary: var(--light-secondary);
+  --cms-secondary-fg: var(--light-secondary-fg);
+  --cms-accent: var(--light-accent);
+  --cms-nav-active-bg: var(--light-nav-active-bg);
+  --cms-nav-active-fg: var(--light-nav-active-fg);
+  --cms-success: var(--light-success);
+  --cms-warning: var(--light-warning);
+  --cms-error: var(--light-error);
+  --cms-scrollbar-track: var(--light-scrollbar-track);
+  --cms-scrollbar-thumb: var(--light-scrollbar-thumb);
 }
 
 /* Legacy WebKit scrollbar fallback only when scrollbar-color is unavailable */

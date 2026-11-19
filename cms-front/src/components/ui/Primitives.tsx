@@ -174,6 +174,7 @@ interface ToolbarPopoverProps {
   icon?: React.ReactNode;
   badgeCount?: number;
   align?: PopoverAlign;
+  fullWidth?: boolean;
   triggerClassName?: string;
   panelClassName?: string;
   ariaLabel?: string;
@@ -185,6 +186,7 @@ export const ToolbarPopover: React.FC<ToolbarPopoverProps> = ({
   icon,
   badgeCount = 0,
   align = 'end',
+  fullWidth = false,
   triggerClassName = 'h-9 px-3 rounded-[10px] border border-[var(--cms-border)] bg-[var(--cms-card)] hover:bg-[var(--cms-content)] text-xs font-medium text-[var(--cms-fg)]',
   panelClassName = 'w-72 p-4',
   ariaLabel,
@@ -194,17 +196,17 @@ export const ToolbarPopover: React.FC<ToolbarPopoverProps> = ({
     useAnchoredPopover(align);
 
   return (
-    <div className="inline-block shrink-0">
+    <div className={fullWidth ? 'block w-full min-w-0' : 'inline-block shrink-0'}>
       <button
         ref={triggerRef}
         type="button"
         popoverTarget={popoverId}
         aria-label={ariaLabel}
         style={{ anchorName } as React.CSSProperties}
-        className={`focus-ring inline-flex items-center gap-1.5 cursor-pointer transition-colors ${triggerClassName}`}
+        className={`focus-ring inline-flex items-center gap-1.5 cursor-pointer transition-colors ${fullWidth ? 'w-full min-w-0 ' : ''}${triggerClassName}`}
       >
         {icon}
-        <span>{label}</span>
+        <span className={fullWidth ? 'min-w-0 flex-1 flex items-center' : undefined}>{label}</span>
         {badgeCount > 0 && (
           <span className="min-w-[18px] h-[18px] px-1 rounded-full cta-primary text-[11px] font-semibold tabular-nums inline-flex items-center justify-center leading-none">
             {badgeCount}

@@ -332,9 +332,10 @@ function AccountFooter({ admin, collapsed, onLogout }: AccountFooterProps) {
     <div className="p-2 border-t border-[var(--cms-border)] shrink-0">
       <ToolbarPopover
         align="top-start"
+        fullWidth
         ariaLabel="账号菜单"
         panelClassName="w-48 p-1.5 space-y-0.5"
-        triggerClassName={`w-full rounded-xl hover:bg-[var(--cms-secondary)] transition-colors ${
+        triggerClassName={`rounded-xl hover:bg-[var(--cms-secondary)] transition-colors ${
           collapsed ? 'p-1 justify-center' : 'px-2 py-1.5 justify-between'
         }`}
         label={
@@ -416,12 +417,27 @@ export function CmsSidebar({
     }
   }, [mobileOpen]);
 
+  // Close the mobile top-layer dialog when viewport expands to desktop (>= 768px)
+  useEffect(() => {
+    if (!mobileOpen) return;
+    const mq = window.matchMedia('(min-width: 768px)');
+    const syncDesktopViewport = () => {
+      if (mq.matches) {
+        onCloseMobile();
+      }
+    };
+    syncDesktopViewport();
+    mq.addEventListener('change', syncDesktopViewport);
+    return () => mq.removeEventListener('change', syncDesktopViewport);
+  }, [mobileOpen, onCloseMobile]);
+
   // Light-dismiss fallback when closedby is unsupported
   useEffect(() => {
     const el = mobileDialogRef.current;
     if (!el || 'closedBy' in HTMLDialogElement.prototype) return;
 
     const isOutside = (e: PointerEvent) => {
+      if (e.target !== el) return false;
       const r = el.getBoundingClientRect();
       return e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom;
     };

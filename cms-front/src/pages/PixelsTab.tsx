@@ -28,6 +28,7 @@ export default function PixelsTab() {
 
   const [editingPixel, setEditingPixel] = useState<FBPixel | null>(null);
   const [isPixelModalOpen, setIsPixelModalOpen] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
   const [pixelForm, setPixelForm] = useState({
     name: '',
     pixel_id: '',
@@ -52,7 +53,8 @@ export default function PixelsTab() {
     void fetchPixels();
   }, []);
 
-  const handleClosePixelModal = () => {
+  const handleClosePixelModal = (force = false) => {
+    if (submitting && !force) return;
     setIsPixelModalOpen(false);
     setEditingPixel(null);
     setPixelForm({ name: '', pixel_id: '', access_token: '' });
@@ -60,6 +62,8 @@ export default function PixelsTab() {
 
   const handlePixelFormSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (submitting) return;
+    setSubmitting(true);
     try {
       if (editingPixel) {
         await apiRequest('PUT', `/fb-pixels/${editingPixel.id}`, pixelForm);
@@ -68,10 +72,12 @@ export default function PixelsTab() {
         await apiRequest('POST', '/fb-pixels', pixelForm);
         window.showToast?.(`像素「${pixelForm.name}」创建成功。`, 'success');
       }
-      handleClosePixelModal();
+      handleClosePixelModal(true);
       void fetchPixels();
     } catch (err: unknown) {
       window.showToast?.((err instanceof Error ? err.message : '') || '操作失败，请重试', 'error');
+    } finally {
+      setSubmitting(false);
     }
   };
 
@@ -194,17 +200,24 @@ export default function PixelsTab() {
 
       <CmsDialog
         open={isPixelModalOpen}
-        onClose={handleClosePixelModal}
+        onClose={() => handleClosePixelModal()}
+        closedBy={submitting ? 'none' : 'any'}
+        closeDisabled={submitting}
         variant="drawer"
         title={editingPixel ? '编辑像素' : '添加像素'}
         size="md"
         footer={
           <>
-            <button type="button" className="btn-secondary" onClick={handleClosePixelModal}>
+            <button
+              type="button"
+              disabled={submitting}
+              className="btn-secondary"
+              onClick={() => handleClosePixelModal()}
+            >
               取消
             </button>
-            <button type="submit" form="pixel-form" className="btn-primary">
-              确认保存
+            <button type="submit" form="pixel-form" disabled={submitting} className="btn-primary">
+              {submitting ? '保存中...' : '确认保存'}
             </button>
           </>
         }

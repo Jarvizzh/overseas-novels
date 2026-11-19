@@ -10,6 +10,8 @@ import {
 } from 'lucide-react';
 import { apiRequest, domainApi } from '../utils/api';
 import type { SystemDomain } from '../utils/api';
+import { copyTextToClipboard } from '../utils/clipboard';
+import { FALLBACK_COVER } from '../components/operations/operationsUtils';
 import { DEFAULT_CHAPTER_DELIMITER_REGEX } from '../components/novels/ChapterUploadFields';
 import { MAX_GENRES_LENGTH, NovelFormModal, type NovelFormData } from '../components/novels/NovelFormModal';
 import { PromotionLinkModal } from '../components/novels/PromotionLinkModal';
@@ -778,6 +780,7 @@ export default function NovelsTab() {
       if (savedDuringRun) {
         setSelectedNovel(savedDuringRun);
         void fetchNovels(novelQuery);
+        void fetchChapters(savedDuringRun.id, true);
       }
       const msg = (err instanceof Error ? err.message : '') || '更新书籍失败';
       setEditModalError(msg);
@@ -1073,11 +1076,13 @@ export default function NovelsTab() {
     }
   };
 
-  const handleCopyLink = () => {
-    if (generatedLink) {
-      void navigator.clipboard.writeText(generatedLink);
-      window.showToast?.('链接已复制到剪贴板！', 'success');
-    }
+  const handleCopyLink = async () => {
+    if (!generatedLink) return;
+    const ok = await copyTextToClipboard(generatedLink);
+    window.showToast?.(
+      ok ? '链接已复制到剪贴板！' : '复制失败，请手动选中链接复制',
+      ok ? 'success' : 'error',
+    );
   };
 
   const toggleColumn = (key: string) => {
@@ -1485,8 +1490,14 @@ export default function NovelsTab() {
                     <td>
                       <div className="flex items-center gap-3.5">
                         <img
-                          src={novel.cover_url}
+                          src={novel.cover_url || FALLBACK_COVER}
                           alt={novel.title}
+                          onError={(e) => {
+                            const img = e.currentTarget;
+                            if (img.dataset.fb) return;
+                            img.dataset.fb = '1';
+                            img.src = FALLBACK_COVER;
+                          }}
                           className="w-10 h-14 object-cover rounded-lg border border-[var(--cms-border)] shrink-0"
                         />
                         <div className="min-w-0">
@@ -1685,8 +1696,14 @@ export default function NovelsTab() {
               className="px-6 py-4 border-b border-[var(--cms-border)] bg-[var(--cms-card)] flex items-start gap-4 shrink-0"
             >
               <img
-                src={selectedNovel.cover_url}
+                src={selectedNovel.cover_url || FALLBACK_COVER}
                 alt={selectedNovel.title}
+                onError={(e) => {
+                  const img = e.currentTarget;
+                  if (img.dataset.fb) return;
+                  img.dataset.fb = '1';
+                  img.src = FALLBACK_COVER;
+                }}
                 className="w-14 h-20 object-cover rounded-lg border border-[var(--cms-border)] shrink-0"
               />
               <div className="flex-1 min-w-0 space-y-2 text-xs">
@@ -1734,7 +1751,7 @@ export default function NovelsTab() {
             {/* Split Directory + Live Chapter Reader */}
             <div className="flex-1 min-h-0 max-md:overflow-y-auto md:overflow-hidden grid grid-cols-1 md:grid-cols-[270px_1fr]">
               {/* Left Column: Chapters Directory */}
-              <div className="border-r border-[var(--cms-border)] bg-[var(--cms-bg)] flex flex-col overflow-hidden">
+              <div className="max-md:border-b md:border-b-0 md:border-r border-[var(--cms-border)] bg-[var(--cms-bg)] flex flex-col overflow-hidden">
                 <div className="px-4 py-2.5 border-b border-[var(--cms-border)] flex items-center justify-between text-xs shrink-0">
                   <span className="font-medium text-[var(--cms-muted-fg)]">章节目录</span>
                   <span className="text-[var(--cms-muted-fg)] tabular-nums">共 {chapters.length} 章</span>

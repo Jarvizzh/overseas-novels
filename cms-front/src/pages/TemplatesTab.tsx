@@ -73,6 +73,11 @@ interface RechargeSlot {
   price_amount?: number | string;
 }
 
+type SlotDraft = Omit<RechargeSlot, 'coins' | 'bonus'> & {
+  coins: number | string;
+  bonus: number | string;
+};
+
 let slotUidSeq = 1;
 function nextSlotUid(): string {
   slotUidSeq += 1;
@@ -119,7 +124,7 @@ function normalizeSlotType(type: RechargeSlot['type']): SlotTypeNormalized {
   return 'single';
 }
 
-function getSlotAmount(slot: RechargeSlot): number {
+function getSlotAmount(slot: { price_amount?: number | string; price_cents: number }): number {
   if (slot.price_amount === '') return 0;
   if (slot.price_amount !== undefined) {
     const num = Number(slot.price_amount);
@@ -128,12 +133,13 @@ function getSlotAmount(slot: RechargeSlot): number {
   return (slot.price_cents || 0) / 100;
 }
 
-function getSlotMaxBonus(slot: RechargeSlot): number {
+function getSlotMaxBonus(slot: { coins: number | string }): number {
   return Math.floor((Number(slot.coins) || 0) * 1.5);
 }
 
-function isSlotBonusValid(slot: RechargeSlot): boolean {
+function isSlotBonusValid(slot: { type: RechargeSlot['type']; coins: number | string; bonus: number | string }): boolean {
   if (normalizeSlotType(slot.type) !== 'single') return true;
+  if (slot.bonus === '') return true;
   const bonus = Number(slot.bonus);
   return Number.isFinite(bonus) && bonus >= 0 && bonus <= getSlotMaxBonus(slot);
 }
@@ -193,6 +199,16 @@ export default function TemplatesTab() {
   const { templateId } = useParams<{ templateId?: string }>();
   const [searchParams] = useSearchParams();
 
+  const currentAdminRole = (() => {
+    try {
+      const info = localStorage.getItem('cms_admin');
+      return info ? (JSON.parse(info)?.role as string) || '' : '';
+    } catch {
+      return '';
+    }
+  })();
+  const canManageTemplates = ['SuperAdmin', 'Finance'].includes(currentAdminRole);
+
   const isNewRoute = location.pathname === '/recharge-templates/new';
   const parsedTemplateId =
     templateId && /^\d+$/.test(templateId) ? Number(templateId) : null;
@@ -224,7 +240,7 @@ export default function TemplatesTab() {
   const [dragOverIdx, setDragOverIdx] = useState<number | null>(null);
   const [reorderStatus, setReorderStatus] = useState('');
   const [editingSlotTarget, setEditingSlotTarget] = useState<number | 'new' | null>(null);
-  const [slotDraft, setSlotDraft] = useState<RechargeSlot | null>(null);
+  const [slotDraft, setSlotDraft] = useState<SlotDraft | null>(null);
   const [slotDraftError, setSlotDraftError] = useState('');
   const [missingEditTemplate, setMissingEditTemplate] = useState(false);
   const slotFormId = useId();
@@ -408,12 +424,12 @@ export default function TemplatesTab() {
     });
   };
 
-  const applySlotDraftChange = (field: keyof RechargeSlot, value: string | number) => {
+  const applySlotDraftChange = (field: keyof SlotDraft, value: string | number) => {
     setSlotDraftError('');
     setSlotDraft((prev) => {
       if (!prev) return prev;
       const prevCents = Math.round(getSlotAmount(prev) * 100);
-      const current = { ...prev, [field]: value };
+      const current: SlotDraft = { ...prev, [field]: value };
       const normalizedType = normalizeSlotType(current.type);
 
       if (field === 'price_amount') {
@@ -421,26 +437,28 @@ export default function TemplatesTab() {
         const safeCents = value === '' || !Number.isFinite(amount) || amount < 0 ? 0 : Math.round(amount * 100);
         current.price_cents = safeCents;
         current.price = `$${(safeCents / 100).toFixed(2)}`;
-        if (normalizedType === 'single' && (prev.coins === prevCents || prev.coins === 0)) {
+        const prevCoinsNum = Number(prev.coins);
+        if (normalizedType === 'single' && (prevCoinsNum === prevCents || prev.coins === 0)) {
           current.coins = safeCents;
         }
       }
 
       if (field === 'coins') {
-        const coinsNum = value === '' ? 0 : Math.max(0, Math.round(Number(value) || 0));
-        current.coins = coinsNum;
+        current.coins = value === '' ? '' : String(value);
       }
 
       if (field === 'bonus') {
-        const bonusNum = value === '' ? 0 : Math.round(Number(value) || 0);
-        current.bonus = bonusNum;
+        current.bonus = value === '' ? '' : String(value);
       }
 
       if (field === 'type') {
         const nextType = normalizeSlotType(value as RechargeSlot['type']);
         const amount = getSlotAmount(current);
         if (nextType === 'single') {
-          current.coins = current.coins > 0 ? current.coins : Math.round(amount * 100);
+          const curCoins = Number(current.coins);
+          current.coins = Number.isFinite(curCoins) && curCoins > 0 ? curCoins : Math.round(amount * 100);
+          const curBonus = Number(current.bonus);
+          current.bonus = Number.isFinite(curBonus) && curBonus >= 0 ? curBonus : 0;
           current.vip_duration = '';
           current.subscription_cycle = '';
         } else if (nextType === 'subscription') {
@@ -471,6 +489,7 @@ export default function TemplatesTab() {
   };
 
   const openEditSlotModal = (index: number) => {
+    if (!canManageTemplates) return;
     const target = slots[index];
     if (!target) return;
     setSelectedSlotIdx(index);
@@ -480,6 +499,7 @@ export default function TemplatesTab() {
   };
 
   const handleAddSlot = () => {
+    if (!canManageTemplates) return;
     if (slots.length >= 8) {
       window.showToast?.('单个模板最多配置 8 个卡位', 'error');
       return;
@@ -497,24 +517,29 @@ export default function TemplatesTab() {
 
   const handleConfirmSlotModal = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!slotDraft || editingSlotTarget === null) return;
+    if (!canManageTemplates || !slotDraft || editingSlotTarget === null) return;
     const amt = getSlotAmount(slotDraft);
+    const cents = Math.round(amt * 100);
     const type = normalizeSlotType(slotDraft.type);
 
-    if (!(amt > 0)) {
-      setSlotDraftError('档位售价必须大于 $0.00');
+    if (!Number.isFinite(amt) || cents < 1) {
+      setSlotDraftError('档位售价不能低于 $0.01');
       return;
     }
     if (type === 'single') {
-      if (!Number.isInteger(Number(slotDraft.coins)) || Number(slotDraft.coins) <= 0) {
+      const coinsVal = Number(slotDraft.coins);
+      if (slotDraft.coins === '' || !Number.isInteger(coinsVal) || coinsVal <= 0) {
         setSlotDraftError('基础金币数必须为大于 0 的整数');
+        return;
+      }
+      const bonusVal = Number(slotDraft.bonus);
+      if (slotDraft.bonus === '' || !Number.isInteger(bonusVal) || bonusVal < 0) {
+        setSlotDraftError('额外赠送金币数必须为不小于 0 的整数');
         return;
       }
       if (!isSlotBonusValid(slotDraft)) {
         setSlotDraftError(
-          Number(slotDraft.bonus) < 0 || !Number.isFinite(Number(slotDraft.bonus))
-            ? '额外赠送金币数不能为负数'
-            : `赠送不可超过基础金币 1.5 倍（上限 ${getSlotMaxBonus(slotDraft)} 金币）`,
+          `赠送不可超过基础金币 1.5 倍（上限 ${getSlotMaxBonus(slotDraft)} 金币）`,
         );
         return;
       }
@@ -531,9 +556,11 @@ export default function TemplatesTab() {
     const committed: RechargeSlot = {
       ...slotDraft,
       _uid: slotDraft._uid || nextSlotUid(),
-      price: `$${amt.toFixed(2)}`,
-      price_cents: Math.round(amt * 100),
-      price_amount: amt,
+      coins: type === 'single' ? Math.round(Number(slotDraft.coins) || 0) : 0,
+      bonus: type === 'single' ? Math.round(Number(slotDraft.bonus) || 0) : 0,
+      price: `$${(cents / 100).toFixed(2)}`,
+      price_cents: cents,
+      price_amount: Number((cents / 100).toFixed(2)),
     };
 
     setFormError('');
@@ -618,6 +645,7 @@ export default function TemplatesTab() {
 
   const handleSaveTemplate = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!canManageTemplates) return;
     setFormError('');
 
     if (!templateName.trim()) {
@@ -632,9 +660,10 @@ export default function TemplatesTab() {
     for (let i = 0; i < slots.length; i++) {
       const slot = slots[i];
       const amt = getSlotAmount(slot);
-      if (!(amt > 0)) {
+      const cents = Math.round(amt * 100);
+      if (!Number.isFinite(amt) || cents < 1) {
         setSelectedSlotIdx(i);
-        setFormError(`卡位 ${i + 1} 的售价必须大于 $0.00`);
+        setFormError(`卡位 ${i + 1} 的售价不能低于 $0.01`);
         return;
       }
       if (normalizeSlotType(slot.type) === 'single' && !(Number(slot.coins) > 0)) {
@@ -750,14 +779,16 @@ export default function TemplatesTab() {
             <div className="flex items-center gap-2.5 text-xs text-[var(--cms-muted-fg)]">
               <span className="tabular-nums">共 {filteredTemplates.length} 套模板</span>
               <ViewOptionsPopover density={density} onDensityChange={setDensity} />
-              <button
-                type="button"
-                onClick={startCreateTemplate}
-                className="btn-primary h-9 px-3.5 text-xs whitespace-nowrap"
-              >
-                <Plus size={14} aria-hidden="true" />
-                <span>新建模板</span>
-              </button>
+              {canManageTemplates && (
+                <button
+                  type="button"
+                  onClick={startCreateTemplate}
+                  className="btn-primary h-9 px-3.5 text-xs whitespace-nowrap"
+                >
+                  <Plus size={14} aria-hidden="true" />
+                  <span>新建模板</span>
+                </button>
+              )}
             </div>
           </search>
 
@@ -838,32 +869,34 @@ export default function TemplatesTab() {
                               onClick={() => openEditorForTemplate(t)}
                               className="btn-detail whitespace-nowrap"
                             >
-                              编辑
+                              {canManageTemplates ? '编辑' : '查看'}
                             </button>
-                            <RowActionMenu
-                              ariaLabel={`模板 ${t.name} 更多操作`}
-                              items={[
-                                ...(!t.is_default
-                                  ? [{
-                                      label: '设为全站默认',
-                                      tone: 'success' as const,
-                                      onClick: () => void handleSetDefault(t.id),
-                                    }]
-                                  : []),
-                                {
-                                  label: '复制为新模板',
-                                  onClick: () => openCopyTemplate(t),
-                                },
-                                ...(!t.is_default
-                                  ? [{
-                                      label: '删除模板',
-                                      tone: 'danger' as const,
-                                      dividerBefore: true,
-                                      onClick: () => handleDelete(t),
-                                    }]
-                                  : []),
-                              ]}
-                            />
+                            {canManageTemplates && (
+                              <RowActionMenu
+                                ariaLabel={`模板 ${t.name} 更多操作`}
+                                items={[
+                                  ...(!t.is_default
+                                    ? [{
+                                        label: '设为全站默认',
+                                        tone: 'success' as const,
+                                        onClick: () => void handleSetDefault(t.id),
+                                      }]
+                                    : []),
+                                  {
+                                    label: '复制为新模板',
+                                    onClick: () => openCopyTemplate(t),
+                                  },
+                                  ...(!t.is_default
+                                    ? [{
+                                        label: '删除模板',
+                                        tone: 'danger' as const,
+                                        dividerBefore: true,
+                                        onClick: () => handleDelete(t),
+                                      }]
+                                    : []),
+                                ]}
+                              />
+                            )}
                           </div>
                         </td>
                       </tr>
@@ -887,9 +920,9 @@ export default function TemplatesTab() {
               <span>返回列表</span>
             </button>
           </div>
-          <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 animate-pulse">
-            <div className="lg:col-span-7 h-72 rounded-xl bg-[var(--cms-surface-muted)]" />
-            <div className="lg:col-span-5 h-72 rounded-xl bg-[var(--cms-surface-muted)]" />
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
+            <div className="lg:col-span-7 h-72 rounded-xl skeleton-bar" />
+            <div className="lg:col-span-5 h-72 rounded-xl skeleton-bar" />
           </div>
         </div>
       ) : missingEditTemplate ? (
@@ -921,22 +954,24 @@ export default function TemplatesTab() {
                 <input
                   type="text"
                   required
+                  disabled={!canManageTemplates}
                   placeholder="例如：欧美通用默认模板 / 新客首充高转化方案"
                   value={templateName}
                   onChange={(e) => {
                     setFormError('');
                     setTemplateName(e.target.value);
                   }}
-                  className="input-field"
+                  className="input-field disabled:opacity-65 disabled:cursor-not-allowed"
                 />
               </label>
 
-              <label className="inline-flex items-center gap-2 pt-5 text-xs font-medium text-[var(--cms-fg)] cursor-pointer select-none">
+              <label className={`inline-flex items-center gap-2 pt-5 text-xs font-medium text-[var(--cms-fg)] select-none ${canManageTemplates ? 'cursor-pointer' : 'opacity-65 cursor-not-allowed'}`}>
                 <input
                   type="checkbox"
+                  disabled={!canManageTemplates}
                   checked={isDefaultTemplate}
                   onChange={(e) => setIsDefaultTemplate(e.target.checked)}
-                  className="w-4 h-4 rounded cursor-pointer"
+                  className="w-4 h-4 rounded cursor-pointer disabled:cursor-not-allowed"
                 />
                 <span>设为全站默认模板</span>
               </label>
@@ -951,12 +986,23 @@ export default function TemplatesTab() {
                 <ChevronLeft size={15} aria-hidden="true" />
                 <span>返回列表</span>
               </button>
-              <button type="submit" disabled={saving} className="btn-primary px-5 whitespace-nowrap">
-                <Save size={15} aria-hidden="true" />
-                <span>{saving ? '保存中...' : '保存模板配置'}</span>
-              </button>
+              {canManageTemplates && (
+                <button type="submit" disabled={saving} className="btn-primary px-5 whitespace-nowrap">
+                  <Save size={15} aria-hidden="true" />
+                  <span>{saving ? '保存中...' : '保存模板配置'}</span>
+                </button>
+              )}
             </div>
           </div>
+
+          {!canManageTemplates && (
+            <div
+              role="status"
+              className="px-4 py-2.5 rounded-xl border border-[var(--cms-border)] bg-[var(--cms-card)] text-xs text-[var(--cms-muted-fg)]"
+            >
+              当前账号为只读查看模式（仅 SuperAdmin / Finance 角色支持创建、编辑或保存充值模板）。
+            </div>
+          )}
 
           {formError && (
             <div
@@ -988,15 +1034,17 @@ export default function TemplatesTab() {
                       · 支持鼠标拖拽调整顺序，点击「编辑」弹窗修改属性
                     </span>
                   </div>
-                  <button
-                    type="button"
-                    disabled={slots.length >= 8}
-                    onClick={handleAddSlot}
-                    className="btn-secondary h-8 px-3 text-xs"
-                  >
-                    <Plus size={14} aria-hidden="true" />
-                    <span>添加卡位</span>
-                  </button>
+                  {canManageTemplates && (
+                    <button
+                      type="button"
+                      disabled={slots.length >= 8}
+                      onClick={handleAddSlot}
+                      className="btn-secondary h-8 px-3 text-xs"
+                    >
+                      <Plus size={14} aria-hidden="true" />
+                      <span>添加卡位</span>
+                    </button>
+                  )}
                 </div>
 
                 <div className="divide-y divide-[color-mix(in_srgb,var(--cms-border)_60%,transparent)]">
@@ -1012,23 +1060,13 @@ export default function TemplatesTab() {
                     return (
                       <div
                         key={slot._uid || slot.id || idx}
-                        draggable={!saving}
-                        onDragStart={(e) => handleSlotDragStart(e, idx)}
-                        onDragOver={(e) => handleSlotDragOver(e, idx)}
-                        onDrop={(e) => handleSlotDrop(e, idx)}
+                        draggable={canManageTemplates && !saving}
+                        onDragStart={(e) => canManageTemplates && handleSlotDragStart(e, idx)}
+                        onDragOver={(e) => canManageTemplates && handleSlotDragOver(e, idx)}
+                        onDrop={(e) => canManageTemplates && handleSlotDrop(e, idx)}
                         onDragEnd={handleSlotDragEnd}
-                        role="button"
-                        tabIndex={0}
-                        onClick={() => setSelectedSlotIdx(idx)}
-                        onDoubleClick={() => openEditSlotModal(idx)}
-                        onKeyDown={(e) => {
-                          if (e.target !== e.currentTarget) return;
-                          if (e.key === 'Enter' || e.key === ' ') {
-                            e.preventDefault();
-                            setSelectedSlotIdx(idx);
-                          }
-                        }}
-                        className={`px-4 py-3.5 flex items-center justify-between gap-3 cursor-grab active:cursor-grabbing transition-all ${
+                        onDoubleClick={() => canManageTemplates && openEditSlotModal(idx)}
+                        className={`px-4 py-3.5 flex items-center justify-between gap-3 transition-all ${
                           isDragging
                             ? 'opacity-45 bg-[var(--cms-content)]'
                             : isDragTarget
@@ -1038,7 +1076,14 @@ export default function TemplatesTab() {
                                 : 'hover:bg-[var(--cms-content)]'
                         }`}
                       >
-                        <div className="flex items-center gap-3 min-w-0 flex-1">
+                        <button
+                          type="button"
+                          onClick={() => setSelectedSlotIdx(idx)}
+                          aria-pressed={active}
+                          className={`focus-ring flex items-center gap-3 min-w-0 flex-1 text-left rounded-lg ${
+                            canManageTemplates ? 'cursor-grab active:cursor-grabbing' : 'cursor-pointer'
+                          }`}
+                        >
                           <span
                             aria-hidden="true"
                             className="text-[var(--cms-placeholder)] hover:text-[var(--cms-muted-fg)] shrink-0 inline-flex items-center"
@@ -1056,8 +1101,8 @@ export default function TemplatesTab() {
                             0{idx + 1}
                           </span>
 
-                          <div className="min-w-0 flex-1 space-y-0.5">
-                            <div className="flex flex-wrap items-center gap-2 text-xs">
+                          <span className="min-w-0 flex-1 space-y-0.5 block">
+                            <span className="flex flex-wrap items-center gap-2 text-xs">
                               <span className="inline-flex items-center gap-1.5 text-[var(--cms-muted-fg)] shrink-0">
                                 <span
                                   className="w-1.5 h-1.5 rounded-full"
@@ -1100,41 +1145,41 @@ export default function TemplatesTab() {
                                   {slot.vip_name || (type === 'subscription' ? 'VIP 会员卡' : '整本买断')}
                                 </span>
                               )}
-                            </div>
+                            </span>
 
                             {type !== 'single' && slot.vip_desc && (
-                              <div className="text-xs text-[var(--cms-muted-fg)] truncate">{slot.vip_desc}</div>
+                              <span className="block text-xs text-[var(--cms-muted-fg)] truncate">{slot.vip_desc}</span>
                             )}
-                          </div>
-                        </div>
+                          </span>
+                        </button>
 
-                        <div
-                          className="flex items-center gap-2 shrink-0"
-                          onClick={(e) => e.stopPropagation()}
-                          onDoubleClick={(e) => e.stopPropagation()}
-                        >
+                        <div className="flex items-center gap-2 shrink-0">
                           <span className="text-xs tabular-nums text-[var(--cms-fg)] mr-1">
                             ${amount.toFixed(2)}
                           </span>
 
-                          <button
-                            type="button"
-                            onClick={() => openEditSlotModal(idx)}
-                            className="btn-detail whitespace-nowrap"
-                          >
-                            编辑
-                          </button>
+                          {canManageTemplates && (
+                            <>
+                              <button
+                                type="button"
+                                onClick={() => openEditSlotModal(idx)}
+                                className="btn-detail whitespace-nowrap"
+                              >
+                                编辑
+                              </button>
 
-                          <button
-                            type="button"
-                            disabled={slots.length <= 4}
-                            onClick={() => handleDeleteSlot(idx)}
-                            title={slots.length <= 4 ? '模板至少保留 4 个卡位' : '移除卡位'}
-                            aria-label={`移除卡位 ${idx + 1}`}
-                            className="focus-ring w-7 h-7 rounded-md hover:bg-[color-mix(in_srgb,var(--cms-error)_12%,transparent)] text-[var(--cms-muted-fg)] hover:text-[var(--cms-error)] flex items-center justify-center cursor-pointer disabled:opacity-25 disabled:cursor-not-allowed"
-                          >
-                            <Trash2 size={13} aria-hidden="true" />
-                          </button>
+                              <button
+                                type="button"
+                                disabled={slots.length <= 4}
+                                onClick={() => handleDeleteSlot(idx)}
+                                title={slots.length <= 4 ? '模板至少保留 4 个卡位' : '移除卡位'}
+                                aria-label={`移除卡位 ${idx + 1}`}
+                                className="focus-ring w-7 h-7 rounded-md hover:bg-[color-mix(in_srgb,var(--cms-error)_12%,transparent)] text-[var(--cms-muted-fg)] hover:text-[var(--cms-error)] flex items-center justify-center cursor-pointer disabled:opacity-25 disabled:cursor-not-allowed"
+                              >
+                                <Trash2 size={13} aria-hidden="true" />
+                              </button>
+                            </>
+                          )}
                         </div>
                       </div>
                     );
@@ -1681,9 +1726,7 @@ export default function TemplatesTab() {
                         className="input-field tabular-nums"
                         style={{ paddingLeft: '26px' }}
                         value={slotDraft.price_amount ?? getSlotAmount(slotDraft)}
-                        onChange={(e) =>
-                          applySlotDraftChange('price_amount', e.target.value === '' ? '' : parseFloat(e.target.value))
-                        }
+                        onChange={(e) => applySlotDraftChange('price_amount', e.target.value)}
                       />
                     </div>
                   </label>
@@ -1691,7 +1734,7 @@ export default function TemplatesTab() {
                   <label className="space-y-1.5">
                     <div className="flex items-center justify-between gap-2">
                       <span className="font-medium text-[var(--cms-muted-fg)]">基础金币 (Coins)</span>
-                      {slotDraft.coins !== Math.round(getSlotAmount(slotDraft) * 100) && (
+                      {Number(slotDraft.coins) !== Math.round(getSlotAmount(slotDraft) * 100) && (
                         <button
                           type="button"
                           onClick={() => applySlotDraftChange('coins', Math.round(getSlotAmount(slotDraft) * 100))}
@@ -1725,8 +1768,8 @@ export default function TemplatesTab() {
                         ? Number(slotDraft.bonus) < 0
                           ? '不能为负数'
                           : '超出 1.5x 上限'
-                        : slotDraft.coins > 0 && slotDraft.bonus > 0
-                          ? `+${Math.round((slotDraft.bonus / slotDraft.coins) * 100)}%`
+                        : Number(slotDraft.coins) > 0 && Number(slotDraft.bonus) > 0
+                          ? `+${Math.round((Number(slotDraft.bonus) / Number(slotDraft.coins)) * 100)}%`
                           : '不赠送'}
                     </span>
                   </div>
@@ -1780,9 +1823,7 @@ export default function TemplatesTab() {
                         className="input-field tabular-nums"
                         style={{ paddingLeft: '26px' }}
                         value={slotDraft.price_amount ?? getSlotAmount(slotDraft)}
-                        onChange={(e) =>
-                          applySlotDraftChange('price_amount', e.target.value === '' ? '' : parseFloat(e.target.value))
-                        }
+                        onChange={(e) => applySlotDraftChange('price_amount', e.target.value)}
                       />
                     </div>
                   </label>
@@ -1829,9 +1870,7 @@ export default function TemplatesTab() {
                         className="input-field tabular-nums"
                         style={{ paddingLeft: '26px' }}
                         value={slotDraft.price_amount ?? getSlotAmount(slotDraft)}
-                        onChange={(e) =>
-                          applySlotDraftChange('price_amount', e.target.value === '' ? '' : parseFloat(e.target.value))
-                        }
+                        onChange={(e) => applySlotDraftChange('price_amount', e.target.value)}
                       />
                     </div>
                   </label>

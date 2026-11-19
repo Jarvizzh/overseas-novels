@@ -116,6 +116,7 @@ export default function OrdersTab() {
   const [detailLoading, setDetailLoading] = useState(false);
 
   const fetchSeqRef = useRef(0);
+  const detailSeqRef = useRef(0);
 
   const fetchOrders = useCallback(async () => {
     const seq = ++fetchSeqRef.current;
@@ -150,17 +151,26 @@ export default function OrdersTab() {
   }, [fetchOrders]);
 
   const handleOpenPaymentDetails = async (orderId: number | string) => {
+    const seq = ++detailSeqRef.current;
     setSelectedOrderForDetail(orderId);
     setDetailModalOpen(true);
     setDetailLoading(true);
     try {
       const res = await apiRequest('GET', `/orders/${orderId}/payment-details`);
+      if (seq !== detailSeqRef.current) return;
       setPaymentDetails(res.details || null);
     } catch (err) {
+      if (seq !== detailSeqRef.current) return;
       console.error('Failed to fetch payment details:', err);
       setPaymentDetails(null);
+      window.showToast?.(
+        `加载三方支付明细失败：${err instanceof Error ? err.message : ''}`,
+        'error',
+      );
     } finally {
-      setDetailLoading(false);
+      if (seq === detailSeqRef.current) {
+        setDetailLoading(false);
+      }
     }
   };
 
@@ -574,6 +584,8 @@ export default function OrdersTab() {
       <ThirdPartyPaymentModal
         isOpen={detailModalOpen}
         onClose={() => {
+          detailSeqRef.current += 1;
+          setDetailLoading(false);
           setDetailModalOpen(false);
           setPaymentDetails(null);
         }}

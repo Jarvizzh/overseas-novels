@@ -465,10 +465,21 @@ export const BookPickerDrawer: React.FC<BookPickerDrawerProps> = ({
             return (
               <div
                 key={novel.id}
+                role="checkbox"
+                aria-checked={alreadyAdded || isChecked}
+                aria-disabled={alreadyAdded || undefined}
+                tabIndex={alreadyAdded ? -1 : 0}
                 onClick={() => {
                   if (!alreadyAdded) toggleSelect(novel);
                 }}
-                className={`p-3 rounded-xl border flex items-center gap-3 transition-colors ${
+                onKeyDown={(e) => {
+                  if (alreadyAdded) return;
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    toggleSelect(novel);
+                  }
+                }}
+                className={`focus-ring p-3 rounded-xl border flex items-center gap-3 transition-colors ${
                   alreadyAdded
                     ? 'border-[var(--cms-border)] bg-[var(--cms-content)]/60 opacity-75'
                     : isChecked

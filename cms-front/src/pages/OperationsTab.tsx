@@ -110,10 +110,8 @@ export default function OperationsTab() {
   };
 
   useEffect(() => {
-    if (initialTabParam === 'rankings' || initialTabParam === 'campaigns' || initialTabParam === 'recommendations') {
-      setActiveTabState(initialTabParam);
-    }
-  }, [initialTabParam]);
+    setActiveTabState(resolvedUrlTab);
+  }, [resolvedUrlTab]);
 
   const [loading, setLoading] = useState(true);
   const [savingSlot, setSavingSlot] = useState<RecommendationGroupName | null>(null);
@@ -323,14 +321,15 @@ export default function OperationsTab() {
     return () => window.clearTimeout(timer);
   }, [loading, draftGroups, draftRankingConfig, previewAtIso, runPreview]);
 
-  // Reference time for health dots matches preview time-travel simulator
+  // Reference time for health dots matches preview time-travel simulator or latest server preview timestamp
   const referenceTimeMs = useMemo(() => {
-    if (previewAtIso) {
-      const parsed = Date.parse(previewAtIso);
+    const iso = previewAtIso || previewData?.at;
+    if (iso) {
+      const parsed = Date.parse(iso);
       if (!Number.isNaN(parsed)) return parsed;
     }
     return Date.now();
-  }, [previewAtIso]);
+  }, [previewAtIso, previewData?.at]);
 
   const healthByGroup = useMemo(
     () => ({
@@ -514,7 +513,7 @@ export default function OperationsTab() {
   };
 
   const handleSaveRecSlot = async (slot: RecSlot) => {
-    if (!canEdit) return;
+    if (!canEdit || savingSlot !== null) return;
     const entries = draftGroups[slot] || [];
     if (!validateEntriesSchedule(entries)) return;
 
@@ -533,7 +532,7 @@ export default function OperationsTab() {
   };
 
   const handleSaveTopCharts = async () => {
-    if (!canEdit) return;
+    if (!canEdit || savingSlot !== null) return;
     if (parsedLimit === null) {
       window.showToast?.('榜单展示上限须为 1 至 100 的整数', 'error');
       return;

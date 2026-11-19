@@ -67,6 +67,7 @@ export const CmsDialog: React.FC<CmsDialogProps> = ({
     if ('closedBy' in HTMLDialogElement.prototype) return;
 
     const isOutside = (e: PointerEvent) => {
+      if (e.target !== el) return false;
       const r = el.getBoundingClientRect();
       return e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom;
     };
@@ -96,6 +97,10 @@ export const CmsDialog: React.FC<CmsDialogProps> = ({
   };
 
   const handleNativeClose = () => {
+    if (open && closeDisabled) {
+      dialogRef.current?.showModal();
+      return;
+    }
     if (open) {
       onClose();
     }

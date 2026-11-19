@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 import { CmsDialog } from './ui/CmsDialog';
 import { StatusDot } from './ui/Primitives';
+import { copyTextToClipboard } from '../utils/clipboard';
 
 export interface ThirdPartyPaymentDetail {
   id: number;
@@ -55,9 +56,13 @@ export const ThirdPartyPaymentModal: React.FC<Props> = ({
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
   const [showRaw, setShowRaw] = useState(false);
 
-  const handleCopy = (text: string, key: string) => {
+  const handleCopy = async (text: string, key: string) => {
     if (!text) return;
-    void navigator.clipboard.writeText(text);
+    const ok = await copyTextToClipboard(text);
+    if (!ok) {
+      window.showToast?.('复制失败，请手动选中复制', 'error');
+      return;
+    }
     setCopiedKey(key);
     window.setTimeout(() => setCopiedKey(null), 2000);
   };

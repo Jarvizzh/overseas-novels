@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { apiRequest, domainApi } from '../utils/api';
 import type { SystemDomain } from '../utils/api';
+import { copyTextToClipboard } from '../utils/clipboard';
 import CustomSelect from '../components/CustomSelect';
 import { CmsDialog } from '../components/ui/CmsDialog';
 import { Pagination } from '../components/ui/Pagination';
@@ -63,6 +64,7 @@ export default function PromotionsTab() {
 
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
   const [editingLink, setEditingLink] = useState<PromotionLink | null>(null);
+  const [editSubmitting, setEditSubmitting] = useState(false);
   const [editForm, setEditForm] = useState({
     name: '',
     chapterIndex: '1',
@@ -119,11 +121,38 @@ export default function PromotionsTab() {
 
   const handleEditSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!editingLink) return;
+    if (!editingLink || editSubmitting) return;
 
     if (!editForm.fbPixelId) {
       window.showToast?.('推广链接必须显式绑定 Facebook 像素！', 'error');
       return;
+    }
+
+    const chapterIdxRaw = editForm.chapterIndex.trim();
+    if (chapterIdxRaw) {
+      const parsedCh = Number(chapterIdxRaw);
+      if (!Number.isInteger(parsedCh) || parsedCh < 0) {
+        window.showToast?.('落地章节索引须为非负整数', 'error');
+        return;
+      }
+    }
+
+    const costRaw = editForm.coinCostPerThousand.trim();
+    if (costRaw) {
+      const parsedCost = Number(costRaw);
+      if (!Number.isInteger(parsedCost) || parsedCost < 0) {
+        window.showToast?.('专属千字计费须为不小于 0 的整数', 'error');
+        return;
+      }
+    }
+
+    const payChRaw = editForm.startPayChapterIndex.trim();
+    if (payChRaw) {
+      const parsedPayCh = Number(payChRaw);
+      if (!Number.isInteger(parsedPayCh) || parsedPayCh < 1) {
+        window.showToast?.('专属起付章节须为不小于 1 的整数', 'error');
+        return;
+      }
     }
 
     const activeDomains = (domains || []).filter((d) => d.status === 1);
@@ -141,33 +170,34 @@ export default function PromotionsTab() {
 
     const params = new URLSearchParams();
     params.set('novel_id', String(editingLink.novel_id));
-    if (editForm.chapterIndex) params.set('chapter_index', editForm.chapterIndex);
-    if (editForm.utmSource) params.set('utm_source', editForm.utmSource);
-    if (editForm.utmCampaign) params.set('utm_campaign', editForm.utmCampaign);
+    if (chapterIdxRaw) params.set('chapter_index', chapterIdxRaw);
+    if (editForm.utmSource.trim()) params.set('utm_source', editForm.utmSource.trim());
+    if (editForm.utmCampaign.trim()) params.set('utm_campaign', editForm.utmCampaign.trim());
 
     const targetPixel = pixels.find((p) => p.id === parseInt(editForm.fbPixelId, 10));
     if (targetPixel) params.set('pixel_id', targetPixel.pixel_id);
     if (editForm.rechargeTemplateId) params.set('template_id', editForm.rechargeTemplateId);
-    if (editForm.coinCostPerThousand) params.set('cost', editForm.coinCostPerThousand);
-    if (editForm.startPayChapterIndex) params.set('pay_ch', editForm.startPayChapterIndex);
+    if (costRaw) params.set('cost', costRaw);
+    if (payChRaw) params.set('pay_ch', payChRaw);
     params.set('link_id', String(editingLink.id));
 
-    const path = editForm.chapterIndex ? '/content' : '/detail';
+    const path = chapterIdxRaw && Number(chapterIdxRaw) > 0 ? '/content' : '/detail';
     const finalUrl = `${baseUrl}${path}?${params.toString()}`;
 
+    setEditSubmitting(true);
     try {
       await apiRequest('PUT', `/promotion-links/${editingLink.id}`, {
         name: editForm.name,
-        chapter_index: editForm.chapterIndex ? parseInt(editForm.chapterIndex, 10) : 0,
-        utm_source: editForm.utmSource,
-        utm_campaign: editForm.utmCampaign,
+        chapter_index: chapterIdxRaw ? parseInt(chapterIdxRaw, 10) : 0,
+        utm_source: editForm.utmSource.trim(),
+        utm_campaign: editForm.utmCampaign.trim(),
         generated_url: finalUrl,
         domain_id: targetDomainObj ? targetDomainObj.id : defaultDomainObj ? defaultDomainObj.id : null,
         domain: targetDomainObj ? targetDomainObj.domain : defaultDomainObj ? defaultDomainObj.domain : '',
         fb_pixel_id: editForm.fbPixelId ? parseInt(editForm.fbPixelId, 10) : null,
         recharge_template_id: editForm.rechargeTemplateId ? parseInt(editForm.rechargeTemplateId, 10) : null,
-        coin_cost_per_thousand: editForm.coinCostPerThousand ? parseInt(editForm.coinCostPerThousand, 10) : null,
-        start_pay_chapter_index: editForm.startPayChapterIndex ? parseInt(editForm.startPayChapterIndex, 10) : null,
+        coin_cost_per_thousand: costRaw ? parseInt(costRaw, 10) : null,
+        start_pay_chapter_index: payChRaw ? parseInt(payChRaw, 10) : null,
       });
 
       window.showToast?.('修改推广链接成功！', 'success');
@@ -175,6 +205,8 @@ export default function PromotionsTab() {
       void fetchLinks();
     } catch (err: unknown) {
       window.showToast?.(`修改推广链接失败：${err instanceof Error ? err.message : ''}`, 'error');
+    } finally {
+      setEditSubmitting(false);
     }
   };
 
@@ -190,9 +222,12 @@ export default function PromotionsTab() {
     });
   };
 
-  const handleCopy = (url: string) => {
-    void navigator.clipboard.writeText(url);
-    window.showToast?.('推广链接已复制到剪贴板！', 'success');
+  const handleCopy = async (url: string) => {
+    const ok = await copyTextToClipboard(url);
+    window.showToast?.(
+      ok ? '推广链接已复制到剪贴板！' : '复制失败，请手动选中链接复制',
+      ok ? 'success' : 'error',
+    );
   };
 
   const filteredLinks = useMemo(() => {
@@ -461,18 +496,25 @@ export default function PromotionsTab() {
       {/* Edit Promotion Link Slide-Over Drawer */}
       <CmsDialog
         open={Boolean(isEditModalOpen && editingLink)}
-        onClose={() => setIsEditModalOpen(false)}
+        onClose={() => !editSubmitting && setIsEditModalOpen(false)}
+        closedBy={editSubmitting ? 'none' : 'any'}
+        closeDisabled={editSubmitting}
         variant="drawer"
         title="编辑推广链接"
         subtitle={editingLink ? `${editingLink.novel_title} · #${editingLink.id}` : undefined}
         size="md"
         footer={
           <>
-            <button type="button" className="btn-secondary" onClick={() => setIsEditModalOpen(false)}>
+            <button
+              type="button"
+              disabled={editSubmitting}
+              className="btn-secondary"
+              onClick={() => !editSubmitting && setIsEditModalOpen(false)}
+            >
               取消
             </button>
-            <button type="submit" form="edit-promo-form" className="btn-primary">
-              确认保存
+            <button type="submit" form="edit-promo-form" disabled={editSubmitting} className="btn-primary">
+              {editSubmitting ? '保存中...' : '确认保存'}
             </button>
           </>
         }
@@ -530,12 +572,13 @@ export default function PromotionsTab() {
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <label className="space-y-1.5">
                 <span className="block font-medium text-[var(--cms-muted-fg)]">广告渠道 (utm_source)</span>
-                <CustomSelect
+                <input
+                  type="text"
                   aria-label="广告渠道"
-                  width="100%"
+                  className="input-field"
+                  placeholder="例如: facebook, tiktok"
                   value={editForm.utmSource}
-                  onChange={(val) => setEditForm({ ...editForm, utmSource: val })}
-                  options={[{ value: 'facebook', label: 'Facebook' }]}
+                  onChange={(e) => setEditForm({ ...editForm, utmSource: e.target.value })}
                 />
               </label>
 
