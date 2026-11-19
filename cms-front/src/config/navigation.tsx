@@ -84,7 +84,7 @@ export const NAV_TREE: NavNode[] = [
     id: 'support',
     label: '客诉管理',
     icon: <MessageSquare size={16} aria-hidden="true" />,
-    children: [{ id: 'feedback', label: '客服留言', path: '/feedback' }],
+    children: [{ id: 'feedback', label: '用户反馈', path: '/feedback' }],
   },
   {
     id: 'system',
