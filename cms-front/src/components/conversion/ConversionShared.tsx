@@ -43,9 +43,9 @@ export function CopyableText({
   };
 
   return (
-    <span className={`inline-flex items-center gap-1 min-w-0 ${className}`}>
+    <span className={`inline-flex items-center gap-1 min-w-0 max-w-full ${className}`}>
       <span
-        className={`${mono ? 'font-mono-code' : 'tabular-nums'} truncate`}
+        className={`${mono ? 'font-mono-code' : 'tabular-nums'} min-w-0 truncate`}
         title={value}
       >
         {displayValue ?? value}

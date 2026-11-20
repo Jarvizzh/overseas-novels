@@ -30,7 +30,7 @@ export function TargetResultsTable({
 
   return (
     <TableRegion ariaLabel="Pixel 投递任务结果">
-      <table className="cms-table min-w-[620px] [&_th]:px-3 [&_td]:px-3" data-density={density}>
+      <table className="cms-table min-w-[620px] [&_th]:px-2.5 [&_td]:px-2.5" data-density={density}>
         <caption className="sr-only">Pixel 投递任务结果</caption>
         <thead>
           <tr>
@@ -58,8 +58,8 @@ export function TargetResultsTable({
                 key={delivery.id}
                 className={activeAttemptsDeliveryId === delivery.id ? 'row-selected' : ''}
               >
-                <th scope="row" className="text-left font-normal whitespace-nowrap align-top">
-                  <div className="space-y-1">
+                <th scope="row" className="text-left font-normal align-top">
+                  <div className="space-y-1 min-w-0 max-w-[164px]">
                     <CopyableText
                       value={delivery.pixel_id}
                       label="Pixel ID"
@@ -67,7 +67,7 @@ export function TargetResultsTable({
                     />
                     <div className="flex items-center gap-1.5 min-w-0">
                       <span
-                        className={`badge ${
+                        className={`badge shrink-0 ${
                           delivery.role === 'original' ? 'badge-blue' : 'badge-gray'
                         }`}
                       >
@@ -75,7 +75,7 @@ export function TargetResultsTable({
                       </span>
                       {destination?.name && (
                         <span
-                          className="text-[11px] text-[var(--cms-muted-fg)] truncate max-w-[120px]"
+                          className="text-[11px] text-[var(--cms-muted-fg)] truncate min-w-0"
                           title={destination.name}
                         >
                           {destination.name}
@@ -86,11 +86,11 @@ export function TargetResultsTable({
                 </th>
 
                 <td className="align-top">
-                  <div className="space-y-1">
+                  <div className="space-y-1 min-w-0 max-w-[148px]">
                     <ConversionStatusDot code={delivery.state} />
                     {reasonText && (
                       <div
-                        className="text-[11px] text-[var(--cms-muted-fg)] max-w-[220px] break-words"
+                        className="text-[11px] text-[var(--cms-muted-fg)] break-words"
                         title={delivery.reason}
                       >
                         {reasonText}
@@ -100,7 +100,7 @@ export function TargetResultsTable({
                 </td>
 
                 <td className="align-top">
-                  <div className="space-y-1 max-w-[220px]">
+                  <div className="space-y-1 min-w-0 max-w-[152px]">
                     <CopyableText
                       value={delivery.meta_event_id}
                       label="Meta 事件 ID"
@@ -127,43 +127,45 @@ export function TargetResultsTable({
                   )}
                 </td>
 
-                <td className="align-top text-[11px] space-y-0.5 max-w-[240px]">
-                  {delivery.last_attempt ? (
-                    <>
-                      <div className="flex flex-wrap items-center gap-1.5 text-[var(--cms-fg)] tabular-nums">
-                        {delivery.last_attempt.http_status !== undefined && (
-                          <span className="badge badge-secondary">
-                            HTTP {delivery.last_attempt.http_status}
-                          </span>
-                        )}
-                        {delivery.last_attempt.graph_code !== undefined && (
-                          <span className="badge badge-amber">
-                            Graph {delivery.last_attempt.graph_code}
-                            {delivery.last_attempt.graph_subcode !== undefined
-                              ? `/${delivery.last_attempt.graph_subcode}`
-                              : ''}
-                          </span>
-                        )}
-                      </div>
-                      {delivery.last_attempt.fbtrace_id && (
-                        <CopyableText
-                          value={delivery.last_attempt.fbtrace_id}
-                          label="fbtrace_id"
-                          className="text-[var(--cms-muted-fg)]"
-                        />
-                      )}
-                      {lastAttemptReason && (
-                        <div
-                          className="text-[var(--cms-muted-fg)] break-words"
-                          title={delivery.last_attempt.reason}
-                        >
-                          {lastAttemptReason}
+                <td className="align-top text-[11px]">
+                  <div className="min-w-0 max-w-[136px] space-y-0.5">
+                    {delivery.last_attempt ? (
+                      <>
+                        <div className="flex flex-wrap items-center gap-1.5 text-[var(--cms-fg)] tabular-nums">
+                          {delivery.last_attempt.http_status !== undefined && (
+                            <span className="badge badge-secondary">
+                              HTTP {delivery.last_attempt.http_status}
+                            </span>
+                          )}
+                          {delivery.last_attempt.graph_code !== undefined && (
+                            <span className="badge badge-amber">
+                              Graph {delivery.last_attempt.graph_code}
+                              {delivery.last_attempt.graph_subcode !== undefined
+                                ? `/${delivery.last_attempt.graph_subcode}`
+                                : ''}
+                            </span>
+                          )}
                         </div>
-                      )}
-                    </>
-                  ) : (
-                    <span className="text-[var(--cms-muted-fg)]">—</span>
-                  )}
+                        {delivery.last_attempt.fbtrace_id && (
+                          <CopyableText
+                            value={delivery.last_attempt.fbtrace_id}
+                            label="fbtrace_id"
+                            className="text-[var(--cms-muted-fg)]"
+                          />
+                        )}
+                        {lastAttemptReason && (
+                          <div
+                            className="text-[var(--cms-muted-fg)] break-words"
+                            title={delivery.last_attempt.reason}
+                          >
+                            {lastAttemptReason}
+                          </div>
+                        )}
+                      </>
+                    ) : (
+                      <span className="text-[var(--cms-muted-fg)]">—</span>
+                    )}
+                  </div>
                 </td>
 
                 {showActionCol && (

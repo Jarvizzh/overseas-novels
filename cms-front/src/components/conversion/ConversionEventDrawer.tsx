@@ -828,7 +828,9 @@ export function ConversionEventDrawer({
                               </td>
                               <td>
                                 {att.fbtrace_id ? (
-                                  <CopyableText value={att.fbtrace_id} label="fbtrace_id" />
+                                  <div className="max-w-[160px] min-w-0">
+                                    <CopyableText value={att.fbtrace_id} label="fbtrace_id" />
+                                  </div>
                                 ) : (
                                   '—'
                                 )}

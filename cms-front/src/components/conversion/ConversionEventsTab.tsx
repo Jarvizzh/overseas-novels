@@ -1049,8 +1049,10 @@ export function ConversionEventsTab({
                     )}
 
                     {visibleCols.source_event_id && (
-                      <td className="max-w-[180px]">
-                        <CopyableText value={item.source_event_id} label="原始事件 ID" />
+                      <td>
+                        <div className="max-w-[180px] min-w-0">
+                          <CopyableText value={item.source_event_id} label="原始事件 ID" />
+                        </div>
                       </td>
                     )}
 
