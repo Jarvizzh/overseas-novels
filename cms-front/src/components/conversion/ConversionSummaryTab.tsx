@@ -49,6 +49,7 @@ const EVENT_NAME_OPTIONS = [
 ];
 
 const WORKER_TYPES = ['normalize', 'normalize_inbox', 'meta', 'partner_report'] as const;
+const WORKER_HEARTBEAT_ACTIVE_MS = 90_000;
 
 export function ConversionSummaryTab({
   integrations,
@@ -157,12 +158,16 @@ export function ConversionSummaryTab({
       const latest = instances
         .slice()
         .sort((a, b) => Date.parse(b.heartbeat_at) - Date.parse(a.heartbeat_at))[0];
-      const anyPaused = instances.some((i) => i.paused);
-      const stale = latest ? nowMs - Date.parse(latest.heartbeat_at) > 90_000 : true;
+      const activeInstances = instances.filter((i) => {
+        const hbMs = Date.parse(i.heartbeat_at);
+        return Number.isFinite(hbMs) && nowMs - hbMs <= WORKER_HEARTBEAT_ACTIVE_MS;
+      });
+      const anyPaused = activeInstances.length > 0 && activeInstances.every((i) => i.paused);
+      const stale = activeInstances.length === 0;
       return {
         type,
         meta: workerTypeMeta(type),
-        instanceCount: instances.length,
+        instanceCount: activeInstances.length,
         latest,
         anyPaused,
         stale,
