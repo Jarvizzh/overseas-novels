@@ -72,7 +72,7 @@ flowchart TD
 
     %% 4. 集中数据与持久化层
     subgraph Layer4 ["【阿里云 VPC 专有网络 - 集中数据层】"]
-        RDS[("🗄️ 阿里云 RDS PostgreSQL 18<br/>(schema: public + conversion)<br/>• reader_conversion_outbox 事务出站<br/>• conversion.* 统一事件/任务/审计/密文<br/>• 最小权限分角色账号隔离")]:::dataStyle
+        RDS[("🗄️ 阿里云 RDS PostgreSQL 18<br/>(schema: public + conversion)<br/>• reader_conversion_outbox 事务出站<br/>• conversion.* 统一事件/任务/审计/密文<br/>• 当前统一使用 RDS 账号 star_novel")]:::dataStyle
         
         Redis[("⚡ Redis 7 缓存<br/>(独立 Compose 内网或 VPC ECS :6379)<br/>• 0~20% Jitter 缓存防雪崩<br/>• SingleFlight / 分布式锁 / AOF")]:::dataStyle
     end
@@ -102,16 +102,16 @@ flowchart TD
 
 ## 📋 二、 服务器规划与网络矩阵
 
-| 机器/服务角色 | 部署组件与职责 | 监听端口 / 访问模式 | 最低数据库角色与权限说明 |
+| 机器/服务角色 | 部署组件与职责 | 监听端口 / 访问模式 | 数据库连接账号 |
 | :--- | :--- | :--- | :--- |
-| **网关与管理机 (`ECS-Gateway`)** | 宝塔面板 + Nginx (统一网关) + `reader-front` 静态 + `cms-front` 静态 + `cms-backend` 容器 | `80`, `443` (公网开放)<br/>`127.0.0.1:8081` (仅本机反代) | `cms_role`（仅业务表 + `conversion` 只读选单列，无权访问密文） |
-| **转化私网 API (`conversion-api`)** | `conversion --mode=api`：Pixel/接入配置、凭据加密写入、只读变更审计与订单全链路对账、审计重排 | `8092`（**仅回环 `127.0.0.1` 或 Docker/VPC 私网互通，严禁公网暴露**） | `api_role`（可写配置与 `operation_audit` 只读/追加，禁读 `admins` 与凭据密文） |
-| **转化异步 Worker (`conversion-worker`)** | `conversion --mode=worker`：消费 `reader_conversion_outbox` / `conversion.inbox`、投递 Meta CAPI、定稿 | 无入站监听端口（仅主动出站访问 RDS 与 Meta Graph API） | `worker_role`（读写投递队列、凭据密文与心跳，无权修改配置/审计） |
-| **转化采集告警 (`conversion-collector`)** | `conversion --mode=collector`：独立每 30 秒采样积压、缺路由与 Worker 心跳写入 `conversion.alerts` | 无入站监听端口（仅主动查询 RDS） | `collector_role`（只读状态表 + 读写 `conversion.alerts`） |
-| **分销回调与回告（阶段 C 启用）** | `conversion --mode=callback` + `partner-worker`：第三方分销入站 Webhook 与原目标最终结果回告 | `:8093`（仅限已验证接入的特定 `/callbacks/...` 路径反代放行） | 独立 `callback_role` / `partner_worker_role`（见阶段 C 授权脚本） |
-| **读者端集群节点 (`ECS-Reader-1..N`)** | `reader-backend` Go API 容器 | `8080` (仅 VPC 内网 / 本机回环) | `reader_role`（只向 `reader_conversion_outbox` 与修复事实表追加） |
+| **网关与管理机 (`ECS-Gateway`)** | 宝塔面板 + Nginx (统一网关) + `reader-front` 静态 + `cms-front` 静态 + `cms-backend` 容器 | `80`, `443` (公网开放)<br/>`127.0.0.1:8081` (仅本机反代) | `star_novel`（当前统一 RDS 账号） |
+| **转化私网 API (`conversion-api`)** | `conversion --mode=api`：Pixel/接入配置、凭据加密写入、只读变更审计与订单全链路对账、审计重排 | `8092`（**仅回环 `127.0.0.1` 或 Docker/VPC 私网互通，严禁公网暴露**） | `star_novel`（当前统一 RDS 账号） |
+| **转化异步 Worker (`conversion-worker`)** | `conversion --mode=worker`：消费 `reader_conversion_outbox` / `conversion.inbox`、投递 Meta CAPI、定稿 | 无入站监听端口（仅主动出站访问 RDS 与 Meta Graph API） | `star_novel`（当前统一 RDS 账号） |
+| **转化采集告警 (`conversion-collector`)** | `conversion --mode=collector`：独立每 30 秒采样积压、缺路由与 Worker 心跳写入 `conversion.alerts` | 无入站监听端口（仅主动查询 RDS） | `star_novel`（当前统一 RDS 账号） |
+| **分销回调与回告（阶段 C 启用）** | `conversion --mode=callback` + `partner-worker`：第三方分销入站 Webhook 与原目标最终结果回告 | `:8093`（仅限已验证接入的特定 `/callbacks/...` 路径反代放行） | `star_novel`（当前统一 RDS 账号；阶段 C 按需拆分） |
+| **读者端集群节点 (`ECS-Reader-1..N`)** | `reader-backend` Go API 容器 | `8080` (仅 VPC 内网 / 本机回环) | `star_novel`（当前统一 RDS 账号） |
 | **Redis 7 缓存** | Docker Compose 内置 `redis:7`（推荐，见 [deploy/linux/README.md](deploy/linux/README.md)）或 VPC 内网 ECS | `6379` (仅内网，严禁公网开放) | — |
-| **阿里云 RDS PostgreSQL** | 主业务数据库（含 `pg_trgm` 与 `conversion` schema） | `3433` 或 `5432` (VPC 专网连接) | 迁移所有者账号（仅在 `-migrate` / `psql` 授权脚本阶段使用） |
+| **阿里云 RDS PostgreSQL** | 主业务数据库（含 `pg_trgm` 与 `conversion` schema） | `3433` 或 `5432` (VPC 专网连接) | 统一使用 `star_novel`（含迁移与全部业务表权限） |
 
 > [!IMPORTANT]
 > **网络与安全边界原则**：
@@ -125,7 +125,7 @@ flowchart TD
 
 ### 3.1 阿里云 RDS PostgreSQL 配置
 1. **白名单配置**：在 RDS 控制台 【白名单与安全组】 中，将 VPC 内网网段（如 `172.16.0.0/24`）加入白名单；
-2. **账号与数据库创建**：创建高权限账号 `star_admin`，创建数据库 `star_novel`，字符集选择 `UTF8`；
+2. **账号与数据库创建**：统一使用高权限账号 `star_novel` 与业务数据库 `star_novel`（或既有线上库 `star_novel_db`），字符集选择 `UTF8`；
 3. **初始化或升级 Schema**。使用本次发布的 CMS 镜像，通过同一份 CMS 环境配置运行迁移命令。
    ```bash
    docker run --rm --env-file cms-backend/.env star-cms-backend:latest -migrate
@@ -202,25 +202,14 @@ flowchart TD
 
 本次架构升级将广告转化追踪彻底解耦为「**Reader 事务写 Outbox + `conversion-backend` 异步消费 / 私网控制 / 独立监控告警 + CMS 可视化回传中心与像素管理**」，同时更新 Reader、CMS、转化 Worker、私网 API 和独立 Collector。**测试与生产必须使用独立数据库、独立 `CONVERSION_ENVIRONMENT` 及独立测试 Pixel**，私网 API 只接受 CMS 私网调用。
 
-1. **备份与窗口迁移**：在维护窗口备份数据库，记录 `reader_schema_migrations` 版本账本、`payment_event_outbox` 各状态数量和已确认的 Meta 事件 ID。暂停旧业务写入和旧 CAPI 消费；如测试环境曾启动司南模拟服务，同步暂停回调入口和回告 Worker。等待在途请求及租约结束，使用新版 CMS 镜像与迁移所有者连接执行 `-migrate`，推进 schema 至 **`2026111909`**（含 `conversion` schema 15 张表、`reader_conversion_outbox`、`reader_conversion_repair_facts` 及订单资格扩展字段）。
-2. **创建并发保留期与查询索引**：使用同一迁移所有者在**事务外（保持自动提交）**单独执行：
+1. **停写与窗口迁移**：在维护窗口记录 `reader_schema_migrations` 版本账本、`payment_event_outbox` 各状态数量和已确认的 Meta 事件 ID（当前部署策略暂不额外执行数据库备份）。暂停旧业务写入和旧 CAPI 消费；如测试环境曾启动司南模拟服务，同步暂停回调入口和回告 Worker。等待在途请求及租约结束，使用新版 CMS 镜像与 `star_novel` 连接执行 `-migrate`，推进 schema 至 **`2026111909`**（含 `conversion` schema 15 张表、`reader_conversion_outbox`、`reader_conversion_repair_facts` 及订单资格扩展字段）。
+2. **创建并发保留期与查询索引**：使用 `star_novel` 在**事务外（保持自动提交）**单独执行：
    ```bash
    psql -X -v ON_ERROR_STOP=1 -f cms-backend/db/conversion_query_indexes.sql
    ```
    核对新增索引（`recharge_orders_conversion_fulfilled_at`、`conversion_outbox_retention`、`conversion_repair_fact_retention`、`conversion_event_retention`、`conversion_inbox_retention`）的 `pg_index.indisvalid=true`，并在接近生产规模的副本上检查执行耗时和查询计划。
-3. **分角色最小权限授予**：为 Reader、CMS、Worker、API、Collector、保留期命令预先准备独立的 PostgreSQL 非表所有者登录角色（不继承其他运行模式账号）。由迁移所有者按下例授予转化相关权限：
-
-   ```bash
-   psql -X -f cms-backend/db/conversion_role_grants.sql \
-     -v reader_role=sn_reader -v cms_role=sn_cms -v worker_role=sn_conversion_worker \
-     -v api_role=sn_conversion_api -v collector_role=sn_conversion_collector \
-     -v retention_role=sn_conversion_retention
-   ```
-
-   - 该脚本除隔离 `fb_pixels.access_token`（运行时 `reader` / `cms` 均禁读）与 `conversion.credentials.ciphertext` 外，已为 `api_role` 授予 `GRANT SELECT, INSERT ON conversion.operation_audit`，确保 CMS「像素管理 / 接入授权」抽屉的**只读变更审计时间线**（`GET /api/v1/admin/conversion/audit`）正常读取且不泄漏 `admins` 表或凭据密文。
-   - **（仅分销阶段 C 测试/联调库）**：如需启动 `callback` 与 `partner-worker` 进行司南模拟联调，另执行 `psql -X -f cms-backend/db/conversion_sinan_mock_grants.sql -v callback_role=sn_conversion_callback -v partner_worker_role=sn_conversion_partner_worker`。
-
-4. **历史队列与 Pixel 凭据接管**：使用单独的维护期导入账号运行[历史队列接管](conversion-backend/README.md#历史队列接管)（`conversion-ops import-legacy-pixels` / `backfill-legacy-subscriptions` / `import-legacy-events`）。该账号仅用于迁移期读取旧 Pixel 凭据并写入历史导入账本，导入完成后将其从服务运行环境移除。补齐旧投递的环境证据后可用 `conversion-ops review-legacy-environment` 审计复核，确认切换完成后再清理旧明文凭据。
+3. **数据库权限说明（当前暂不拆分多账号）**：当前所有后端服务统一使用 RDS 账号 `star_novel` 连接，**暂无需单独创建多个 RDS 子账号，也暂不运行 `cms-backend/db/conversion_role_grants.sql`（以及阶段 C 的 `conversion_sinan_mock_grants.sql`）**；待后续需收紧生产最小权限隔离时，再按该脚本拆分为 `reader_role` / `cms_role` / `worker_role` / `api_role` / `collector_role` / `retention_role`（其中 `api_role` 需保留对 `conversion.operation_audit` 的 `SELECT, INSERT` 权限以支撑只读审计时间线）。
+4. **历史队列与 Pixel 凭据接管**：使用 `star_novel` 账号运行[历史队列接管](conversion-backend/README.md#历史队列接管)（`conversion-ops import-legacy-pixels` / `backfill-legacy-subscriptions` / `import-legacy-events`）。补齐旧投递的环境证据后可用 `conversion-ops review-legacy-environment` 审计复核，确认切换完成后再清理旧表中的明文凭据。
 5. **配置密钥与首启转化服务**：按第五章 §5.3 部署并启动 `conversion-api`（`:8092`）、`conversion-worker` 和 `conversion-collector`。**初次启动务必将 Worker 的 `CONVERSION_META_ENABLED` 设为 `false`**，确认 `worker` 已正常归一化 Outbox 并更新心跳后，核对测试订单入队、逐单资格与各 Pixel 任务无误，再将 `CONVERSION_META_ENABLED` 改为 `true` 重启 `worker` 放量。
 6. **启动新版 Reader、CMS 与前端并核对告警**：按第四章 §4.3、第五章 §5.2 确保 `reader-backend` 设置一致的 `CONVERSION_ENVIRONMENT`，`cms-backend` 正确配置 `CONVERSION_PRIVATE_URL` 与共享 `CONVERSION_PRIVATE_TOKEN`。保持 Collector 运行，停用 Worker 验证心跳告警触发（`alerts`），恢复 Worker 后确认日志记录 `opened` 与 `resolved`。
 7. **运维工具切换与回滚边界**：PayPal 对账继续使用 `payment-ops`；转化重排、旧环境复核、缺行补建和保留期清理统一改由 CMS「回传中心」或[转化运维命令](conversion-backend/README.md#运行与运维)执行（旧 `payment-ops -kind outbox` 不再对应新转化队列）。迁移提交后先暂停故障链路再用匹配当前 schema 的版本修复或前滚；回退旧代码前须核对切换后新增业务、未发任务及已确认的 `meta_event_id` 证据。
@@ -294,8 +283,8 @@ ENTRYPOINT ["/app/server"]
 GIN_MODE=release
 PORT=8080
 
-# 数据库与缓存内网连接（建议切换后改用最小权限账号 reader_role，如 sn_reader）
-DATABASE_URL=postgres://sn_reader:YOUR_ROLE_PASSWORD@pgm-xxxxxx.pgsql.rds.aliyuncs.com:3433/star_novel?sslmode=disable
+# 数据库与缓存内网连接（统一使用 RDS 账号 star_novel）
+DATABASE_URL=postgres://star_novel:YOUR_RDS_PASSWORD@pgm-xxxxxx.pgsql.rds.aliyuncs.com:3433/star_novel?sslmode=disable
 REDIS_URL=redis://:YOUR_STRONG_REDIS_PASSWORD_2026@172.16.0.15:6379/0
 
 # 全集群必须一致的 JWT 密钥
@@ -406,8 +395,8 @@ ENTRYPOINT ["/app/cms-server"]
 ```ini
 GIN_MODE=release
 PORT=8081
-# 建议使用最小权限账号 cms_role（如 sn_cms）
-DATABASE_URL=postgres://sn_cms:YOUR_ROLE_PASSWORD@pgm-xxxxxx.pgsql.rds.aliyuncs.com:3433/star_novel?sslmode=disable
+# 统一使用 RDS 账号 star_novel
+DATABASE_URL=postgres://star_novel:YOUR_RDS_PASSWORD@pgm-xxxxxx.pgsql.rds.aliyuncs.com:3433/star_novel?sslmode=disable
 REDIS_URL=redis://:YOUR_STRONG_REDIS_PASSWORD_2026@172.16.0.15:6379/0
 CMS_JWT_SECRET=<独立于 Reader 的至少 32 字符随机密钥，可用 openssl rand -hex 32 生成>
 DEFAULT_DOMAIN=https://h5.starsfic.com
@@ -460,7 +449,7 @@ curl -fsS http://127.0.0.1:8081/healthz
 
 ### 5.3 部署独立统一转化回传服务 (`conversion-backend`)
 
-`conversion-backend/Dockerfile` 采用多阶段构建，打包出 `/app/bin/conversion`（常驻服务入口，支持 `--mode=api|worker|collector|callback|partner-worker`）与 `/app/bin/conversion-ops`（运维/接管 CLI）。三个核心生产实例按职责与数据库角色拆分运行：
+`conversion-backend/Dockerfile` 采用多阶段构建，打包出 `/app/bin/conversion`（常驻服务入口，支持 `--mode=api|worker|collector|callback|partner-worker`）与 `/app/bin/conversion-ops`（运维/接管 CLI）。三个核心生产实例按职责拆分进程运行（当前统一使用 `star_novel` RDS 账号）：
 
 1. **准备三份独立环境配置文件**：
    - 生成共享 Token 与凭据加密主密钥：
@@ -473,7 +462,7 @@ curl -fsS http://127.0.0.1:8081/healthz
      ```
    - `conversion-api.env`（私网控制面：配置增改、密钥写入、只读审计、逐单对账与审计重排）：
      ```ini
-     DATABASE_URL=postgres://sn_conversion_api:YOUR_API_PASSWORD@pgm-xxxxxx.pgsql.rds.aliyuncs.com:3433/star_novel?sslmode=disable
+     DATABASE_URL=postgres://star_novel:YOUR_RDS_PASSWORD@pgm-xxxxxx.pgsql.rds.aliyuncs.com:3433/star_novel?sslmode=disable
      CONVERSION_ENVIRONMENT=production
      CONVERSION_PRIVATE_ADDR=:8092
      CONVERSION_PRIVATE_TOKEN=<与 cms-backend 一致的共享 Token>
@@ -483,7 +472,7 @@ curl -fsS http://127.0.0.1:8081/healthz
      ```
    - `conversion-worker.env`（异步投递面：Outbox 归一化 + Meta Graph API 发送）：
      ```ini
-     DATABASE_URL=postgres://sn_conversion_worker:YOUR_WORKER_PASSWORD@pgm-xxxxxx.pgsql.rds.aliyuncs.com:3433/star_novel?sslmode=disable
+     DATABASE_URL=postgres://star_novel:YOUR_RDS_PASSWORD@pgm-xxxxxx.pgsql.rds.aliyuncs.com:3433/star_novel?sslmode=disable
      CONVERSION_ENVIRONMENT=production
      # 初次切换上线先设 false 验证入队与心跳，确认无误后再改为 true 放量
      CONVERSION_META_ENABLED=false
@@ -493,7 +482,7 @@ curl -fsS http://127.0.0.1:8081/healthz
      ```
    - `conversion-collector.env`（独立监控面：每 30s 采集心跳、积压、缺目标与告警）：
      ```ini
-     DATABASE_URL=postgres://sn_conversion_collector:YOUR_COLLECTOR_PASSWORD@pgm-xxxxxx.pgsql.rds.aliyuncs.com:3433/star_novel?sslmode=disable
+     DATABASE_URL=postgres://star_novel:YOUR_RDS_PASSWORD@pgm-xxxxxx.pgsql.rds.aliyuncs.com:3433/star_novel?sslmode=disable
      CONVERSION_ENVIRONMENT=production
      ```
 
@@ -728,12 +717,5 @@ docker run -d \
    - **Step 3**：在 CMS「像素管理」逐个轮换 Pixel Access Token 后写入 `v2` 密文；确认数据库 `conversion.credentials` 中已无 `key_version='v1'` 的活动/待投递引用后，再将 `v1` 从配置移除。
 2. **数据保留期脱敏清理**：可通过 `conversion-ops retention --keep-days 30 --limit 100 --apply --operator <admin_id> --reason "<reason>"` 分批清理超保留期的敏感快照字段（保留逻辑键、投递终态与审计记录），直至每批处理返回 `0`。
 
-### 8.4 数据库每日自动备份
-在网关机或任意 ECS 的 Crontab 中添加自动备份任务：
-```bash
-0 3 * * * pg_dump -h <RDS内网地址> -p 3433 -U star_admin star_novel | gzip > /data/backup/star_novel_$(date +\%Y\%m\%d).sql.gz
-find /data/backup/ -name "star_novel_*.sql.gz" -mtime +7 -exec rm -f {} \;
-```
-
 ---
-*文档版本：v2.0.0（2026-11-19 更新：适配统一转化回传服务架构与像素管理/回传中心重构） | 维护团队：STAR NOVEL 架构组*
+*文档版本：v2.1.0（2026-11-20 更新：统一使用 `star_novel` RDS 账号，精简数据库备份步骤） | 维护团队：STAR NOVEL 架构组*
