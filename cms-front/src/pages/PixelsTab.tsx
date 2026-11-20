@@ -162,10 +162,8 @@ export default function PixelsTab() {
 
       {serviceUnavailable ? (
         <ServiceUnavailableState
-          showLegacyHint={false}
           retrying={loading}
           onRetry={() => void loadData()}
-          onSwitchLegacy={() => { }}
         />
       ) : (
         <>

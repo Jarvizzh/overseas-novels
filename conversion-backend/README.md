@@ -18,7 +18,7 @@
 
 使用 `go run ./cmd/conversion --mode=api` 启动私网 API。沿用 `DATABASE_URL` 与 `CONVERSION_ENVIRONMENT`。使用 `CONVERSION_PRIVATE_ADDR` 配置监听地址，默认 `127.0.0.1:8092`。CMS 与 API 配置相同的 `CONVERSION_PRIVATE_TOKEN`，CMS 另外设置 `CONVERSION_PRIVATE_URL` 指向私网地址，例如同机部署时使用 `http://127.0.0.1:8092`。
 
-CMS 在「广告投放 → 回传日志」按订单号查询。默认使用本地订单 ID，分销查询另填写接入 ID。API 路径为 `GET /api/v1/admin/conversion/orders/{order_id}`，分销查询附带 `integration_id`。接口实时复核管理员账号和角色，返回资格、事件、各 Pixel 投递和分销回告摘要。历史日志由 SuperAdmin 查看脱敏明细。
+CMS 在「广告投放 → 回传中心 → 逐单对账」按订单号查询。默认使用本地订单 ID，分销查询另填写接入 ID。API 路径为 `GET /api/v1/admin/conversion/orders/{order_id}`，分销查询附带 `integration_id`。接口实时复核管理员账号和角色，返回资格、事件、各 Pixel 投递和分销回告摘要。
 
 ## 历史队列接管
 

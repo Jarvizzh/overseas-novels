@@ -159,10 +159,8 @@ export function ConversionEventsTab({
   onClearUrlPixelId,
   serviceUnavailable,
   retryingService = false,
-  showLegacyHint,
   onServiceUnavailable,
   onRetryService,
-  onSwitchLegacy,
   onSelectEvent,
   onJumpToOrder,
 }: {
@@ -176,10 +174,8 @@ export function ConversionEventsTab({
   onClearUrlPixelId?: () => void;
   serviceUnavailable: boolean;
   retryingService?: boolean;
-  showLegacyHint: boolean;
   onServiceUnavailable: () => void;
   onRetryService: () => void;
-  onSwitchLegacy: () => void;
   onSelectEvent: (ev: ConversionEvent) => void;
   onJumpToOrder: (orderId: string, integrationId?: string) => void;
 }) {
@@ -473,10 +469,8 @@ export function ConversionEventsTab({
   if (serviceUnavailable) {
     return (
       <ServiceUnavailableState
-        showLegacyHint={showLegacyHint}
         retrying={retryingService}
         onRetry={onRetryService}
-        onSwitchLegacy={onSwitchLegacy}
       />
     );
   }

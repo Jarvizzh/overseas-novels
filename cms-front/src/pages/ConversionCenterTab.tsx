@@ -1,6 +1,6 @@
 import { type KeyboardEvent, useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { Activity, FileSearch, History, ListChecks } from 'lucide-react';
+import { Activity, FileSearch, ListChecks } from 'lucide-react';
 import { apiRequest } from '../utils/api';
 import { getErrorMessage, isServiceUnavailableError } from '../utils/conversionStatus';
 import { InlineErrorBanner } from '../components/conversion/ConversionShared';
@@ -8,7 +8,6 @@ import { ConversionEventDrawer } from '../components/conversion/ConversionEventD
 import { ConversionEventsTab } from '../components/conversion/ConversionEventsTab';
 import { ConversionOrdersTab } from '../components/conversion/ConversionOrdersTab';
 import { ConversionSummaryTab } from '../components/conversion/ConversionSummaryTab';
-import { LegacyTrackingLogsTab } from '../components/conversion/LegacyTrackingLogsTab';
 import type {
   ConversionDestination,
   ConversionEvent,
@@ -17,25 +16,24 @@ import type {
   ConversionTabKey,
 } from '../components/conversion/types';
 
-function resolveTabKey(raw: string | null, showHistory: boolean): ConversionTabKey {
+const conversionTabs: Array<{ key: ConversionTabKey; label: string }> = [
+  { key: 'events', label: '回传事件' },
+  { key: 'orders', label: '逐单对账' },
+  { key: 'summary', label: '监控与告警' },
+];
+
+function resolveTabKey(raw: string | null): ConversionTabKey {
   if (raw === 'orders' || raw === 'summary') return raw;
-  if (raw === 'legacy' && showHistory) return 'legacy';
   return 'events';
 }
 
-export default function ConversionCenterTab({
-  showHistory,
-  canWrite,
-}: {
-  showHistory: boolean;
-  canWrite: boolean;
-}) {
+export default function ConversionCenterTab({ canWrite }: { canWrite: boolean }) {
   const baseId = useId();
   const [searchParams, setSearchParams] = useSearchParams();
   const tabListRef = useRef<HTMLDivElement>(null);
   const tabButtonRefs = useRef<Partial<Record<ConversionTabKey, HTMLButtonElement | null>>>({});
 
-  const activeTab = resolveTabKey(searchParams.get('tab'), showHistory);
+  const activeTab = resolveTabKey(searchParams.get('tab'));
   const urlEventId = searchParams.get('event_id');
   const urlOrderId = searchParams.get('order_id');
   const urlIntegrationId = searchParams.get('integration_id') ?? '';
@@ -89,15 +87,6 @@ export default function ConversionCenterTab({
       nonce: (prev?.nonce ?? 0) + 1,
     }));
   }, [urlOrderId, urlIntegrationId]);
-
-  // Normalize unauthorized ?tab=legacy back to events
-  useEffect(() => {
-    if (searchParams.get('tab') === 'legacy' && !showHistory) {
-      const next = new URLSearchParams(searchParams);
-      next.delete('tab');
-      setSearchParams(next, { replace: true });
-    }
-  }, [searchParams, setSearchParams, showHistory]);
 
   // Load shared lookup metadata (integrations, destinations) and initial active alert badge count
   useEffect(() => {
@@ -249,20 +238,8 @@ export default function ConversionCenterTab({
     setSearchParams(next, { replace: true });
   }, [searchParams, setSearchParams]);
 
-  const visibleTabs = useMemo(() => {
-    const base: Array<{ key: ConversionTabKey; label: string }> = [
-      { key: 'events', label: '回传事件' },
-      { key: 'orders', label: '逐单对账' },
-      { key: 'summary', label: '监控与告警' },
-    ];
-    if (showHistory) {
-      base.push({ key: 'legacy', label: '回传日志' });
-    }
-    return base;
-  }, [showHistory]);
-
   const handleTabListKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
-    const keys = visibleTabs.map((t) => t.key);
+    const keys = conversionTabs.map((t) => t.key);
     const focusedIdx = keys.findIndex((k) => tabButtonRefs.current[k] === document.activeElement);
     if (focusedIdx < 0) return;
 
@@ -291,7 +268,7 @@ export default function ConversionCenterTab({
           onKeyDown={handleTabListKeyDown}
           className="flex items-center gap-6 overflow-x-auto h5-no-scrollbar"
         >
-          {visibleTabs.map((tab) => {
+          {conversionTabs.map((tab) => {
             const isSelected = activeTab === tab.key;
             return (
               <button
@@ -314,7 +291,6 @@ export default function ConversionCenterTab({
                 {tab.key === 'events' && <ListChecks size={14} aria-hidden="true" />}
                 {tab.key === 'orders' && <FileSearch size={14} aria-hidden="true" />}
                 {tab.key === 'summary' && <Activity size={14} aria-hidden="true" />}
-                {tab.key === 'legacy' && <History size={14} aria-hidden="true" />}
                 <span>{tab.label}</span>
                 {tab.key === 'summary' && alertsCount > 0 && !serviceUnavailable && (
                   <span
@@ -351,10 +327,8 @@ export default function ConversionCenterTab({
             refreshToken={eventsRefreshToken}
             serviceUnavailable={serviceUnavailable}
             retryingService={metaLoading}
-            showLegacyHint={showHistory}
             onServiceUnavailable={() => setServiceUnavailable(true)}
             onRetryService={handleRetryService}
-            onSwitchLegacy={() => switchTab('legacy')}
             onSelectEvent={handleOpenDrawerFromList}
             onJumpToOrder={handleJumpToOrder}
           />
@@ -367,10 +341,8 @@ export default function ConversionCenterTab({
             initialQuery={orderLookupTrigger}
             serviceUnavailable={serviceUnavailable}
             retryingService={metaLoading}
-            showLegacyHint={showHistory}
             onServiceUnavailable={() => setServiceUnavailable(true)}
             onRetryService={handleRetryService}
-            onSwitchLegacy={() => switchTab('legacy')}
             onOpenEventDrawer={handleOpenDrawerById}
           />
         )}
@@ -383,16 +355,13 @@ export default function ConversionCenterTab({
             destinationById={destinationById}
             serviceUnavailable={serviceUnavailable}
             retryingService={metaLoading}
-            showLegacyHint={showHistory}
             onServiceUnavailable={() => setServiceUnavailable(true)}
             onRetryService={handleRetryService}
-            onSwitchLegacy={() => switchTab('legacy')}
             onOpenEventDrawer={handleOpenDrawerById}
             onAlertsCountChange={setAlertsCount}
           />
         )}
 
-        {activeTab === 'legacy' && showHistory && <LegacyTrackingLogsTab />}
       </div>
 
       {/* Shared Event Detail Drawer */}

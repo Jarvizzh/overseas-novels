@@ -316,7 +316,7 @@ function AppContent() {
               path="/conversions"
               element={
                 CONVERSION_READ_ROLES.includes(admin.role)
-                  ? <ConversionCenterTab showHistory={admin.role === 'SuperAdmin'} canWrite={admin.role === 'SuperAdmin' || admin.role === 'Admin'} />
+                  ? <ConversionCenterTab canWrite={admin.role === 'SuperAdmin' || admin.role === 'Admin'} />
                   : <Navigate to="/" replace />
               }
             />

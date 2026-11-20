@@ -241,7 +241,6 @@ var managedSequences = []sequenceSpec{
 	{table: "gift_codes", column: "id"},
 	{table: "gift_code_redemptions", column: "id"},
 	{table: "feedback", column: "id"},
-	{table: "facebook_capi_logs", column: "id"},
 	{table: "third_party_payment_orders", column: "id"},
 }
 

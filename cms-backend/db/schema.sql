@@ -351,21 +351,6 @@ CREATE TABLE IF NOT EXISTS feedback (
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
--- 22. Facebook CAPI 事件日志表 (Facebook CAPI Logs)
-CREATE TABLE IF NOT EXISTS facebook_capi_logs (
-    id BIGSERIAL PRIMARY KEY,
-    pixel_id VARCHAR(50) NOT NULL,
-    event_name VARCHAR(50) NOT NULL,
-    user_id BIGINT,
-    value DECIMAL(10,2),
-    currency VARCHAR(10),
-    test_event_code VARCHAR(50),
-    status_code INT,
-    payload TEXT,
-    response TEXT,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-);
-
 -- 23. 性能索引构建 (Indexes)
 CREATE INDEX IF NOT EXISTS idx_novels_status_publish_views ON novels(status, publish_status, view_count DESC, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_novels_status_publish_created ON novels(status, publish_status, created_at DESC, id DESC);

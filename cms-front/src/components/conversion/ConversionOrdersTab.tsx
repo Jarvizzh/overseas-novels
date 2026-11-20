@@ -32,10 +32,8 @@ export function ConversionOrdersTab({
   initialQuery,
   serviceUnavailable,
   retryingService = false,
-  showLegacyHint,
   onServiceUnavailable,
   onRetryService,
-  onSwitchLegacy,
   onOpenEventDrawer,
 }: {
   integrations: ConversionIntegration[];
@@ -43,10 +41,8 @@ export function ConversionOrdersTab({
   initialQuery: { orderId: string; integrationId: string; nonce: number } | null;
   serviceUnavailable: boolean;
   retryingService?: boolean;
-  showLegacyHint: boolean;
   onServiceUnavailable: () => void;
   onRetryService: () => void;
-  onSwitchLegacy: () => void;
   onOpenEventDrawer: (eventId: string) => void;
 }) {
   const headingId = useId();
@@ -181,10 +177,8 @@ export function ConversionOrdersTab({
   if (serviceUnavailable) {
     return (
       <ServiceUnavailableState
-        showLegacyHint={showLegacyHint}
         retrying={retryingService}
         onRetry={onRetryService}
-        onSwitchLegacy={onSwitchLegacy}
       />
     );
   }

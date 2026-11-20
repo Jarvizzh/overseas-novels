@@ -653,7 +653,7 @@ server {
 | **3. 行锁扣费与章节解锁** | 连续快速点击“解锁付费章节” | 数据库 `wallets` 余额正常扣减，无负余额，无并发双扣，流水记录完整 |
 | **4. 每日签到防刷** | 模拟并发请求 `/wallet/checkin` 接口 | 首次签到成功，后续并发请求被 Redis 分布式锁与偏唯一索引拦截并提示已签到 |
 | **5. 像素管理与配置审计 (`/pixels`)** | 打开 `/pixels` 新增/编辑测试 Pixel（带 Access Token）、尝试退役绑定了推广链的 Pixel、在接入配置编辑三态路由授权矩阵并查看抽屉「变更审计记录」 | 凭据加密保存（返回无明文）；占用中的 Pixel 退役按钮置灰阻断；矩阵仅提交变更 Diff；变更审计时间线正常加载且无密文泄漏 |
-| **6. 回传中心与监控降级 (`/conversions`)** | 打开 `/conversions`，测试事件列表筛选、详情抽屉时间线与审计重排；使用「逐单对账」输入测试订单；暂停/恢复 `conversion-worker` 检查「监控与告警」；用 `SuperAdmin` 检查「回传日志」详情抽屉；短暂停掉 `conversion-api` 测试降级与切换查看历史日志 | Outbox → 统一事件 → Meta 投递全链路贯通且真实 `fbtrace_id` 可查；停 Worker 触发告警、恢复后自动解除；`MediaBuyer` 无「回传日志」Tab 与写权限；`conversion-api` 离线时 UI 给出 503 降级提示且 H5 下单写入 Outbox 不受阻 |
+| **6. 回传中心与监控降级 (`/conversions`)** | 打开 `/conversions`，测试事件列表筛选、详情抽屉时间线与审计重排；使用「逐单对账」输入测试订单；暂停/恢复 `conversion-worker` 检查「监控与告警」；短暂停掉 `conversion-api` 测试降级提示和重新检测 | Outbox → 统一事件 → Meta 投递全链路贯通且真实 `fbtrace_id` 可查；停 Worker 触发告警、恢复后自动解除；`MediaBuyer` 无写权限；`conversion-api` 离线时 UI 给出 503 降级提示且 H5 下单写入 Outbox 不受阻 |
 | **7. CMS 基础运营与权限** | 使用初始化/部署 `SuperAdmin` 账号登录 `https://admin.star-novel.com` | 仪表盘加载正常，小说章节拆分导入、6卡位充值模板修改即时生效 |
 
 ---

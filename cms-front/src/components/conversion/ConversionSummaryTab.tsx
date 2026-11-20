@@ -58,10 +58,8 @@ export function ConversionSummaryTab({
   destinationById,
   serviceUnavailable,
   retryingService = false,
-  showLegacyHint,
   onServiceUnavailable,
   onRetryService,
-  onSwitchLegacy,
   onOpenEventDrawer,
   onAlertsCountChange,
 }: {
@@ -71,10 +69,8 @@ export function ConversionSummaryTab({
   destinationById: Map<string, ConversionDestination>;
   serviceUnavailable: boolean;
   retryingService?: boolean;
-  showLegacyHint: boolean;
   onServiceUnavailable: () => void;
   onRetryService: () => void;
-  onSwitchLegacy: () => void;
   onOpenEventDrawer: (eventId: string) => void;
   onAlertsCountChange: (count: number) => void;
 }) {
@@ -204,10 +200,8 @@ export function ConversionSummaryTab({
   if (serviceUnavailable) {
     return (
       <ServiceUnavailableState
-        showLegacyHint={showLegacyHint}
         retrying={retryingService}
         onRetry={onRetryService}
-        onSwitchLegacy={onSwitchLegacy}
       />
     );
   }

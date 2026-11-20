@@ -70,17 +70,13 @@ export function CopyableText({
 export function ServiceUnavailableState({
   title = '统一转化服务暂不可用',
   message = 'CMS 未连接或暂时无法访问 conversion-backend 私网接口，无法读取实时回传事件与对账数据。',
-  showLegacyHint = false,
   retrying = false,
   onRetry,
-  onSwitchLegacy,
 }: {
   title?: string;
   message?: string;
-  showLegacyHint?: boolean;
   retrying?: boolean;
   onRetry?: () => void;
-  onSwitchLegacy?: () => void;
 }) {
   return (
     <div className="cms-card p-8 text-center space-y-3">
@@ -106,11 +102,6 @@ export function ServiceUnavailableState({
           >
             <RefreshCw size={13} className={retrying ? 'animate-spin' : ''} aria-hidden="true" />
             <span>{retrying ? '正在检测…' : '重新检测'}</span>
-          </button>
-        )}
-        {showLegacyHint && onSwitchLegacy && (
-          <button type="button" onClick={onSwitchLegacy} className="btn-primary h-8 px-3 text-xs">
-            <span>前往回传日志</span>
           </button>
         )}
       </div>

@@ -261,22 +261,7 @@ export interface ConversionSummaryData {
   heartbeats: WorkerHeartbeat[];
 }
 
-export interface CAPILog {
-  id: string;
-  pixel_id: string;
-  event_name: string;
-  user_id: string | null;
-  value: number | null;
-  currency: string | null;
-  test_event_code?: string | null;
-  test: boolean;
-  status_code: number;
-  payload?: string;
-  response?: string;
-  created_at: string;
-}
-
-export type ConversionTabKey = 'events' | 'orders' | 'summary' | 'legacy';
+export type ConversionTabKey = 'events' | 'orders' | 'summary';
 
 export type PixelsTabKey = 'pixels' | 'integrations';
 
