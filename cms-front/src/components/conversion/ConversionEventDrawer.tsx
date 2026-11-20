@@ -865,8 +865,8 @@ export function ConversionEventDrawer({
 
               {/* Partner Reports */}
               {active.partner_reports && active.partner_reports.length > 0 && (
-                <div className="space-y-2.5">
-                  <h3 className="text-sm font-semibold text-[var(--cms-fg)] m-0">
+                <div className="flex flex-col gap-3">
+                  <h3 className="text-sm font-semibold text-[var(--cms-fg)]">
                     分销最终结果回告 ({active.partner_reports.length})
                   </h3>
                   {active.partner_reports.map((report) => (

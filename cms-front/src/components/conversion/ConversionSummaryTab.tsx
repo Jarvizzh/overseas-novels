@@ -297,7 +297,7 @@ export function ConversionSummaryTab({
         data && (
           <div className={`space-y-5 ${loading ? 'opacity-70 transition-opacity' : ''}`}>
             {/* Worker Heartbeats */}
-            <section className="space-y-2.5">
+            <section className="flex flex-col gap-3.5">
               <div className="flex items-center justify-between gap-2">
                 <h2 className="text-sm font-semibold text-[var(--cms-fg)] flex items-center gap-2 m-0">
                   <Activity size={15} className="text-[var(--cms-primary)]" aria-hidden="true" />
@@ -339,8 +339,8 @@ export function ConversionSummaryTab({
             </section>
 
             {/* Active Alerts */}
-            <section className="space-y-2.5">
-              <h2 className="text-sm font-semibold text-[var(--cms-fg)] flex items-center gap-2 m-0">
+            <section className="flex flex-col gap-3.5">
+              <h2 className="text-sm font-semibold text-[var(--cms-fg)] flex items-center gap-2">
                 <AlertTriangle
                   size={15}
                   className={data.alerts.length > 0 ? 'text-[var(--cms-warning)]' : 'text-[var(--cms-success)]'}
@@ -407,8 +407,8 @@ export function ConversionSummaryTab({
             </section>
 
             {/* Population Confirmation Rate */}
-            <section className="space-y-2.5">
-              <h2 className="text-sm font-semibold text-[var(--cms-fg)] m-0">原目标回传确认率统计</h2>
+            <section className="flex flex-col gap-3.5">
+              <h2 className="text-sm font-semibold text-[var(--cms-fg)]">原目标回传确认率统计</h2>
               <TableRegion ariaLabel="原目标回传确认率统计">
                 <table className="cms-table min-w-[760px]" data-density="comfortable">
                   <thead>
@@ -538,8 +538,8 @@ export function ConversionSummaryTab({
             </section>
 
             {/* Target Delivery Metrics */}
-            <section className="space-y-2.5">
-              <h2 className="text-sm font-semibold text-[var(--cms-fg)] m-0">Pixel 投递与延迟分布</h2>
+            <section className="flex flex-col gap-3.5">
+              <h2 className="text-sm font-semibold text-[var(--cms-fg)]">Pixel 投递与延迟分布</h2>
               <TableRegion ariaLabel="Pixel 投递与延迟分布">
                 <table className="cms-table min-w-[900px]" data-density="compact">
                   <thead>
@@ -629,8 +629,8 @@ export function ConversionSummaryTab({
 
             {/* Partner Reports Metrics */}
             {data.reports.length > 0 && (
-              <section className="space-y-2.5">
-                <h2 className="text-sm font-semibold text-[var(--cms-fg)] m-0">分销结果回告汇总</h2>
+              <section className="flex flex-col gap-3.5">
+                <h2 className="text-sm font-semibold text-[var(--cms-fg)]">分销结果回告汇总</h2>
                 <TableRegion ariaLabel="分销结果回告汇总">
                   <table className="cms-table min-w-[760px]" data-density="compact">
                     <thead>

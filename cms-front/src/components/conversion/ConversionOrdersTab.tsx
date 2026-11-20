@@ -316,8 +316,8 @@ export function ConversionOrdersTab({
 
           {/* Partner Inbox Section */}
           {report.inbox && report.inbox.length > 0 && (
-            <div className="space-y-2">
-              <h3 className="text-sm font-semibold text-[var(--cms-fg)] m-0">
+            <div className="flex flex-col gap-3">
+              <h3 className="text-sm font-semibold text-[var(--cms-fg)]">
                 分销入站回调 Inbox ({report.inbox.length})
               </h3>
               <TableRegion ariaLabel="分销入站回调记录">
@@ -364,8 +364,8 @@ export function ConversionOrdersTab({
           )}
 
           {/* Reconciled Events */}
-          <div className="space-y-3">
-            <h3 className="text-sm font-semibold text-[var(--cms-fg)] m-0">
+          <div className="flex flex-col gap-3">
+            <h3 className="text-sm font-semibold text-[var(--cms-fg)]">
               关联转化事件 ({report.events.length})
             </h3>
 
