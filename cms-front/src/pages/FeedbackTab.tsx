@@ -247,8 +247,7 @@ export default function FeedbackTab() {
               items.map((item) => (
                 <tr
                   key={item.id}
-                  onClick={() => openDetailModal(item)}
-                  className={`cursor-pointer ${selectedItem?.id === item.id ? 'row-selected' : ''}`}
+                  className={selectedItem?.id === item.id ? 'row-selected' : undefined}
                 >
                   <td className="tabular-nums">
                     <div className="text-[var(--cms-fg)]">#{item.id}</div>
@@ -256,7 +255,7 @@ export default function FeedbackTab() {
                       {item.user_id && item.user_id > 0 ? `UID ${item.user_id}` : '访客'}
                     </div>
                   </td>
-                  <td onClick={(e) => e.stopPropagation()}>
+                  <td>
                     <a href={`mailto:${item.email}`} className="text-[var(--cms-fg)] hover:underline">
                       {item.email}
                     </a>
@@ -279,7 +278,7 @@ export default function FeedbackTab() {
                   <td className="tabular-nums text-[var(--cms-muted-fg)] whitespace-nowrap">
                     {new Date(item.created_at).toLocaleString()}
                   </td>
-                  <td className="text-right" onClick={(e) => e.stopPropagation()}>
+                  <td className="text-right">
                     <button
                       type="button"
                       onClick={() => openDetailModal(item)}

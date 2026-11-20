@@ -264,8 +264,7 @@ export function LegacyTrackingLogsTab() {
               logs.map((log) => (
                 <tr
                   key={log.id}
-                  onClick={() => setSelectedLog(log)}
-                  className={`cursor-pointer ${selectedLog?.id === log.id ? 'row-selected' : ''}`}
+                  className={selectedLog?.id === log.id ? 'row-selected' : undefined}
                 >
                   <td className="tabular-nums text-[var(--cms-muted-fg)]">#{log.id}</td>
                   <td className="tabular-nums font-mono-code text-[var(--cms-fg)]">{log.pixel_id}</td>
@@ -300,7 +299,7 @@ export function LegacyTrackingLogsTab() {
                   <td className="tabular-nums text-[var(--cms-muted-fg)] whitespace-nowrap">
                     {new Date(log.created_at).toLocaleString()}
                   </td>
-                  <td className="text-right" onClick={(e) => e.stopPropagation()}>
+                  <td className="text-right">
                     <button
                       type="button"
                       onClick={() => setSelectedLog(log)}

@@ -338,8 +338,7 @@ export default function UsersTab() {
                 return (
                   <tr
                     key={u.id}
-                    onClick={() => void handleUserClick(u.id)}
-                    className={`cursor-pointer ${isViewing ? 'row-selected' : ''}`}
+                    className={isViewing ? 'row-selected' : undefined}
                   >
                     <td>
                       <div className="space-y-0.5">
@@ -415,7 +414,7 @@ export default function UsersTab() {
                     <td className="tabular-nums text-[var(--cms-muted-fg)] whitespace-nowrap">
                       {new Date(u.created_at).toLocaleDateString()}
                     </td>
-                    <td className="text-right" onClick={(e) => e.stopPropagation()}>
+                    <td className="text-right">
                       <button
                         type="button"
                         onClick={() => void handleUserClick(u.id)}

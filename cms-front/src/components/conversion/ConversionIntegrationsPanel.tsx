@@ -220,7 +220,6 @@ export function ConversionIntegrationsPanel({
               当前展示 <strong className="text-[var(--cms-fg)] font-medium">{filteredIntegrations.length}</strong> /{' '}
               {integrations.length} 个渠道接入配置
             </span>
-            <span>点击行可直接管理 Pixel 三态授权矩阵及审计历史</span>
           </div>
         }
       >
@@ -262,8 +261,7 @@ export function ConversionIntegrationsPanel({
                 return (
                   <tr
                     key={integ.id}
-                    onClick={() => openIntegrationDrawer(integ, 'config')}
-                    className={`cursor-pointer transition-colors ${!integ.enabled ? 'opacity-75' : ''}`}
+                    className={`transition-colors ${!integ.enabled ? 'opacity-75' : ''}`}
                   >
                     {visibleCols.integration_id && (
                       <td className="font-mono-code text-[var(--cms-muted-fg)] whitespace-nowrap">
@@ -347,7 +345,6 @@ export function ConversionIntegrationsPanel({
                                 return (
                                   <span
                                     key={b.destination_id}
-                                    onClick={(e) => e.stopPropagation()}
                                     className={`badge ${
                                       isRetired ? 'badge-red' : 'badge-blue'
                                     } inline-flex items-center gap-1`}
@@ -373,7 +370,6 @@ export function ConversionIntegrationsPanel({
                                 return (
                                   <span
                                     key={b.destination_id}
-                                    onClick={(e) => e.stopPropagation()}
                                     className={`badge ${
                                       isRetired ? 'badge-red' : 'badge-gray'
                                     } inline-flex items-center gap-1`}
@@ -394,7 +390,7 @@ export function ConversionIntegrationsPanel({
                       )}
                     </td>
 
-                    <td className="text-right whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
+                    <td className="text-right whitespace-nowrap">
                       <div className="inline-flex items-center justify-end gap-1 whitespace-nowrap">
                         <button
                           type="button"

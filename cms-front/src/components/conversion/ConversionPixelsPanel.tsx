@@ -958,7 +958,6 @@ export function ConversionPixelsPanel({
               当前展示 <strong className="text-[var(--cms-fg)] font-medium">{filteredDestinations.length}</strong> /{' '}
               {destinations.length} 个 Pixel 目标
             </span>
-            <span>点击任意行可查看配置细节与永久操作审计历史</span>
           </div>
         }
       >
@@ -999,8 +998,7 @@ export function ConversionPixelsPanel({
                 return (
                   <tr
                     key={dest.id}
-                    onClick={() => openDestDrawer(dest, 'config')}
-                    className={`cursor-pointer transition-colors ${isRetired ? 'opacity-70' : ''}`}
+                    className={`transition-colors ${isRetired ? 'opacity-70' : ''}`}
                   >
                     {visibleCols.destination_id && (
                       <td className="font-mono-code text-[var(--cms-muted-fg)] whitespace-nowrap">
@@ -1028,7 +1026,7 @@ export function ConversionPixelsPanel({
                       </div>
                     </th>
 
-                    <td onClick={(e) => e.stopPropagation()}>
+                    <td>
                       <CopyableText value={dest.pixel_id} label="Pixel ID" />
                     </td>
 
@@ -1063,7 +1061,7 @@ export function ConversionPixelsPanel({
                       )}
                     </td>
 
-                    <td onClick={(e) => e.stopPropagation()}>
+                    <td>
                       {dest.promotion_dependencies > 0 ? (
                         <Link
                           to="/promotions"
@@ -1084,7 +1082,7 @@ export function ConversionPixelsPanel({
                       </td>
                     )}
 
-                    <td className="text-right whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
+                    <td className="text-right whitespace-nowrap">
                       <div className="inline-flex items-center justify-end gap-1 whitespace-nowrap">
                         <Link
                           to={`/conversions?pixel_id=${encodeURIComponent(dest.pixel_id)}`}

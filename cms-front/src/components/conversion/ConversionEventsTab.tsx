@@ -897,8 +897,7 @@ export function ConversionEventsTab({
                 return (
                   <tr
                     key={item.id}
-                    onClick={() => onSelectEvent(item)}
-                    className={`cursor-pointer ${selectedEventId === item.id ? 'row-selected' : ''}`}
+                    className={selectedEventId === item.id ? 'row-selected' : undefined}
                   >
                     <td>
                       <div className="space-y-0.5">
@@ -942,13 +941,12 @@ export function ConversionEventsTab({
                         {item.order_id ? (
                           <button
                             type="button"
-                            onClick={(e) => {
-                              e.stopPropagation();
+                            onClick={() =>
                               onJumpToOrder(
                                 item.order_id!,
                                 item.source === 'starnovel' ? '' : item.integration_id,
-                              );
-                            }}
+                              )
+                            }
                             className="focus-ring inline-flex items-center gap-1 text-[var(--cms-primary)] hover:underline cursor-pointer font-mono-code"
                             title="前往逐单对账"
                           >
@@ -1075,7 +1073,7 @@ export function ConversionEventsTab({
                       </div>
                     </td>
 
-                    <td className="text-right whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
+                    <td className="text-right whitespace-nowrap">
                       <button
                         type="button"
                         onClick={() => onSelectEvent(item)}
