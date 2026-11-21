@@ -28,6 +28,8 @@ import {
   policySourceLabels,
   policyVersion,
   reconcileBandChanges,
+  reconcileFallback,
+  samePolicyGroup,
   showMinor,
 } from './paymentPolicy';
 import type { ConversionIntegration } from './types';
@@ -51,7 +53,7 @@ interface PolicyPublicationResult {
     version_number: string | null;
   } | null;
   current: PaymentPolicyView | null;
-  current_status?: 'available' | 'app_unauthorized';
+  current_status?: 'available' | 'app_unauthorized' | 'promotion_deleted';
 }
 
 function publicationVersion(number: string | null, id: string | null) {
@@ -88,10 +90,13 @@ export function PaymentPolicyPanel({
   const [edit, setEdit] = useState<BandEdit | null>(null);
   const [bands, setBands] = useState<BandChange[]>([]);
   const [fallbacks, setFallbacks] = useState<Record<string, ActionFields | null>>({});
+  const [fallbackConflicts, setFallbackConflicts] = useState<Record<string, string[]>>({});
   const [removedGroups, setRemovedGroups] = useState<string[]>([]);
+  const [groupConflicts, setGroupConflicts] = useState<string[]>([]);
   const [group, setGroup] = useState('');
   const [range, setRange] = useState<PaymentRange>();
   const [deactivate, setDeactivate] = useState(false);
+  const [restoreConflict, setRestoreConflict] = useState('');
   const [error, setError] = useState<{ message: string; field?: string }>({ message: '' });
   const [loading, setLoading] = useState(false);
   const [pending, setPending] = useState<'publish' | 'verify' | ''>('');
@@ -102,6 +107,7 @@ export function PaymentPolicyPanel({
   const seq = useRef(0);
   const panel = useRef<HTMLDivElement>(null);
   const statusMessage = useRef<HTMLDivElement>(null);
+  const publishButton = useRef<HTMLButtonElement>(null);
   const requestBusy = useRef(false);
   const dirty =
     bands.length > 0 ||
@@ -113,11 +119,13 @@ export function PaymentPolicyPanel({
   const path = `/conversion/integrations/${encodeURIComponent(integration.id)}/payment-policy`;
   const busy = Boolean(pending);
   const rows = useMemo(() => (view ? paymentBandRows(view.config, bands) : []), [view, bands]);
-  const bandConflicts = useMemo(
-    () => (view ? reconcileBandChanges(view.config, bands).conflicts : []),
-    [view, bands],
-  );
-  const conflictingKeys = new Set(bandConflicts.map(({ key }) => key));
+  const bandConflicts = bands.filter(({ conflict }) => conflict);
+  const conflictingBands = new Map(bandConflicts.map((change) => [change.key, change.conflict]));
+  const hasDraftConflicts =
+    bandConflicts.length > 0 ||
+    Object.keys(fallbackConflicts).length > 0 ||
+    groupConflicts.length > 0 ||
+    Boolean(restoreConflict);
 
   useEffect(() => {
     onState(dirty || Boolean(uncertain), busy);
@@ -159,9 +167,12 @@ export function PaymentPolicyPanel({
   function clearDraft() {
     setBands([]);
     setFallbacks({});
+    setFallbackConflicts({});
     setRemovedGroups([]);
+    setGroupConflicts([]);
     setRange(undefined);
     setDeactivate(false);
+    setRestoreConflict('');
     setConflict(false);
     setUncertain(null);
     clearFeedback();
@@ -270,7 +281,7 @@ export function PaymentPolicyPanel({
   }
 
   async function publish() {
-    if (!canWrite || requestBusy.current || conflict || uncertain || bandConflicts.length || !dirty) return;
+    if (!canWrite || requestBusy.current || conflict || uncertain || hasDraftConflicts || !dirty) return;
     const draft = draftPayload();
     if (!draft) return;
     const publication: PolicyPublication = {
@@ -303,23 +314,58 @@ export function PaymentPolicyPanel({
   }
 
   function rebaseDraft(next: PaymentPolicyView) {
-    const reconciled = reconcileBandChanges(next.config, bands);
+    if (!view) return;
+    const before = new Map(view.config.groups.map((item) => [item.payment_kind, item]));
     const groups = new Map(next.config.groups.map((item) => [item.payment_kind, item]));
-    setBands(reconciled.bands);
+    const reconciled = reconcileBandChanges(view.config, next.config, bands);
+    const nextFallbacks: Record<string, ActionFields | null> = {};
+    const nextFallbackConflicts: Record<string, string[]> = {};
+    for (const [kind, fields] of Object.entries(fallbacks)) {
+      const merged = reconcileFallback(before.get(kind)?.fallback, fields, groups.get(kind)?.fallback);
+      if (merged.fields !== undefined) nextFallbacks[kind] = merged.fields;
+      if (merged.conflicts.length) nextFallbackConflicts[kind] = merged.conflicts;
+    }
+    const nextGroupConflicts = removedGroups.filter((kind) => {
+      const current = groups.get(kind);
+      return current && !samePolicyGroup(before.get(kind), current);
+    });
+    setBands(reconciled);
     setRemovedGroups(removedGroups.filter((kind) => groups.has(kind)));
-    setFallbacks(
-      Object.fromEntries(
-        Object.entries(fallbacks).filter(([kind, fields]) => fields !== null || groups.get(kind)?.fallback),
-      ),
-    );
+    setGroupConflicts(nextGroupConflicts);
+    setFallbacks(nextFallbacks);
+    setFallbackConflicts(nextFallbackConflicts);
     if (range === next.config.payment_range) setRange(undefined);
-    if (!next.own_version) setDeactivate(false);
-    const firstConflict = reconciled.conflicts[0];
+    if (deactivate) {
+      if (!next.own_version) {
+        setDeactivate(false);
+        setRestoreConflict('');
+      } else {
+        const ownChanged = next.own_version.id !== view.own_version?.id;
+        const inheritedChanged = next.inherited_version?.id !== view.inherited_version?.id;
+        if (ownChanged || inheritedChanged) {
+          setRestoreConflict(
+            ownChanged && inheritedChanged
+              ? '链接专属规则和继承目标均已变更'
+              : ownChanged
+                ? '链接专属规则已变更'
+                : '继承目标已变更',
+          );
+          focusField('confirm-inheritance');
+        }
+      }
+    }
+    const firstConflict = reconciled.find((change) => change.conflict);
+    const fallbackConflict = Object.keys(nextFallbackConflicts)[0];
     if (firstConflict) {
       setGroup(firstConflict.kind);
       focusField(firstConflict.key);
+    } else if (fallbackConflict !== undefined) {
+      setGroup(fallbackConflict);
+      focusField('fallback-conflict');
+    } else if (nextGroupConflicts.length) {
+      setGroup(nextGroupConflicts[0]);
+      focusField('remove-group');
     }
-    return reconciled.bands.length !== bands.length;
   }
 
   async function verifyLatest() {
@@ -338,12 +384,19 @@ export function PaymentPolicyPanel({
         if (uncertain.promotion_id) params.set('promotion_id', uncertain.promotion_id);
         const result: PolicyPublicationResult = await apiRequest('GET', `/conversion/audit?${params}`);
         const action = uncertain.deactivate ? 'inherit_payment_policy' : 'publish_payment_policy';
-        const unauthorized = result?.current_status === 'app_unauthorized' && result.current === null;
+        const unavailable =
+          result?.current === null
+            ? result.current_status === 'app_unauthorized'
+              ? '当前应用已解除授权'
+              : result.current_status === 'promotion_deleted'
+                ? '当前推广链接已删除'
+                : ''
+            : '';
         const available =
           (result?.current_status === undefined || result.current_status === 'available') && result?.current;
         if (
           result?.publication_id !== uncertain.publication_id ||
-          (!available && !unauthorized) ||
+          (!available && !unavailable) ||
           result.record === undefined ||
           (result.record && result.record.action !== action)
         ) {
@@ -363,7 +416,7 @@ export function PaymentPolicyPanel({
             const superseded = record.version_id !== (current?.id ?? null) ? '本次生效版本已被替代。' : '';
             setNotice(`${submitted}${superseded}当前生效 ${currentVersion}。`);
           } else {
-            setNotice(`${submitted}当前应用已解除授权。`);
+            setNotice(`${submitted}${unavailable}。`);
           }
           onPublished(next);
         } else {
@@ -371,17 +424,15 @@ export function PaymentPolicyPanel({
             rebaseDraft(next);
             setNotice('已刷新生效版本和审计记录。未找到本次发布记录，请核对草稿');
           } else {
-            setNotice('未找到本次发布记录。当前应用已解除授权，草稿已保留');
+            setNotice(`未找到本次发布记录。${unavailable}，草稿已保留`);
           }
           setUncertain(null);
         }
       } else {
         next = await apiRequest('GET', policyEndpoint(integration.id, scope.app, scope.promotion));
         if (!next) throw new Error('读取回传规则失败');
-        const removed = rebaseDraft(next);
-        setNotice(
-          removed ? '已加载最新生效规则，草稿中已完成的区间删除已移除' : '已加载最新生效规则，请核对草稿',
-        );
+        rebaseDraft(next);
+        setNotice('已加载最新生效规则，请核对草稿');
       }
       setView(next);
       setConflict(false);
@@ -437,8 +488,9 @@ export function PaymentPolicyPanel({
   function deleteBand(row: BandRow, focusKey: string) {
     const branchId = row.band.branch_id;
     setBands((current) => {
+      const editGroup = current.find(({ key }) => key === row.key)?.editGroup;
       const remaining = current.filter(({ key }) => key !== row.key);
-      if (branchId) remaining.push({ key: row.key, kind: row.kind, band: null, branchId });
+      if (branchId) remaining.push({ key: row.key, kind: row.kind, band: null, branchId, editGroup });
       return remaining;
     });
     clearFeedback();
@@ -461,6 +513,7 @@ export function PaymentPolicyPanel({
   const fallback =
     group in fallbacks ? fallbacks[group] : effectiveGroup?.fallback && actionFields(effectiveGroup.fallback);
   const version = view && policyVersion(view);
+  const inherited = view?.inherited_version;
   const currentBands = rows.filter(({ kind }) => kind === group);
   const locked = busy || deactivate || removeGroup;
   const footerButtons = (
@@ -471,10 +524,11 @@ export function PaymentPolicyPanel({
       {canWrite && (
         <>
           <button
+            ref={publishButton}
             type="button"
             className="btn-primary"
             onClick={() => void publish()}
-            disabled={busy || !view || !dirty || conflict || Boolean(uncertain) || bandConflicts.length > 0}
+            disabled={busy || !view || !dirty || conflict || Boolean(uncertain) || hasDraftConflicts}
           >
             {pending === 'publish' ? '发布中…' : '发布'}
           </button>
@@ -580,10 +634,8 @@ export function PaymentPolicyPanel({
       )}
       <div role="status" className="space-y-1">
         {notice && <p className="m-0 text-[var(--cms-muted-fg)]">{notice}</p>}
-        {bandConflicts.length > 0 && (
-          <p className="m-0 text-[var(--cms-muted-fg)]">
-            {bandConflicts.length} 项区间编辑冲突，请在对应付款类型下撤销冲突编辑后发布。
-          </p>
+        {hasDraftConflicts && (
+          <p className="m-0 text-[var(--cms-muted-fg)]">草稿与最新规则存在冲突，请核对标记的变更后再发布。</p>
         )}
       </div>
       {active && loading && (
@@ -618,7 +670,7 @@ export function PaymentPolicyPanel({
               <button
                 type="button"
                 className="btn-ghost ml-auto"
-                disabled={busy}
+                disabled={busy || Boolean(uncertain)}
                 onClick={() => {
                   const toggle = () => {
                     clearDraft();
@@ -633,7 +685,48 @@ export function PaymentPolicyPanel({
             )}
           </div>
           {deactivate ? (
-            <p className="text-[var(--cms-muted-fg)]">发布后，本链接使用当前接入默认规则。</p>
+            <section className="space-y-3" aria-labelledby={`${id}-inherited-title`}>
+              <h3 id={`${id}-inherited-title`} className="m-0 font-medium">
+                恢复后生效 · {inherited ? `接入默认 v${inherited.number} · #${inherited.id}` : '默认全传'}
+              </h3>
+              {inherited?.config.groups.length === 0 && <p className="m-0">所有付款类型 · 全传</p>}
+              {inherited &&
+                inherited.config.groups.map((item) => (
+                  <div className="space-y-1" key={item.payment_kind}>
+                    <p className="m-0">
+                      {paymentKindLabel(item.payment_kind)} · 兜底{' '}
+                      {item.fallback ? actionLabel(item.fallback) : '全传'}
+                    </p>
+                    {Boolean(item.bands?.length) && (
+                      <PolicyBandTable
+                        rows={paymentBandRows({ ...inherited.config, groups: [item] }, [])}
+                        branches={[]}
+                      />
+                    )}
+                  </div>
+                ))}
+              {restoreConflict && (
+                <div className="flex flex-wrap items-center gap-2">
+                  <p className="m-0" id={`${id}-inherited-conflict`}>
+                    {restoreConflict}。请核对后重新确认。
+                  </p>
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    data-policy-field="confirm-inheritance"
+                    aria-describedby={`${id}-inherited-conflict`}
+                    disabled={busy || conflict || Boolean(uncertain)}
+                    onClick={() => {
+                      setRestoreConflict('');
+                      setNotice('已确认最新继承目标，点击发布后生效');
+                      requestAnimationFrame(() => publishButton.current?.focus());
+                    }}
+                  >
+                    确认恢复继承
+                  </button>
+                </div>
+              )}
+            </section>
           ) : (
             <>
               <div className="grid sm:grid-cols-2 gap-3">
@@ -687,7 +780,7 @@ export function PaymentPolicyPanel({
               <div className="space-y-2 border-t border-[var(--cms-border)] pt-3">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <h3 className="font-medium m-0">本组兜底</h3>
-                  {canWrite && !locked && (
+                  {canWrite && !locked && !fallbackConflicts[group] && (
                     <button
                       type="button"
                       className="btn-ghost"
@@ -703,7 +796,25 @@ export function PaymentPolicyPanel({
                     </button>
                   )}
                 </div>
-                {fallback && !removeGroup ? (
+                {fallbackConflicts[group] ? (
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span id={`${id}-fallback-conflict`}>{fallbackConflicts[group].join('；')}</span>
+                    <button
+                      type="button"
+                      className="btn-ghost"
+                      data-policy-field="fallback-conflict"
+                      aria-describedby={`${id}-fallback-conflict`}
+                      disabled={busy}
+                      onClick={() => {
+                        setFallbacks(({ [group]: _previous, ...current }) => current);
+                        setFallbackConflicts(({ [group]: _previous, ...current }) => current);
+                        focusField('fallback');
+                      }}
+                    >
+                      撤销兜底冲突编辑
+                    </button>
+                  </div>
+                ) : fallback && !removeGroup ? (
                   <div tabIndex={-1} data-policy-field="fallback">
                     {canWrite ? (
                       <PaymentActionFields
@@ -723,7 +834,11 @@ export function PaymentPolicyPanel({
                   </div>
                 ) : (
                   <p className="m-0 text-[var(--cms-muted-fg)]">
-                    {removeGroup ? '待移除本组，发布后使用通用组' : '本组未命中时全传'}
+                    {groupConflicts.includes(group)
+                      ? '本组规则已更新，请撤销移除分组并核对最新规则。'
+                      : removeGroup
+                        ? '待移除本组，发布后使用通用组'
+                        : '本组未命中时全传'}
                   </p>
                 )}
               </div>
@@ -736,13 +851,16 @@ export function PaymentPolicyPanel({
                       <button
                         type="button"
                         className="btn-ghost"
+                        data-policy-field="remove-group"
                         disabled={busy}
                         onClick={() => {
-                          if (removeGroup)
+                          if (removeGroup) {
                             setRemovedGroups((current) => current.filter((kind) => kind !== group));
-                          else {
+                            setGroupConflicts((current) => current.filter((kind) => kind !== group));
+                          } else {
                             setBands((current) => current.filter((change) => change.kind !== group));
                             setFallbacks(({ [group]: _previous, ...current }) => current);
+                            setFallbackConflicts(({ [group]: _previous, ...current }) => current);
                             setRemovedGroups((current) => [...current, group]);
                           }
                           clearFeedback();
@@ -772,11 +890,12 @@ export function PaymentPolicyPanel({
                         const next = currentBands[i + 1];
                         const { band } = row;
                         const label = bandLabel(band);
-                        if (conflictingKeys.has(row.key)) {
+                        const messages = conflictingBands.get(row.key);
+                        if (messages) {
                           const description = `${id}-conflict-${row.key}`;
                           return (
-                            <div className="flex items-center gap-1 whitespace-nowrap">
-                              <span id={description}>该区间已不在生效规则中</span>
+                            <div className="flex flex-wrap items-center gap-1 whitespace-normal">
+                              <span id={description}>{messages.join('；')}</span>
                               <button
                                 type="button"
                                 className="btn-ghost"
@@ -814,7 +933,7 @@ export function PaymentPolicyPanel({
                             </button>
                             {next &&
                               band.currency === next.band.currency &&
-                              !conflictingKeys.has(next.key) &&
+                              !conflictingBands.has(next.key) &&
                               band.max_minor === next.band.min_minor && (
                                 <button
                                   type="button"

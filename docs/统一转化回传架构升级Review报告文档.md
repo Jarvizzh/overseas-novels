@@ -290,3 +290,49 @@ Reader 已取消旧的 CAPI 消费者，原 `payment-ops -kind outbox` 仍会更
 - R17。刷新最新规则时按分支 ID 清理已完成的区间删除。目标分支已消失的编辑保留在金额区间表中，标记冲突并提供撤销。撤销拆分或合并时同步清除其关联变更。Chrome 模拟测试覆盖删除和兜底同时修改、只剩已完成的删除、编辑与拆分合并冲突，以及超时后无审计时重载草稿。 [草稿刷新与冲突操作](../cms-front/src/components/conversion/PaymentPolicyPanel.tsx)
 - R18。司南应用已解除授权时，精确发布核对返回原发布记录、`current_status=app_unauthorized` 和 `current=null`。CMS 显示已确认的历史发布版本和解除授权状态。隔离 PostgreSQL 验证了授权撤销后的历史查询范围，以及直接读取和发布仍返回 400。Chrome 模拟测试验证了有审计和无审计两种状态。 [审计回归](../conversion-backend/internal/operations/publication_audit_test.go)
 - 转化服务全量 `go test -race`、`go vet`、CMS 前端 lint 和构建、R16 浏览器回归通过。
+
+### R17、R18 独立复审（2026-11-21）
+
+**R17、R18 的原复现均通过。另发现一项 P2 和一项 P3。** Chrome 模拟验证并发删除后兜底规则可以独立发布，目标消失的区间编辑会阻止发布，撤销该编辑后可继续。司南应用解除授权后，私网 API 能返回原操作者的发布回执，同时保持直接读取和发布受限。Chrome 验证了已提交和未提交时的两种解除授权提示。[草稿处理](../cms-front/src/components/conversion/PaymentPolicyPanel.tsx#L305) · [撤销授权后的回执回归](../conversion-backend/internal/operations/publication_audit_test.go#L178)
+
+#### R19 · P2 · 同一区间的并发修改可被旧草稿覆盖
+
+**复现。** 两名运营同时打开同一区间。A 将金额上限从 90 调到 95，B 先把回传动作从「传 3 漏 2」改为「按 0% 回传」并发布。A 首次提交收到 `409`。刷新后，由于区间分支 ID 仍存在，CMS 没有标记冲突，草稿仍显示旧的「传 3 漏 2」，并用最新的版本号提交整条区间。隔离 PostgreSQL 确认该请求成功，把 B 的规则改回「传 3 漏 2」，使本应跳过的订单重新参与投递。[草稿对账](../cms-front/src/components/conversion/paymentPolicy.ts#L201) · [整条区间的序列化](../cms-front/src/components/conversion/paymentPolicy.ts#L213)
+
+**修复建议与验收。** 保留草稿起点，对照起点、当前配置和本地变更。不同字段可以合并，共同修改的字段应显式显示差异并等待运营处理。拆分和合并同时核对所有相关区间。测试 A 修改上限且 B 修改回传动作时，发布结果保留 B 的动作。双方修改同一字段时，解决冲突前禁止发布。
+
+#### R20 · P3 · Reader 推广链接删除后，已提交的发布无法核对
+
+**复现。** Reader 链接专属规则成功发布并写入审计，随后删除推广链接。按原发布 ID 核对时，读取当前规则因链接不存在返回 `400 invalid_payment_policy_promotion`，已找到的发布记录随响应一同丢失。常规审计仍可查到该记录。隔离 PostgreSQL 已复现。[发布核对状态](../conversion-backend/internal/operations/configuration.go#L207) · [Reader 链接验证](../conversion-backend/internal/paymentpolicy/settings.go#L91)
+
+**修复建议与验收。** 在原有操作者、环境和作用域匹配的前提下，复用当前配置不可用的响应契约，返回已核实的发布结果和「推广链接已删除」状态。验证原发布者可确认本次提交并结束待确认流程，直接读取和发布被删除的链接仍受原有约束。
+
+本轮在隔离 PostgreSQL 16 重跑转化服务的完整 `go test -race -p 2 -count=1 ./...` 和 `go vet ./...`，均通过。CMS 前端 lint 和构建通过。R19 用 Chrome 模拟 API 检查了实际提交的草稿，并用隔离数据库独立复现结果。R20 使用私网 API 用例复现。CMS 后端和 Reader 沿用上轮验证，真实 Meta 和司南投递仍按联调验收。
+
+### R19、R20 修复与复验
+
+- R19。刷新草稿时按起始、草稿和最新配置对照分支字段。金额与回传参数的独立变更会合并；同一字段的不同值会显示在对应行并暂停发布。拆分或合并的关联分支变更需要人工核对。Chrome 验证了上限调整保留「按 0% 回传」、相同字段冲突、双方改成同一值、循环参数与兜底的独立合并，以及超时无审计时重载草稿。隔离库使用合并后的请求发布，确认上限为 95 USD，回传比例仍为 0%。 [区间草稿合并](../cms-front/src/components/conversion/paymentPolicy.ts)
+- R20。Reader 推广链接已删除时，精确核对返回原发布记录、`current_status=promotion_deleted` 和 `current=null`。隔离库复验了发布人、环境和推广链接范围，以及直接读取和发布被删除链接的限制。Chrome 验证了有审计时确认历史版本、无审计时保留草稿的显示。 [发布核对回归](../conversion-backend/internal/operations/publication_audit_test.go)
+
+### R19、R20 独立复审（2026-11-21）
+
+**R19、R20 的原复现均通过。恢复继承另发现一项 P2。** Chrome 复验 R19 的两个场景。金额上限改为 95 USD 时，重新提交的区间保留另一位运营发布的 0% 回传比例。双方修改上限时，界面展示两个值并阻止发布，撤销冲突编辑后可以继续提交独立的兜底修改。R20 在隔离 PostgreSQL 验证了删除后的发布回执、作用域隔离和读写约束，并在 Chrome 复验了有回执与无回执时的提示。[区间合并](../cms-front/src/components/conversion/paymentPolicy.ts#L326) · [Reader 链接回执测试](../conversion-backend/internal/operations/publication_audit_test.go#L231)
+
+#### R21 · P2 · 刷新恢复继承草稿时，变更了的接入默认规则未要求重新确认
+
+**复现。** A 在链接专属版本下选择「恢复继承」，此时接入默认全传。B 先把接入默认改成 0% 回传，链接专属版本保持原样。A 首次发布收到 `409`。点击「查看最新配置」后，CMS 只对比专属版本，未提示继承目标已变更，发布按钮已可用。再次点发布时，请求用新的 `expected_inherited_version` 提交恢复继承，链接开始按 0% 回传。Chrome 验证了按钮状态、提示和请求，隔离 PostgreSQL 验证了首次 409 和再次提交后的实际生效规则。[恢复继承草稿对账](../cms-front/src/components/conversion/PaymentPolicyPanel.tsx#L336) · [服务端版本检查](../conversion-backend/internal/paymentpolicy/settings.go#L229)
+
+**修复建议与验收。** 恢复继承时对比专属版本和继承版本。任一发生变化时，暂停发布并显示恢复后将生效的默认版本和规则，待运营重新确认。补测链接专属版本不变但接入默认从全传改为 0% 回传，以及此前无默认版本后新增默认的情况。只有重新确认最新继承目标后才允许发布。
+
+本轮在隔离 PostgreSQL 16 执行转化服务全量竞态测试和 `go vet`，均通过。CMS 前端 lint 和构建通过。CMS 后端与 Reader 的验证沿用上轮，真实 Meta 和司南投递仍按联调验收。
+
+### R21 修复与复验
+
+- 恢复继承草稿刷新时同时核对链接专属版本和继承版本。任一版本变更时停用发布，展示恢复后将生效的默认版本、付款类型、兜底和金额区间，并要求运营重新确认。确认只解锁发布。若确认后版本再次变更，服务端继续返回 409，CMS 刷新后再次要求确认。 [草稿对账与确认](../cms-front/src/components/conversion/PaymentPolicyPanel.tsx)
+- Chrome 覆盖接入默认从全传改为 0%、首次新增默认版本、仅链接专属版本变化、连续变更和超时后无审计时重新确认。隔离 PostgreSQL 验证旧继承版本和旧的隐式默认均会返回 409，使用新版本发布后实际继承 0% 回传。 [发布回归](../conversion-backend/internal/operations/publication_audit_test.go)
+
+### R21 独立复验（2026-11-21）
+
+**通过。** 原复现中，默认规则从全传改为 0% 后，CMS 展示将要生效的默认版本及回传比例，并保持发布禁用，直至运营重新确认。确认本身只解锁发布按钮。随后提交使用已核对的版本，若此时默认规则再改为 50%，刷新后会再次提示确认。Chrome 模拟回归还覆盖首次新增默认、仅专属版本变化、超时后查无提交记录，以及链接已由其他运营恢复继承时结束旧草稿。[继承目标对账](../cms-front/src/components/conversion/PaymentPolicyPanel.tsx#L338) · [确认与发布门禁](../cms-front/src/components/conversion/PaymentPolicyPanel.tsx#L687)
+
+隔离 PostgreSQL 16 验证 StarNovel 和司南旧版本请求均返回 `409`，用新版本恢复继承后生效规则为 0% 回传。转化服务全量竞态测试和 `go vet`、CMS 前端 lint 和构建均通过。真实 Meta 和司南投递仍按联调验收。[服务端回归](../conversion-backend/internal/operations/publication_audit_test.go#L231)

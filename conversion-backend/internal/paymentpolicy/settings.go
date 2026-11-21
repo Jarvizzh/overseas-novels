@@ -10,6 +10,7 @@ import (
 )
 
 var ErrVersionConflict = errors.New("payment_policy_version_conflict")
+var ErrPromotionNotFound error = &ValidationError{Code: "invalid_payment_policy_promotion", Field: "promotion_id"}
 
 type Version struct {
 	ID     int64  `json:"id,string"`
@@ -96,7 +97,7 @@ func capabilitiesTx(ctx context.Context, tx pgx.Tx, s Scope, source, account str
 			SELECT reader_payment_coverage_verified($2,p.id),COALESCE(NULLIF(p.name,''),p.novel_title)
 			FROM promotion_links p WHERE p.id=$1`, id, s.Environment).Scan(&out.FirstPaid, &out.PromotionName)
 		if errors.Is(err, pgx.ErrNoRows) {
-			return Capabilities{}, invalid("invalid_payment_policy_promotion", "promotion_id")
+			return Capabilities{}, ErrPromotionNotFound
 		}
 		if out.FirstPaid {
 			out.FirstReason = ""

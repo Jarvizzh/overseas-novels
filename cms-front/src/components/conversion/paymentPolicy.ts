@@ -196,18 +196,184 @@ export interface BandRow {
 
 export type BandChange = (BandRow | { key: string; kind: string; branchId: string; band: null }) & {
   editGroup?: number;
+  conflict?: string[];
 };
 
-export function reconcileBandChanges(config: PolicyConfig, changes: BandChange[]) {
-  const branchIds = new Set(
-    config.groups.flatMap(({ bands }) => bands?.map(({ branch_id }) => branch_id) ?? []),
+function sameAction(a: PolicyAction | undefined, b: PolicyAction | undefined) {
+  return (
+    a?.mode === b?.mode &&
+    a?.rate_bps === b?.rate_bps &&
+    a?.send_count === b?.send_count &&
+    a?.skip_count === b?.skip_count
   );
+}
+
+function sameBand(a: PolicyBand | undefined, b: PolicyBand | undefined) {
+  return (
+    a?.currency === b?.currency &&
+    a?.min_minor === b?.min_minor &&
+    a?.max_minor === b?.max_minor &&
+    sameAction(a, b)
+  );
+}
+
+export function samePolicyGroup(a: PolicyGroup | undefined, b: PolicyGroup) {
+  return (
+    a !== undefined &&
+    sameAction(a.fallback, b.fallback) &&
+    (a.bands?.length ?? 0) === (b.bands?.length ?? 0) &&
+    (b.bands ?? []).every(
+      (band, index) => band.branch_id === a.bands?.[index]?.branch_id && sameBand(a.bands?.[index], band),
+    )
+  );
+}
+
+function mergeField<T>(base: T, draft: T, latest: T, onConflict: () => void): T {
+  if (draft === base) return latest;
+  if (latest !== base && latest !== draft) onConflict();
+  return draft;
+}
+
+function mergeAction(
+  base: PolicyAction | undefined,
+  draft: PolicyAction | undefined,
+  latest: PolicyAction | undefined,
+  conflicts: string[],
+): PolicyAction | undefined {
+  if (sameAction(draft, base)) return latest;
+  if (sameAction(latest, base) || sameAction(latest, draft)) return draft;
+  const describe = (action: PolicyAction | undefined) => (action ? actionLabel(action) : '无兜底');
+  if (!base || !draft || !latest || base.mode !== draft.mode || base.mode !== latest.mode) {
+    conflicts.push(`回传方式与参数：草稿 ${describe(draft)}，生效 ${describe(latest)}`);
+    return draft;
+  }
+  const numeric = (
+    field: 'rate_bps' | 'send_count' | 'skip_count',
+    label: string,
+    format: (value: number | undefined) => string = String,
+  ) =>
+    mergeField(base[field], draft[field], latest[field], () =>
+      conflicts.push(`${label}：草稿 ${format(draft[field])}，生效 ${format(latest[field])}`),
+    );
+  if (draft.mode === 'ratio') {
+    return { mode: 'ratio', rate_bps: numeric('rate_bps', '回传比例', (value) => `${Number(value) / 100}%`) };
+  }
+  const send = numeric('send_count', '回传笔数');
+  const skip = numeric('skip_count', '跳过笔数');
+  if (!Number.isSafeInteger(Number(send) + Number(skip))) {
+    conflicts.push(`合并后的循环笔数超出范围：草稿 ${describe(draft)}，生效 ${describe(latest)}`);
+    return draft;
+  }
+  return { mode: 'cycle', send_count: send, skip_count: skip };
+}
+
+export function reconcileFallback(
+  base: PolicyAction | undefined,
+  fields: ActionFields | null,
+  latest: PolicyAction | undefined,
+) {
+  const conflicts: string[] = [];
+  const draft = fields ? parseAction(fields) : undefined;
+  if (fields && !draft) {
+    if (!sameAction(base, latest)) conflicts.push('兜底规则已更新，当前草稿参数有误');
+    return { fields, conflicts };
+  }
+  const merged = mergeAction(base, draft, latest, conflicts);
+  if (!conflicts.length && sameAction(merged, latest)) return { fields: undefined, conflicts };
+  return { fields: sameAction(merged, draft) ? fields : merged ? actionFields(merged) : null, conflicts };
+}
+
+function mergeBand(base: PolicyBand, draft: PolicyBand, latest: PolicyBand, conflicts: string[]): PolicyBand {
+  const amounts = (band: PolicyBand) => [band.currency, band.min_minor, band.max_minor].join('/');
+  const band = { ...draft };
+  if (draft.currency !== base.currency || latest.currency !== base.currency) {
+    const merged = mergeField(amounts(base), amounts(draft), amounts(latest), () =>
+      conflicts.push(`币种与金额：草稿 ${bandLabel(draft)}，生效 ${bandLabel(latest)}`),
+    );
+    if (merged === amounts(latest)) {
+      band.currency = latest.currency;
+      band.min_minor = latest.min_minor;
+      band.max_minor = latest.max_minor;
+    }
+  } else {
+    const display = (amount: string | null) =>
+      amount === null ? '无上限' : showMinor(amount, draft.currency);
+    band.min_minor = mergeField(base.min_minor, draft.min_minor, latest.min_minor, () =>
+      conflicts.push(`最小金额：草稿 ${display(draft.min_minor)}，生效 ${display(latest.min_minor)}`),
+    );
+    band.max_minor = mergeField(base.max_minor, draft.max_minor, latest.max_minor, () =>
+      conflicts.push(`最大金额：草稿 ${display(draft.max_minor)}，生效 ${display(latest.max_minor)}`),
+    );
+    if (band.max_minor !== null && BigInt(band.max_minor) <= BigInt(band.min_minor)) {
+      conflicts.push(`合并后的上下限无效：草稿 ${bandLabel(draft)}，生效 ${bandLabel(latest)}`);
+      band.min_minor = draft.min_minor;
+      band.max_minor = draft.max_minor;
+    }
+  }
+  const action = mergeAction(base, draft, latest, conflicts) ?? draft;
   return {
-    bands: changes.filter((change) => change.band !== null || branchIds.has(change.branchId)),
-    conflicts: changes.filter(
-      (change) => change.band?.branch_id !== undefined && !branchIds.has(change.band.branch_id),
-    ),
+    currency: band.currency,
+    min_minor: band.min_minor,
+    max_minor: band.max_minor,
+    branch_id: band.branch_id,
+    mode: action.mode,
+    rate_bps: action.rate_bps,
+    send_count: action.send_count,
+    skip_count: action.skip_count,
   };
+}
+
+export function reconcileBandChanges(base: PolicyConfig, latest: PolicyConfig, changes: BandChange[]) {
+  const byID = (config: PolicyConfig) =>
+    new Map(
+      config.groups.flatMap(({ bands }) => (bands ?? []).map((band) => [band.branch_id, band] as const)),
+    );
+  const oldBands = byID(base);
+  const newBands = byID(latest);
+  const structuralConflicts = new Map<number, string[]>();
+  const target = (change: BandChange) => (change.band === null ? change.branchId : change.band.branch_id);
+  for (const change of changes) {
+    const id = target(change);
+    if (!id || change.editGroup === undefined) continue;
+    const before = oldBands.get(id);
+    const current = newBands.get(id);
+    if (sameBand(before, current)) continue;
+    const messages = structuralConflicts.get(change.editGroup) ?? [];
+    messages.push(
+      current
+        ? `关联区间已变更：${bandLabel(current)} · ${actionLabel(current)}`
+        : `关联区间已移除：${before ? bandLabel(before) : `#${id}`}`,
+    );
+    structuralConflicts.set(change.editGroup, messages);
+  }
+
+  return changes.flatMap((change): BandChange[] => {
+    const id = target(change);
+    const before = id ? oldBands.get(id) : undefined;
+    const current = id ? newBands.get(id) : undefined;
+    const structural = change.editGroup === undefined ? undefined : structuralConflicts.get(change.editGroup);
+    if (change.band === null && !current) return [];
+    if (structural) return [{ ...change, conflict: structural }];
+    if (change.band === null) {
+      return sameBand(before, current) || !current
+        ? [change]
+        : [
+            {
+              ...change,
+              conflict: [
+                `草稿删除此区间，生效规则已将其改为 ${bandLabel(current)} · ${actionLabel(current)}`,
+              ],
+            },
+          ];
+    }
+    if (!id) return [change];
+    if (!current) return [{ ...change, conflict: ['该区间已不在生效规则中'] }];
+    if (!before) return [{ ...change, conflict: ['区间起始版本不可用，请撤销冲突编辑'] }];
+    const conflicts: string[] = [];
+    const band = mergeBand(before, change.band, current, conflicts);
+    if (!conflicts.length && change.editGroup === undefined && sameBand(band, current)) return [];
+    return [{ ...change, band, conflict: conflicts.length ? conflicts : undefined }];
+  });
 }
 
 export function bandChangeOperation(change: BandChange): PolicyOp {
@@ -221,7 +387,9 @@ export function bandChangeOperation(change: BandChange): PolicyOp {
 }
 
 export function paymentBandRows(config: PolicyConfig, changes: BandChange[]): BandRow[] {
-  const changed = new Set(changes.map(({ key }) => key));
+  const changed = new Set(
+    changes.filter(({ band, conflict }) => band !== null || !conflict).map(({ key }) => key),
+  );
   const rows = config.groups
     .flatMap((group) =>
       (group.bands ?? []).map((band) => ({

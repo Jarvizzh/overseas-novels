@@ -227,4 +227,73 @@ func TestPublicationAuditMatchesCommittedScope(t *testing.T) {
 		call(http.MethodPost, publishPath, "ops", []byte(`{"app_id":"reader","unexpected":"value"}`),
 			http.StatusBadRequest)
 	})
+
+	t.Run("restore inheritance rejects stale default versions", func(t *testing.T) {
+		for _, scope := range []struct{ integration, app, promotion string }{
+			{"1", "reader", "14"}, {"3", "456", "14"},
+		} {
+			path := "/integrations/" + scope.integration + "/payment-policy"
+			var base paymentpolicy.View
+			decodePolicyView(t, call(http.MethodGet, path+"?app_id="+scope.app, "ops", nil, http.StatusOK), &base)
+			var inherited *int64
+			if base.OwnVersion != nil {
+				inherited = &base.OwnVersion.ID
+			}
+			submit := func(draft paymentpolicy.Draft, status int) *httptest.ResponseRecorder {
+				t.Helper()
+				body, err := json.Marshal(draft)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return call(http.MethodPost, path+"/publish", "ops", body, status)
+			}
+			var link paymentpolicy.View
+			decodePolicyView(t, submit(paymentpolicy.Draft{App: scope.app, Promotion: scope.promotion,
+				ExpectedInherited: inherited, Operations: fallback}, http.StatusOK), &link)
+			zero := 0
+			var latest paymentpolicy.View
+			decodePolicyView(t, submit(paymentpolicy.Draft{
+				App: scope.app, ExpectedVersion: inherited,
+				Operations: []paymentpolicy.Operation{{Type: "set_fallback", Action: &paymentpolicy.Action{Mode: paymentpolicy.Ratio, RateBPS: &zero}}},
+			}, http.StatusOK), &latest)
+			restore := paymentpolicy.Draft{App: scope.app, Promotion: scope.promotion, Deactivate: true,
+				ExpectedVersion: &link.OwnVersion.ID, ExpectedInherited: inherited}
+			submit(restore, http.StatusConflict)
+			restore.ExpectedInherited = &latest.OwnVersion.ID
+			var restored paymentpolicy.View
+			decodePolicyView(t, submit(restore, http.StatusOK), &restored)
+			if restored.OwnVersion != nil || restored.InheritedVersion == nil ||
+				restored.InheritedVersion.ID != latest.OwnVersion.ID || len(restored.Config.Groups) == 0 {
+				t.Fatalf("restored unexpected policy for %s: %+v", scope.app, restored)
+			}
+			action := restored.Config.Groups[0].Fallback
+			if action == nil || action.Mode != paymentpolicy.Ratio || action.RateBPS == nil || *action.RateBPS != 0 {
+				t.Fatalf("restored unexpected fallback for %s: %+v", scope.app, action)
+			}
+		}
+	})
+
+	t.Run("confirms publication after the Reader promotion is deleted", func(t *testing.T) {
+		mustExec(t, ctx, owner, `DELETE FROM promotion_links WHERE id=13`)
+		receipt := get("ops", "1", "reader", "13", publicationID)
+		if receipt.CurrentStatus != "promotion_deleted" || receipt.Current != nil ||
+			receipt.Record == nil || receipt.Record.Action != "publish_payment_policy" ||
+			receipt.Record.VersionID == nil || *receipt.Record.VersionID != fmt.Sprint(published.OwnVersion.ID) ||
+			receipt.Record.VersionNumber == nil || *receipt.Record.VersionNumber != fmt.Sprint(published.OwnVersion.Number) {
+			t.Fatalf("wrong receipt for deleted promotion: %+v, record: %+v", receipt, receipt.Record)
+		}
+		for _, other := range []publicationAuditResult{
+			get("another-operator", "1", "reader", "13", publicationID),
+			get("ops", "1", "reader", "13", "0000000000000000000000000000a020"),
+			get("ops", "1", "reader", "14", publicationID),
+		} {
+			if other.Record != nil {
+				t.Fatalf("publication lookup crossed operator, promotion or publication ID: %+v", other)
+			}
+		}
+		call(http.MethodGet, auditPath("2", "reader", "13", publicationID), "ops", nil, http.StatusNotFound)
+		call(http.MethodGet, auditPath("1", "reader", "2147483648", publicationID), "ops", nil, http.StatusBadRequest)
+		call(http.MethodGet, "/integrations/1/payment-policy?app_id=reader&promotion_id=13", "ops", nil, http.StatusBadRequest)
+		call(http.MethodPost, publishPath, "ops", []byte(`{"app_id":"reader","promotion_id":"13"}`), http.StatusBadRequest)
+	})
 }

@@ -217,6 +217,8 @@ func (repo Repository) handlePublicationAudit(w http.ResponseWriter, r *http.Req
 			out.CurrentStatus = "available"
 		case source == "sinan" && validApp && errors.As(err, &invalid) && invalid.Code == "invalid_payment_policy_app":
 			out.CurrentStatus = "app_unauthorized"
+		case errors.Is(err, paymentpolicy.ErrPromotionNotFound):
+			out.CurrentStatus = "promotion_deleted"
 		default:
 			return err
 		}
