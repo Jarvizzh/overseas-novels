@@ -26,7 +26,10 @@ StarNovel 以一套支付域支撑金币充值、整本购买和 VIP。PayPal �
 
 ## 2. 现状和迁移范围
 
-基线为本地 `codex/conversion-reporting` 工作区，已提交 HEAD 为 `22be987`，工作区另有转化相关改动。下表描述代码能力，生产部署与渠道权限需在实施时分别核实。
+- **开发分支** `codex/payment-domain`。
+- **代码基线** `main` 与 `origin/main` 的提交 `5e5b3d8e5f72bdc8e27500f71d51e108b3703fde`（`Merge unified conversion reporting into main`）。开发分支从该提交创建。
+
+下表按主线基线描述代码能力。生产部署与渠道权限需在实施时分别核实。
 
 | 模块 | 当前覆盖 | 开发工作包 |
 | --- | --- | --- |
