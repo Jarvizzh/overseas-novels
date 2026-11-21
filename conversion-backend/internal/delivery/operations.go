@@ -27,6 +27,8 @@ type Operator struct {
 type OperationResult struct {
 	ID            string     `json:"id,omitempty"`
 	Action        string     `json:"action"`
+	State         string     `json:"state,omitempty"`
+	Reason        string     `json:"reason,omitempty"`
 	NextAttemptAt *time.Time `json:"next_attempt_at,omitempty"`
 	Existing      bool       `json:"existing,omitempty"`
 	DryRun        bool       `json:"dry_run,omitempty"`
@@ -60,6 +62,14 @@ func (s Service) operate(ctx context.Context, operator Operator, reason string,
 	if err != nil {
 		return OperationResult{}, err
 	}
+	return s.withOperatorTx(ctx, operator, func(tx pgx.Tx, actor Operator) (OperationResult, error) {
+		return action(tx, actor, reason)
+	})
+}
+
+func (s Service) withOperatorTx(ctx context.Context, operator Operator,
+	action func(pgx.Tx, Operator) (OperationResult, error),
+) (OperationResult, error) {
 	tx, err := s.Pool.Begin(ctx)
 	if err != nil {
 		return OperationResult{}, err
@@ -69,7 +79,7 @@ func (s Service) operate(ctx context.Context, operator Operator, reason string,
 	if err != nil {
 		return OperationResult{}, err
 	}
-	result, err := action(tx, operator, reason)
+	result, err := action(tx, operator)
 	if err != nil {
 		return OperationResult{}, err
 	}
@@ -100,12 +110,10 @@ func (s Service) RetryDelivery(ctx context.Context, operator Operator, id int64,
 		return OperationResult{}, ErrInvalidOperation
 	}
 	return s.operate(ctx, operator, reason, func(tx pgx.Tx, actor Operator, reason string) (OperationResult, error) {
-		var d retryState
-		err := tx.QueryRow(ctx, `
-			SELECT state,COALESCE(reason,''),clock_timestamp(),next_attempt_at,deadline_at,attempts,retry_budget_base_attempt,
-			       unknown_retry_used,budget_reset_used,lease_token IS NOT NULL,unknown_attempt_no
-			FROM conversion.deliveries WHERE id=$1 AND environment=$2 FOR UPDATE`, id, s.Environment).
-			Scan(&d.state, &d.reason, &d.now, &d.next, &d.deadline, &d.attempts, &d.base, &d.unknownRetry, &d.budgetReset, &d.leased, &d.unknownAttempt)
+		if result, handled, err := s.retryPendingPaymentTx(ctx, tx, actor, id, expected, reason); handled || err != nil {
+			return result, err
+		}
+		d, err := readRetryState(ctx, tx, id, s.Environment, true)
 		if err != nil {
 			return OperationResult{}, err
 		}
@@ -130,6 +138,19 @@ func (s Service) RetryDelivery(ctx context.Context, operator Operator, id int64,
 		err = s.audit(ctx, tx, actor, "retry_delivery", subject, reason, "", before, after)
 		return OperationResult{ID: subject, Action: "retry_delivery", NextAttemptAt: &next}, err
 	})
+}
+
+func readRetryState(ctx context.Context, tx pgx.Tx, id int64, environment string, lock bool) (retryState, error) {
+	var d retryState
+	query := `SELECT state,COALESCE(reason,''),clock_timestamp(),next_attempt_at,deadline_at,attempts,retry_budget_base_attempt,
+	            unknown_retry_used,budget_reset_used,lease_token IS NOT NULL,unknown_attempt_no
+	          FROM conversion.deliveries WHERE id=$1 AND environment=$2`
+	if lock {
+		query += " FOR UPDATE"
+	}
+	err := tx.QueryRow(ctx, query, id, environment).Scan(&d.state, &d.reason, &d.now, &d.next, &d.deadline, &d.attempts,
+		&d.base, &d.unknownRetry, &d.budgetReset, &d.leased, &d.unknownAttempt)
+	return d, err
 }
 
 func retryPolicy(d retryState, expected int, acknowledge bool) (base int, reset, unknown bool, err error) {
@@ -175,14 +196,18 @@ func (s Service) AppendTarget(ctx context.Context, operator Operator, eventID, d
 		var now time.Time
 		var sourceType, sourceID string
 		var integrationID int64
+		var sendable bool
 		err := tx.QueryRow(ctx, `
 			SELECT integration_id,event_name,occurred_at,action_source,source_url,matching_data,amount::text,currency,
-			       source_event_type,source_event_id,clock_timestamp()
-			FROM conversion.events WHERE id=$1 AND environment=$2 FOR UPDATE`, eventID, s.Environment).
+			       source_event_type,source_event_id,clock_timestamp(),`+paymentCanSend+`
+			FROM conversion.events e WHERE id=$1 AND environment=$2 FOR UPDATE OF e`, eventID, s.Environment).
 			Scan(&integrationID, &p.EventName, &p.OccurredAt, &p.ActionSource, &p.SourceURL, &p.MatchingData,
-				&p.Amount, &p.Currency, &sourceType, &sourceID, &now)
+				&p.Amount, &p.Currency, &sourceType, &sourceID, &now, &sendable)
 		if err != nil {
 			return OperationResult{}, err
+		}
+		if !sendable {
+			return OperationResult{}, ErrOperationConflict
 		}
 		var existing int64
 		err = tx.QueryRow(ctx, "SELECT id FROM conversion.deliveries WHERE event_id=$1 AND destination_id=$2", eventID, destinationID).Scan(&existing)
@@ -246,18 +271,21 @@ func (s Service) RetryPartnerReport(ctx context.Context, operator Operator, id i
 	return s.operate(ctx, operator, reason, func(tx pgx.Tx, actor Operator, reason string) (OperationResult, error) {
 		var state, cause string
 		var now, next time.Time
-		var leased, replay, allowsNoTrace bool
+		var leased, replay, allowsNoTrace, allowsPromotion bool
 		err := tx.QueryRow(ctx, `
 			SELECT r.state,COALESCE(r.reason,''),clock_timestamp(),r.next_attempt_at,r.lease_token IS NOT NULL OR r.lease_until IS NOT NULL,
 			       COALESCE(i.report_config->>'replay_supported','false')='true',
-			       COALESCE(i.report_config->>'no_trace_encoding','') IN ('omit','empty')
+			       COALESCE(i.report_config->>'no_trace_encoding','') IN ('omit','empty'),
+			       (r.wire_payload IS NOT NULL OR i.source<>'sinan' OR r.payload->>'event_name' IS DISTINCT FROM 'Purchase'
+			        OR NULLIF(r.payload->'source_fields'->>'promotion_id','') IS NOT NULL
+			        OR COALESCE(i.report_config->>'missing_promotion_encoding','')='null')
 			FROM conversion.partner_reports r JOIN conversion.integrations i ON i.id=r.integration_id
 			WHERE r.id=$1 AND i.environment=$2 FOR UPDATE OF r FOR SHARE OF i`, id, s.Environment).
-			Scan(&state, &cause, &now, &next, &leased, &replay, &allowsNoTrace)
+			Scan(&state, &cause, &now, &next, &leased, &replay, &allowsNoTrace, &allowsPromotion)
 		if err != nil {
 			return OperationResult{}, err
 		}
-		if leased || state == "confirmed" || state == "pending" && !now.Before(next) ||
+		if leased || !allowsPromotion || state == "confirmed" || state == "pending" && !now.Before(next) ||
 			state == "outcome_unknown" && !replay || cause == "no_trace_contract_unconfirmed" && !allowsNoTrace {
 			return OperationResult{}, ErrOperationConflict
 		}

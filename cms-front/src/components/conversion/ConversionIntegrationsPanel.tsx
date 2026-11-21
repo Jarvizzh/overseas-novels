@@ -400,6 +400,10 @@ export function ConversionIntegrationsPanel({
                           <History size={12} aria-hidden="true" />
                           <span>审计</span>
                         </button>
+                        {['starnovel', 'sinan'].includes(integ.source) && (
+                          <button type="button" className="btn-ghost text-xs whitespace-nowrap"
+                            onClick={() => openIntegrationDrawer(integ, 'policy')}>回传规则</button>
+                        )}
                         <button
                           type="button"
                           onClick={() => openIntegrationDrawer(integ, 'config')}

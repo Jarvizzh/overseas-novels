@@ -233,7 +233,7 @@ func (r *dbRepository) settleCheckout(ctx context.Context, orderID string, captu
 			return nil, err
 		}
 	}
-	_, err = tx.Exec(ctx, `UPDATE recharge_orders SET status='Success', paid_at=now(), fulfilled_at=now(), updated_at=now() WHERE id=$1`, o.id)
+	_, err = tx.Exec(ctx, `UPDATE recharge_orders SET status='Success', paid_at=now(), fulfilled_at=clock_timestamp(), updated_at=now() WHERE id=$1`, o.id)
 	if err != nil {
 		return nil, err
 	}

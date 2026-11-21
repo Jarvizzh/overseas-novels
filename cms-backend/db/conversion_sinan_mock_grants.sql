@@ -10,7 +10,7 @@ GRANT UPDATE (id) ON conversion.integrations TO :"callback_role";
 GRANT SELECT (id,key_version,ciphertext) ON conversion.credentials TO :"callback_role";
 GRANT SELECT (integration_id,destination_id,environment) ON conversion.integration_destinations TO :"callback_role";
 GRANT SELECT (id,pixel_id,media) ON conversion.destinations TO :"callback_role";
-GRANT INSERT (integration_id,source_event_type,source_event_id,source_order_id,received_at,payload,payload_digest,digest_version,state,reason)
+GRANT INSERT (integration_id,source_event_type,source_event_id,source_order_id,source_app_id,received_at,payload,payload_digest,digest_version,state,reason)
     ON conversion.inbox TO :"callback_role";
 GRANT SELECT (integration_id,source_event_type,source_event_id,state,payload_digest,digest_version)
     ON conversion.inbox TO :"callback_role";

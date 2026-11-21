@@ -14,7 +14,8 @@ import (
 const eventProjection = `jsonb_strip_nulls(jsonb_build_object(
 	'id',e.id::text,'integration_id',e.integration_id::text,'source',i.source,'source_event_type',e.source_event_type,
 	'source_event_id',e.source_event_id,'event_name',e.event_name,'order_id',e.source_order_id,'promotion_id',e.promotion_id,
-	'attribution_state',e.attribution_state,'reason',e.reason,'amount',e.amount::text,'currency',e.currency,
+	'attribution_state',e.attribution_state,'reason',e.reason,
+	'payment_policy_state',CASE WHEN e.event_name IN ('Purchase','Subscribe') THEN e.payment_policy_state END,'amount',e.amount::text,'currency',e.currency,
 	'occurred_at',e.occurred_at,'created_at',e.created_at,'enqueued_at',e.received_at,
 	'deliveries',outbound.items,'deliveries_truncated',outbound.truncated))`
 
@@ -54,7 +55,7 @@ func (repo Repository) handleEvent(w http.ResponseWriter, r *http.Request) {
 }
 
 const eventDetailsSQL = `
-	SELECT ` + eventProjection + ` || jsonb_build_object(
+	SELECT ` + eventProjection + ` || jsonb_strip_nulls(jsonb_build_object('payment_policy',policy.item)) || jsonb_build_object(
 		'partner_reports',COALESCE((SELECT jsonb_agg(jsonb_strip_nulls(jsonb_build_object(
 		    'id',r.id::text,'state',r.state,'reason',r.reason,'status',r.report_status,'next_attempt_at',
 		    CASE WHEN r.state='pending' THEN r.next_attempt_at END,
@@ -81,7 +82,7 @@ const eventDetailsSQL = `
 			   WHERE d.event_id=e.id AND a.delivery_id=$3 AND ($4::int=0 OR a.attempt_no<$4)
 			   ORDER BY a.attempt_no DESC LIMIT 50) a),'[]'))
 	FROM conversion.events e JOIN conversion.integrations i ON i.id=e.integration_id
-	` + deliveryDetails + `
+	` + deliveryDetails + paymentPolicyDetails + `
 	WHERE e.environment=$1 AND e.id=$2
 `
 

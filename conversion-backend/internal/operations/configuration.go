@@ -9,6 +9,7 @@ import (
 
 	"conversion-backend/internal/delivery"
 	"conversion-backend/internal/partner/sinan"
+	"conversion-backend/internal/paymentpolicy"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -121,7 +122,7 @@ func (repo Repository) handleAudit(w http.ResponseWriter, r *http.Request) {
 	case "destination":
 		actions = []string{"configure_destination"}
 	case "integration":
-		actions = []string{"configure_integration", "configure_sinan_mock"}
+		actions = []string{"configure_integration", "configure_sinan_mock", "publish_payment_policy", "inherit_payment_policy"}
 	default:
 		writeError(w, http.StatusBadRequest, "invalid_filter")
 		return
@@ -129,6 +130,10 @@ func (repo Repository) handleAudit(w http.ResponseWriter, r *http.Request) {
 	subjectID, ok := positiveID(q.Get("subject_id"))
 	if !ok {
 		writeError(w, http.StatusBadRequest, "invalid_id")
+		return
+	}
+	if q.Has("publication_id") {
+		repo.handlePublicationAudit(w, r, subjectID)
 		return
 	}
 	limit := 20
@@ -157,6 +162,69 @@ func (repo Repository) handleAudit(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, out)
 }
+
+type publicationAuditRecord struct {
+	Action        string  `json:"action"`
+	VersionID     *string `json:"version_id"`
+	VersionNumber *string `json:"version_number"`
+}
+
+type publicationAuditResult struct {
+	PublicationID string                  `json:"publication_id"`
+	Record        *publicationAuditRecord `json:"record"`
+	Current       paymentpolicy.View      `json:"current"`
+}
+
+func (repo Repository) handlePublicationAudit(w http.ResponseWriter, r *http.Request, integrationID int64) {
+	q := r.URL.Query()
+	publicationID, app, promotion := q.Get("publication_id"), q.Get("app_id"), q.Get("promotion_id")
+	_, validApp := positiveID(app)
+	_, validPromotion := positiveID(promotion)
+	if q.Get("subject_type") != "integration" || !paymentpolicy.ValidPublicationID(publicationID) ||
+		(app != paymentpolicy.ReaderApp && !validApp) || (promotion != "" && !validPromotion) {
+		writeError(w, http.StatusBadRequest, "invalid_filter")
+		return
+	}
+	ctx := r.Context()
+	out := publicationAuditResult{PublicationID: publicationID}
+	err := pgx.BeginFunc(ctx, repo.Pool, func(tx pgx.Tx) error {
+		// Wait for an in-flight publication holding this integration's write lock.
+		// The following statement reads the audit with a fresh snapshot.
+		var id int64
+		if err := tx.QueryRow(ctx, "SELECT id FROM conversion.integrations WHERE id=$1 AND environment=$2 FOR SHARE",
+			integrationID, repo.Environment).Scan(&id); err != nil {
+			return err
+		}
+		var record publicationAuditRecord
+		err := tx.QueryRow(ctx, publicationAuditSQL, repo.Environment, strconv.FormatInt(integrationID, 10),
+			operatorFrom(r).ID, publicationID, app, promotion).Scan(&record.Action, &record.VersionID, &record.VersionNumber)
+		switch {
+		case err == nil:
+			out.Record = &record
+		case !errors.Is(err, pgx.ErrNoRows):
+			return err
+		}
+		// Read the effective version under the same lock so a missing audit
+		// cannot be paired with a version committed after the lookup.
+		out.Current, err = paymentpolicy.ReadTx(ctx, tx, paymentpolicy.Scope{
+			Environment: repo.Environment, IntegrationID: integrationID, App: app, Promotion: promotion,
+		})
+		return err
+	})
+	writePolicy(w, out, err)
+}
+
+const publicationAuditSQL = `
+	SELECT action,
+		COALESCE(after_state#>>'{own_version,id}',after_state#>>'{inherited_version,id}'),
+		COALESCE(after_state#>>'{own_version,number}',after_state#>>'{inherited_version,number}')
+	FROM conversion.operation_audit
+	WHERE environment=$1 AND subject_id=$2 AND operator_id=$3
+	  AND action IN ('publish_payment_policy','inherit_payment_policy')
+	  AND after_state ? 'publication_id' AND after_state->>'publication_id'=$4
+	  AND after_state->>'app_id'=$5 AND COALESCE(after_state->>'promotion_id','')=$6
+	ORDER BY id DESC LIMIT 1
+`
 
 const auditListSQL = `
 	WITH matched AS (
@@ -213,7 +281,11 @@ func operatorFrom(r *http.Request) delivery.Operator {
 }
 
 func decodeConfiguration(w http.ResponseWriter, r *http.Request, value any) bool {
-	reader := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8<<10))
+	return decodeConfigurationBody(w, r, value, 8<<10)
+}
+
+func decodeConfigurationBody(w http.ResponseWriter, r *http.Request, value any, limit int64) bool {
+	reader := json.NewDecoder(http.MaxBytesReader(w, r.Body, limit))
 	reader.DisallowUnknownFields()
 	return reader.Decode(value) == nil && errors.Is(reader.Decode(new(any)), io.EOF)
 }

@@ -20,14 +20,15 @@ import (
 const MockContract = "sinan-mock-v1"
 
 type Config struct {
-	AppPixels       map[string][]string          `json:"app_pixels"`
-	PromotionPixels map[string]map[string]string `json:"promotion_pixels,omitempty"`
-	SourceHosts     []string                     `json:"source_hosts"`
-	Endpoint        string                       `json:"endpoint"`
-	NoTrace         string                       `json:"no_trace_encoding"`
-	Replay          bool                         `json:"replay_supported"`
-	MaxAge          int                          `json:"max_age_seconds"`
-	AlertAfter      int                          `json:"alert_after_seconds,omitempty"`
+	AppPixels        map[string][]string          `json:"app_pixels"`
+	PromotionPixels  map[string]map[string]string `json:"promotion_pixels,omitempty"`
+	SourceHosts      []string                     `json:"source_hosts"`
+	Endpoint         string                       `json:"endpoint"`
+	NoTrace          string                       `json:"no_trace_encoding"`
+	MissingPromotion string                       `json:"missing_promotion_encoding,omitempty"`
+	Replay           bool                         `json:"replay_supported"`
+	MaxAge           int                          `json:"max_age_seconds"`
+	AlertAfter       int                          `json:"alert_after_seconds,omitempty"`
 }
 
 func (c Config) allows(app, pixel string) bool {
@@ -37,7 +38,8 @@ func (c Config) allows(app, pixel string) bool {
 func (c Config) Validate() bool {
 	if len(c.AppPixels) == 0 || len(c.AppPixels) > 100 || len(c.SourceHosts) > 100 ||
 		c.MaxAge < 1 || c.MaxAge > 30*24*60*60 || c.AlertAfter < 0 || c.AlertAfter > 999999 ||
-		(c.NoTrace != "" && c.NoTrace != "omit" && c.NoTrace != "empty") {
+		(c.NoTrace != "" && c.NoTrace != "omit" && c.NoTrace != "empty") ||
+		(c.MissingPromotion != "" && c.MissingPromotion != "null") {
 		return false
 	}
 	if _, err := mockEndpoint(c.Endpoint); err != nil {

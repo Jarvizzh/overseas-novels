@@ -86,6 +86,7 @@ const summarySQL = `
 		SELECT o.id,o.subscription_id,a.id AS integration_id,a.source,
 			o.capi_expectation->>'reason' AS reason,o.capi_expectation->>'pixel_id' AS pixel,
 			o.capi_expectation->'events' AS expected,o.capi_expectation IS NULL AS legacy_order,
+			o.capi_expectation->>'payment_key' AS payment_key,
 			NULLIF(o.capi_expectation->>'occurred_at','')::timestamptz AS occurred_at,
 			COALESCE(o.fulfilled_at,CASE WHEN o.capi_expectation->>'reason'='refunded_before_fulfillment' THEN o.paid_at END) AS fulfilled_at
 		FROM recharge_orders o CROSS JOIN period w
@@ -112,15 +113,18 @@ const summarySQL = `
 	), payment_facts AS (
 		SELECT COALESCE(p.source,'starnovel') AS source,p.integration_id,
 			COALESCE(spec->>'name','Purchase') AS event_name,
-			CASE WHEN spec IS NOT NULL THEN 'expected'
+			CASE WHEN decision.outcome='skipped' THEN 'policy_skipped' WHEN spec IS NOT NULL THEN 'expected'
 			     WHEN p.reason='organic' THEN 'organic' WHEN p.reason IS NULL THEN 'historical_unknown' ELSE 'not_required' END AS eligibility,
-			p.occurred_at IS NULL AND spec IS NOT NULL AS missing_time,
+			p.occurred_at IS NULL AND spec IS NOT NULL AND decision.outcome IS DISTINCT FROM 'skipped' AS missing_time,
 			e.id AS event_id, q.business_key IS NOT NULL AS queued,
 			original.state='succeeded' AS confirmed, original.id IS NULL AS missing_target
 		FROM payments p CROSS JOIN period w
 		LEFT JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(p.expected)='array' THEN p.expected ELSE '[]' END) spec ON true
 		LEFT JOIN conversion.events e ON e.integration_id=p.integration_id AND e.source_event_type=spec->>'name'
 			AND e.source_event_id=spec->>'business_key'
+		LEFT JOIN conversion.payment_policy_decisions decision ON decision.environment=$1
+			AND decision.integration_id=p.integration_id AND decision.app_scope='reader'
+			AND decision.payment_key=p.payment_key AND p.payment_key=p.id::text
 		LEFT JOIN reader_conversion_outbox q ON q.business_key=spec->>'business_key' AND q.environment=$1
 		LEFT JOIN conversion.deliveries original ON original.event_id=e.id AND original.role='original'
 		WHERE COALESCE(p.occurred_at,p.fulfilled_at)>=w.from_at AND COALESCE(p.occurred_at,p.fulfilled_at)<=w.to_at
@@ -136,11 +140,13 @@ const summarySQL = `
 		  AND ($4='' OR h.event_name=$4)
 	), other_facts AS (
 		SELECT a.source,a.id AS integration_id,e.event_name,
-			CASE e.attribution_state WHEN 'organic' THEN 'organic' WHEN 'unknown' THEN 'historical_unknown'
+			CASE WHEN decision.outcome='skipped' THEN 'policy_skipped'
+			     WHEN e.attribution_state='organic' THEN 'organic' WHEN e.attribution_state='unknown' THEN 'historical_unknown'
 			     ELSE 'expected' END AS eligibility,
 			false AS missing_time,e.id AS event_id,true AS queued,
 			d.state='succeeded' AS confirmed,d.id IS NULL AS missing_target
 		FROM accounts a JOIN conversion.events e ON e.integration_id=a.id CROSS JOIN period w
+		LEFT JOIN conversion.payment_policy_decisions decision ON decision.id=e.payment_policy_decision_id
 		LEFT JOIN conversion.deliveries d ON d.event_id=e.id AND d.role='original'
 		WHERE e.occurred_at>=w.from_at AND e.occurred_at<=w.to_at AND ($4='' OR e.event_name=$4)
 		  AND (a.source<>'starnovel' OR e.event_name NOT IN ('Purchase','Subscribe'))
@@ -177,8 +183,50 @@ const summarySQL = `
 		WHERE (p.state<>'confirmed' OR (e.occurred_at>=w.from_at AND e.occurred_at<=w.to_at))
 		  AND ($4='' OR e.event_name=$4) AND ($6=0 OR d.destination_id=$6)
 		GROUP BY a.source,a.id,e.event_name,d.destination_id,p.state,p.reason
+	), policy_cohort AS MATERIALIZED (
+		SELECT p.id,p.outcome,p.integration_id,p.payment_key,p.app_scope,p.original_destination_id,a.source
+		FROM conversion.payment_policy_decisions p
+		JOIN accounts a ON a.id=p.integration_id CROSS JOIN period w
+		WHERE p.environment=$1 AND p.decided_at BETWEEN w.from_at AND w.to_at
+		  AND ($6=0 OR p.original_destination_id=$6)
+	), policy_events AS (
+		-- Reader expectations come from orders in the decision cohort, independent of the business-time population.
+		SELECT p.id AS decision_id,p.outcome,p.original_destination_id,
+		       spec->>'name' AS event_name,e.id AS event_id
+		FROM policy_cohort p
+		JOIN recharge_orders o ON o.id=CASE
+			WHEN p.payment_key ~ '^[1-9][0-9]{0,18}$'
+			     AND (length(p.payment_key)<19 OR p.payment_key COLLATE "C"<='9223372036854775807')
+			THEN p.payment_key::bigint END
+		CROSS JOIN LATERAL jsonb_array_elements(CASE
+			WHEN jsonb_typeof(o.capi_expectation->'events')='array' THEN o.capi_expectation->'events' ELSE '[]' END) spec
+		LEFT JOIN conversion.events e ON e.payment_policy_decision_id=p.id
+		    AND e.event_name=spec->>'name' AND e.source_event_id=spec->>'business_key'
+		WHERE p.source='starnovel' AND p.app_scope='reader'
+		  AND o.capi_expectation->>'environment'=$1 AND o.capi_expectation->>'payment_key'=p.payment_key
+		  AND ($4='' OR spec->>'name'=$4)
+		  AND (spec->>'name'='Purchase' OR (spec->>'name'='Subscribe' AND EXISTS (
+		      SELECT 1 FROM user_subscriptions s WHERE s.subscription_id=o.subscription_id
+		          AND s.capi_subscribe_order_id=o.id AND s.capi_subscribe_state='claimed')))
+		UNION ALL
+		SELECT p.id,p.outcome,p.original_destination_id,e.event_name,e.id
+		FROM policy_cohort p JOIN conversion.events e ON e.payment_policy_decision_id=p.id
+		WHERE (p.source<>'starnovel' OR p.app_scope<>'reader') AND ($4='' OR e.event_name=$4)
+	), payment_coverage AS (
+		SELECT count(*) AS evaluated,count(*) FILTER(WHERE p.outcome='selected') AS selected
+		FROM policy_cohort p
+		WHERE $4='' OR EXISTS(SELECT 1 FROM policy_events e WHERE e.decision_id=p.id)
+	), selected_confirmation AS (
+		SELECT e.event_name,count(*) AS expected,count(*) FILTER(WHERE d.state='succeeded') AS confirmed
+		FROM policy_events e
+		LEFT JOIN conversion.deliveries d ON d.event_id=e.event_id AND d.role='original'
+		    AND d.destination_id=e.original_destination_id
+		WHERE e.outcome='selected'
+		GROUP BY e.event_name
 	)
 	SELECT jsonb_build_object('environment',$1,'from_at',w.from_at,'to_at',w.to_at,
+		'payment_coverage',(SELECT to_jsonb(c) FROM payment_coverage c),
+		'selected_confirmation',(SELECT COALESCE(jsonb_agg(to_jsonb(c) ORDER BY c.event_name),'[]') FROM selected_confirmation c),
 		'population',(SELECT COALESCE(jsonb_agg(jsonb_set(to_jsonb(p),'{integration_id}',COALESCE(to_jsonb(p.integration_id::text),'null'))),'[]') FROM population p),
 		'targets',(SELECT COALESCE(jsonb_agg(to_jsonb(t)),'[]') FROM target_metrics t),
 		'reports',(SELECT COALESCE(jsonb_agg(to_jsonb(r)),'[]') FROM report_metrics r),
@@ -226,6 +274,11 @@ const alertSQL = `
 		  AND NOT EXISTS(SELECT 1 FROM conversion.legacy_outbox_imports m WHERE m.event_id=e.id
 		      AND m.legacy_state='delivered' AND m.legacy_delivered_at IS NOT NULL)
 		GROUP BY e.integration_id
+	), missing_rule_facts AS (
+		SELECT 'rule_fact_missing' AS kind,e.integration_id::text AS subject,
+		       jsonb_build_object('count',count(*),'oldest_at',min(e.received_at),'sample_event_id',min(e.id)::text) AS detail
+		FROM conversion.events e WHERE e.environment=$1 AND e.reason='rule_fact_missing'
+		  AND e.received_at>=now()-interval '7 days' GROUP BY e.integration_id
 	), meta AS (
 		SELECT 'meta_queue_delayed' AS kind,d.destination_id::text AS subject,
 		       jsonb_build_object('count',count(*),'oldest_at',min(d.next_attempt_at),'pixel_id',x.pixel_id) AS detail
@@ -274,7 +327,7 @@ const alertSQL = `
 		     OR (oldest<now()-interval '5 minutes' AND (progress IS NULL OR progress<now()-interval '5 minutes')))
 	), active AS (
 		SELECT * FROM ingress UNION ALL SELECT * FROM missed UNION ALL SELECT * FROM missing_original UNION ALL SELECT * FROM meta
-		UNION ALL SELECT * FROM receipts UNION ALL SELECT * FROM stalled
+		UNION ALL SELECT * FROM receipts UNION ALL SELECT * FROM stalled UNION ALL SELECT * FROM missing_rule_facts
 	), observed AS (
 		INSERT INTO conversion.alerts(environment,kind,subject,detail)
 		SELECT $1,kind,subject,detail FROM active

@@ -3,8 +3,10 @@ package tracking
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -102,6 +104,13 @@ func TestConversionOrdersMapsUpstreamErrorCodes(t *testing.T) {
 			wantError:      "筛选参数格式错误",
 		},
 		{
+			name:           "400 payment policy request",
+			upstreamStatus: http.StatusBadRequest,
+			upstreamBody:   `{"code":"invalid_payment_policy_request","field":"publication_id"}`,
+			wantCode:       "invalid_payment_policy_request",
+			wantError:      "回传规则请求格式无效，请核对配置后重试",
+		},
+		{
 			name:           "404 resource_not_found",
 			upstreamStatus: http.StatusNotFound,
 			upstreamBody:   `{"code":"resource_not_found"}`,
@@ -175,6 +184,61 @@ func TestConversionOrdersMapsUpstreamErrorCodes(t *testing.T) {
 				t.Fatalf("got=%+v want code=%q error=%q", got, tc.wantCode, tc.wantError)
 			}
 		})
+	}
+}
+
+func TestConversionPolicyProxyForwardsPublicationAuditAndLargeDraft(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	old := config.AppConfig
+	config.AppConfig = &config.Config{JWTSecret: "tracking-publication-test-secret"}
+	t.Cleanup(func() { config.AppConfig = old })
+
+	const publicationID = "0000000000000000000000000000a016"
+	input := `{"app_id":"reader","expected_version":null,"publication_id":"` + publicationID + `","operations":[]}` +
+		strings.Repeat(" ", 9<<10)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Operator-ID") != "fixture-admin" {
+			t.Error("proxy did not forward verified operator")
+		}
+		switch r.Method {
+		case http.MethodGet:
+			q := r.URL.Query()
+			if r.URL.Path != "/internal/conversion/audit" || q.Get("publication_id") != publicationID ||
+				q.Get("app_id") != "reader" || q.Get("promotion_id") != "13" || q.Get("subject_id") != "1" {
+				t.Errorf("unexpected audit query: %s", r.URL)
+			}
+			_, _ = w.Write([]byte(`{"publication_id":"` + publicationID + `","record":null,"current":{}}`))
+		case http.MethodPost:
+			body, err := io.ReadAll(r.Body)
+			if err != nil || string(body) != input || r.URL.Path != "/internal/conversion/integrations/1/payment-policy/publish" {
+				t.Errorf("unexpected publish request: %s %d bytes %v", r.URL, len(body), err)
+			}
+			_, _ = w.Write([]byte(`{"config_source":"own"}`))
+		}
+	}))
+	defer upstream.Close()
+
+	r := gin.New()
+	if err := RegisterConversionOrders(r.Group("/api/v1/admin"), orderAdminLookup{
+		admin: &auth.Admin{ID: "fixture-admin", Role: "Admin", Status: 1},
+	}, upstream.URL, "private-fixture"); err != nil {
+		t.Fatal(err)
+	}
+	token, err := auth.GenerateToken("fixture-admin", "Admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct{ method, path, body, want string }{
+		{http.MethodGet, "/audit?subject_type=integration&subject_id=1&app_id=reader&promotion_id=13&publication_id=" + publicationID, "", publicationID},
+		{http.MethodPost, "/integrations/1/payment-policy/publish", input, `"config_source":"own"`},
+	} {
+		req := httptest.NewRequest(test.method, "/api/v1/admin/conversion"+test.path, strings.NewReader(test.body))
+		req.Header.Set("Authorization", "Bearer "+token)
+		res := httptest.NewRecorder()
+		r.ServeHTTP(res, req)
+		if res.Code != http.StatusOK || !strings.Contains(res.Body.String(), test.want) {
+			t.Fatalf("%s %s: %d %s", test.method, test.path, res.Code, res.Body.String())
+		}
 	}
 }
 

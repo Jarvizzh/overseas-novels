@@ -164,7 +164,7 @@ func (s Inbox) accept(ctx context.Context, key, token, eventType string, body []
 		return http.StatusBadRequest, "invalid_payload"
 	}
 	receipt := partner.Receipt{
-		IntegrationID: id, SourceType: eventType, SourceID: p.EventID, OrderID: string(p.OrderID),
+		IntegrationID: id, SourceType: eventType, SourceID: p.EventID, OrderID: string(p.OrderID), AppID: string(p.AppID),
 		ReceivedAt: received, Payload: snapshot, Digest: digest, DigestVersion: 2, Quarantine: reason,
 		LegacyDigest: func() ([]byte, error) { return callbackDigest(legacy) },
 	}

@@ -17,6 +17,9 @@ interface CustomSelectProps {
   id?: string;
   name?: string;
   'aria-label'?: string;
+  'aria-invalid'?: boolean;
+  'aria-describedby'?: string;
+  'data-policy-field'?: string;
 }
 
 export default function CustomSelect({
@@ -31,6 +34,9 @@ export default function CustomSelect({
   id,
   name,
   'aria-label': ariaLabel,
+  'aria-invalid': invalid,
+  'aria-describedby': describedBy,
+  'data-policy-field': policyField,
 }: CustomSelectProps) {
   const hasEmptyOption = options.some((o) => o.value === '');
 
@@ -39,6 +45,9 @@ export default function CustomSelect({
       id={id}
       name={name}
       aria-label={ariaLabel || placeholder}
+      aria-invalid={invalid}
+      aria-describedby={describedBy}
+      data-policy-field={policyField}
       disabled={disabled}
       value={value}
       onChange={(e) => onChange(e.target.value)}

@@ -57,20 +57,28 @@ func createReport(ctx context.Context, tx pgx.Tx, id int64) error {
 		       COALESCE(d.frozen_route->>'contract_version',i.contract_version),
 		       jsonb_strip_nulls(jsonb_build_object(
 		         'source_fields', e.partner_fields, 'event_id', e.source_event_id, 'pixel_id', x.pixel_id,
+		         'event_name', CASE WHEN i.source='sinan' AND e.payment_policy_state<>'historical' THEN e.event_name END,
 		         'report_time', d.finalized_at, 'last_attempt_at', d.last_attempt_at, 'reason', d.reason,
 		         'fbtrace_id', a.fbtrace_id, 'http_status', a.http_status, 'events_received', a.events_received,
 		         'graph_code', a.graph_code, 'graph_subcode', a.graph_subcode, 'outcome', a.outcome)),
-		       CASE WHEN d.state = 'failed' AND a.fbtrace_id IS NULL
-		                  AND COALESCE(i.report_config->>'no_trace_encoding', '') NOT IN ('omit','empty')
-		            THEN 'blocked' ELSE 'pending' END,
-		       CASE WHEN d.state = 'failed' AND a.fbtrace_id IS NULL
-		                  AND COALESCE(i.report_config->>'no_trace_encoding', '') NOT IN ('omit','empty')
-		            THEN 'no_trace_contract_unconfirmed' END
+		       CASE WHEN contract.block_reason IS NULL THEN 'pending' ELSE 'blocked' END,
+		       contract.block_reason
 		FROM conversion.deliveries d JOIN conversion.events e ON e.id = d.event_id
 		JOIN conversion.integrations i ON i.id = e.integration_id
 		JOIN conversion.destinations x ON x.id = d.destination_id
 		LEFT JOIN conversion.delivery_attempts a ON a.delivery_id = d.id AND a.attempt_no =
 		    CASE WHEN d.state = 'succeeded' THEN d.attempts ELSE COALESCE(d.unknown_attempt_no,d.attempts) END
+		CROSS JOIN LATERAL (
+		    SELECT CASE
+		        WHEN d.state='failed' AND a.fbtrace_id IS NULL
+		             AND COALESCE(i.report_config->>'no_trace_encoding','') NOT IN ('omit','empty')
+		        THEN 'no_trace_contract_unconfirmed'
+		        WHEN i.source='sinan' AND e.event_name='Purchase' AND e.payment_policy_state<>'historical'
+		             AND NULLIF(e.partner_fields->>'promotion_id','') IS NULL
+		             AND COALESCE(i.report_config->>'missing_promotion_encoding','') <> 'null'
+		        THEN 'missing_promotion_contract_unconfirmed'
+		    END AS block_reason
+		) contract
 		WHERE d.id = $1 AND d.role = 'original' AND i.source <> 'starnovel'
 		ON CONFLICT (integration_id, event_id, original_delivery_id) DO NOTHING`, id)
 	return err

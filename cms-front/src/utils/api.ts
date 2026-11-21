@@ -3,12 +3,16 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8081/api
 export class ApiError extends Error {
   readonly status: number;
   readonly code?: string;
+  readonly field?: string;
+  readonly appIds?: string[];
 
-  constructor(message: string, status: number, code?: string) {
+  constructor(message: string, status: number, code?: string, field?: string, appIds?: string[]) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
     this.code = code;
+    this.field = field;
+    this.appIds = appIds;
   }
 }
 
@@ -65,7 +69,11 @@ export async function apiRequest(
   if (!response.ok) {
     const errorData = await response.json().catch(() => ({}));
     const errorCode = typeof errorData.code === 'string' ? errorData.code : undefined;
-    throw new ApiError(errorData.error || `请求失败 (${response.status})`, response.status, errorCode);
+    throw new ApiError(
+      errorData.error || `请求失败 (${response.status})`, response.status, errorCode,
+      typeof errorData.field === 'string' ? errorData.field : undefined,
+      Array.isArray(errorData.app_ids) ? errorData.app_ids.filter((id: unknown) => typeof id === 'string') : undefined,
+    );
   }
 
   return response.json();

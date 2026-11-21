@@ -1,3 +1,5 @@
+import type { PaymentMode, PolicySource } from "./paymentPolicy";
+
 export interface IntegrationBinding {
   destination_id: string;
   pixel_id: string;
@@ -97,6 +99,32 @@ export interface PartnerReportDetail extends PartnerReportSummary {
   attempts?: PartnerReportAttempt[];
 }
 
+export interface PaymentDecision {
+  id?: string;
+  state: 'pending' | 'decided' | 'historical';
+  outcome?: 'selected' | 'skipped';
+  reason?: string;
+  app_id?: string;
+  promotion_id?: string;
+  scope_kind?: string;
+  version_id?: string;
+  version_number?: string;
+  config_source?: PolicySource;
+  mode?: PaymentMode;
+  cycle_sequence?: string;
+  decided_at?: string;
+  match?: {
+    kind: string;
+    is_fallback: boolean;
+    currency?: string;
+    min_minor?: string;
+    max_minor?: string;
+    rate_bps?: number;
+    send_count?: number;
+    skip_count?: number;
+  };
+}
+
 export interface ConversionEvent {
   id: string;
   integration_id: string;
@@ -119,6 +147,7 @@ export interface ConversionEvent {
 }
 
 export interface ConversionEventDetail extends ConversionEvent {
+  payment_policy?: PaymentDecision;
   partner_reports?: PartnerReportDetail[];
   attempts?: ConversionDeliveryAttempt[];
 }
@@ -166,6 +195,8 @@ export interface OrderEvent {
 }
 
 export interface OrderInboxItem {
+  app_id?: string;
+  normalized_event_id?: string;
   id: string;
   source_event_id?: string;
   source_event_type: string;
@@ -175,6 +206,7 @@ export interface OrderInboxItem {
 }
 
 export interface OrderReconciliationReport {
+  payment_policy?: PaymentDecision | null;
   order_id: string;
   source: string;
   environment: string;
@@ -251,6 +283,8 @@ export interface WorkerHeartbeat {
 }
 
 export interface ConversionSummaryData {
+  payment_coverage?: { evaluated: number; selected: number };
+  selected_confirmation?: { event_name: string; expected: number; confirmed: number }[];
   environment?: string;
   from_at?: string;
   to_at?: string;

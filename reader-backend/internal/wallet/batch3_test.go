@@ -129,6 +129,78 @@ func TestSubscriptionKeepsCheckoutAttribution(t *testing.T) {
 		t.Fatalf("subscribe owner=%d, want %d, err=%v", claimedOrder, owner, err)
 	}
 
+	var matchingSnapshots int
+	if err := p.QueryRow(ctx, `SELECT count(*) FROM reader_conversion_outbox
+		WHERE order_id=$1 AND event_name IN ('Purchase','Subscribe')
+		AND snapshot->>'payment_key'=$1::bigint::text AND snapshot->>'payment_kind'='subscription_initial'
+		AND snapshot->>'first_paid_on_promotion'='true'`, owner).Scan(&matchingSnapshots); err != nil || matchingSnapshots != 2 {
+		t.Fatalf("first-subscription payment snapshots=%d, err=%v", matchingSnapshots, err)
+	}
+	var sameTimeRenewals int
+	if err := p.QueryRow(ctx, `SELECT count(*) FROM reader_conversion_outbox WHERE order_id<>$1 AND event_name='Purchase'
+		AND snapshot->>'payment_kind'='subscription_renewal' AND snapshot->>'action_source'='system_generated'`, owner).
+		Scan(&sameTimeRenewals); err != nil || sameTimeRenewals != 1 {
+		t.Fatalf("same-time renewals=%d, err=%v", sameTimeRenewals, err)
+	}
+	latest := at.Add(72 * time.Hour).Truncate(time.Microsecond)
+	for _, payment := range []struct {
+		capture string
+		paidAt  time.Time
+	}{
+		{"later-renewal", latest},
+		{"late-renewal", at.Add(24 * time.Hour)},
+		{"late-renewal", at.Add(24 * time.Hour)},
+	} {
+		first, err := r.RecordSubscriptionRenewalOrderTx(ctx, sub, payment.capture, 999, "USD", payment.paidAt,
+			payment.paidAt.AddDate(0, 1, 0), "ACTIVE", &model.ThirdPartyPaymentOrder{Status: "COMPLETED", RawPayload: "{}"})
+		if err != nil || first {
+			t.Fatalf("settle %s: first=%v, err=%v", payment.capture, first, err)
+		}
+	}
+	var renewals, allEvents int
+	var lastPayment time.Time
+	if err := p.QueryRow(ctx, `SELECT
+		count(*) FILTER (WHERE event_name='Purchase' AND snapshot->>'payment_kind'='subscription_renewal'
+			AND snapshot->>'action_source'='system_generated'), count(*),
+		(SELECT last_payment_time FROM user_subscriptions WHERE subscription_id='I-SNAPSHOT')
+		FROM reader_conversion_outbox WHERE event_name IN ('Purchase','Subscribe')`).
+		Scan(&renewals, &allEvents, &lastPayment); err != nil || renewals != 3 || allEvents != 5 || !lastPayment.Equal(latest) {
+		t.Fatalf("renewals=%d, events=%d, last payment=%s (want %s), err=%v", renewals, allEvents, lastPayment, latest, err)
+	}
+
+	// An older Reader uses the six-argument entry point and still identifies
+	// a verified renewal even when it passes automatic_payment=false.
+	exec(`INSERT INTO recharge_orders(user_id,external_ref_id,amount_cents,payment_method,status,order_type,subscription_id,paid_at,fulfilled_at,fb_lead_metadata)
+		VALUES(1,'legacy-late',999,'paypal','Success','subscription','I-SNAPSHOT',now(),now(),'{"pixel_id":"original-pixel"}');
+		INSERT INTO third_party_payment_orders(order_id,payment_provider,external_order_id,capture_id,gross_amount,status)
+		SELECT id,'paypal',subscription_id,external_ref_id,9.99,'VERIFIED' FROM recharge_orders WHERE external_ref_id='legacy-late';
+		SELECT record_reader_payment_conversion(id,now(),'paypal_subscription_ledger','production',false,false)
+		FROM recharge_orders WHERE external_ref_id='legacy-late';`)
+	if err := p.QueryRow(ctx, `SELECT o.snapshot->>'payment_kind',o.snapshot->>'action_source'
+		FROM reader_conversion_outbox o JOIN recharge_orders r ON r.id=o.order_id WHERE r.external_ref_id='legacy-late'`).
+		Scan(&click, &pixel); err != nil || click != "subscription_renewal" || pixel != "system_generated" {
+		t.Fatalf("legacy renewal snapshot=%q/%q, err=%v", click, pixel, err)
+	}
+
+	exec(`INSERT INTO user_subscriptions(user_id,subscription_id,capi_subscribe_state,attribution,last_payment_time)
+		VALUES(1,'I-HISTORICAL','historical','{"pixel_id":"original-pixel"}',now()-interval '2 months');`)
+	historical, err := r.GetSubscriptionByID(ctx, "I-HISTORICAL")
+	if err != nil || historical == nil {
+		t.Fatalf("historical subscription: %+v, %v", historical, err)
+	}
+	for i, ref := range []string{"historical-unproven", "historical-verified"} {
+		paidAt := at.AddDate(0, i, 0)
+		if _, err := r.RecordSubscriptionRenewalOrderTx(ctx, historical, ref, 999, "USD", paidAt,
+			paidAt.AddDate(0, 1, 0), "ACTIVE", &model.ThirdPartyPaymentOrder{Status: "COMPLETED", RawPayload: "{}"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var historicalKinds string
+	if err := p.QueryRow(ctx, `SELECT string_agg(COALESCE(o.snapshot->>'payment_kind','unknown'),',' ORDER BY r.paid_at)
+		FROM reader_conversion_outbox o JOIN recharge_orders r ON r.id=o.order_id WHERE r.subscription_id='I-HISTORICAL'`).
+		Scan(&historicalKinds); err != nil || historicalKinds != "unknown,subscription_renewal" {
+		t.Fatalf("historical payment kinds=%q, err=%v", historicalKinds, err)
+	}
 }
 
 func TestProviderPlansRequireBoundIdentity(t *testing.T) {

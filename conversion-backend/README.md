@@ -1,6 +1,6 @@
 # Star Novel 转化服务
 
-转化服务消费 Reader 事务 Outbox，创建统一事件与各 Pixel 投递任务。迁移由 CMS 的 `-migrate` 入口管理，Worker 启动时要求 schema `2026111909`。应用架构、实施顺序与验收标准见 [统一转化回传架构升级与开发文档](../docs/conversion-reporting-architecture.md)。
+转化服务消费 Reader 事务 Outbox，创建统一事件与各 Pixel 投递任务。迁移由 CMS 的 `-migrate` 入口管理，Worker 启动时要求 schema `2026111915`。应用架构、实施顺序与验收标准见 [统一转化回传架构升级与开发文档](../docs/conversion-reporting-architecture.md)。
 
 从本目录运行 `go run ./cmd/conversion`。配置如下。
 
@@ -90,6 +90,7 @@ psql -X -f cms-backend/db/conversion_sinan_mock_grants.sql \
     "endpoint": "http://127.0.0.1:8094/final",
     "max_age_seconds": 86400,
     "no_trace_encoding": "omit",
+    "missing_promotion_encoding": "null",
     "replay_supported": false
   },
   "inbound_token": "<单账户测试 Token>",
@@ -99,5 +100,7 @@ psql -X -f cms-backend/db/conversion_sinan_mock_grants.sql \
 
 - 回调使用 `Authorization: Bearer <测试 Token>` 和 `Content-Type: application/json`。模拟契约使用字符串 `event_id`、Unix 秒 `event_time`、原始 `app_id` 和 `pixel_id`。订单入口同时提供 `order_id`，支付提供 `recharge_type`（1 或 2）、十进制 `amount` 和 ISO 4217 `currency`。回调中的 `order_id`、`device_id` 用字符串保存原值。浏览器数据从 `client_ip`、`user_agent` 读取。Inbox 按已存摘要核对重试。迁移前未标记版本的记录先核对完整摘要，再核对旧字段口径。版本 2 始终核对包含这两个浏览器字段的完整摘要。旧记录的摘要和快照原样保留。
 - 模拟回告按 `message` 和字段表的 `ad_set_id` 编码。应用、投手和推广链 ID 用 int64，订单、设备、广告及 Pixel ID 保持字符串。模拟结果 `1`、`-1` 使用原投递定稿时间的 Unix 秒作为 `report_time`，`0` 省略时间、消息和 trace。签名使用 Ed25519，签名原文依次为 `POST`、转义路径、Unix 秒、十六进制 nonce、业务请求体 SHA-256 十六进制摘要，使用换行连接。头字段为 `X-Sinan-Timestamp`、`X-Sinan-Nonce` 和 `X-Sinan-Signature`，签名值用标准 Base64。模拟成功条件为 HTTP 200 与 JSON `code=0`。
+- `recharge-paid` 按环境、接入、应用和订单号使用付款规则。缺推广 ID 时走应用的 `default`。入口仍按原始回调事件 ID 幂等。同一付款的其他回调 ID 在 Inbox 记录重复或付款事实冲突，附带首条归一化事件 ID，逐单查询可带 `app_id`。
+- 缺推广 ID 的新付款最终回告进入契约阻塞。隔离 Mock 可配置 `missing_promotion_encoding=null`，再重排同一回告任务，出站 `promotion_id` 为 JSON `null`。正式编码和成功响应以司南联调为准。
 - 无真实 trace 的失败默认阻塞。模拟接收方确认省略或空字符串后，设置 `no_trace_encoding=omit` 或 `empty`，通过 CMS 或 `conversion-ops retry-partner-report` 审计重排。明确拒收的限流按 `Retry-After` 和退避重试。只有模拟账户明确配置 `replay_supported=true` 时才自动重放结果未知的回告。业务请求体从首次进入发送起冻结。司南返回 HTTP 200 且业务码为 0 后，如果首次定稿失败，Worker 会按原发送尝试及其租约令牌保存确认。扫描已收回租约时，若后续尝试尚未发送，可据此确认回告并结束已领取但未发送的重试。后续尝试已发送时，原确认保留为历史证据。CMS 事件详情显示最近 20 次回告的 HTTP 状态、业务码、尝试时间和重试计划。
 - 正式上线依赖架构文档 §7.2 的真实样本和联调结果，包括入站验证、签名及字段、无 trace 失败回告和结果未知后的重放语义。模拟模式只接受测试环境和回环地址。

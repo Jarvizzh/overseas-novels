@@ -65,7 +65,7 @@ type Store struct {
 }
 
 func (s Store) CheckSchema(ctx context.Context) error {
-	const required = 2026111909
+	const required = 2026111915
 	var version int
 	if err := s.Pool.QueryRow(ctx, "SELECT max(version) FROM reader_schema_migrations").Scan(&version); err != nil {
 		return err
@@ -86,6 +86,7 @@ func claimTx(ctx context.Context, tx pgx.Tx, environment string, paymentFirst bo
 			JOIN conversion.destinations x ON x.id = d.destination_id
 			WHERE d.environment = $1 AND d.state = 'pending' AND d.lease_until IS NULL
 			  AND (e.event_name IN ('Purchase','Subscribe')) = $4
+			  AND `+paymentCanSend+`
 			  AND d.next_attempt_at <= now() AND d.deadline_at > now() + $2::interval
 			  AND x.next_claim_at <= now()
 			  AND NOT EXISTS (
@@ -138,6 +139,7 @@ func (s Store) StartSend(ctx context.Context, job Lease, credentialID int64, cip
 	tag, err := s.Pool.Exec(ctx, `
 		WITH locked AS (
 			SELECT d.id FROM conversion.deliveries d
+			JOIN conversion.events e ON e.id=d.event_id
 			JOIN conversion.destinations x ON x.id = d.destination_id
 			JOIN conversion.credentials c ON c.id = x.credential_id
 			WHERE d.id = $1 AND d.lease_token = $2::uuid AND d.attempts = $3
@@ -145,6 +147,7 @@ func (s Store) StartSend(ctx context.Context, job Lease, credentialID int64, cip
 			  AND d.deadline_at > now() + $8::interval
 			  AND x.enabled AND c.id = $5 AND c.ciphertext = $6 AND c.key_version = $7
 			  AND COALESCE(conversion.sinan_route_issue(d.event_id,x.id),'')=''
+			  AND `+paymentCanSend+`
 			FOR UPDATE OF d FOR SHARE OF x
 		)
 		UPDATE conversion.delivery_attempts a SET sending_at = now()

@@ -24,6 +24,7 @@ import (
 type reportSnapshot struct {
 	SourceFields sourceFields `json:"source_fields"`
 	EventID      string       `json:"event_id"`
+	EventName    string       `json:"event_name"`
 	PixelID      identifier   `json:"pixel_id"`
 	ReportTime   time.Time    `json:"report_time"`
 	TraceID      *string      `json:"fbtrace_id"`
@@ -31,22 +32,22 @@ type reportSnapshot struct {
 }
 
 type reportBody struct {
-	AppID         int64      `json:"app_id"`
-	PixelID       identifier `json:"pixel_id"`
-	DistributorID int64      `json:"distributor_id,omitempty"`
-	PromotionID   int64      `json:"promotion_id,omitempty"`
-	AdID          opaqueID   `json:"ad_id,omitempty"`
-	AdSetID       opaqueID   `json:"ad_set_id,omitempty"`
-	OrderID       opaqueID   `json:"order_id,omitempty"`
-	DeviceID      opaqueID   `json:"device_id,omitempty"`
-	EventID       string     `json:"event_id"`
-	Status        int        `json:"report_status"`
-	ReportTime    *int64     `json:"report_time,omitempty"`
-	TraceID       *string    `json:"fbtrace_id,omitempty"`
-	Message       string     `json:"message,omitempty"`
+	AppID         int64           `json:"app_id"`
+	PixelID       identifier      `json:"pixel_id"`
+	DistributorID int64           `json:"distributor_id,omitempty"`
+	PromotionID   json.RawMessage `json:"promotion_id,omitempty"`
+	AdID          opaqueID        `json:"ad_id,omitempty"`
+	AdSetID       opaqueID        `json:"ad_set_id,omitempty"`
+	OrderID       opaqueID        `json:"order_id,omitempty"`
+	DeviceID      opaqueID        `json:"device_id,omitempty"`
+	EventID       string          `json:"event_id"`
+	Status        int             `json:"report_status"`
+	ReportTime    *int64          `json:"report_time,omitempty"`
+	TraceID       *string         `json:"fbtrace_id,omitempty"`
+	Message       string          `json:"message,omitempty"`
 }
 
-func buildReport(status int, snapshot []byte, noTrace string) ([]byte, string) {
+func buildReport(status int, snapshot []byte, config Config) ([]byte, string) {
 	var original reportSnapshot
 	if json.Unmarshal(snapshot, &original) != nil || original.EventID == "" ||
 		original.SourceFields.AppID == "" || original.PixelID == "" || original.PixelID != original.SourceFields.PixelID {
@@ -55,8 +56,8 @@ func buildReport(status int, snapshot []byte, noTrace string) ([]byte, string) {
 	fields := original.SourceFields
 	report := reportBody{
 		AppID: fields.AppID.number(), PixelID: original.PixelID,
-		DistributorID: fields.DistributorID.number(), PromotionID: fields.PromotionID.number(),
-		AdID: fields.AdID, AdSetID: fields.AdSetID, OrderID: fields.OrderID, DeviceID: fields.DeviceID,
+		DistributorID: fields.DistributorID.number(),
+		AdID:          fields.AdID, AdSetID: fields.AdSetID, OrderID: fields.OrderID, DeviceID: fields.DeviceID,
 		EventID: original.EventID, Status: status,
 	}
 	switch status {
@@ -77,7 +78,7 @@ func buildReport(status int, snapshot []byte, noTrace string) ([]byte, string) {
 				return nil, "invalid_report_snapshot"
 			}
 			if report.TraceID == nil || *report.TraceID == "" {
-				switch noTrace {
+				switch config.NoTrace {
 				case "omit":
 					report.TraceID = nil
 				case "empty":
@@ -89,6 +90,15 @@ func buildReport(status int, snapshot []byte, noTrace string) ([]byte, string) {
 		}
 	default:
 		return nil, "invalid_report_snapshot"
+	}
+	switch {
+	case fields.PromotionID != "":
+		report.PromotionID = strconv.AppendInt(nil, fields.PromotionID.number(), 10)
+	case original.EventName == "Purchase":
+		if config.MissingPromotion != "null" {
+			return nil, "missing_promotion_contract_unconfirmed"
+		}
+		report.PromotionID = json.RawMessage("null")
 	}
 	body, err := json.Marshal(report)
 	if err != nil {
@@ -167,7 +177,7 @@ func (a ReportAdapter) PrepareReport(j partner.ReportJob) ([]byte, func(context.
 	body := j.Wire
 	if body == nil {
 		var reason string
-		body, reason = buildReport(j.Status, j.Payload, config.NoTrace)
+		body, reason = buildReport(j.Status, j.Payload, config)
 		if reason != "" {
 			return nil, nil, reason
 		}

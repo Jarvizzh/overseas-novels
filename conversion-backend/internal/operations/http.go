@@ -17,6 +17,7 @@ func NewHandler(repo Repository, token string) http.Handler {
 	mux := http.NewServeMux()
 	svc := queueActions{service: delivery.Service{Store: delivery.Store{Pool: repo.Pool, Environment: repo.Environment}}}
 	repo.registerConfiguration(mux, svc.service)
+	repo.registerPaymentPolicy(mux, svc.service)
 	mux.HandleFunc("POST /internal/conversion/events/{id}/deliveries", handleAction(svc.append, http.StatusCreated))
 	mux.HandleFunc("POST /internal/conversion/deliveries/{id}/retry", handleAction(svc.retry, http.StatusAccepted))
 	mux.HandleFunc("POST /internal/conversion/partner-reports/{id}/retry", handleAction(svc.retryReport, http.StatusAccepted))
@@ -25,12 +26,18 @@ func NewHandler(repo Repository, token string) http.Handler {
 	mux.HandleFunc("GET /internal/conversion/events/{id}", repo.handleEvent)
 	mux.HandleFunc("GET /internal/conversion/events/{id}/destinations", repo.handleAllowedTargets)
 	mux.HandleFunc("GET /internal/conversion/orders/{order_id}", func(w http.ResponseWriter, r *http.Request) {
-		key, ok := ParseOrderKey(r.PathValue("order_id"), r.URL.Query().Get("integration_id"))
+		query := r.URL.Query()
+		key, ok := ParseOrderKey(r.PathValue("order_id"), query.Get("integration_id"), query.Get("app_id"))
 		if !ok {
 			writeError(w, http.StatusBadRequest, "invalid_order_key")
 			return
 		}
 		result, err := repo.Order(r.Context(), key)
+		var ambiguous *orderAppAmbiguity
+		if errors.As(err, &ambiguous) {
+			writeJSON(w, http.StatusConflict, map[string]any{"code": ambiguous.Error(), "app_ids": ambiguous.Apps})
+			return
+		}
 		if errors.Is(err, pgx.ErrNoRows) {
 			writeError(w, http.StatusNotFound, "order_not_found")
 			return
@@ -83,7 +90,10 @@ func (repo Repository) handleAllowedTargets(w http.ResponseWriter, r *http.Reque
 		   WHERE d.integration_id=e.integration_id AND d.environment=e.environment AND x.enabled AND x.retired_at IS NULL
 		   AND COALESCE(conversion.sinan_route_issue(e.id,x.id),'')=''
 		   AND NOT EXISTS (SELECT 1 FROM conversion.deliveries j WHERE j.event_id=e.id AND j.destination_id=x.id)),'[]')
-		FROM conversion.events e WHERE e.id=$1 AND e.environment=$2`, id, repo.Environment).Scan(&result)
+		FROM conversion.events e WHERE e.id=$1 AND e.environment=$2
+		  AND (e.payment_policy_state IN ('historical','not_applicable') OR
+		      (e.payment_policy_state='decided' AND EXISTS (SELECT 1 FROM conversion.payment_policy_decisions p
+		         WHERE p.id=e.payment_policy_decision_id AND p.outcome='selected')))`, id, repo.Environment).Scan(&result)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "resource_not_found")
 		return

@@ -18,6 +18,10 @@ export interface StatusMeta {
 }
 
 const STATUS_META_MAP: Record<string, StatusMeta> = {
+  policy_selected: { label: '已选中回传', tone: 'success' },
+  policy_skipped: { label: '按规则跳过', tone: 'muted' },
+  policy_historical: { label: '历史订单', tone: 'muted' },
+  policy_pending: { label: '待核查规则数据', tone: 'warning' },
   // 归因状态
   matched: { label: '已归因', tone: 'success' },
   organic: { label: '自然流量', tone: 'muted' },
@@ -67,6 +71,18 @@ const STATUS_META_MAP: Record<string, StatusMeta> = {
 };
 
 const REASON_LABELS: Record<string, string> = {
+  rule_fact_missing: '待核查规则数据',
+  rule_not_first_payment: '该链接下的复购',
+  rule_send_all: '命中全传规则',
+  rule_no_match_send: '按默认全传',
+  rule_ratio_selected: '比例抽样选中',
+  rule_ratio_skipped: '比例抽样跳过',
+  rule_cycle_selected: '循环选中',
+  rule_cycle_skipped: '循环跳过',
+  historical_payment: '沿用历史付款处理',
+  duplicate_payment_event: '同单重复回调，已归并',
+  payment_policy_fact_conflict: '同单付款事实冲突',
+  missing_promotion_contract_unconfirmed: '回告待确认推广 ID 的空值编码',
   deadline_exhausted: '已过投递有效期截止时间',
   retry_budget_exhausted: '自动重试预算已耗尽（需人工排查后重置）',
   meta_no_confirmation: '一直未获得 Meta 明确单事件接收确认',
@@ -111,9 +127,11 @@ const RECOVERABLE_BLOCKED_REASONS = new Set([
   'destination_disabled',
   'promotion_pixel_mismatch',
   'partner_route_not_authorized',
+  'rule_fact_missing',
 ]);
 
 const ALERT_LABELS: Record<string, string> = {
+  rule_fact_missing: '付款规则事实待核查',
   meta_queue_delayed: 'Meta 待发队列超时',
   meta_credentials: 'Meta 凭据或路由绑定异常',
   meta_outcome_unknown: 'Meta 接收结果未知待确认',
@@ -279,6 +297,8 @@ const AUDIT_ACTION_LABELS: Record<string, string> = {
   configure_destination: 'Pixel 目标配置',
   configure_integration: '接入与路由绑定',
   configure_sinan_mock: '司南联调配置',
+  publish_payment_policy: '发布付款回传规则',
+  inherit_payment_policy: '恢复继承付款回传规则',
   append_delivery_target: '追加投递目标',
   retry_delivery: '重排投递任务',
   retry_partner_report: '重排分销回告',
@@ -321,6 +341,17 @@ export function formatAuditHighlights(
 
   const hasBefore = before !== null && Object.keys(before).length > 0;
   const notes: string[] = [];
+
+  if ('own_version' in after && typeof after.app_id === 'string') {
+    const describe = (snapshot: Record<string, unknown> | null) => {
+      const own = asRecord(snapshot?.own_version);
+      const inherited = asRecord(snapshot?.inherited_version);
+      const version = own ?? inherited;
+      return version ? `${own ? '专属' : '继承默认'} v${version.number} · #${version.id}` : '默认全传';
+    };
+    notes.push(`应用 ${after.app_id} · ${after.promotion_id ? `推广链接 #${after.promotion_id}` : '接入默认'}`);
+    notes.push(`${describe(before)} → ${describe(after)}`);
+  }
 
   if ('display_name' in after) {
     const prevName = before?.display_name;

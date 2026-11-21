@@ -11,6 +11,7 @@ import (
 
 	"conversion-backend/internal/delivery"
 	"conversion-backend/internal/partner"
+	"conversion-backend/internal/paymentpolicy"
 
 	"github.com/jackc/pgx/v5"
 	"golang.org/x/text/currency"
@@ -42,7 +43,14 @@ func normalizeInbox(ctx context.Context, tx pgx.Tx, j partner.InboxJob) (partner
 	if err != nil {
 		return partner.Normalized{}, err
 	}
-	return partner.Normalized{Event: event, Targets: targets}, nil
+	result := partner.Normalized{Event: event, Targets: targets}
+	if j.SourceType == "recharge-paid" {
+		result.Payment = &paymentpolicy.Facts{
+			Scope:      paymentpolicy.Scope{IntegrationID: j.IntegrationID, App: string(p.AppID), Promotion: event.PromotionID},
+			PaymentKey: event.OrderID, Kind: event.OrderType,
+		}
+	}
+	return result, nil
 }
 
 func normalizeEvent(p callback, name, eventType string, integration int64, received time.Time) delivery.Event {

@@ -14,6 +14,7 @@ import {
   timestamp,
 } from '../../utils/conversionStatus';
 import { ConversionStatusDot, CopyableText, InlineErrorBanner } from './ConversionShared';
+import { PaymentDecisionSummary } from './PaymentDecisionSummary';
 import { TargetResultsTable } from './TargetResultsTable';
 import type {
   AllowedDestinationTarget,
@@ -42,7 +43,7 @@ function PartnerReportCard({
 }) {
   const attempts = report.attempts ?? [];
   const reasonLabel = getReasonLabel(report.reason);
-  const isNoTraceBlocked = report.reason === 'no_trace_contract_unconfirmed';
+  const contractBlocked = ['no_trace_contract_unconfirmed', 'missing_promotion_contract_unconfirmed'].includes(report.reason ?? '');
 
   return (
     <div className="cms-card p-4 space-y-3">
@@ -83,12 +84,12 @@ function PartnerReportCard({
       {reasonLabel && (
         <div
           className={`p-2.5 rounded-lg text-xs flex items-center gap-2 ${
-            isNoTraceBlocked
+            contractBlocked
               ? 'border border-[color-mix(in_srgb,var(--cms-warning)_30%,transparent)] bg-[color-mix(in_srgb,var(--cms-warning)_10%,transparent)] text-[var(--cms-warning)]'
               : 'bg-[var(--cms-content)] text-[var(--cms-muted-fg)]'
           }`}
         >
-          {isNoTraceBlocked && <AlertTriangle size={14} aria-hidden="true" />}
+          {contractBlocked && <AlertTriangle size={14} aria-hidden="true" />}
           <span>
             {reasonLabel}
             {report.reason && reasonLabel !== report.reason ? ` (${report.reason})` : ''}
@@ -165,7 +166,7 @@ function AuditActionModal({
 }: {
   action: AuditAction | null;
   onClose: () => void;
-  onSuccess: (message: string) => Promise<void> | void;
+  onSuccess: (message: string, feedback?: 'status') => Promise<void> | void;
 }) {
   const formId = useId();
   const reasonErrorId = useId();
@@ -248,12 +249,23 @@ function AuditActionModal({
         });
         await onSuccess('已追加授权 Pixel 投递任务并记录审计日志');
       } else if (action.kind === 'retry') {
-        await apiRequest('POST', `/conversion/deliveries/${action.delivery.id}/retry`, {
-          reason: trimmedReason,
-          expected_attempts: action.delivery.attempts,
-          acknowledge_duplicate_risk: acknowledged,
-        });
-        await onSuccess(`已提交 Pixel ${action.delivery.pixel_id} 重排调度并记录审计日志`);
+        const result: { state?: string } = await apiRequest(
+          'POST',
+          `/conversion/deliveries/${action.delivery.id}/retry`,
+          {
+            reason: trimmedReason,
+            expected_attempts: action.delivery.attempts,
+            acknowledge_duplicate_risk: acknowledged,
+          },
+        );
+        const pixel = `Pixel ${action.delivery.pixel_id}`;
+        if (result.state === 'blocked') {
+          await onSuccess(`${pixel} 的付款事实仍待核查，投递继续暂停。`, 'status');
+        } else if (result.state === 'skipped') {
+          await onSuccess(`${pixel} 已按付款规则跳过。`, 'status');
+        } else {
+          await onSuccess(`已提交 ${pixel} 重排调度并记录审计日志`);
+        }
       } else {
         await apiRequest('POST', `/conversion/partner-reports/${action.report.id}/retry`, {
           reason: trimmedReason,
@@ -467,6 +479,10 @@ export function ConversionEventDrawer({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [auditAction, setAuditAction] = useState<AuditAction | null>(null);
+  const [retryStatus, setRetryStatus] = useState('');
+  useEffect(() => {
+    setRetryStatus('');
+  }, [eventId]);
 
   const [attemptsDeliveryId, setAttemptsDeliveryId] = useState('');
   const [attempts, setAttempts] = useState<ConversionDeliveryAttempt[]>([]);
@@ -619,6 +635,9 @@ export function ConversionEventDrawer({
           </button>
         }
       >
+        <div role="status">
+          {retryStatus && <p className="mt-0 mb-3 text-xs text-[var(--cms-muted-fg)]">{retryStatus}</p>}
+        </div>
         {loading && !active ? (
           <div className="space-y-4">
             <div className="skeleton-bar h-24 rounded-2xl" />
@@ -729,6 +748,8 @@ export function ConversionEventDrawer({
                   <div className="tabular-nums text-[var(--cms-fg)]">{timestamp(active.created_at)}</div>
                 </div>
               </div>
+
+              {active.payment_policy && <PaymentDecisionSummary decision={active.payment_policy} />}
 
               {/* Meta Pixel Deliveries */}
               <div className="space-y-2.5">
@@ -889,9 +910,12 @@ export function ConversionEventDrawer({
       <AuditActionModal
         action={auditAction}
         onClose={() => setAuditAction(null)}
-        onSuccess={async (msg) => {
+        onSuccess={async (msg, feedback) => {
           setAuditAction(null);
-          window.showToast?.(msg, 'success');
+          setRetryStatus(feedback === 'status' ? msg : '');
+          if (feedback !== 'status') {
+            window.showToast?.(msg, 'success');
+          }
           if (eventId) {
             await loadDetail(eventId);
           }

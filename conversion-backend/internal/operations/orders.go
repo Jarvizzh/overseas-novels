@@ -20,13 +20,14 @@ type Repository struct {
 type OrderKey struct {
 	ID            string
 	IntegrationID int64
+	AppID         string
 }
 
-func ParseOrderKey(id, integration string) (OrderKey, bool) {
+func ParseOrderKey(id, integration, app string) (OrderKey, bool) {
 	key := OrderKey{ID: id}
 	if integration == "" {
 		order, ok := positiveID(id)
-		if !ok {
+		if !ok || app != "" {
 			return OrderKey{}, false
 		}
 		key.ID = strconv.FormatInt(order, 10)
@@ -36,7 +37,12 @@ func ParseOrderKey(id, integration string) (OrderKey, bool) {
 	if !ok || !partner.ValidOrderID(id) {
 		return OrderKey{}, false
 	}
-	key.IntegrationID = n
+	if app != "" {
+		if _, ok := positiveID(app); !ok {
+			return OrderKey{}, false
+		}
+	}
+	key.IntegrationID, key.AppID = n, app
 	return key, true
 }
 
@@ -45,13 +51,23 @@ func positiveID(value string) (int64, bool) {
 	return n, err == nil && n > 0 && strconv.FormatInt(n, 10) == value
 }
 
+type orderAppAmbiguity struct {
+	Apps []string
+}
+
+func (e *orderAppAmbiguity) Error() string { return "order_app_ambiguous" }
+
 func (r Repository) Order(ctx context.Context, key OrderKey) (json.RawMessage, error) {
 	var result json.RawMessage
 	if key.IntegrationID == 0 {
 		err := r.Pool.QueryRow(ctx, readerOrderSQL, key.ID, r.Environment).Scan(&result)
 		return result, err
 	}
-	err := r.Pool.QueryRow(ctx, partnerOrderSQL, key.ID, r.Environment, key.IntegrationID).Scan(&result)
+	var apps []string
+	err := r.Pool.QueryRow(ctx, partnerOrderSQL, key.ID, r.Environment, key.IntegrationID, key.AppID).Scan(&result, &apps)
+	if err == nil && len(apps) > 1 {
+		return nil, &orderAppAmbiguity{Apps: apps}
+	}
 	return result, err
 }
 
@@ -82,7 +98,7 @@ const deliveryDetails = `
 	) outbound ON true
 `
 
-const readerOrderSQL = `
+var readerOrderSQL = `
 	WITH local_order AS (
 		SELECT id,status,order_type,subscription_id,fulfilled_at,capi_expectation,
 			COALESCE(reconciliation_note,'') <> '' AS review,
@@ -159,23 +175,31 @@ const readerOrderSQL = `
 			'reason',COALESCE(o.capi_expectation->>'reason',CASE WHEN EXISTS(SELECT 1 FROM legacy WHERE qualifies) THEN 'legacy_verified' END),'pixel_id',o.capi_expectation->>'pixel_id',
 			'occurred_at',o.capi_expectation->'occurred_at','time_source',o.capi_expectation->>'time_source',
 			'fulfilled_at',o.fulfilled_at)),
+		'payment_policy',` + orderPaymentPolicySQL("normalized") + `,
 		'events',(SELECT COALESCE(jsonb_agg(item ORDER BY key),'[]') FROM event_rows)))
 	FROM local_order o
 `
 
-const partnerOrderSQL = `
+var partnerOrderSQL = `
 	WITH account AS (
 		SELECT id,source FROM conversion.integrations WHERE id=$3 AND environment=$2 AND source<>'starnovel'
+	), apps AS (
+		SELECT COALESCE(e.payment_app_scope,e.partner_fields->>'app_id') AS app_id
+		FROM account i JOIN conversion.events e ON e.integration_id=i.id WHERE e.source_order_id=$1
+		UNION
+		SELECT o.source_app_id FROM account i JOIN conversion.inbox o ON o.integration_id=i.id WHERE o.source_order_id=$1
 	), source_events AS (
 		SELECT e.* FROM account i JOIN conversion.events e ON e.integration_id=i.id
-		WHERE e.source_order_id=$1 ORDER BY e.id DESC LIMIT 101
+		WHERE e.source_order_id=$1 AND ($4='' OR COALESCE(e.payment_app_scope,e.partner_fields->>'app_id')=$4)
+		ORDER BY e.id DESC LIMIT 101
 	), received AS (
-		SELECT o.id,o.source_event_id,o.source_event_type,o.received_at,o.state,o.reason
+		SELECT o.id,o.source_event_id,o.source_event_type,o.received_at,o.state,o.reason,o.source_app_id,o.normalized_event_id
 		FROM account i JOIN conversion.inbox o ON o.integration_id=i.id
-		WHERE o.source_order_id=$1 ORDER BY o.received_at DESC,o.id DESC LIMIT 101
+		WHERE o.source_order_id=$1 AND ($4='' OR o.source_app_id=$4)
+		ORDER BY o.received_at DESC,o.id DESC LIMIT 101
 	), event_rows AS (
 		SELECT e.id,jsonb_strip_nulls(jsonb_build_object(
-			'id',e.id::text,'business_key',e.source_event_id,'source_event_type',e.source_event_type,'event_name',e.event_name,
+			'id',e.id::text,'app_id',COALESCE(e.payment_app_scope,e.partner_fields->>'app_id'),'business_key',e.source_event_id,'source_event_type',e.source_event_type,'event_name',e.event_name,
 			'occurred_at',e.occurred_at,'enqueued_at',e.received_at,'attribution_state',e.attribution_state,'reason',e.reason,
 			'state',CASE WHEN outbound.confirmed THEN 'confirmed' WHEN outbound.has_original THEN 'delivery_created' ELSE 'missing_target' END,
 			'deliveries',outbound.items,'deliveries_truncated',outbound.truncated,
@@ -191,10 +215,14 @@ const partnerOrderSQL = `
 	SELECT jsonb_build_object('order_id',$1,'source',a.source,'environment',$2,'integration_id',a.id::text,
 		'inbox',(SELECT COALESCE(jsonb_agg(jsonb_strip_nulls(jsonb_build_object('id',id::text,
 			'source_event_id',source_event_id,'source_event_type',source_event_type,'received_at',received_at,
+			'app_id',source_app_id,'normalized_event_id',normalized_event_id::text,
 			'state',state,'reason',reason)) ORDER BY received_at DESC,id DESC),'[]')
 			FROM (SELECT * FROM received ORDER BY received_at DESC,id DESC LIMIT 100) recent),
 		'inbox_truncated',(SELECT count(*)>100 FROM received),
 		'events',(SELECT COALESCE(jsonb_agg(item ORDER BY id DESC),'[]') FROM event_rows),
-		'events_truncated',(SELECT count(*)>100 FROM source_events))
+		'events_truncated',(SELECT count(*)>100 FROM source_events),
+		'payment_policy',` + orderPaymentPolicySQL("source_events") + `),
+		CASE WHEN $4='' THEN (SELECT array_agg(app_id ORDER BY app_id)
+			FROM (SELECT app_id FROM apps WHERE app_id<>'' ORDER BY app_id LIMIT 100) matching) END
 	FROM account a WHERE EXISTS(SELECT 1 FROM received) OR EXISTS(SELECT 1 FROM source_events)
 `

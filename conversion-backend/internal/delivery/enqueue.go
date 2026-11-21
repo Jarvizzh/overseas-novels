@@ -28,6 +28,14 @@ type Event struct {
 	SourceURL        *string
 	MatchingData     json.RawMessage
 	PartnerFields    json.RawMessage
+
+	readerPayment            *readerPayment
+	paymentApp               string
+	policyState              string
+	policyDecisionID         *int64
+	recoveredRenewal         bool
+	awaitingSubscriptionKind bool
+	failureReason            string
 }
 
 type Target struct {
@@ -89,6 +97,8 @@ func (s Service) EnqueueTx(ctx context.Context, tx pgx.Tx, event Event, targets 
 		seen[target.DestinationID] = struct{}{}
 		state, reason := "pending", ""
 		switch {
+		case event.failureReason != "":
+			state, reason = "failed", event.failureReason
 		case target.SkipReason != "":
 			state, reason = "skipped", target.SkipReason
 		case event.OccurredAt == nil:
@@ -118,13 +128,16 @@ func insertEventTx(ctx context.Context, tx pgx.Tx, environment string, event Eve
 		INSERT INTO conversion.events
 			(integration_id, environment, source_event_type, source_event_id, event_name, source_order_id,
 			 promotion_id, attribution_state, reason, occurred_at, received_at, amount, currency,
-			 action_source, source_url, matching_data, partner_fields, order_type, time_source)
+			 action_source, source_url, matching_data, partner_fields, order_type, time_source,
+			 payment_app_scope, payment_policy_state, payment_policy_decision_id)
 		VALUES ($1,$2,$3,$4,$5,NULLIF($6,''),NULLIF($7,''),$8,NULLIF($9,''),$10,$11,$12::text::numeric,
-		        $13,$14,$15,COALESCE($16,'{}'::jsonb),$17,NULLIF($18,''),NULLIF($19,''))
+		        $13,$14,$15,COALESCE($16,'{}'::jsonb),$17,NULLIF($18,''),NULLIF($19,''),
+		        NULLIF($20,''),COALESCE(NULLIF($21,''),'historical'),$22)
 		ON CONFLICT (integration_id, source_event_type, source_event_id) DO NOTHING
 		RETURNING id, created_at`, event.IntegrationID, environment, event.SourceType, event.SourceID, event.Name,
 		event.OrderID, event.PromotionID, event.AttributionState, event.Reason, event.OccurredAt, event.ReceivedAt,
-		event.Amount, event.Currency, event.ActionSource, event.SourceURL, event.MatchingData, event.PartnerFields, event.OrderType, event.TimeSource).
+		event.Amount, event.Currency, event.ActionSource, event.SourceURL, event.MatchingData, event.PartnerFields, event.OrderType, event.TimeSource,
+		event.paymentApp, event.policyState, event.policyDecisionID).
 		Scan(&id, &createdAt)
 	return id, createdAt, err
 }

@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"time"
 
+	"conversion-backend/internal/paymentpolicy"
+
 	"github.com/jackc/pgx/v5"
 )
 
@@ -96,11 +98,23 @@ func (s Service) repairTx(ctx context.Context, tx pgx.Tx, actor Operator, input 
 	if !qualified {
 		return OperationResult{}, ErrOperationConflict
 	}
+	var integrationID int64
+	err := tx.QueryRow(ctx, `SELECT id FROM conversion.integrations
+		WHERE environment=$1 AND source='starnovel' AND account_key='reader'`, s.Environment).Scan(&integrationID)
+	if err != nil {
+		return OperationResult{}, err
+	}
+	if input.Apply {
+		scope := paymentpolicy.Scope{Environment: s.Environment, IntegrationID: integrationID, App: paymentpolicy.ReaderApp}
+		if err := lockPaymentTx(ctx, tx, scope, orderID); err != nil {
+			return OperationResult{}, err
+		}
+	}
 	fact, err := readRepairFact(ctx, tx, input, s.Environment, key, expected.Pixel, *expected.OccurredAt)
 	if err != nil {
 		return OperationResult{}, err
 	}
-	return s.restoreRepairFact(ctx, tx, actor, input, fact, orderID)
+	return s.restoreRepairFact(ctx, tx, actor, input, fact, orderID, integrationID)
 }
 
 func readRepairFact(ctx context.Context, tx pgx.Tx, input RepairRequest, environment, key, pixel string, happened time.Time) (repairFacts, error) {
@@ -119,17 +133,11 @@ func readRepairFact(ctx context.Context, tx pgx.Tx, input RepairRequest, environ
 	return fact, err
 }
 
-func (s Service) restoreRepairFact(ctx context.Context, tx pgx.Tx, actor Operator, input RepairRequest, fact repairFacts, orderID string) (OperationResult, error) {
-	var integrationID int64
-	err := tx.QueryRow(ctx, `SELECT id FROM conversion.integrations
-		WHERE environment=$1 AND source='starnovel' AND account_key='reader'`, s.Environment).Scan(&integrationID)
-	if err != nil {
-		return OperationResult{}, err
-	}
+func (s Service) restoreRepairFact(ctx context.Context, tx pgx.Tx, actor Operator, input RepairRequest, fact repairFacts, orderID string, integrationID int64) (OperationResult, error) {
 	var eventID, originalID *int64
 	var originalPixel *string
 	var queued, consumed, legacy bool
-	err = tx.QueryRow(ctx, `
+	err := tx.QueryRow(ctx, `
 		SELECT e.id,d.id,x.pixel_id,
 		       q.business_key IS NOT NULL,q.consumed_at IS NOT NULL,
 		       EXISTS(SELECT 1 FROM conversion.legacy_outbox_imports WHERE legacy_event_id=$2)
@@ -170,17 +178,33 @@ func (s Service) restoreRepairFact(ctx context.Context, tx pgx.Tx, actor Operato
 	if err != nil {
 		return OperationResult{}, err
 	}
-	if ValidatePayload(Payload{EventName: event.Name, OccurredAt: event.OccurredAt, ActionSource: event.ActionSource,
-		SourceURL: event.SourceURL, MatchingData: event.MatchingData, Amount: event.Amount, Currency: event.Currency}) != nil {
+	if event.failureReason != "" {
 		return OperationResult{}, ErrOperationConflict
 	}
-	var target int64
-	targetQuery := `SELECT x.id FROM conversion.integration_destinations r JOIN conversion.destinations x ON x.id=r.destination_id
-		WHERE r.integration_id=$1 AND x.pixel_id=$2`
-	if input.Apply {
-		targetQuery += " FOR SHARE OF r,x"
+	if event.readerPayment != nil {
+		event.readerPayment.facts.Environment = s.Environment
 	}
-	err = tx.QueryRow(ctx, targetQuery, integrationID, fact.pixel).Scan(&target)
+	if !input.Apply && event.readerPayment != nil {
+		if _, _, err := prepareReaderPaymentTx(ctx, tx, &event); err != nil {
+			return OperationResult{}, err
+		}
+	}
+	if !input.Apply || event.readerPayment == nil {
+		if err := validatePaymentEvent(event); err != nil && !errors.Is(err, paymentpolicy.ErrFactMissing) {
+			return OperationResult{}, ErrOperationConflict
+		}
+	}
+	var target int64
+	if event.readerPayment != nil {
+		target, err = readerAuthorizedOriginalTx(ctx, tx, s.Environment, integrationID, fact.pixel, input.Apply)
+	} else {
+		targetQuery := `SELECT x.id FROM conversion.integration_destinations r JOIN conversion.destinations x ON x.id=r.destination_id
+			WHERE r.integration_id=$1 AND x.pixel_id=$2`
+		if input.Apply {
+			targetQuery += " FOR SHARE OF r,x"
+		}
+		err = tx.QueryRow(ctx, targetQuery, integrationID, fact.pixel).Scan(&target)
+	}
 	if errors.Is(err, pgx.ErrNoRows) {
 		return OperationResult{}, ErrOperationConflict
 	}
@@ -194,6 +218,25 @@ func (s Service) restoreRepairFact(ctx context.Context, tx pgx.Tx, actor Operato
 	if !input.Apply {
 		return out, nil
 	}
+	state, targetReason := "pending", ""
+	if event.readerPayment != nil {
+		decision, err := assessReaderPaymentTx(ctx, tx, &event, target)
+		if err != nil {
+			return OperationResult{}, err
+		}
+		if event.failureReason != "" || (event.policyState == paymentHistorical && validatePaymentEvent(event) != nil) {
+			return OperationResult{}, ErrOperationConflict
+		}
+		if err := applyPaymentPolicyTx(ctx, tx, event, event.readerPayment.facts, decision, false); err != nil {
+			return OperationResult{}, err
+		}
+		switch {
+		case decision != nil && decision.Outcome == paymentpolicy.Skipped:
+			state, targetReason = "skipped", decision.Reason
+		case event.policyState == paymentPending:
+			state, targetReason = "blocked", event.Reason
+		}
+	}
 	if eventID == nil {
 		_, err = tx.Exec(ctx, `
 			INSERT INTO reader_conversion_outbox(business_key,event_name,order_id,environment,occurred_at,created_at,snapshot)
@@ -201,13 +244,13 @@ func (s Service) restoreRepairFact(ctx context.Context, tx pgx.Tx, actor Operato
 	} else {
 		var id int64
 		id, err = insertTargetTx(ctx, tx, *eventID, s.Environment, Target{DestinationID: target, MetaEventID: "starnovel:" + fact.key,
-			Original: true, ExistingBinding: true}, deadline, "pending", "")
+			Original: true, ExistingBinding: true}, deadline, state, targetReason)
 		out.ID = strconv.FormatInt(id, 10)
 	}
 	if err != nil {
 		return OperationResult{}, err
 	}
 	err = s.audit(ctx, tx, actor, out.Action, fact.key, input.Reason, input.Evidence, map[string]any{"missing": true},
-		map[string]any{"id": out.ID, "order_id": orderID, "pixel_id": fact.pixel})
+		map[string]any{"id": out.ID, "order_id": orderID, "pixel_id": fact.pixel, "state": state, "reason": targetReason})
 	return out, err
 }

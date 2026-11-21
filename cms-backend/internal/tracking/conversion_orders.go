@@ -55,6 +55,13 @@ func RegisterConversionOrders(rg *gin.RouterGroup, admins adminLookup, rawURL, t
 		{http.MethodGet, "/conversion/integrations", func(*gin.Context) []string { return []string{"integrations"} }},
 		{http.MethodPost, "/conversion/integrations", func(*gin.Context) []string { return []string{"integrations"} }},
 		{http.MethodPatch, "/conversion/integrations/:id", func(c *gin.Context) []string { return []string{"integrations", c.Param("id")} }},
+		{http.MethodGet, "/conversion/integrations/:id/payment-policy", func(c *gin.Context) []string { return []string{"integrations", c.Param("id"), "payment-policy"} }},
+		{http.MethodPost, "/conversion/integrations/:id/payment-policy/preview", func(c *gin.Context) []string {
+			return []string{"integrations", c.Param("id"), "payment-policy", "preview"}
+		}},
+		{http.MethodPost, "/conversion/integrations/:id/payment-policy/publish", func(c *gin.Context) []string {
+			return []string{"integrations", c.Param("id"), "payment-policy", "publish"}
+		}},
 		{http.MethodGet, "/conversion/destinations", func(*gin.Context) []string { return []string{"destinations"} }},
 		{http.MethodPost, "/conversion/destinations", func(*gin.Context) []string { return []string{"destinations"} }},
 		{http.MethodPatch, "/conversion/destinations/:id", func(c *gin.Context) []string { return []string{"destinations", c.Param("id")} }},
@@ -74,10 +81,14 @@ func RegisterConversionOrders(rg *gin.RouterGroup, admins adminLookup, rawURL, t
 			}
 			var input []byte
 			if route.method != http.MethodGet {
+				limit, code, message := int64(8<<10), "invalid_operation", "操作请求格式错误"
+				if len(path) == 4 && path[0] == "integrations" && path[2] == "payment-policy" {
+					limit, code, message = 64<<10, "invalid_payment_policy_request", "回传规则请求格式无效或超出大小限制"
+				}
 				var err error
-				input, err = io.ReadAll(http.MaxBytesReader(c.Writer, c.Request.Body, 8<<10))
+				input, err = io.ReadAll(http.MaxBytesReader(c.Writer, c.Request.Body, limit))
 				if err != nil {
-					c.JSON(http.StatusBadRequest, gin.H{"code": "invalid_operation", "error": "操作请求格式错误"})
+					c.JSON(http.StatusBadRequest, gin.H{"code": code, "error": message})
 					return
 				}
 			}
@@ -155,23 +166,35 @@ func (c *conversionOrderClient) request(ctx context.Context, admin *auth.Admin, 
 }
 
 type conversionErrorEntry struct {
-	Code  string `json:"code"`
-	Error string `json:"error"`
+	Code   string   `json:"code"`
+	Error  string   `json:"error"`
+	Field  string   `json:"field,omitempty"`
+	AppIDs []string `json:"app_ids,omitempty"`
 }
 
 var conversionUpstreamErrorCatalog = map[int]map[string]string{
 	http.StatusBadRequest: {
-		"invalid_time":           "时间范围格式错误，或开始时间晚于结束时间",
-		"invalid_cursor":         "分页游标无效，请返回首页重新查询",
-		"invalid_limit":          "每页条数超出允许范围",
-		"invalid_id":             "编号参数格式错误，须为正整数",
-		"invalid_event_id":       "编号参数格式错误，须为正整数",
-		"invalid_delivery_id":    "编号参数格式错误，须为正整数",
-		"invalid_attempt_cursor": "编号参数格式错误，须为正整数",
-		"invalid_filter":         "筛选参数格式错误",
-		"invalid_order_key":      "订单号或接入 ID 格式错误",
-		"invalid_summary_filter": "统计筛选参数无效（小时数须在 1 至 168 之间）",
-		"invalid_operation":      "操作参数无效，请核对必填字段与原因长度（1-500 字）",
+		"invalid_time":                             "时间范围格式错误，或开始时间晚于结束时间",
+		"invalid_cursor":                           "分页游标无效，请返回首页重新查询",
+		"invalid_limit":                            "每页条数超出允许范围",
+		"invalid_id":                               "编号参数格式错误，须为正整数",
+		"invalid_event_id":                         "编号参数格式错误，须为正整数",
+		"invalid_delivery_id":                      "编号参数格式错误，须为正整数",
+		"invalid_attempt_cursor":                   "编号参数格式错误，须为正整数",
+		"invalid_filter":                           "筛选参数格式错误",
+		"invalid_order_key":                        "订单号或接入 ID 格式错误",
+		"invalid_summary_filter":                   "统计筛选参数无效（小时数须在 1 至 168 之间）",
+		"invalid_payment_policy_request":           "回传规则请求格式无效，请核对配置后重试",
+		"invalid_payment_policy":                   "回传规则配置无效",
+		"invalid_payment_policy_operation":         "请核对区间操作和回传参数",
+		"invalid_payment_policy_bands":             "金额区间重叠或数量超限",
+		"invalid_payment_policy_app":               "请选择当前接入授权的应用",
+		"invalid_payment_policy_promotion":         "推广链接编号无效或链接不存在",
+		"payment_policy_source_unsupported":        "此接入来源暂不支持付款回传规则",
+		"payment_policy_first_requires_promotion":  "仅推广链接专属规则可配置首单",
+		"payment_policy_first_coverage_unverified": "该链接的历史付款覆盖尚未核实",
+		"payment_policy_first_source_unsupported":  "该来源暂不支持首单规则",
+		"invalid_operation":                        "操作参数无效，请核对必填字段与原因长度（1-500 字）",
 	},
 	http.StatusForbidden: {
 		"operator_forbidden": "当前账号无权执行此操作",
@@ -181,7 +204,9 @@ var conversionUpstreamErrorCatalog = map[int]map[string]string{
 		"resource_not_found": "未找到指定的事件、投递或目标记录",
 	},
 	http.StatusConflict: {
-		"state_conflict": "记录状态已变化，或存在重复 Pixel/接入账户与推广链绑定冲突，请刷新后核对",
+		"payment_policy_version_conflict": "规则版本已变化，请核对最新配置后重试",
+		"order_app_ambiguous":             "多个应用存在该订单号，请选择应用后查询",
+		"state_conflict":                  "记录状态已变化，或存在重复 Pixel/接入账户与推广链绑定冲突，请刷新后核对",
 	},
 }
 
@@ -196,11 +221,13 @@ func mapConversionUpstreamError(status int, body io.Reader) []byte {
 	const maxErrorBody = 4 << 10
 	raw, _ := io.ReadAll(io.LimitReader(body, maxErrorBody))
 	var parsed struct {
-		Code string `json:"code"`
+		Code   string   `json:"code"`
+		Field  string   `json:"field"`
+		AppIDs []string `json:"app_ids"`
 	}
 	if len(raw) > 0 && json.Unmarshal(raw, &parsed) == nil {
 		if msg, ok := conversionUpstreamErrorCatalog[status][parsed.Code]; ok {
-			encoded, err := json.Marshal(conversionErrorEntry{Code: parsed.Code, Error: msg})
+			encoded, err := json.Marshal(conversionErrorEntry{Code: parsed.Code, Error: msg, Field: parsed.Field, AppIDs: parsed.AppIDs})
 			if err == nil {
 				return encoded
 			}

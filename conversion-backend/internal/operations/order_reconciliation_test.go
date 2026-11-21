@@ -47,6 +47,16 @@ func TestOrderReconciliation(t *testing.T) {
 		) INSERT INTO conversion.legacy_outbox_imports(legacy_event_id,event_id,legacy_state,legacy_attempts,
 		    legacy_delivered_at,resolution,legacy_next_attempt_at,legacy_had_lease)
 		  SELECT 'payment:100:Purchase',id,'delivered',1,now(),'succeeded_without_target',now(),false FROM e;`)
+	mustExec(t, ctx, pool, `
+		INSERT INTO conversion.events(integration_id,environment,source_event_type,source_event_id,event_name,source_order_id,
+			attribution_state,received_at,partner_fields)
+		VALUES(1,'test','recharge-paid','app-1-payment','Purchase','shared-order','matched',now(),'{"app_id":"1"}'),
+		      (1,'test','recharge-paid','app-2-payment','Purchase','shared-order','matched',now(),'{"app_id":"2"}');
+		INSERT INTO conversion.inbox(integration_id,source_event_type,source_event_id,source_order_id,source_app_id,
+			state,reason,payload_digest,normalized_event_id)
+		SELECT 1,'recharge-paid','app-1-alias','shared-order','1','consumed','duplicate_payment_event','fixture',id
+		FROM conversion.events WHERE source_event_id='app-1-payment';
+	`)
 	handler := NewHandler(Repository{Pool: pool, Environment: "test"}, "service-fixture")
 	for _, tt := range []struct {
 		path, token, role string
@@ -64,6 +74,10 @@ func TestOrderReconciliation(t *testing.T) {
 		{"/100", "service-fixture", "Finance", 200, "confirmed"},
 		{"/external-1?integration_id=1", "service-fixture", "Finance", 200, "quarantined"},
 		{"/external-1?integration_id=2", "service-fixture", "Finance", 404, "order_not_found"},
+		{"/shared-order?integration_id=1", "service-fixture", "Finance", 409, `"app_ids":["1","2"]`},
+		{"/shared-order?integration_id=1&app_id=1", "service-fixture", "Finance", 200, "duplicate_payment_event"},
+		{"/shared-order?integration_id=1&app_id=2", "service-fixture", "Finance", 200, "app-2-payment"},
+		{"/shared-order?integration_id=1&app_id=3", "service-fixture", "Finance", 404, "order_not_found"},
 	} {
 		t.Run(tt.path+"/"+tt.role+"/"+tt.want, func(t *testing.T) {
 			req := httptest.NewRequest(http.MethodGet, "/internal/conversion/orders"+tt.path, nil)
@@ -77,6 +91,10 @@ func TestOrderReconciliation(t *testing.T) {
 			}
 			if strings.Contains(response.Body.String(), "secret-fixture") {
 				t.Fatal("private source data leaked into reconciliation")
+			}
+			if strings.HasSuffix(tt.path, "app_id=1") &&
+				(strings.Contains(response.Body.String(), "app-2-payment") || !strings.Contains(response.Body.String(), "normalized_event_id")) {
+				t.Fatalf("unexpected scoped evidence: %s", response.Body.String())
 			}
 		})
 	}
@@ -113,7 +131,7 @@ func operationsTestPool(t *testing.T) (context.Context, *pgxpool.Pool) {
 	t.Cleanup(pool.Close)
 	for _, asset := range []string{"schema.sql", "migrations/2026111702.sql", "migrations/2026111703.sql",
 		"migrations/2026111704.sql", "migrations/2026111901.sql", "migrations/2026111902.sql", "migrations/2026111903.sql",
-		"migrations/2026111904.sql", "migrations/2026111905.sql", "migrations/2026111906.sql", "migrations/2026111907.sql", "migrations/2026111908.sql", "migrations/2026111909.sql"} {
+		"migrations/2026111904.sql", "migrations/2026111905.sql", "migrations/2026111906.sql", "migrations/2026111907.sql", "migrations/2026111908.sql", "migrations/2026111909.sql", "migrations/2026111910.sql", "migrations/2026111911.sql", "migrations/2026111912.sql", "migrations/2026111913.sql", "migrations/2026111914.sql", "migrations/2026111915.sql"} {
 		sql, err := os.ReadFile("../../../cms-backend/db/" + asset)
 		if err != nil {
 			t.Fatal(err)

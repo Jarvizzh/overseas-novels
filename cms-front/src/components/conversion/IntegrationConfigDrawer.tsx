@@ -1,4 +1,4 @@
-import { type FormEvent, type KeyboardEvent, useEffect, useId, useMemo, useRef, useState } from 'react';
+import { type FormEvent, type KeyboardEvent, lazy, Suspense, useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { AlertTriangle, Check, Plus, Radio, Search, ShieldCheck, ShieldOff } from 'lucide-react';
 import { ApiError, apiRequest } from '../../utils/api';
 import {
@@ -11,9 +11,13 @@ import CustomSelect from '../CustomSelect';
 import { CmsDialog } from '../ui/CmsDialog';
 import { ConfigurationAuditSection } from './ConfigurationAuditSection';
 import { ConversionStatusDot, InlineErrorBanner } from './ConversionShared';
+import { discardPaymentDraft } from './paymentPolicy';
+import type { PaymentPolicyView } from './paymentPolicy';
 import type { ConversionDestination, ConversionIntegration } from './types';
 
-export type IntegrationDrawerTab = 'config' | 'audit';
+const PaymentPolicyPanel = lazy(() => import('./PaymentPolicyPanel').then(({ PaymentPolicyPanel }) => ({ default: PaymentPolicyPanel })));
+
+export type IntegrationDrawerTab = 'config' | 'policy' | 'audit';
 type RouteMode = 'none' | 'authorized' | 'additional';
 
 const SOURCE_CREATE_OPTIONS = [
@@ -76,6 +80,8 @@ export function IntegrationConfigDrawer({
   canWrite,
   onClose,
   onSuccess,
+  initialPolicyPromotion,
+  onPolicyPublished,
 }: {
   open: boolean;
   editingIntegration: ConversionIntegration | null;
@@ -84,6 +90,8 @@ export function IntegrationConfigDrawer({
   canWrite: boolean;
   onClose: () => void;
   onSuccess: (message: string) => Promise<void> | void;
+  initialPolicyPromotion?: string;
+  onPolicyPublished?: (view: PaymentPolicyView) => void;
 }) {
   const formId = useId();
   const accountErrId = useId();
@@ -93,6 +101,15 @@ export function IntegrationConfigDrawer({
   const reasonErrId = useId();
 
   const [drawerTab, setDrawerTab] = useState<IntegrationDrawerTab>(initialTab);
+  const [policyFooter, setPolicyFooter] = useState<HTMLDivElement | null>(null);
+  const [policyDirty, setPolicyDirty] = useState(false);
+  const [policyBusy, setPolicyBusy] = useState(false);
+  const [auditRefresh, setAuditRefresh] = useState(0);
+  const onPolicyState = useCallback((dirty: boolean, busy: boolean) => {
+    setPolicyDirty(dirty);
+    setPolicyBusy(busy);
+  }, []);
+
   const [source, setSource] = useState('sinan');
   const [accountKey, setAccountKey] = useState('');
   const [contractVersion, setContractVersion] = useState('sinan-v1');
@@ -399,31 +416,43 @@ export function IntegrationConfigDrawer({
     }
   };
 
-  const handleTabKeyDown = (e: React.KeyboardEvent, current: IntegrationDrawerTab) => {
-    if (!editingIntegration) return;
-    if (e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.key === 'Home' || e.key === 'End') {
-      e.preventDefault();
-      const next: IntegrationDrawerTab =
-        e.key === 'Home'
-          ? 'config'
-          : e.key === 'End'
-            ? 'audit'
-            : current === 'config'
-              ? 'audit'
-              : 'config';
+  const showPolicy = editingIntegration && ['starnovel', 'sinan'].includes(editingIntegration.source);
+  const tabs: { id: IntegrationDrawerTab; label: string }[] = [
+    ...(!initialPolicyPromotion ? [{ id: 'config' as const, label: '接入与路由矩阵' }] : []),
+    ...(showPolicy ? [{ id: 'policy' as const, label: '回传规则' }] : []),
+    { id: 'audit', label: '变更审计记录' },
+  ];
+  const isBusy = submitting || policyBusy;
+  const requestClose = () => {
+    if (isBusy) return;
+    if (policyDirty) discardPaymentDraft(onClose);
+    else onClose();
+  };
+  const moveTab = (next: IntegrationDrawerTab, focus = false) => {
+    if (isBusy || next === drawerTab) return;
+    const select = () => {
       setDrawerTab(next);
-      tabRefs.current[next]?.focus();
-    }
+      if (focus) requestAnimationFrame(() => tabRefs.current[next]?.focus());
+    };
+    if (policyDirty) discardPaymentDraft(select);
+    else select();
+  };
+  const handleTabKeyDown = (e: React.KeyboardEvent, current: IntegrationDrawerTab) => {
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) return;
+    e.preventDefault();
+    const i = tabs.findIndex((tab) => tab.id === current);
+    const next = e.key === 'Home' ? 0 : e.key === 'End' ? tabs.length - 1
+      : (i + (e.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length;
+    moveTab(tabs[next].id, true);
   };
 
   return (
     <CmsDialog
       open={open}
-      onClose={() => {
-        if (!submitting) onClose();
-      }}
-      closedBy={submitting ? 'none' : 'any'}
-      closeDisabled={submitting}
+      onClose={requestClose}
+      closedBy={isBusy ? 'none' : policyDirty ? 'closerequest' : 'any'}
+      closeDisabled={isBusy}
+      interceptCancel={policyDirty}
       variant="drawer"
       size="xl"
       title={
@@ -437,9 +466,11 @@ export function IntegrationConfigDrawer({
           : '定义来源账户、事件白名单及可路由的 Meta Pixel 授权矩阵'
       }
       footer={
-        drawerTab === 'config' && canWrite ? (
+        drawerTab === 'policy' ? (
+          <div ref={setPolicyFooter} className="flex flex-wrap justify-end items-center gap-2" />
+        ) : drawerTab === 'config' && canWrite ? (
           <>
-            <button type="button" onClick={onClose} disabled={submitting} className="btn-secondary">
+            <button type="button" onClick={requestClose} disabled={isBusy} className="btn-secondary">
               取消
             </button>
             <button type="submit" form={formId} disabled={submitting} className="btn-primary">
@@ -453,7 +484,7 @@ export function IntegrationConfigDrawer({
             </button>
           </>
         ) : (
-          <button type="button" onClick={onClose} disabled={submitting} className="btn-secondary">
+          <button type="button" onClick={requestClose} disabled={isBusy} className="btn-secondary">
             关闭
           </button>
         )
@@ -462,43 +493,21 @@ export function IntegrationConfigDrawer({
       <div className="space-y-4">
         {editingIntegration && (
           <div className="border-b border-[var(--cms-border)] flex items-center justify-between gap-3">
-            <div role="tablist" aria-label="接入详情分区" className="flex items-center gap-6">
-              <button
-                ref={(el) => {
-                  tabRefs.current.config = el;
-                }}
-                type="button"
-                role="tab"
-                id={`${formId}-tab-config`}
-                aria-selected={drawerTab === 'config'}
-                onKeyDown={(e) => handleTabKeyDown(e, 'config')}
-                onClick={() => setDrawerTab('config')}
-                className={`focus-ring pb-2.5 text-xs font-medium whitespace-nowrap cursor-pointer transition-colors ${
-                  drawerTab === 'config'
-                    ? 'text-[var(--cms-fg)]'
-                    : 'text-[var(--cms-muted-fg)] hover:text-[var(--cms-fg)]'
-                }`}
-              >
-                接入与路由矩阵
-              </button>
-              <button
-                ref={(el) => {
-                  tabRefs.current.audit = el;
-                }}
-                type="button"
-                role="tab"
-                id={`${formId}-tab-audit`}
-                aria-selected={drawerTab === 'audit'}
-                onKeyDown={(e) => handleTabKeyDown(e, 'audit')}
-                onClick={() => setDrawerTab('audit')}
-                className={`focus-ring pb-2.5 text-xs font-medium whitespace-nowrap cursor-pointer transition-colors ${
-                  drawerTab === 'audit'
-                    ? 'text-[var(--cms-fg)]'
-                    : 'text-[var(--cms-muted-fg)] hover:text-[var(--cms-fg)]'
-                }`}
-              >
-                变更审计记录
-              </button>
+            <div role="tablist" aria-label="接入详情分区" className="flex flex-wrap items-center gap-x-5 gap-y-1">
+              {tabs.map(({ id, label }) => (
+                <button key={id} type="button" role="tab" id={`${formId}-tab-${id}`}
+                  ref={(el) => { tabRefs.current[id] = el; }}
+                  aria-selected={drawerTab === id}
+                  aria-controls={`${formId}-panel-${id}`}
+                  tabIndex={drawerTab === id ? 0 : -1}
+                  onKeyDown={(e) => handleTabKeyDown(e, id)}
+                  onClick={() => moveTab(id)}
+                  className={`focus-ring pb-2.5 text-xs font-medium whitespace-nowrap cursor-pointer transition-colors ${drawerTab === id
+                    ? 'text-[var(--cms-fg)] border-b-2 border-[var(--cms-primary)]'
+                    : 'text-[var(--cms-muted-fg)] hover:text-[var(--cms-fg)]'}`}>
+                  {label}
+                </button>
+              ))}
             </div>
 
             <div className="pb-2 text-xs">
@@ -998,6 +1007,26 @@ export function IntegrationConfigDrawer({
           </div>
         )}
 
+        {editingIntegration && drawerTab === 'policy' && (
+          <div role="tabpanel" id={`${formId}-panel-policy`} aria-labelledby={`${formId}-tab-policy`}>
+            <Suspense fallback={<div className="skeleton-bar h-32 rounded-xl" role="status" aria-label="正在加载回传规则" />}>
+            <PaymentPolicyPanel
+              key={`${editingIntegration.id}:${initialPolicyPromotion ?? ''}`}
+              integration={editingIntegration}
+              canWrite={canWrite}
+              initialPromotion={initialPolicyPromotion}
+              footer={policyFooter}
+              onClose={requestClose}
+              onState={onPolicyState}
+              onPublished={(view) => {
+                setAuditRefresh((count) => count + 1);
+                onPolicyPublished?.(view);
+              }}
+            />
+            </Suspense>
+          </div>
+        )}
+
         {editingIntegration && drawerTab === 'audit' && (
           <div
             role="tabpanel"
@@ -1007,6 +1036,7 @@ export function IntegrationConfigDrawer({
             <ConfigurationAuditSection
               subjectType="integration"
               subjectId={editingIntegration.id}
+              refreshKey={auditRefresh}
               destinationById={destinationById}
             />
           </div>

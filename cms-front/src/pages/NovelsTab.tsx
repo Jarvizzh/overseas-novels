@@ -16,6 +16,9 @@ import { canWritePromotions, getCurrentAdminRole, validateAndBuildPromotionPaylo
 import { FALLBACK_COVER } from '../components/operations/operationsUtils';
 import { DEFAULT_CHAPTER_DELIMITER_REGEX } from '../components/novels/ChapterUploadFields';
 import { MAX_GENRES_LENGTH, NovelFormModal, type NovelFormData } from '../components/novels/NovelFormModal';
+import { IntegrationConfigDrawer } from '../components/conversion/IntegrationConfigDrawer';
+import { defaultPolicySummary, type PaymentPolicyView, policyEndpoint, policyVersion } from '../components/conversion/paymentPolicy';
+import type { ConversionIntegration } from '../components/conversion/types';
 import { PromotionLinkModal } from '../components/novels/PromotionLinkModal';
 import { CmsDialog } from '../components/ui/CmsDialog';
 import { Pagination } from '../components/ui/Pagination';
@@ -289,6 +292,33 @@ export default function NovelsTab() {
     startPayChapterIndex: '',
   });
   const [generatedLink, setGeneratedLink] = useState('');
+  const [promoIntegration, setPromoIntegration] = useState<ConversionIntegration | null>(null);
+  const [promoDefaultPolicy, setPromoDefaultPolicy] = useState<PaymentPolicyView | null>(null);
+  const [promoLinkPolicy, setPromoLinkPolicy] = useState<PaymentPolicyView | null>(null);
+  const [promoLinkId, setPromoLinkId] = useState('');
+  const [promoRuleChoice, setPromoRuleChoice] = useState<'inherit' | 'own'>('inherit');
+  const [isPromoRuleOpen, setIsPromoRuleOpen] = useState(false);
+  const promoWriteRef = useRef(false);
+
+  useEffect(() => {
+    if (!isPromoModalOpen || !['Admin', 'SuperAdmin', 'MediaBuyer', 'Finance'].includes(currentAdminRole)) return;
+    const controller = new AbortController();
+    setPromoIntegration(null);
+    setPromoDefaultPolicy(null);
+    void (async () => {
+      try {
+        const items: ConversionIntegration[] = await apiRequest('GET', '/conversion/integrations', undefined, false, controller.signal);
+        const reader = items.find((item) => item.source === 'starnovel' && item.account_key === 'reader');
+        if (!reader || controller.signal.aborted) return;
+        setPromoIntegration(reader);
+        const defaults: PaymentPolicyView = await apiRequest('GET', policyEndpoint(reader.id, 'reader'), undefined, false, controller.signal);
+        if (!controller.signal.aborted) setPromoDefaultPolicy(defaults);
+      } catch {
+        // Link creation can use the existing default even if the summary is unavailable.
+      }
+    })();
+    return () => controller.abort();
+  }, [isPromoModalOpen, currentAdminRole]);
 
   // Global pricing / chapter settings
   const [globalCoinCost, setGlobalCoinCost] = useState(500);
@@ -1015,11 +1045,15 @@ export default function NovelsTab() {
       startPayChapterIndex: '',
     });
     setGeneratedLink('');
+    setPromoLinkId('');
+    setPromoLinkPolicy(null);
+    setPromoRuleChoice('inherit');
+    setIsPromoRuleOpen(false);
     setIsPromoModalOpen(true);
   };
 
   const handleGeneratePromotionLink = async () => {
-    if (!canCreatePromo || promoSubmitting) return;
+    if (!canCreatePromo || promoWriteRef.current || generatedLink) return;
 
     const built = validateAndBuildPromotionPayload(
       {
@@ -1044,6 +1078,7 @@ export default function NovelsTab() {
       return;
     }
 
+    promoWriteRef.current = true;
     setPromoSubmitting(true);
     try {
       const created = await apiRequest('POST', '/promotion-links', built.payload);
@@ -1054,10 +1089,14 @@ export default function NovelsTab() {
         resolvedUrl = `${built.baseUrl}${built.path}?${built.params.toString()}`;
       }
       setGeneratedLink(created?.generated_url || resolvedUrl);
+      const createdId = created?.id ? String(created.id) : '';
+      setPromoLinkId(createdId);
+      if (promoRuleChoice === 'own' && createdId && promoIntegration && canEditGlobalSettings) setIsPromoRuleOpen(true);
       window.showToast?.('推广链接已成功生成并记录！', 'success');
     } catch (err: unknown) {
       window.showToast?.(`保存推广链接失败：${err instanceof Error ? err.message : ''}`, 'error');
     } finally {
+      promoWriteRef.current = false;
       setPromoSubmitting(false);
     }
   };
@@ -2107,7 +2146,30 @@ export default function NovelsTab() {
         onGenerateLink={handleGeneratePromotionLink}
         generatedLink={generatedLink}
         onCopyLink={handleCopyLink}
+        ruleChoice={promoRuleChoice}
+        ruleSummary={promoLinkPolicy?.own_version ? `专属规则 · v${policyVersion(promoLinkPolicy)?.number}`
+          : promoLinkPolicy ? defaultPolicySummary(promoLinkPolicy)
+            : promoDefaultPolicy ? defaultPolicySummary(promoDefaultPolicy) : '继承接入默认'}
+        onRuleChoice={setPromoRuleChoice}
+        canConfigureRule={canEditGlobalSettings && Boolean(promoIntegration)}
+        onConfigureRule={canEditGlobalSettings && promoIntegration && promoLinkId ? () => setIsPromoRuleOpen(true) : undefined}
       />
+      {isPromoRuleOpen && promoIntegration && (
+        <IntegrationConfigDrawer
+          open
+          editingIntegration={promoIntegration}
+          initialTab="policy"
+          initialPolicyPromotion={promoLinkId}
+          destinations={[]}
+          canWrite={canEditGlobalSettings}
+          onClose={() => setIsPromoRuleOpen(false)}
+          onSuccess={() => {}}
+          onPolicyPublished={(policy) => {
+            setPromoLinkPolicy(policy);
+            window.showToast?.('推广链接回传规则已发布', 'success');
+          }}
+        />
+      )}
     </div>
   );
 }

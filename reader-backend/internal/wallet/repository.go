@@ -538,10 +538,10 @@ func (r *dbRepository) RecordSubscriptionRenewalOrderTx(
 	var orderID int64
 	err = tx.QueryRow(ctx, `INSERT INTO recharge_orders
 		(user_id, external_ref_id, amount_cents,currency,coins,bonus_coins_credited,payment_method,status,
-		paid_at, order_type, subscription_id, recharge_slot_id, recharge_template_id, fulfilled_at, paid_period_start, paid_period_end,
+		paid_at, order_type, subscription_id, recharge_slot_id, recharge_template_id, paid_period_start, paid_period_end,
 		utm_source, utm_campaign, promotion_link_id, novel_id, reconciliation_note, paypal_refund_reported,fb_lead_metadata)
 		SELECT u.id,$2,$3,$4,0,0,$5,'Success',$6,'subscription',$7::text,$8,
-			(SELECT id FROM recharge_templates WHERE id=$9),CASE WHEN $10::timestamptz IS NOT NULL THEN now() END,CASE WHEN $10::timestamptz IS NOT NULL THEN $6::timestamptz END,$10,COALESCE((SELECT attribution->>'utm_source' FROM user_subscriptions WHERE subscription_id=$7::text),u.utm_source),COALESCE((SELECT attribution->>'utm_campaign' FROM user_subscriptions WHERE subscription_id=$7::text),u.utm_campaign),p.id,p.novel_id,
+			(SELECT id FROM recharge_templates WHERE id=$9),CASE WHEN $10::timestamptz IS NOT NULL THEN $6::timestamptz END,$10,COALESCE((SELECT attribution->>'utm_source' FROM user_subscriptions WHERE subscription_id=$7::text),u.utm_source),COALESCE((SELECT attribution->>'utm_campaign' FROM user_subscriptions WHERE subscription_id=$7::text),u.utm_campaign),p.id,p.novel_id,
  CASE WHEN $11 THEN 'PayPal reports refunded sale; match refund ID'
  WHEN $10::timestamptz IS NULL THEN 'PayPal settled amount verified; billing period needs review' END,$11,(SELECT attribution FROM user_subscriptions WHERE subscription_id=$7::text) || jsonb_build_object('payer_email',$12::text)
 		FROM users u LEFT JOIN LATERAL (
@@ -550,7 +550,6 @@ func (r *dbRepository) RecordSubscriptionRenewalOrderTx(
 		ON CONFLICT(external_ref_id) DO UPDATE SET
 			paid_period_end=COALESCE(EXCLUDED.paid_period_end,recharge_orders.paid_period_end),
  paid_period_start=COALESCE(EXCLUDED.paid_period_start,recharge_orders.paid_period_start),
-			fulfilled_at=COALESCE(recharge_orders.fulfilled_at,EXCLUDED.fulfilled_at),
 			paypal_refund_reported=EXCLUDED.paypal_refund_reported,
 			reconciliation_note=EXCLUDED.reconciliation_note
 		WHERE ((recharge_orders.paid_period_end IS NULL AND EXCLUDED.paid_period_end IS NOT NULL
@@ -566,7 +565,7 @@ func (r *dbRepository) RecordSubscriptionRenewalOrderTx(
 	if err != nil {
 		return false, err
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO third_party_payment_orders
+	capture, err := tx.Exec(ctx, `INSERT INTO third_party_payment_orders
 		(order_id,payment_provider,external_order_id,capture_id,payer_id,payer_email,payer_name,currency,gross_amount,net_amount,status,raw_payload)
 		VALUES($1,$2,$3,$4,$5,$6,$7::text,$8,$9::bigint::numeric/100,$9::bigint::numeric/100,'VERIFIED',$10::jsonb)
  ON CONFLICT(payment_provider,external_order_id,capture_id) DO UPDATE SET status='VERIFIED',raw_payload=EXCLUDED.raw_payload
@@ -575,6 +574,9 @@ func (r *dbRepository) RecordSubscriptionRenewalOrderTx(
 		currency, amountCents, tpOrder.RawPayload)
 	if err != nil {
 		return false, err
+	}
+	if capture.RowsAffected() == 0 {
+		return false, errors.New("PayPal subscription capture is linked to another order")
 	}
 	var priorPeriod bool
 	err = tx.QueryRow(ctx, `SELECT paid_period_end IS NOT NULL FROM recharge_orders WHERE id=$1`, orderID).Scan(&priorPeriod)
@@ -636,8 +638,19 @@ func (r *dbRepository) RecordSubscriptionRenewalOrderTx(
 			return false, err
 		}
 	}
-	if err := conversion.RecordPaymentTx(ctx, tx, orderID, paidAt, "paypal_subscription_ledger",
-		firstConversion, previousPayment != nil && paidAt.After(*previousPayment)); err != nil {
+	// Mark fulfillment only after the subscription row is locked and its
+	// entitlement is written. The fulfillment trigger then locks the
+	// user/promotion pair in the same order as one-time settlements.
+	if _, err := tx.Exec(ctx, `UPDATE recharge_orders SET fulfilled_at=clock_timestamp() WHERE id=$1 AND fulfilled_at IS NULL`, orderID); err != nil {
+		return false, err
+	}
+	var paymentKind *string
+	environment := conversion.Environment()
+	if err := tx.QueryRow(ctx, `SELECT reader_subscription_payment_kind($1,$2)`, orderID, environment).Scan(&paymentKind); err != nil {
+		return false, err
+	}
+	automatic := paymentKind != nil && *paymentKind == "subscription_renewal"
+	if err := conversion.RecordSubscriptionPaymentTx(ctx, tx, orderID, paidAt, environment, paymentKind, firstConversion, automatic); err != nil {
 		return false, err
 	}
 	return previousPayment == nil, tx.Commit(ctx)

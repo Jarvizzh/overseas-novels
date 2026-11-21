@@ -53,19 +53,25 @@ func InitDB(migrate bool) {
 }
 
 const (
-	baselineSchemaVersion       int64 = 2026111701
-	chapterSchemaVersion        int64 = 2026111702
-	readerPerformanceVersion    int64 = 2026111703
-	readerQueueVersion          int64 = 2026111704
-	conversionSchemaVersion     int64 = 2026111901
-	readerConversionVersion     int64 = 2026111902
-	legacyConversionVersion     int64 = 2026111903
-	conversionReconcileVersion  int64 = 2026111904
-	conversionOperationsVersion int64 = 2026111905
-	conversionReviewVersion     int64 = 2026111906
-	sinanConversionVersion      int64 = 2026111907
-	sinanReviewVersion          int64 = 2026111908
-	RequiredSchemaVersion       int64 = 2026111909
+	baselineSchemaVersion        int64 = 2026111701
+	chapterSchemaVersion         int64 = 2026111702
+	readerPerformanceVersion     int64 = 2026111703
+	readerQueueVersion           int64 = 2026111704
+	conversionSchemaVersion      int64 = 2026111901
+	readerConversionVersion      int64 = 2026111902
+	legacyConversionVersion      int64 = 2026111903
+	conversionReconcileVersion   int64 = 2026111904
+	conversionOperationsVersion  int64 = 2026111905
+	conversionReviewVersion      int64 = 2026111906
+	sinanConversionVersion       int64 = 2026111907
+	sinanReviewVersion           int64 = 2026111908
+	sinanRecheckVersion          int64 = 2026111909
+	paymentPolicyVersion         int64 = 2026111910
+	readerPaymentPolicyVersion   int64 = 2026111911
+	sinanPaymentPolicyVersion    int64 = 2026111912
+	readerPaymentReviewVersion   int64 = 2026111913
+	readerPaymentRecoveryVersion int64 = 2026111914
+	RequiredSchemaVersion        int64 = 2026111915
 )
 
 func autoMigrate(ctx context.Context, pool *pgxpool.Pool) error {
@@ -160,7 +166,37 @@ func autoMigrate(ctx context.Context, pool *pgxpool.Pool) error {
 			return fmt.Errorf("schema migration %d: %w", sinanReviewVersion, err)
 		}
 	}
-	if _, err := tx.Exec(ctx, dbassets.SinanRecheckSQL); err != nil {
+	if version < sinanRecheckVersion {
+		if _, err := tx.Exec(ctx, dbassets.SinanRecheckSQL); err != nil {
+			return fmt.Errorf("schema migration %d: %w", sinanRecheckVersion, err)
+		}
+	}
+	if version < paymentPolicyVersion {
+		if _, err := tx.Exec(ctx, dbassets.PaymentPolicySQL); err != nil {
+			return fmt.Errorf("schema migration %d: %w", paymentPolicyVersion, err)
+		}
+	}
+	if version < readerPaymentPolicyVersion {
+		if _, err := tx.Exec(ctx, dbassets.ReaderPaymentPolicySQL); err != nil {
+			return fmt.Errorf("schema migration %d: %w", readerPaymentPolicyVersion, err)
+		}
+	}
+	if version < sinanPaymentPolicyVersion {
+		if _, err := tx.Exec(ctx, dbassets.SinanPaymentPolicySQL); err != nil {
+			return fmt.Errorf("schema migration %d: %w", sinanPaymentPolicyVersion, err)
+		}
+	}
+	if version < readerPaymentReviewVersion {
+		if _, err := tx.Exec(ctx, dbassets.ReaderPaymentReviewSQL); err != nil {
+			return fmt.Errorf("schema migration %d: %w", readerPaymentReviewVersion, err)
+		}
+	}
+	if version < readerPaymentRecoveryVersion {
+		if _, err := tx.Exec(ctx, dbassets.ReaderPaymentRecoverySQL); err != nil {
+			return fmt.Errorf("schema migration %d: %w", readerPaymentRecoveryVersion, err)
+		}
+	}
+	if _, err := tx.Exec(ctx, dbassets.ReaderSubscriptionEvidenceSQL); err != nil {
 		return fmt.Errorf("schema migration %d: %w", RequiredSchemaVersion, err)
 	}
 	return tx.Commit(ctx)

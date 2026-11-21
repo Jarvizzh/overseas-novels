@@ -7,6 +7,8 @@ import (
 	"strings"
 )
 
+var errInvalidWebsiteContext = errors.New("invalid_website_context")
+
 // ValidatePayload is shared by the media transport and audited queue writers.
 func ValidatePayload(p Payload) error {
 	var matches map[string]json.RawMessage
@@ -29,14 +31,14 @@ func ValidatePayload(p Payload) error {
 	switch *p.ActionSource {
 	case "website":
 		if p.SourceURL == nil {
-			return errors.New("invalid_website_context")
+			return errInvalidWebsiteContext
 		}
 		page, err := url.Parse(*p.SourceURL)
 		var userAgent string
 		userAgentErr := json.Unmarshal(matches["client_user_agent"], &userAgent)
 		if err != nil || page.Scheme != "https" || page.Hostname() == "" || page.User != nil ||
 			page.RawQuery != "" || page.Fragment != "" || userAgentErr != nil || strings.TrimSpace(userAgent) == "" {
-			return errors.New("invalid_website_context")
+			return errInvalidWebsiteContext
 		}
 	case "system_generated":
 	default:

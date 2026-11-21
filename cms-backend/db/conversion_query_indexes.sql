@@ -14,3 +14,11 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS conversion_event_retention
 CREATE INDEX CONCURRENTLY IF NOT EXISTS conversion_inbox_retention
     ON conversion.inbox (received_at, id)
     WHERE payload IS NOT NULL AND state IN ('consumed','quarantined');
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS conversion_events_rule_fact_missing
+    ON conversion.events (environment, received_at)
+    WHERE reason = 'rule_fact_missing';
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS conversion_audit_policy_publication
+    ON conversion.operation_audit (environment, subject_id, operator_id, (after_state->>'publication_id'))
+    WHERE action IN ('publish_payment_policy','inherit_payment_policy') AND after_state ? 'publication_id';

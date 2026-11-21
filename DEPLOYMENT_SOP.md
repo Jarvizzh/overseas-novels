@@ -215,6 +215,15 @@ flowchart TD
 7. **运维工具切换与回滚边界**：PayPal 对账继续使用 `payment-ops`；转化重排、旧环境复核、缺行补建和保留期清理统一改由 CMS「回传中心」或[转化运维命令](conversion-backend/README.md#运行与运维)执行（旧 `payment-ops -kind outbox` 不再对应新转化队列）。迁移提交后先暂停故障链路再用匹配当前 schema 的版本修复或前滚；回退旧代码前须核对切换后新增业务、未发任务及已确认的 `meta_event_id` 证据。
 8. **司南阶段 C 约定**：使用独立测试库（`CONVERSION_ENVIRONMENT=test`）、测试凭据与回环模拟端点，按[模拟联调步骤](conversion-backend/README.md#司南阶段-c-模拟联调)完成入站鉴权、三个回调与无 trace 失败回告确认后再开启生产接入（生产严禁启用 `CONVERSION_SINAN_MOCK_ENABLED=true`）。
 
+#### 付款部分回传（schema `2026111915`）
+
+1. 在维护窗口停止 Reader 支付、订阅和对账履约写入，等待在途事务完成。用匹配版本的 CMS 镜像执行 `-migrate`，核对 `reader_schema_migrations` 已到 `2026111915`。Reader 首单迁移按 `fulfilled_at, id` 回填可核实的历史首单。使用独立数据库角色时，迁移后重新执行 `cms-backend/db/conversion_role_grants.sql`。在事务外执行 `cms-backend/db/conversion_query_indexes.sql`，补齐规则事实告警索引。
+   `2026111915` 将仍在原投递期限内、从未尝试发送且符合源订单核验条件的续费类型待查任务恢复为 `blocked/rule_fact_missing`。证据补齐后可以从回传中心重排。
+   升级规则发布核对功能时，在事务外重新执行 `cms-backend/db/conversion_query_indexes.sql`，补齐按发布 ID 查询审计的索引。
+2. 启动对应版本的 CMS、Reader 与转化服务，再恢复履约。切换后新建的链接由在线履约记录覆盖。历史链接确认覆盖完整后，由迁移账号在 `reader_payment_promotion_coverage` 记录环境、链接 ID、核验时间和证据引用，再发布该链接的首单规则。
+3. 先在隔离环境核对授权缺失、同笔订阅首付、补建和默认全传，再对指定推广链接启用规则。已判定付款沿用原结果。 [部分回传开发方案](docs/conversion-partial-reporting-implementation.md#6-开发顺序与发布)
+4. 司南 Mock 使用独立测试库。升级后重新执行 `cms-backend/db/conversion_sinan_mock_grants.sql`，按模拟接收方确认的 `missing_promotion_encoding` 和 `no_trace_encoding` 重排契约阻塞回告。生产接入前独立确认正式空值编码、原始订单及事件 ID 的唯一范围和重复付款回告口径。
+
 ### 3.2 自建 Redis 生产配置
 修改 Redis 所在机器的 `/etc/redis/redis.conf`：
 ```ini

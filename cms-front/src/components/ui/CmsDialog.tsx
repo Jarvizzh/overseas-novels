@@ -11,6 +11,7 @@ interface CmsDialogProps {
   size?: 'sm' | 'md' | 'lg' | 'xl';
   closedBy?: 'any' | 'closerequest' | 'none';
   closeDisabled?: boolean;
+  interceptCancel?: boolean;
   headerExtra?: React.ReactNode;
   footer?: React.ReactNode;
   children: React.ReactNode;
@@ -41,6 +42,7 @@ export const CmsDialog: React.FC<CmsDialogProps> = ({
   size = 'md',
   closedBy = 'any',
   closeDisabled = false,
+  interceptCancel = false,
   headerExtra,
   footer,
   children,
@@ -95,6 +97,10 @@ export const CmsDialog: React.FC<CmsDialogProps> = ({
     if (closeDisabled || closedBy === 'none') {
       e.preventDefault();
       return;
+    }
+    if (interceptCancel) {
+      e.preventDefault();
+      onClose();
     }
   };
 

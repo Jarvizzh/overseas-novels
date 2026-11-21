@@ -38,7 +38,7 @@ GRANT SELECT (id,fb_pixel_id) ON promotion_links TO :"worker_role";
 GRANT SELECT (id,pixel_id) ON fb_pixels TO :"worker_role";
 GRANT EXECUTE ON FUNCTION conversion.sinan_route_issue(bigint,bigint) TO :"worker_role", :"api_role";
 GRANT SELECT ON conversion.inbox TO :"worker_role";
-GRANT UPDATE (state,reason) ON conversion.inbox TO :"worker_role";
+GRANT UPDATE (state,reason,normalized_event_id) ON conversion.inbox TO :"worker_role";
 GRANT UPDATE (id) ON conversion.integrations TO :"worker_role";
 GRANT SELECT ON conversion.credentials,conversion.integrations,conversion.integration_destinations,
     conversion.destinations,conversion.events,conversion.deliveries,conversion.delivery_attempts,
@@ -56,7 +56,7 @@ GRANT SELECT (status,domain) ON system_domains TO :"api_role";
 GRANT SELECT (id,name,pixel_id) ON fb_pixels TO :"api_role";
 GRANT INSERT (name,pixel_id,access_token), UPDATE (name) ON fb_pixels TO :"api_role";
 GRANT USAGE ON SEQUENCE fb_pixels_id_seq TO :"api_role";
-GRANT SELECT (id,fb_pixel_id) ON promotion_links TO :"api_role";
+GRANT SELECT (id,fb_pixel_id,name,novel_title) ON promotion_links TO :"api_role";
 GRANT SELECT (event_id,order_id,event_name,state,delivered_at) ON payment_event_outbox TO :"api_role";
 GRANT SELECT ON reader_conversion_outbox,reader_conversion_repair_facts TO :"api_role";
 GRANT INSERT (business_key,event_name,order_id,environment,occurred_at,created_at,snapshot)
@@ -68,7 +68,7 @@ GRANT SELECT ON conversion.integrations,conversion.integration_destinations,conv
     conversion.legacy_outbox_imports,conversion.worker_heartbeats,conversion.alerts TO :"api_role";
 GRANT SELECT (report_id,attempt_no,started_at,sending_at,responded_at,recorded_at,outcome,reason,retry_at,http_status,business_code)
     ON conversion.partner_report_attempts TO :"api_role";
-GRANT SELECT (id,integration_id,source_order_id,source_event_type,source_event_id,received_at,state,reason)
+GRANT SELECT (id,integration_id,source_order_id,source_event_type,source_event_id,source_app_id,normalized_event_id,received_at,state,reason)
     ON conversion.inbox TO :"api_role";
 GRANT SELECT (id), INSERT (ciphertext,key_version) ON conversion.credentials TO :"api_role";
 GRANT INSERT, UPDATE ON conversion.integrations,conversion.destinations,conversion.integration_destinations TO :"api_role";
@@ -76,7 +76,7 @@ GRANT DELETE ON conversion.integration_destinations TO :"api_role";
 -- PostgreSQL requires one UPDATE column for SELECT FOR UPDATE on an event.
 GRANT UPDATE (id) ON conversion.events TO :"api_role";
 GRANT INSERT,UPDATE ON conversion.deliveries TO :"api_role";
-GRANT UPDATE (state,next_attempt_at,reason) ON conversion.partner_reports TO :"api_role";
+GRANT INSERT, UPDATE (state,next_attempt_at,reason) ON conversion.partner_reports TO :"api_role";
 GRANT UPDATE (environment_evidence,resolution) ON conversion.legacy_outbox_imports TO :"api_role";
 GRANT SELECT, INSERT ON conversion.operation_audit TO :"api_role";
 
@@ -105,5 +105,25 @@ GRANT SELECT,DELETE,UPDATE (recorded_at) ON conversion.delivery_diagnostics TO :
 GRANT SELECT (legacy_event_id,event_id) ON conversion.legacy_outbox_imports TO :"retention_role";
 GRANT SELECT (event_id,created_at,payload),UPDATE (payload) ON payment_event_outbox TO :"retention_role";
 GRANT INSERT ON conversion.operation_audit TO :"retention_role";
+
+-- Payment policy versions are immutable to the runtime roles.
+GRANT SELECT ON conversion.payment_policy_scopes,conversion.payment_policy_versions,
+    conversion.payment_policy_counters TO :"worker_role", :"api_role";
+GRANT SELECT,INSERT ON conversion.payment_policy_decisions TO :"worker_role", :"api_role";
+GRANT UPDATE (policy_scope_id,policy_version_id,branch_id,mode,cycle_sequence,sample_bucket,sample_version,outcome,reason,decided_at)
+    ON conversion.payment_policy_decisions TO :"worker_role", :"api_role";
+GRANT INSERT, UPDATE (last_sequence) ON conversion.payment_policy_counters TO :"worker_role", :"api_role";
+GRANT INSERT, UPDATE (active_version_id) ON conversion.payment_policy_scopes TO :"api_role";
+GRANT INSERT ON conversion.payment_policy_versions TO :"api_role";
+GRANT USAGE ON SEQUENCE conversion.payment_policy_branch_ids TO :"api_role";
+GRANT SELECT ON reader_payment_promotion_coverage TO :"api_role";
+
+GRANT SELECT,INSERT ON reader_payment_first_on_promotion TO :"reader_role";
+GRANT EXECUTE ON FUNCTION reader_payment_coverage_verified(text,integer) TO :"reader_role", :"api_role";
+GRANT EXECUTE ON FUNCTION reader_verified_first_payment(text,bigint,bigint,integer) TO :"worker_role", :"api_role";
+GRANT EXECUTE ON FUNCTION reader_verified_subscription_payment_kind(text,bigint,bigint) TO :"worker_role", :"api_role";
+GRANT UPDATE (payment_policy_state,payment_policy_decision_id,reason,attribution_state,action_source,source_url)
+    ON conversion.events TO :"worker_role", :"api_role";
+GRANT SELECT (order_id,state,delivered_at) ON payment_event_outbox TO :"worker_role";
 
 COMMIT;

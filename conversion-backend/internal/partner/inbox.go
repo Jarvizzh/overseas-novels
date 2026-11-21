@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"conversion-backend/internal/delivery"
+	"conversion-backend/internal/paymentpolicy"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -25,6 +26,7 @@ type Receipt struct {
 	SourceType    string
 	SourceID      string
 	OrderID       string
+	AppID         string
 	ReceivedAt    time.Time
 	Payload       []byte
 	Digest        []byte
@@ -38,10 +40,10 @@ type Receipt struct {
 func StoreInboxTx(ctx context.Context, tx pgx.Tx, r Receipt) (conflict bool, err error) {
 	if r.Quarantine == "" {
 		tag, err := tx.Exec(ctx, `
-			INSERT INTO conversion.inbox(integration_id,source_event_type,source_event_id,source_order_id,received_at,payload,payload_digest,digest_version)
-			VALUES($1,$2,$3,NULLIF($4,''),$5,$6,$7,$8)
+			INSERT INTO conversion.inbox(integration_id,source_event_type,source_event_id,source_order_id,source_app_id,received_at,payload,payload_digest,digest_version)
+			VALUES($1,$2,$3,NULLIF($4,''),NULLIF($5,''),$6,$7,$8,$9)
 			ON CONFLICT (integration_id,source_event_type,source_event_id) WHERE state<>'quarantined' DO NOTHING`,
-			r.IntegrationID, r.SourceType, r.SourceID, r.OrderID, r.ReceivedAt, r.Payload, r.Digest, r.DigestVersion)
+			r.IntegrationID, r.SourceType, r.SourceID, r.OrderID, r.AppID, r.ReceivedAt, r.Payload, r.Digest, r.DigestVersion)
 		if err != nil || tag.RowsAffected() == 1 {
 			return false, err
 		}
@@ -71,9 +73,9 @@ func StoreInboxTx(ctx context.Context, tx pgx.Tx, r Receipt) (conflict bool, err
 		conflict = true
 	}
 	_, err = tx.Exec(ctx, `
-		INSERT INTO conversion.inbox(integration_id,source_event_type,source_event_id,source_order_id,received_at,payload,payload_digest,digest_version,state,reason)
-		VALUES($1,$2,NULLIF($3,''),NULLIF($4,''),$5,$6,$7,$8,'quarantined',$9)`,
-		r.IntegrationID, r.SourceType, r.SourceID, r.OrderID, r.ReceivedAt, r.Payload, r.Digest, r.DigestVersion, r.Quarantine)
+		INSERT INTO conversion.inbox(integration_id,source_event_type,source_event_id,source_order_id,source_app_id,received_at,payload,payload_digest,digest_version,state,reason)
+		VALUES($1,$2,NULLIF($3,''),NULLIF($4,''),NULLIF($5,''),$6,$7,$8,$9,'quarantined',$10)`,
+		r.IntegrationID, r.SourceType, r.SourceID, r.OrderID, r.AppID, r.ReceivedAt, r.Payload, r.Digest, r.DigestVersion, r.Quarantine)
 	return conflict, err
 }
 
@@ -93,6 +95,7 @@ type InboxJob struct {
 type Normalized struct {
 	Event      delivery.Event
 	Targets    []delivery.Target
+	Payment    *paymentpolicy.Facts
 	Quarantine string
 }
 
@@ -128,10 +131,18 @@ func Consume(ctx context.Context, svc delivery.Service, source string, limit int
 				_, err = tx.Exec(ctx, "UPDATE conversion.inbox SET state='quarantined',reason=$2 WHERE id=$1", j.ID, out.Quarantine)
 				return err
 			}
-			if _, err = svc.EnqueueTx(ctx, tx, out.Event, out.Targets); err != nil {
+			var eventID int64
+			var reason string
+			if out.Payment != nil {
+				eventID, reason, err = svc.EnqueuePartnerPaymentTx(ctx, tx, out.Event, out.Targets, *out.Payment)
+			} else {
+				eventID, err = svc.EnqueueTx(ctx, tx, out.Event, out.Targets)
+			}
+			if err != nil {
 				return err
 			}
-			_, err = tx.Exec(ctx, "UPDATE conversion.inbox SET state='consumed' WHERE id=$1", j.ID)
+			_, err = tx.Exec(ctx, `UPDATE conversion.inbox SET state='consumed',reason=NULLIF($2,''),normalized_event_id=$3
+				WHERE id=$1`, j.ID, reason, eventID)
 			return err
 		})
 		if errors.Is(err, errInboxEmpty) {

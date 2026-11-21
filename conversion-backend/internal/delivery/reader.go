@@ -24,17 +24,21 @@ type readerMessage struct {
 }
 
 type readerSnapshot struct {
-	UserID           string  `json:"user_id"`
-	Email            string  `json:"email"`
-	PromotionID      string  `json:"promotion_id"`
-	AttributionState string  `json:"attribution_state"`
-	Reason           string  `json:"reason"`
-	OrderType        string  `json:"order_type"`
-	TimeSource       string  `json:"time_source"`
-	ActionSource     string  `json:"action_source"`
-	AmountCents      *int64  `json:"amount_cents"`
-	Currency         *string `json:"currency"`
-	Attribution      struct {
+	UserID               string  `json:"user_id"`
+	Email                string  `json:"email"`
+	PromotionID          string  `json:"promotion_id"`
+	AttributionState     string  `json:"attribution_state"`
+	Reason               string  `json:"reason"`
+	OrderType            string  `json:"order_type"`
+	TimeSource           string  `json:"time_source"`
+	ActionSource         string  `json:"action_source"`
+	AmountCents          *int64  `json:"amount_cents"`
+	Currency             *string `json:"currency"`
+	PaymentPolicyVersion int     `json:"payment_policy_version"`
+	PaymentKey           string  `json:"payment_key"`
+	PaymentKind          string  `json:"payment_kind"`
+	FirstPaid            *bool   `json:"first_paid_on_promotion"`
+	Attribution          struct {
 		PixelID   string `json:"pixel_id"`
 		FBP       string `json:"fbp"`
 		FBC       string `json:"fbc"`
@@ -79,7 +83,7 @@ func (s Service) consumeReaderMessage(ctx context.Context) error {
 		return err
 	}
 	if reason == "" {
-		if _, err := s.EnqueueTx(ctx, tx, event, targets); err != nil {
+		if _, err := s.enqueueReaderTx(ctx, tx, event, targets); err != nil {
 			return fmt.Errorf("enqueue reader conversion: %w", err)
 		}
 	}
@@ -106,6 +110,9 @@ func normalizeReaderMessage(ctx context.Context, tx pgx.Tx, message readerMessag
 	}
 
 	event, err := readerEvent(ctx, tx, message, data)
+	if event.failureReason != "" && event.readerPayment == nil {
+		return Event{}, nil, event.failureReason, nil
+	}
 	if err != nil {
 		return Event{}, nil, "", err
 	}
@@ -169,6 +176,10 @@ func readerEvent(ctx context.Context, tx pgx.Tx, message readerMessage, data rea
 		amount := fmt.Sprintf("%d.%02d", cents/100, cents%100)
 		event.Amount, event.Currency = &amount, data.Currency
 	}
+	event.readerPayment, err = readerPaymentFacts(message, data, event)
+	if err != nil {
+		event.failureReason = err.Error()
+	}
 	return event, nil
 }
 
@@ -212,14 +223,14 @@ func claimReaderMessageTx(ctx context.Context, tx pgx.Tx, environment string) (r
 		FROM reader_conversion_outbox o
 		JOIN conversion.integrations i ON i.environment=o.environment AND i.source='starnovel' AND i.account_key='reader'
 		WHERE o.environment=$1 AND o.consumed_at IS NULL AND i.enabled
-		ORDER BY o.created_at,o.business_key LIMIT 1 FOR UPDATE OF o SKIP LOCKED`, environment).
+		ORDER BY o.created_at,o.business_key LIMIT 1 FOR UPDATE OF o SKIP LOCKED FOR SHARE OF i`, environment).
 		Scan(&m.key, &m.name, &m.orderID, &m.occurredAt, &m.createdAt, &m.snapshot, &m.integrationID)
 	return m, err
 }
 
 func readerTargetsTx(ctx context.Context, tx pgx.Tx, integrationID int64, pixel, metaID string) ([]Target, error) {
 	rows, err := tx.Query(ctx, `
-		SELECT x.id,x.pixel_id=$2,x.enabled
+		SELECT x.id,x.pixel_id=$2,x.enabled AND x.retired_at IS NULL
 		FROM conversion.integration_destinations r JOIN conversion.destinations x ON x.id=r.destination_id
 		WHERE r.integration_id=$1 AND (x.pixel_id=$2 OR (r.default_route AND x.enabled AND x.retired_at IS NULL))
 		ORDER BY (x.pixel_id=$2) DESC,x.id FOR SHARE OF x`, integrationID, pixel)

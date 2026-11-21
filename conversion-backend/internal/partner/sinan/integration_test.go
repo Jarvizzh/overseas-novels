@@ -36,6 +36,7 @@ type fixture struct {
 	owner    *pgxpool.Pool
 	report   partner.ReportQueue
 	svc      delivery.Service
+	api      delivery.Service
 	inbox    Inbox
 	keys     credentials.Keyring
 	public   ed25519.PublicKey
@@ -44,7 +45,7 @@ type fixture struct {
 
 func newFixture(t *testing.T) fixture {
 	t.Helper()
-	return newFixtureFrom(t, "2026111909", nil)
+	return newFixtureFrom(t, "2026111915", nil)
 }
 
 func newFixtureFrom(t *testing.T, schemaVersion string, beforeUpgrade func(fixture)) fixture {
@@ -73,7 +74,7 @@ func newFixtureFrom(t *testing.T, schemaVersion string, beforeUpgrade func(fixtu
 	t.Cleanup(owner.Close)
 	execSQLFile(t, ctx, owner, "schema.sql", nil)
 	versions := []string{"2026111702", "2026111703", "2026111704", "2026111901", "2026111902",
-		"2026111903", "2026111904", "2026111905", "2026111906", "2026111907", "2026111908", "2026111909"}
+		"2026111903", "2026111904", "2026111905", "2026111906", "2026111907", "2026111908", "2026111909", "2026111910", "2026111911", "2026111912", "2026111913", "2026111914", "2026111915"}
 	for _, version := range versions {
 		if version <= schemaVersion {
 			execSQLFile(t, ctx, owner, "migrations/"+version+".sql", nil)
@@ -140,6 +141,7 @@ func newFixtureFrom(t *testing.T, schemaVersion string, beforeUpgrade func(fixtu
 	}
 	f.report = partner.ReportQueue{Pool: rolePool("partner_worker"), Environment: TestEnvironment, Source: "sinan", Contract: MockContract}
 	f.svc = delivery.Service{Store: delivery.Store{Pool: rolePool("worker"), Environment: TestEnvironment}}
+	f.api = delivery.Service{Store: delivery.Store{Pool: rolePool("api"), Environment: TestEnvironment}}
 	f.inbox = Inbox{Pool: rolePool("callback"), Environment: TestEnvironment, Decrypt: keys.Decrypt}
 	return f
 }
@@ -254,7 +256,7 @@ func TestCallbackInboxScopesAndNormalization(t *testing.T) {
 	f.ingest(t, "order-created", "same-id")
 	f.ingest(t, "attribution-succeeded", "same-id")
 	f.ingest(t, "attribution-succeeded", "second-dye")
-	if w := post(handler, "publisher", "recharge-paid", fixtureToken, strings.Replace(f.callbackBody("tokens"), `"recharge_type":1`, `"recharge_type":2`, 1)); w.Code != 200 {
+	if w := post(handler, "publisher", "recharge-paid", fixtureToken, strings.Replace(strings.Replace(f.callbackBody("tokens"), `"recharge_type":1`, `"recharge_type":2`, 1), "demo_order_0001", "demo_order_0002", 1)); w.Code != 200 {
 		t.Fatalf("token purchase returned %d %s", w.Code, w.Body.String())
 	}
 	f.check(t, "0", "SELECT count(*)::text FROM conversion.events")
@@ -263,6 +265,7 @@ func TestCallbackInboxScopesAndNormalization(t *testing.T) {
 		t.Fatalf("dependent write failure was ignored: %d %v", count, err)
 	}
 	f.check(t, "0", "SELECT count(*)::text FROM conversion.events")
+	f.check(t, "0", "SELECT count(*)::text FROM conversion.payment_policy_decisions")
 	f.check(t, "5", "SELECT count(*)::text FROM conversion.inbox WHERE state='pending'")
 	exec(t, f.ctx, f.owner, "ALTER TABLE conversion.deliveries DROP CONSTRAINT reject_fixture")
 	if count, err := Consume(f.ctx, f.svc, 20); err != nil || count != 5 {
@@ -276,7 +279,7 @@ func TestCallbackInboxScopesAndNormalization(t *testing.T) {
 	f.check(t, "1,2", "SELECT string_agg(order_type,',' ORDER BY order_type) FROM conversion.events WHERE event_name='Purchase'")
 	f.check(t, "5:5:10", "SELECT count(DISTINCT meta_event_id)||':'||count(*) FILTER(WHERE role='original')||':'||count(*) FROM conversion.deliveries")
 	f.check(t, "0", "SELECT count(*)::text FROM conversion.deliveries WHERE destination_id=3")
-	f.check(t, "5", "SELECT count(*)::text FROM conversion.events WHERE extract(epoch FROM occurred_at)=$1 AND source_order_id='demo_order_0001'", f.occurred)
+	f.check(t, "5", "SELECT count(*)::text FROM conversion.events WHERE extract(epoch FROM occurred_at)=$1 AND source_order_id IN ('demo_order_0001','demo_order_0002')", f.occurred)
 	f.check(t, "https://reader.example/read:9223372036854775807:"+strings.Repeat("a", 64), `
 		SELECT source_url||':'||(partner_fields->>'ad_id')||':'||(matching_data->'external_id'->>0)
 		FROM conversion.events WHERE source_event_type='order-created'`)
@@ -584,7 +587,7 @@ func TestReportStatusEncoding(t *testing.T) {
 		{-1, "omit", "", ""},
 		{-1, "empty", `""`, ""},
 	} {
-		body, reason := buildReport(tc.status, []byte(snapshot), tc.encoding)
+		body, reason := buildReport(tc.status, []byte(snapshot), Config{NoTrace: tc.encoding})
 		if reason != tc.reason {
 			t.Fatalf("encoding %d %q: %q", tc.status, tc.encoding, reason)
 		}
@@ -723,7 +726,7 @@ func TestLateReportReceiptAfterSweep(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			wire, reason := buildReport(job.Status, job.Payload, "")
+			wire, reason := buildReport(job.Status, job.Payload, Config{})
 			if reason != "" {
 				t.Fatal(reason)
 			}

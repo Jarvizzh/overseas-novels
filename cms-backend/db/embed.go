@@ -71,3 +71,33 @@ var SinanReviewSQL string
 //
 //go:embed migrations/2026111909.sql
 var SinanRecheckSQL string
+
+// PaymentPolicySQL adds versioned payment reporting policies and decision storage.
+//
+//go:embed migrations/2026111910.sql
+var PaymentPolicySQL string
+
+// ReaderPaymentPolicySQL initializes first-payment facts and settlement capture.
+//
+//go:embed migrations/2026111911.sql
+var ReaderPaymentPolicySQL string
+
+// SinanPaymentPolicySQL preserves the scoped payment identity and receipt evidence.
+//
+//go:embed migrations/2026111912.sql
+var SinanPaymentPolicySQL string
+
+// ReaderPaymentReviewSQL uses verified subscription and first-payment facts.
+//
+//go:embed migrations/2026111913.sql
+var ReaderPaymentReviewSQL string
+
+// ReaderPaymentRecoverySQL exposes verified subscription facts to conversion decision writers.
+//
+//go:embed migrations/2026111914.sql
+var ReaderPaymentRecoverySQL string
+
+// ReaderSubscriptionEvidenceSQL scopes subscription evidence and recovers eligible pre-send failures.
+//
+//go:embed migrations/2026111915.sql
+var ReaderSubscriptionEvidenceSQL string

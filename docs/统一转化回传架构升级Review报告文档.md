@@ -148,3 +148,121 @@ Reader 已取消旧的 CAPI 消费者，原 `payment-ops -kind outbox` 仍会更
 迁移前的未标记摘要先按完整字段核对，未匹配时再按旧字段核对。版本 2 只核对完整摘要。使用隔离 PostgreSQL 分别在 `2026111907` 和 `2026111908` 写入旧记录，并实际执行后续迁移。两个来源的相同回调重试均返回 200，且只归一化一次。金额变更，以及 `2026111908` 已记录的 IP 或 User-Agent 变更仍返回 409。版本 2 也拒绝在重试中新增或修改浏览器字段。转化服务全量竞态测试和 `go vet` 通过。
 
 **本轮独立复验通过，阶段 C 上轮遗留问题已关闭。** 在隔离 PostgreSQL 16 对两条迁移路径、冲突校验和 C01 回告租约恢复连续执行两轮竞态回归，全部通过。真实司南鉴权和回告协议仍按架构文档的联调项验收。[升级回归用例](../conversion-backend/internal/partner/sinan/integration_test.go#L645-L702) · [联调验收项](conversion-reporting-architecture.md#72-联调待确认项)
+
+## 购买与订阅事件部分回传 Review
+
+2026-11-20 审查 `codex/conversion-reporting` 上以 `22be987` 为基线的工作区实现，包含迁移 `2026111910` 至 `2026111912`。评审范围包括公共付款规则、Reader 和司南接入、CMS 建链配置、逐单对账及监控。验收依据为 [购买与订阅事件部分回传开发方案](conversion-partial-reporting-implementation.md)。
+
+**审查发现 1 项 P1、2 项 P2。** 两项付款事实缺陷会使符合规则的 StarNovel 订单阻塞并可能到期，监控缺陷会使正常的部分回传表现为投递确认率下降。修复与验收记录见本节末尾。
+
+### R09 · P1 · PayPal 续费回调乱序时丢失付款类型
+
+**复现。** 使用同一订阅依次处理首付、第 3 笔付款和晚到的第 2 笔付款。第 3 笔快照标记为 `subscription_renewal`，第 2 笔的 `payment_kind` 为空，`action_source` 为 `website`。当前代码以 `paidAt.After(last_payment_time)` 为续费依据，乱序付款无法通过这个条件。若链接配置了具体付款类型规则，缺少类型的订单进入 `rule_fact_missing`，可能在 Meta 投递截止前一直阻塞。[Reader 履约](../reader-backend/internal/wallet/repository.go#L598) · [转化快照](../cms-backend/db/migrations/2026111911.sql#L115) · [规则匹配](../conversion-backend/internal/paymentpolicy/rules.go#L166)
+
+**修复建议。** 在锁定订阅行的履约事务内，根据 `capi_subscribe_state`、`capi_subscribe_order_id` 和已核实的渠道付款记录明确传入 `payment_kind`。已认领首付后的其他已核实续费按 `subscription_renewal` 处理，包括渠道时间早于或等于最近付款时间的续费。`last_payment_time` 继续单调更新。用独立字段决定 `action_source`，并为自动续费正确保留其来源。历史订阅确实缺乏首付或续费依据时保留未知诊断。通过后续迁移更新数据库函数，覆盖 Reader 旧调用入口的升级兼容。[事务出站入口](../reader-backend/internal/conversion/outbox.go#L45)
+
+**验收。** 在隔离 PostgreSQL 使用顺序、乱序和同时间三组已核实付款。首付只生成一组 `Purchase` 与 `Subscribe`，两条事件共用 `subscription_initial` 判定。其余每笔续费只生成一个 `Purchase`，按 `subscription_renewal` 命中相应规则。重复处理同一渠道付款时，事件、判定和序号各只产生一次。
+
+### R10 · P2 · 老链接核验后，已入队首单仍无法判定
+
+**复现。** 现有 `TestDurableDeliveryLifecycle/reader_payment_policy` 先在历史覆盖尚未核实的链接履约并记录首单订单 ID，此时原 Pixel 暂不可用。随后补齐覆盖核验、发布「仅首单」规则并恢复原 Pixel。重试仍从旧快照读取空的 `first_paid_on_promotion`，首单持续阻塞为 `rule_fact_missing`，第二笔付款判定为复购并跳过。若订单在核验前入队、发布后才首次消费，Worker 也会读到同样的空快照。[首单事实写入](../cms-backend/db/migrations/2026111911.sql#L103) · [首次判定与重试证据](../conversion-backend/internal/delivery/reader_payment.go#L95) · [复现用例](../conversion-backend/internal/delivery/reader_payment_test.go#L209)
+
+**修复建议。** 将补齐逻辑放在 Reader 公用的付款判定路径，供首次消费、重试和补建复用。对未完成判定且首单快照为空的订单，用已校验的源订单、用户、推广链接和当前环境查询首单事实。仅在历史覆盖已核实且存在可验证的首单记录时补齐布尔值。用窄范围数据库函数提供查询能力，并为 Worker 与运营 API 补齐所需权限和受限角色测试。保留原始快照，并在首次成功判定事务中固化结果。事实仍不充分时保留 `rule_fact_missing`。[数据库角色授权](../cms-backend/db/conversion_role_grants.sql#L119)
+
+**验收。** 分别覆盖核验前已入队但尚未消费，以及缺原 Pixel 后恢复并重试。发布「仅首单」且首单最终动作配置为全传时，两条路径均应选中真实首单并放行待投递任务，同链接的第二笔有效付款应按 `rule_not_first_payment` 跳过。覆盖尚未核实、事实不一致和已完成判定三种场景，分别验证核验门禁、未知诊断和原判定复用。
+
+### R11 · P2 · 按规则跳过的付款进入原目标确认率分母
+
+**复现。** 在相同来源、接入、事件和时间窗口内构造两笔司南 `Purchase`，其中一笔选中且 Meta 确认，另一笔按规则跳过。`GET /internal/conversion/summary` 返回 `selected_confirmation` 为 `1/1`，同时原表的 `expected` 分组为 `1/2`。CMS 分别呈现 100% 和 50% 的确认率。Reader 的 `payment_facts` 同样把这类付款归入 `expected`。[运营查询](../conversion-backend/internal/operations/monitor.go#L112) · [CMS 确认率](../cms-front/src/components/conversion/ConversionSummaryTab.tsx#L431)
+
+**修复建议。** Reader 和分销汇总用已落库的付款判定识别 `skipped`，将其在资格分组中展示为「按规则跳过」，确认率显示 `—`。应投递的原目标事件继续纳入确认率和缺入队、缺目标、缺时间诊断。覆盖率仍按付款计算，确认率仍按原目标事件计算；追加 Pixel 的成功只进入其自身投递统计。CMS 分别标明规则指标使用判定时间、原目标资格统计使用事件业务时间。[现有规则统计区](../cms-front/src/components/conversion/ConversionSummaryTab.tsx#L409)
+
+**验收。** 对 Reader 和司南各构造一笔已确认和一笔规则跳过的同类事件。覆盖率应为 50%，两处对应的应投递确认率应为 100%，界面可见一笔规则跳过。另测全跳过时确认率为 `—`、选中但确有缺目标时保留诊断、追加 Pixel 确认时原目标分子不变。同一付款的 `Purchase` 和 `Subscribe` 在覆盖率分母只计一次，确认率按事件分别统计。
+
+### 验证记录与复审顺序
+
+- 隔离 PostgreSQL 16 上，Reader、CMS、转化服务的 `go test -race -p 2 -count=1 ./...` 和 `go vet ./...` 均通过。CMS 前端 `npm run lint` 和 `npm run build` 通过。现有回归覆盖同单共用判定、按链接独立计数、规则变更续号及司南 Mock 最终回告。[规则并发回归](../conversion-backend/internal/operations/payment_policy_test.go#L23) · [司南最终回告回归](../conversion-backend/internal/partner/sinan/payment_policy_test.go#L20)
+- 使用两条临时用例在本地隔离数据库复现 R09 和 R11，使用现有 Reader 投递集成用例复现 R10。上述修复建议待实施及专项复验。浏览器交互、真实 Meta 投递和司南正式回告协议仍待验收。
+- 优先修复 R09 和 R10，合入对应回归后再开启按付款类型或仅首单配置。上线前一并完成 R11，并在 CMS 核对覆盖率、确认率和逐单对账。
+
+### R09–R11 修复与复验
+
+2026-11-20，R09、R10 和 R11 已在本地修复。验证使用隔离 PostgreSQL 16 和 CMS 浏览器模拟数据。
+
+- R09 根据认领的首付订单和已核实的渠道付款识别续费。顺序、乱序、同时间及重复付款回归通过，首付的 `Purchase` 与 `Subscribe` 共用判定。续费保留 `system_generated` 来源，每笔仅占用一个判定序号。历史订阅缺证据时保留未知诊断，已核实的先前付款可支持后续续费分类。旧六参数写入入口通过兼容性验证。 [Reader 履约用例](../reader-backend/internal/wallet/batch3_test.go) · [规则投递用例](../conversion-backend/internal/delivery/reader_payment_test.go)
+- R10 从源订单和已核实的首单记录补齐事实。首次消费、原目标恢复后重试和补建均可选中首单，同链接复购按规则跳过。覆盖未核实或订单事实不一致时仍停在 `rule_fact_missing`，已完成判定直接复用。Worker 和运营 API 使用受限数据库函数，校验环境、用户和推广链接。 [判定回归](../conversion-backend/internal/delivery/reader_payment_test.go) · [角色权限回归](../conversion-backend/internal/delivery/permissions_test.go)
+- R11 将 Reader 和司南的规则跳过归入独立资格分组。覆盖率 50% 时，示例中应投递事件的原目标确认率均为 100%，全跳过场景显示 `—`。选中事件缺原目标时保留诊断，追加 Pixel 确认只进入自身投递统计。 [汇总接口回归](../conversion-backend/internal/operations/payment_policy_read_test.go)
+- Reader、CMS 和转化服务的完整 Go 竞态测试与 `go vet` 通过。CMS 前端 lint、构建和桌面浏览器统计核对通过。数据库已验证从 `2026111912` 升级到 `2026111913`。生产发布需要应用新迁移并刷新独立数据库角色授权。 [迁移回归](../cms-backend/internal/db/migration_test.go) · [发布步骤](../DEPLOYMENT_SOP.md#付款部分回传schema-2026111915)
+
+### 2026-11-20 独立复审
+
+**R09–R11 的原复现均通过，新发现两项 P2。** R09 的同时间及乱序续费能命中续费规则，旧六参数入口也能写入正确类型。R10 的待消费快照、原目标恢复后重试和补建能补齐已核实的首单事实，环境或归属不符时仍阻塞。R11 的 Reader 和司南汇总都将规则跳过从应投递分母移出。[Reader 履约回归](../reader-backend/internal/wallet/batch3_test.go#L139) · [首单恢复回归](../conversion-backend/internal/delivery/reader_payment_test.go#L245) · [监控回归](../conversion-backend/internal/operations/payment_policy_read_test.go#L186)
+
+#### R12 · P2 · 历史续费补齐渠道证据后仍无法重试
+
+**复现。** 在历史订阅上先履约并归一化一笔没有可验证早期付款证据的订单。配置续费类型规则时，该订单停在 `rule_fact_missing`。随后录入一笔渠道时间更早、已核实且已履约的同订阅付款。数据库此时能把原订单识别为 `subscription_renewal`，但 `RetryDelivery` 仍读取原始快照里的空 `payment_kind`，返回成功且没有安排下次投递，任务继续阻塞。使用隔离 PostgreSQL 的临时集成用例复现。[订阅类型查询](../cms-backend/db/migrations/2026111913.sql#L17) · [Reader 重试证据](../conversion-backend/internal/delivery/reader_payment.go#L124) · [重试结果](../conversion-backend/internal/delivery/payment_delivery.go#L240)
+
+**修复建议。** 对未完成判定且类型缺失的 Reader 订阅付款，在首次消费、重试和补建的共同路径中，按环境、订单、用户及订阅核对渠道付款事实。已可证实为自动续费时，按纠正后的 `action_source` 校验载荷，并在投递解阻的同一事务内更新待发事件的派生字段。复用本单原始归因、发生时间和投递截止时间，并让判定照常取得一次规则结果和序号。保持原始快照可供追溯。若重试后仍缺证据，响应显式标注待核查状态，便于 CMS 显示真实结果。
+
+**验收。** 测试早期付款在原订单首次消费前、阻塞后才补齐两种顺序。阻塞后补齐时，运营重试应按同一笔订单命中续费规则，并按规则恢复投递或跳过。重复重试和并发消费只产生一个判定。证据缺失、身份不一致、已过期或已经定稿的订单继续遵循原状态和约束。
+
+#### R13 · P2 · 选中后确认率漏算尚未归一化的同单事件
+
+**复现。** Reader 的订阅首付款已经选中，`Purchase` 已确认，订单资格里也有应投递的 `Subscribe`，但 `Subscribe` 还没有归一化记录。按 `Subscribe` 筛选汇总，原资格统计给出 1 条应投递、1 条缺入队，规则区给出的付款覆盖率分子和分母均为 0，选中后确认率也没有记录。规则区只连接已有的 `conversion.events`，遗漏了这笔已选中的付款和应投递事件。同窗口存在其他已确认的 `Subscribe` 时，确认率会偏高。使用隔离 PostgreSQL 的汇总接口用例复现。[确认率与事件过滤查询](../conversion-backend/internal/operations/monitor.go#L186) · [Reader 资格查询](../conversion-backend/internal/operations/monitor.go#L112)
+
+**修复建议。** 对 Reader 在已判定付款集合中，以 `capi_expectation.events` 和首付归属确定应投递事件，再左连归一化事件和原目标投递记录。应用事件类型过滤时按该资格集合选择付款并对付款键去重。保留判定时间窗口、Pixel 作用域和逐单诊断。实际原目标确认记录构成分子。
+
+**验收。** 对已选中的订阅首付，仅归一化并确认 `Purchase`，过滤 `Subscribe` 时付款覆盖率为 `1/1`，选中后原目标确认率为 `0/1`。补齐 `Subscribe` 并确认后，确认率变为 `1/1`。追加 Pixel 确认不增加原目标确认数，同时验证一笔含两种事件的付款在未过滤的覆盖率中只计一次。
+
+本轮独立重跑 Reader、CMS、转化服务的全量 `go test -race -p 2 -count=1 ./...` 和 `go vet ./...`，均通过。CMS 前端 lint 和构建通过。补充的两条临时数据库集成用例均复现故障。浏览器交互、真实 Meta 和司南端到端投递沿用单独的联调验收。
+
+### R12、R13 修复与复验
+
+- R12 使用已核实的同订阅付款补齐待判定订单的类型。首次消费、运营重排和补建共用该路径。确认为自动续费后，投递使用 `system_generated`，原始快照、业务发生时间和截止时间保留作审计。隔离 PostgreSQL 验证了并发重排、消费重放、证据归属与环境不符、截止时间、既有判定复用及 Worker 和运营 API 的受限角色权限。CMS 支持重排 `rule_fact_missing`，并通过浏览器验证了「付款事实仍待核查」和「按规则跳过」两种反馈。 [续费恢复回归](../conversion-backend/internal/delivery/reader_subscription_recovery_test.go)
+- R13 规则统计从 Reader 订单资格快照和订阅首付认领取得应投递事件。按 `Subscribe` 筛选时，缺入队的首付计入付款覆盖率 `1/1` 和原目标确认率 `0/1`。追加 Pixel 确认后原目标确认率仍为 `0/1`，原目标确认后变为 `1/1`。同笔付款仍只计一次，付款判定时间和原目标 Pixel 筛选均已验证。 [汇总接口回归](../conversion-backend/internal/operations/payment_policy_read_test.go)
+- Reader、CMS 和转化服务的完整 Go 竞态测试与 `go vet` 通过。并行执行三个模块时，Reader 的连接预算用例在建立测试连接时超时，单模块串行全量复跑通过。CMS 前端 lint、构建和键盘提交流程验证通过。
+- 本地已验证从 `2026111912` 和 `2026111913` 升级到 `2026111914`。上线前按部署步骤应用迁移。独立数据库角色需刷新授权。 [迁移回归](../cms-backend/internal/db/migration_test.go) · [发布步骤](../DEPLOYMENT_SOP.md#付款部分回传schema-2026111915)
+
+### R12、R13 独立复审（2026-11-20）
+
+**两项原复现均通过，续费路径另发现两项 P2。** R12 在原网站上下文完整时可等待渠道证据，经并发重排只产生一个判定和一个循环序号，并写入 `system_generated`。R13 过滤 `Subscribe` 时，缺入队的订单已正确显示付款覆盖率 `1/1` 和原目标确认率 `0/1`。确认追加 Pixel 时分子不变，原 Pixel 确认后变为 `1/1`。[续费恢复回归](../conversion-backend/internal/delivery/reader_subscription_recovery_test.go#L92) · [Subscribe 汇总回归](../conversion-backend/internal/operations/payment_policy_read_test.go#L174)
+
+#### R14 · P2 · 历史续费缺网站上下文时提前定稿失败
+
+**复现。** 归一化一笔已履约且有原 Pixel 的历史订阅订单。快照没有有效网站 URL，当时也缺少可确认续费的早期付款证据。流水线按快照中的 `website` 校验，直接把投递定稿为 `failed/invalid_website_context`。随后补入同订阅的早期已核实付款，数据库已可识别该单为续费，但运营重试返回 `state_conflict`。若证据在首次归一化前就已存在，同样缺 URL 的订单可使用 `system_generated` 进入投递。[载荷校验与定稿前判断](../conversion-backend/internal/delivery/payment_delivery.go#L53) · [待判定重试门禁](../conversion-backend/internal/delivery/payment_delivery.go#L204)
+
+**修复建议与验收。** 将未知续费类型导致的 `invalid_website_context` 作为可等待的付款事实缺失，仍校验金额、时间和匹配数据。证据到齐后，在原期限内按 `system_generated` 重新校验并走原规则。补测缺 URL 且证据在归一化前、归一化后到达的两种顺序，验证选中时 Worker 读到有效载荷、跳过时无发送、证据一直不足时按原截止时间结束。确认必须使用网站上下文的真实首付仍按现有规则校验。
+
+#### R15 · P2 · 首次履约时跨环境付款证据可进入续费快照
+
+**复现。** 同一数据库中，历史订阅在 `test` 有一笔已标记环境的已核实早期付款。将该订阅的新订单通过兼容六参数入口写入另一环境。由于判定函数执行时新订单的 `capi_expectation` 尚为空，环境比较直接通过，快照落入 `subscription_renewal:system_generated`。随后在新环境调用受限补证函数会返回未知。当前 Reader 履约入口也在写快照前调用同一分类函数，因此同库多环境时，首次履约与恢复使用了不同的证据边界。[订阅证据条件](../cms-backend/db/migrations/2026111914.sql#L14) · [Reader 履约调用](../reader-backend/internal/wallet/repository.go#L647) · [兼容写入入口](../cms-backend/db/migrations/2026111913.sql#L153)
+
+**修复建议与验收。** 首次履约、兼容入口和恢复入口均显式传入本次环境。核对已认领首付和历史早期付款两条分支。测试同一个数据库中证据处于同环境、其他环境及未标记环境三种情况，确认已知其他环境的订单无法影响付款类型、回传规则和事件来源。未标记的历史付款按既有历史证据口径处理。
+
+本轮在隔离 PostgreSQL 16 使用临时用例复现 R14、R15。另验证已有有效网站上下文的续费在补证后可由受限 Worker 领取，载荷校验通过，并在模拟接收确认后定稿为 `succeeded`。Reader、CMS、转化服务的全量竞态测试和 `go vet` 均通过，覆盖从 `2026111912` 与 `2026111913` 升级到 `2026111914`。CMS 前端 lint 和构建通过。浏览器交互及真实 Meta、司南投递继续按联调验收。
+
+### R14、R15 修复与复验
+
+- R14 缺网站上下文且续费类型待确认的订阅付款，会在原期限内等待补证。金额、匹配数据或业务时间无效的订单仍按对应原因处理。受限 Worker 和运营 API 回归覆盖证据先到及晚到、选中后模拟确认、按规则跳过、到期定稿和真实网站首付校验。迁移仅恢复仍在期限内、从未尝试投递且待判定的符合条件的旧失败任务。 [续费恢复回归](../conversion-backend/internal/delivery/reader_subscription_recovery_test.go) · [迁移回归](../cms-backend/internal/db/migration_test.go)
+- R15 首次履约、六参数兼容写入和补证统一显式传入环境。对已认领首付和历史早期付款分别验证了同环境、其他环境、历史环境未标记三种情况。其他环境的证据无法决定本环境的付款类型或事件来源。 [环境隔离回归](../reader-backend/internal/wallet/subscription_conversion_environment_test.go)
+- CMS 新增金额区间的币种固定为 `USD`。桌面和窄屏浏览器验证了键盘无法修改币种，预览请求以 USD 提交并按美分精确转换。 [金额区间表单](../cms-front/src/components/conversion/PaymentPolicyBandDialog.tsx)
+- 首次创建和后续变更均可直接发布，预览供发布前核对。服务端为首个专属版本写入「新建回传规则」，为后续版本和恢复继承写入「变更回传规则」。浏览器验证了直接发布、可选预览，以及发布响应超时后通过审计核对结果。 [发布交互](conversion-partial-reporting-implementation.md#53-草稿权限与异常状态)
+- 隔离 PostgreSQL 16 验证了从 `2026111912`、`2026111913` 和 `2026111914` 升级到 `2026111915`。CMS 和转化服务的全量 Go 竞态测试通过。Reader 并跑时的连接预算用例在建立测试连接时超时，单独重复测试通过，其他 Reader 包通过。三个模块的 `go vet` 和 CMS 前端 lint、构建均通过。 [发布步骤](../DEPLOYMENT_SOP.md#付款部分回传schema-2026111915)
+
+### R14、R15 独立复审（2026-11-20）
+
+**R14、R15 的原复现均通过。规则发布的超时核对另有一项 P2。** R14 验证了缺 URL 的未知续费保留在 `blocked/rule_fact_missing`。补证后可按规则选中并由 Worker 收到模拟确认，也可直接跳过。到期仍缺证据按原期限定稿，真实网站首付和缺金额订单继续按各自校验处理。R15 在实际 Reader 履约、六参数兼容入口和续费补证入口分别验证了同环境、其他环境和未标记环境的付款证据。[续费恢复回归](../conversion-backend/internal/delivery/reader_subscription_recovery_test.go#L96) · [环境隔离回归](../reader-backend/internal/wallet/subscription_conversion_environment_test.go#L41)
+
+#### R16 · P2 · 规则发布已提交，超时核对仍提示重新发布
+
+**复现。** 编辑已有推广链接专属规则时，另一位运营先更新接入默认规则。隔离 PostgreSQL 用例确认服务端接受仍带旧继承版本的请求，并用本次 `publication_id` 写入审计。若响应超时，CMS 的「查看最新配置」还要求审计中的发布前继承版本等于旧草稿版本，因此忽略了已有的成功审计。若本次发布后又有更新，审计版本与当前生效版本不同，也会进入同一误判。用本机 Chrome 和模拟网关 `504` 响应分别复现两种情况。两次都显示「未找到本次发布记录」，保留旧草稿并重新启用发布按钮。再次发布可能生成重复版本，或覆盖超时后已生效的配置。[服务端版本校验](../conversion-backend/internal/paymentpolicy/settings.go#L228) · [CMS 核对逻辑](../cms-front/src/components/conversion/PaymentPolicyPanel.tsx#L311)
+
+**修复建议与验收。** 按 `publication_id`、操作人和作用域精确查询已提交的审计记录。先确认本次是否成功，再用当前生效版本判断本次版本是否仍有效。若已被替代，显示已提交的版本和当前生效版本，并结束本次待确认流程。覆盖响应超时且默认规则变更、同链接随后发布了下一版本、确实未提交三种情况。对高频接入使用精确查询，覆盖成功记录被后续审计挤出最近 20 条的情况。
+
+本轮在隔离 PostgreSQL 16 串行执行了三个 Go 模块的全量竞态测试及 `go vet`，均通过，包含 `2026111912`、`2026111913`、`2026111914` 升级到 `2026111915` 的迁移验证。CMS 前端 lint 和构建通过。浏览器测试使用模拟 API，真实 Meta 和司南投递仍按联调验收。
+
+### R16 修复与复验
+
+- 回传规则超时核对按 `publication_id`、验证过的操作人、环境、接入、应用及推广链接精确查询。审计和当前配置在同一接入锁下读取，核对会等待正在提交的发布事务。隔离 PostgreSQL 覆盖了接入默认规则先更新、同链接后续版本生效、记录移出最近 20 条、确实无提交记录及作用域隔离。 [审计回归](../conversion-backend/internal/operations/publication_audit_test.go)
+- CMS 确认成功后清除本次已提交的草稿，并区分本次发布版本和当前生效版本。浏览器验证了已被替代时的状态、无提交记录时保留草稿，以及旧响应格式无法核对时仍暂停发布。 [发布核对](../cms-front/src/components/conversion/PaymentPolicyPanel.tsx)
+- 发布前端无需填写或提交 `reason`。CMS 将发布请求错误以回传规则专用文案展示。隔离数据库验证了超过旧 8 KiB 限制的 100 条区间草稿可以直接发布，CMS 代理验证了大请求的完整转发。 [CMS 代理测试](../cms-backend/internal/tracking/conversion_orders_test.go)

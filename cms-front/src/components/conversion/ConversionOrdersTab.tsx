@@ -1,6 +1,6 @@
 import { type FormEvent, useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { ArrowRight, Search } from 'lucide-react';
-import { apiRequest } from '../../utils/api';
+import { ApiError, apiRequest } from '../../utils/api';
 import CustomSelect from '../CustomSelect';
 import { SearchInput, TableRegion } from '../ui/Primitives';
 import {
@@ -19,6 +19,7 @@ import {
   InlineErrorBanner,
   ServiceUnavailableState,
 } from './ConversionShared';
+import { PaymentDecisionSummary } from './PaymentDecisionSummary';
 import { TargetResultsTable } from './TargetResultsTable';
 import type {
   ConversionDestination,
@@ -48,6 +49,8 @@ export function ConversionOrdersTab({
   const headingId = useId();
   const [orderInput, setOrderInput] = useState(initialQuery?.orderId ?? '');
   const [integrationId, setIntegrationId] = useState(initialQuery?.integrationId ?? '');
+  const [appId, setAppId] = useState('');
+  const [appChoices, setAppChoices] = useState<string[]>([]);
   const [report, setReport] = useState<OrderReconciliationReport | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -59,6 +62,7 @@ export function ConversionOrdersTab({
     (
       targetOrderId: string,
       targetIntegrationId: string,
+      targetAppId = '',
       onServiceUnavailableRetryable?: () => void,
     ): AbortController | null => {
       const trimmedOrder = targetOrderId.trim();
@@ -75,9 +79,10 @@ export function ConversionOrdersTab({
       setError('');
       setReport(null);
 
-      const query = targetIntegrationId.trim()
-        ? `?${new URLSearchParams({ integration_id: targetIntegrationId.trim() }).toString()}`
-        : '';
+      const params = new URLSearchParams();
+      if (targetIntegrationId) params.set('integration_id', targetIntegrationId.trim());
+      if (targetIntegrationId && targetAppId) params.set('app_id', targetAppId);
+      const query = params.size ? `?${params}` : '';
 
       void (async () => {
         try {
@@ -97,6 +102,7 @@ export function ConversionOrdersTab({
               onServiceUnavailableRetryable?.();
               onServiceUnavailable();
             } else {
+              if (err instanceof ApiError && err.code === 'order_app_ambiguous') setAppChoices(err.appIds ?? []);
               setError(getErrorMessage(err, '逐单对账查询失败'));
             }
           }
@@ -130,9 +136,12 @@ export function ConversionOrdersTab({
     lastAutoNonceRef.current = initialQuery.nonce;
     setOrderInput(initialQuery.orderId);
     setIntegrationId(initialQuery.integrationId);
+    setAppId('');
+    setAppChoices([]);
     const controller = runOrderLookup(
       initialQuery.orderId,
       initialQuery.integrationId,
+      '',
       () => {
         if (lastAutoNonceRef.current === initialQuery.nonce) {
           lastAutoNonceRef.current = prevNonce;
@@ -171,7 +180,7 @@ export function ConversionOrdersTab({
 
   const handleSubmit = (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
-    runOrderLookup(orderInput, integrationId);
+    runOrderLookup(orderInput, integrationId, appId);
   };
 
   if (serviceUnavailable) {
@@ -194,10 +203,16 @@ export function ConversionOrdersTab({
             aria-label="选择订单来源账户"
             options={partnerAccountOptions}
             value={integrationId}
-            onChange={setIntegrationId}
+            onChange={(value) => { setIntegrationId(value); setAppId(''); setAppChoices([]); }}
             width="240px"
           />
 
+          {integrationId && (
+            <CustomSelect aria-label="应用" width="200px" value={appId} onChange={setAppId}
+              options={[{ value: '', label: '自动匹配应用' }, ...Array.from(new Set([
+                ...(integrations.find((item) => item.id === integrationId)?.allowed_apps ?? []), ...appChoices,
+              ])).map((app) => ({ value: app, label: `应用 ${app}` }))]} />
+          )}
           <SearchInput
             className="w-full sm:w-80"
             ariaLabel="订单号"
@@ -308,6 +323,8 @@ export function ConversionOrdersTab({
             </dl>
           </div>
 
+          {report.payment_policy && <PaymentDecisionSummary decision={report.payment_policy} />}
+
           {/* Partner Inbox Section */}
           {report.inbox && report.inbox.length > 0 && (
             <div className="flex flex-col gap-3">
@@ -321,6 +338,7 @@ export function ConversionOrdersTab({
                       <th scope="col">回调 ID</th>
                       <th scope="col">来源事件类型</th>
                       <th scope="col">原始事件 ID</th>
+                      <th scope="col">应用 / 关联事件</th>
                       <th scope="col">解析状态</th>
                       <th scope="col">原因</th>
                       <th scope="col">接收时间</th>
@@ -338,6 +356,13 @@ export function ConversionOrdersTab({
                             <CopyableText value={item.source_event_id} label="原始事件 ID" />
                           ) : (
                             <span className="text-[var(--cms-error)]">缺少事件 ID</span>
+                          )}
+                        </td>
+                        <td className="tabular-nums">
+                          {item.app_id ?? '—'}{item.normalized_event_id && (
+                            <button type="button" className="btn-ghost ml-1" onClick={() => onOpenEventDrawer(item.normalized_event_id!)}>
+                              事件 #{item.normalized_event_id}
+                            </button>
                           )}
                         </td>
                         <td>

@@ -185,6 +185,7 @@ export function ConversionSummaryTab({
     }
     if (
       alert.kind === 'inbox_delayed' ||
+      alert.kind === 'rule_fact_missing' ||
       alert.kind === 'missing_original_target' ||
       alert.kind === 'partner_report_delayed'
     ) {
@@ -405,6 +406,28 @@ export function ConversionSummaryTab({
               )}
             </section>
 
+            <section className="flex flex-col gap-3.5">
+              <h2 className="text-sm font-semibold text-[var(--cms-fg)]">付款回传规则统计</h2>
+              <TableRegion ariaLabel="付款覆盖率与选中后原目标确认率">
+                <table className="cms-table min-w-[540px]" data-density="comfortable">
+                  <thead><tr>
+                    <th scope="col">指标 / 对象</th><th scope="col" className="text-right">已选中或已确认</th>
+                    <th scope="col" className="text-right">已判定或应投递</th><th scope="col" className="text-right">比率</th>
+                  </tr></thead>
+                  <tbody>
+                    <PolicyMetric label="订单回传覆盖率 · 按付款" counted={data.payment_coverage?.selected ?? 0}
+                      total={data.payment_coverage?.evaluated ?? 0} />
+                    {(data.selected_confirmation?.length ? data.selected_confirmation : [{ event_name: '', confirmed: 0, expected: 0 }])
+                      .map((row) => (
+                        <PolicyMetric key={row.event_name} label={`选中后原目标确认率 · ${row.event_name || '按事件'}`}
+                          counted={row.confirmed} total={row.expected} />
+                      ))}
+                  </tbody>
+                </table>
+              </TableRegion>
+              <p className="text-xs m-0 text-[var(--cms-muted-fg)]">以付款判定时间为统计窗口。按 Pixel 筛选时匹配付款的原目标，追加目标见投递分布。</p>
+            </section>
+
             {/* Population Confirmation Rate */}
             <section className="flex flex-col gap-3.5">
               <h2 className="text-sm font-semibold text-[var(--cms-fg)]">原目标回传确认率统计</h2>
@@ -449,7 +472,7 @@ export function ConversionSummaryTab({
                               row.eligibility,
                             ].join(':')}
                           >
-                            <td>
+                            <th scope="row">
                               <span className="font-medium text-[var(--cms-fg)]">
                                 {sourceLabel(row.source)}
                               </span>
@@ -462,7 +485,7 @@ export function ConversionSummaryTab({
                                     ? `#${row.integration_id}`
                                     : '未绑定接入'}
                               </span>
-                            </td>
+                            </th>
                             <td className="font-medium text-[var(--cms-fg)]">{row.event_name}</td>
                             <td>
                               <ConversionStatusDot code={row.eligibility} />
@@ -534,6 +557,10 @@ export function ConversionSummaryTab({
                   </tbody>
                 </table>
               </TableRegion>
+              <p className="text-xs m-0 text-[var(--cms-muted-fg)]">
+                按事件业务时间统计。缺业务时间的 Reader
+                订单按履约时间归入窗口。确认率仅统计应投递的事件。
+              </p>
             </section>
 
             {/* Target Delivery Metrics */}
@@ -692,4 +719,13 @@ export function ConversionSummaryTab({
       )}
     </div>
   );
+}
+
+function PolicyMetric({ label, counted, total }: { label: string; counted: number; total: number }) {
+  return <tr>
+    <th scope="row" className="text-left font-medium">{label}</th>
+    <td className="text-right tabular-nums">{counted}</td>
+    <td className="text-right tabular-nums">{total}</td>
+    <td className="text-right tabular-nums font-medium">{total ? `${((counted / total) * 100).toFixed(1)}%` : '—'}</td>
+  </tr>;
 }

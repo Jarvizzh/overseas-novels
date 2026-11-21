@@ -40,7 +40,7 @@ func TestDurableDeliveryLifecycle(t *testing.T) {
 	}
 	defer pool.Close()
 	for _, asset := range []string{"schema.sql", "migrations/2026111702.sql", "migrations/2026111703.sql",
-		"migrations/2026111704.sql", "migrations/2026111901.sql", "migrations/2026111902.sql", "migrations/2026111903.sql", "migrations/2026111904.sql", "migrations/2026111905.sql", "migrations/2026111906.sql", "migrations/2026111907.sql", "migrations/2026111908.sql", "migrations/2026111909.sql"} {
+		"migrations/2026111704.sql", "migrations/2026111901.sql", "migrations/2026111902.sql", "migrations/2026111903.sql", "migrations/2026111904.sql", "migrations/2026111905.sql", "migrations/2026111906.sql", "migrations/2026111907.sql", "migrations/2026111908.sql", "migrations/2026111909.sql", "migrations/2026111910.sql", "migrations/2026111911.sql", "migrations/2026111912.sql", "migrations/2026111913.sql", "migrations/2026111914.sql", "migrations/2026111915.sql"} {
 		sql, err := os.ReadFile("../../../cms-backend/db/" + asset)
 		if err != nil {
 			t.Fatal(err)
@@ -217,6 +217,7 @@ func TestDurableDeliveryLifecycle(t *testing.T) {
 	t.Run("audited operations", func(t *testing.T) { testAuditedOperations(t, ctx, s) })
 	t.Run("legacy evidence review", func(t *testing.T) { testLegacyReview(t, ctx, s) })
 	t.Run("restricted roles and retention", func(t *testing.T) { testRestrictedRoles(t, ctx, s) })
+	t.Run("reader payment policy", func(t *testing.T) { testReaderPaymentPolicy(t, ctx, s) })
 
 }
 
