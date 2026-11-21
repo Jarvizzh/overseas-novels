@@ -27,6 +27,7 @@ import {
   policyEndpoint,
   policySourceLabels,
   policyVersion,
+  reconcileBandChanges,
   showMinor,
 } from './paymentPolicy';
 import type { ConversionIntegration } from './types';
@@ -49,7 +50,8 @@ interface PolicyPublicationResult {
     version_id: string | null;
     version_number: string | null;
   } | null;
-  current: PaymentPolicyView;
+  current: PaymentPolicyView | null;
+  current_status?: 'available' | 'app_unauthorized';
 }
 
 function publicationVersion(number: string | null, id: string | null) {
@@ -71,7 +73,7 @@ export function PaymentPolicyPanel({
   footer: HTMLElement | null;
   onClose: () => void;
   onState: (dirty: boolean, busy: boolean) => void;
-  onPublished: (view: PaymentPolicyView) => void;
+  onPublished: (view: PaymentPolicyView | null) => void;
 }) {
   const id = useId();
   const isReader = integration.source === 'starnovel';
@@ -111,6 +113,11 @@ export function PaymentPolicyPanel({
   const path = `/conversion/integrations/${encodeURIComponent(integration.id)}/payment-policy`;
   const busy = Boolean(pending);
   const rows = useMemo(() => (view ? paymentBandRows(view.config, bands) : []), [view, bands]);
+  const bandConflicts = useMemo(
+    () => (view ? reconcileBandChanges(view.config, bands).conflicts : []),
+    [view, bands],
+  );
+  const conflictingKeys = new Set(bandConflicts.map(({ key }) => key));
 
   useEffect(() => {
     onState(dirty || Boolean(uncertain), busy);
@@ -263,7 +270,7 @@ export function PaymentPolicyPanel({
   }
 
   async function publish() {
-    if (!canWrite || requestBusy.current || conflict || uncertain || !dirty) return;
+    if (!canWrite || requestBusy.current || conflict || uncertain || bandConflicts.length || !dirty) return;
     const draft = draftPayload();
     if (!draft) return;
     const publication: PolicyPublication = {
@@ -295,12 +302,32 @@ export function PaymentPolicyPanel({
     }
   }
 
+  function rebaseDraft(next: PaymentPolicyView) {
+    const reconciled = reconcileBandChanges(next.config, bands);
+    const groups = new Map(next.config.groups.map((item) => [item.payment_kind, item]));
+    setBands(reconciled.bands);
+    setRemovedGroups(removedGroups.filter((kind) => groups.has(kind)));
+    setFallbacks(
+      Object.fromEntries(
+        Object.entries(fallbacks).filter(([kind, fields]) => fields !== null || groups.get(kind)?.fallback),
+      ),
+    );
+    if (range === next.config.payment_range) setRange(undefined);
+    if (!next.own_version) setDeactivate(false);
+    const firstConflict = reconciled.conflicts[0];
+    if (firstConflict) {
+      setGroup(firstConflict.kind);
+      focusField(firstConflict.key);
+    }
+    return reconciled.bands.length !== bands.length;
+  }
+
   async function verifyLatest() {
     if (requestBusy.current) return;
     requestBusy.current = true;
     setPending('verify');
     try {
-      let next: PaymentPolicyView;
+      let next: PaymentPolicyView | null;
       if (uncertain) {
         const params = new URLSearchParams({
           subject_type: 'integration',
@@ -311,9 +338,12 @@ export function PaymentPolicyPanel({
         if (uncertain.promotion_id) params.set('promotion_id', uncertain.promotion_id);
         const result: PolicyPublicationResult = await apiRequest('GET', `/conversion/audit?${params}`);
         const action = uncertain.deactivate ? 'inherit_payment_policy' : 'publish_payment_policy';
+        const unauthorized = result?.current_status === 'app_unauthorized' && result.current === null;
+        const available =
+          (result?.current_status === undefined || result.current_status === 'available') && result?.current;
         if (
           result?.publication_id !== uncertain.publication_id ||
-          !result.current ||
+          (!available && !unauthorized) ||
           result.record === undefined ||
           (result.record && result.record.action !== action)
         ) {
@@ -322,23 +352,36 @@ export function PaymentPolicyPanel({
         next = result.current;
         const record = result.record;
         if (record) {
-          const current = policyVersion(next);
           const publishedVersion = publicationVersion(record.version_number, record.version_id);
-          const currentVersion = publicationVersion(current?.number ?? null, current?.id ?? null);
           const submitted = uncertain.deactivate
             ? `已确认恢复继承成功。提交时生效 ${publishedVersion}。`
             : `已确认本次发布成功。发布版本 ${publishedVersion}。`;
-          const superseded = record.version_id !== (current?.id ?? null) ? '本次生效版本已被替代。' : '';
           clearDraft();
-          setNotice(`${submitted}${superseded}当前生效 ${currentVersion}。`);
+          if (next) {
+            const current = policyVersion(next);
+            const currentVersion = publicationVersion(current?.number ?? null, current?.id ?? null);
+            const superseded = record.version_id !== (current?.id ?? null) ? '本次生效版本已被替代。' : '';
+            setNotice(`${submitted}${superseded}当前生效 ${currentVersion}。`);
+          } else {
+            setNotice(`${submitted}当前应用已解除授权。`);
+          }
           onPublished(next);
         } else {
-          setNotice('已刷新生效版本和审计记录。未找到本次发布记录，请核对草稿后重试');
+          if (next) {
+            rebaseDraft(next);
+            setNotice('已刷新生效版本和审计记录。未找到本次发布记录，请核对草稿');
+          } else {
+            setNotice('未找到本次发布记录。当前应用已解除授权，草稿已保留');
+          }
           setUncertain(null);
         }
       } else {
         next = await apiRequest('GET', policyEndpoint(integration.id, scope.app, scope.promotion));
-        setNotice('已加载最新生效规则。草稿已保留，请核对后重试');
+        if (!next) throw new Error('读取回传规则失败');
+        const removed = rebaseDraft(next);
+        setNotice(
+          removed ? '已加载最新生效规则，草稿中已完成的区间删除已移除' : '已加载最新生效规则，请核对草稿',
+        );
       }
       setView(next);
       setConflict(false);
@@ -369,7 +412,24 @@ export function PaymentPolicyPanel({
     const removed = second?.band.branch_id;
     if (removed) changes.push({ key: second.key, kind: second.kind, band: null, branchId: removed });
     const replaced = new Set(edit.rows.map(({ key }) => key));
-    setBands((current) => [...current.filter(({ key }) => !replaced.has(key)), ...changes]);
+    setBands((current) => {
+      const editGroups = new Set(
+        current.flatMap(({ key, editGroup }) =>
+          replaced.has(key) && editGroup !== undefined ? [editGroup] : [],
+        ),
+      );
+      const remaining = current.filter(({ key }) => !replaced.has(key));
+      if (changes.length === 1 && editGroups.size === 0) return [...remaining, ...changes];
+      // Keep the dependent changes together if a split or merge has to be discarded later.
+      return [
+        ...remaining.map((change) =>
+          change.editGroup !== undefined && editGroups.has(change.editGroup)
+            ? { ...change, editGroup: edit.key }
+            : change,
+        ),
+        ...changes.map((change) => ({ ...change, editGroup: edit.key })),
+      ];
+    });
     clearFeedback();
     setEdit(null);
   }
@@ -383,6 +443,17 @@ export function PaymentPolicyPanel({
     });
     clearFeedback();
     focusField(focusKey);
+  }
+
+  function discardBandConflict(key: string) {
+    const affectedGroup = bands.find((change) => change.key === key)?.editGroup;
+    const keep = (change: BandChange) =>
+      change.key !== key && (affectedGroup === undefined || change.editGroup !== affectedGroup);
+    setBands((current) => current.filter(keep));
+    clearFeedback();
+    const next = bandConflicts.find(keep);
+    if (next) setGroup(next.kind);
+    focusField(next?.key ?? 'add-band');
   }
 
   const effectiveGroup = view?.config.groups.find((item) => item.payment_kind === group);
@@ -403,7 +474,7 @@ export function PaymentPolicyPanel({
             type="button"
             className="btn-primary"
             onClick={() => void publish()}
-            disabled={busy || !view || !dirty || conflict || Boolean(uncertain)}
+            disabled={busy || !view || !dirty || conflict || Boolean(uncertain) || bandConflicts.length > 0}
           >
             {pending === 'publish' ? '发布中…' : '发布'}
           </button>
@@ -507,7 +578,14 @@ export function PaymentPolicyPanel({
           查看最新配置
         </button>
       )}
-      <div role="status">{notice && <p className="m-0 text-[var(--cms-muted-fg)]">{notice}</p>}</div>
+      <div role="status" className="space-y-1">
+        {notice && <p className="m-0 text-[var(--cms-muted-fg)]">{notice}</p>}
+        {bandConflicts.length > 0 && (
+          <p className="m-0 text-[var(--cms-muted-fg)]">
+            {bandConflicts.length} 项区间编辑冲突，请在对应付款类型下撤销冲突编辑后发布。
+          </p>
+        )}
+      </div>
       {active && loading && (
         <TableRegion ariaLabel="正在加载回传规则">
           <table>
@@ -694,6 +772,25 @@ export function PaymentPolicyPanel({
                         const next = currentBands[i + 1];
                         const { band } = row;
                         const label = bandLabel(band);
+                        if (conflictingKeys.has(row.key)) {
+                          const description = `${id}-conflict-${row.key}`;
+                          return (
+                            <div className="flex items-center gap-1 whitespace-nowrap">
+                              <span id={description}>该区间已不在生效规则中</span>
+                              <button
+                                type="button"
+                                className="btn-ghost"
+                                aria-label={`撤销冲突编辑 ${label}`}
+                                aria-describedby={description}
+                                data-policy-field={row.key}
+                                disabled={busy}
+                                onClick={() => discardBandConflict(row.key)}
+                              >
+                                撤销冲突编辑
+                              </button>
+                            </div>
+                          );
+                        }
                         return (
                           <div className="flex items-center gap-1 whitespace-nowrap">
                             <button
@@ -717,6 +814,7 @@ export function PaymentPolicyPanel({
                             </button>
                             {next &&
                               band.currency === next.band.currency &&
+                              !conflictingKeys.has(next.key) &&
                               band.max_minor === next.band.min_minor && (
                                 <button
                                   type="button"

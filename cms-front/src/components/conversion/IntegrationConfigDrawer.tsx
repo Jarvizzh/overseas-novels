@@ -1020,7 +1020,7 @@ export function IntegrationConfigDrawer({
               onState={onPolicyState}
               onPublished={(view) => {
                 setAuditRefresh((count) => count + 1);
-                onPolicyPublished?.(view);
+                if (view) onPolicyPublished?.(view);
               }}
             />
             </Suspense>

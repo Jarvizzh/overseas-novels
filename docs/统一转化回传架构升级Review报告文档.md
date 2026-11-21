@@ -266,3 +266,27 @@ Reader 已取消旧的 CAPI 消费者，原 `payment-ops -kind outbox` 仍会更
 - 回传规则超时核对按 `publication_id`、验证过的操作人、环境、接入、应用及推广链接精确查询。审计和当前配置在同一接入锁下读取，核对会等待正在提交的发布事务。隔离 PostgreSQL 覆盖了接入默认规则先更新、同链接后续版本生效、记录移出最近 20 条、确实无提交记录及作用域隔离。 [审计回归](../conversion-backend/internal/operations/publication_audit_test.go)
 - CMS 确认成功后清除本次已提交的草稿，并区分本次发布版本和当前生效版本。浏览器验证了已被替代时的状态、无提交记录时保留草稿，以及旧响应格式无法核对时仍暂停发布。 [发布核对](../cms-front/src/components/conversion/PaymentPolicyPanel.tsx)
 - 发布前端无需填写或提交 `reason`。CMS 将发布请求错误以回传规则专用文案展示。隔离数据库验证了超过旧 8 KiB 限制的 100 条区间草稿可以直接发布，CMS 代理验证了大请求的完整转发。 [CMS 代理测试](../cms-backend/internal/tracking/conversion_orders_test.go)
+
+### R16 独立复审（2026-11-21）
+
+**R16 的两个原复现均通过，另发现 R17 和 R18。** 浏览器模拟 `504` 后，接入默认规则变更和专属版本已被替代两种情况均能确认本次发布，清除已提交草稿，并展示当前版本。确实没有审计时保留草稿，旧格式响应无法核对时持续暂停发布。隔离 PostgreSQL 复验了对操作者和作用域的隔离、查找超出最近 20 条的记录、等待持有接入锁的发布事务，以及大请求发布。[应用回归](../conversion-backend/internal/operations/publication_audit_test.go#L19) · [CMS 核对逻辑](../cms-front/src/components/conversion/PaymentPolicyPanel.tsx#L298)
+
+#### R17 · P2 · 并发删除区间后，隐形草稿阻塞其余变更发布
+
+**复现。** 在草稿中删除一个金额区间并修改兜底规则。另一位运营先删除同一区间，首次发布返回 `409`。点击「查看最新配置」后，CMS 更新了版本，仍保留指向已删除分支的 `remove_band`。再次发布时，这条操作返回 `400 invalid_payment_policy_operation`，整批草稿回滚。区间已从界面移除，操作者无法单独清除这条草稿操作。本机 Chrome 和隔离 PostgreSQL 分别复现了界面重发和服务端拒绝。[草稿序列化](../cms-front/src/components/conversion/PaymentPolicyPanel.tsx#L222) · [版本刷新](../cms-front/src/components/conversion/PaymentPolicyPanel.tsx#L339) · [分支校验](../conversion-backend/internal/paymentpolicy/edit.go#L177)
+
+**修复建议与验收。** 读取最新版本后，以作用域和分支 ID 核对旧草稿，将目标已经不存在的删除视为已完成。对指向已删除分支的编辑展示具体冲突，并允许单独撤销。验证并发删除后能继续发布无冲突的兜底或区间变更，验证已被删除的编辑不会被自动转成新增区间。
+
+#### R18 · P3 · 已撤销授权的应用无法核对此前成功发布的规则
+
+**复现。** 为司南应用发布规则并写入审计，随后从接入授权应用中移除该应用。原操作者用发布 ID 核对，服务端已查到审计，但读取当前规则时返回 `400 invalid_payment_policy_app`，整个响应因此缺少本次提交结果。常规审计仍可查到同一条记录。使用隔离 PostgreSQL 的私网 API 用例复现。[发布审计事务](../conversion-backend/internal/operations/configuration.go#L198) · [当前应用校验](../conversion-backend/internal/paymentpolicy/settings.go#L107)
+
+**修复建议与验收。** 将已提交的审计结果与当前作用域可用状态分别返回。确认同一操作者、环境、接入、应用和推广链接后，可显示本次发布结果及「当前应用已解除授权」。保留现有配置读取与发布约束。验证撤销授权后仍可核对本次提交，且其他操作者或环境无法取得该记录。
+
+本轮在隔离 PostgreSQL 16 重跑 `conversion-backend` 和 `cms-backend` 的全量 `go test -race -p 2 -count=1 ./...` 及 `go vet ./...`，均通过。CMS 前端 lint、构建及 R16 的四条本机 Chrome 模拟回归通过。R17、R18 使用临时用例复现。Reader 全量测试沿用上一轮结果，真实 Meta 和司南投递继续按联调验收。
+
+### R17、R18 修复与复验
+
+- R17。刷新最新规则时按分支 ID 清理已完成的区间删除。目标分支已消失的编辑保留在金额区间表中，标记冲突并提供撤销。撤销拆分或合并时同步清除其关联变更。Chrome 模拟测试覆盖删除和兜底同时修改、只剩已完成的删除、编辑与拆分合并冲突，以及超时后无审计时重载草稿。 [草稿刷新与冲突操作](../cms-front/src/components/conversion/PaymentPolicyPanel.tsx)
+- R18。司南应用已解除授权时，精确发布核对返回原发布记录、`current_status=app_unauthorized` 和 `current=null`。CMS 显示已确认的历史发布版本和解除授权状态。隔离 PostgreSQL 验证了授权撤销后的历史查询范围，以及直接读取和发布仍返回 400。Chrome 模拟测试验证了有审计和无审计两种状态。 [审计回归](../conversion-backend/internal/operations/publication_audit_test.go)
+- 转化服务全量 `go test -race`、`go vet`、CMS 前端 lint 和构建、R16 浏览器回归通过。

@@ -172,7 +172,8 @@ type publicationAuditRecord struct {
 type publicationAuditResult struct {
 	PublicationID string                  `json:"publication_id"`
 	Record        *publicationAuditRecord `json:"record"`
-	Current       paymentpolicy.View      `json:"current"`
+	Current       *paymentpolicy.View     `json:"current"`
+	CurrentStatus string                  `json:"current_status"`
 }
 
 func (repo Repository) handlePublicationAudit(w http.ResponseWriter, r *http.Request, integrationID int64) {
@@ -190,9 +191,9 @@ func (repo Repository) handlePublicationAudit(w http.ResponseWriter, r *http.Req
 	err := pgx.BeginFunc(ctx, repo.Pool, func(tx pgx.Tx) error {
 		// Wait for an in-flight publication holding this integration's write lock.
 		// The following statement reads the audit with a fresh snapshot.
-		var id int64
-		if err := tx.QueryRow(ctx, "SELECT id FROM conversion.integrations WHERE id=$1 AND environment=$2 FOR SHARE",
-			integrationID, repo.Environment).Scan(&id); err != nil {
+		var source string
+		if err := tx.QueryRow(ctx, "SELECT source FROM conversion.integrations WHERE id=$1 AND environment=$2 FOR SHARE",
+			integrationID, repo.Environment).Scan(&source); err != nil {
 			return err
 		}
 		var record publicationAuditRecord
@@ -206,10 +207,20 @@ func (repo Repository) handlePublicationAudit(w http.ResponseWriter, r *http.Req
 		}
 		// Read the effective version under the same lock so a missing audit
 		// cannot be paired with a version committed after the lookup.
-		out.Current, err = paymentpolicy.ReadTx(ctx, tx, paymentpolicy.Scope{
+		current, err := paymentpolicy.ReadTx(ctx, tx, paymentpolicy.Scope{
 			Environment: repo.Environment, IntegrationID: integrationID, App: app, Promotion: promotion,
 		})
-		return err
+		var invalid *paymentpolicy.ValidationError
+		switch {
+		case err == nil:
+			out.Current = &current
+			out.CurrentStatus = "available"
+		case source == "sinan" && validApp && errors.As(err, &invalid) && invalid.Code == "invalid_payment_policy_app":
+			out.CurrentStatus = "app_unauthorized"
+		default:
+			return err
+		}
+		return nil
 	})
 	writePolicy(w, out, err)
 }

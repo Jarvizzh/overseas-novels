@@ -194,7 +194,21 @@ export interface BandRow {
   band: PolicyBand;
 }
 
-export type BandChange = BandRow | { key: string; kind: string; branchId: string; band: null };
+export type BandChange = (BandRow | { key: string; kind: string; branchId: string; band: null }) & {
+  editGroup?: number;
+};
+
+export function reconcileBandChanges(config: PolicyConfig, changes: BandChange[]) {
+  const branchIds = new Set(
+    config.groups.flatMap(({ bands }) => bands?.map(({ branch_id }) => branch_id) ?? []),
+  );
+  return {
+    bands: changes.filter((change) => change.band !== null || branchIds.has(change.branchId)),
+    conflicts: changes.filter(
+      (change) => change.band?.branch_id !== undefined && !branchIds.has(change.band.branch_id),
+    ),
+  };
+}
 
 export function bandChangeOperation(change: BandChange): PolicyOp {
   if (change.band === null) {

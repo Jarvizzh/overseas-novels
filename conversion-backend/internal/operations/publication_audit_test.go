@@ -22,6 +22,8 @@ func TestPublicationAuditMatchesCommittedScope(t *testing.T) {
 		INSERT INTO admins(id,username,password_hash,role) VALUES ('ops','ops','fixture','Admin');
 		INSERT INTO conversion.integrations(environment,source,account_key,contract_version)
 		VALUES ('test','starnovel','reader','v1'),('other','starnovel','reader','v1');
+		INSERT INTO conversion.integrations(environment,source,account_key,contract_version,allowed_apps)
+		VALUES ('test','sinan','partner','v1','{123,456}');
 		INSERT INTO novels(id,title,author) VALUES (1,'fixture','fixture');
 		INSERT INTO promotion_links(id,novel_id,novel_title,generated_url)
 		VALUES (13,1,'fixture','https://reader.example/13'),(14,1,'fixture','https://reader.example/14');
@@ -89,11 +91,12 @@ func TestPublicationAuditMatchesCommittedScope(t *testing.T) {
 	}
 	assertReceipt := func(receipt publicationAuditResult, current int64) {
 		t.Helper()
-		if receipt.Current.OwnVersion == nil || receipt.Current.OwnVersion.ID != current ||
+		if receipt.CurrentStatus != "available" || receipt.Current == nil ||
+			receipt.Current.OwnVersion == nil || receipt.Current.OwnVersion.ID != current ||
 			receipt.Record == nil || receipt.Record.Action != "publish_payment_policy" ||
 			receipt.Record.VersionID == nil || *receipt.Record.VersionID != fmt.Sprint(published.OwnVersion.ID) ||
 			receipt.Record.VersionNumber == nil || *receipt.Record.VersionNumber != fmt.Sprint(published.OwnVersion.Number) {
-			t.Fatalf("wrong committed or current version: %+v %+v", receipt.Record, receipt.Current.OwnVersion)
+			t.Fatalf("wrong committed or current version: %+v %+v", receipt.Record, receipt.Current)
 		}
 	}
 	assertReceipt(get("ops", "1", "reader", "13", publicationID), published.OwnVersion.ID)
@@ -150,7 +153,7 @@ func TestPublicationAuditMatchesCommittedScope(t *testing.T) {
 		for {
 			var waiting bool
 			if err := owner.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_stat_activity
-			    WHERE wait_event_type='Lock' AND query LIKE 'SELECT id FROM conversion.integrations%FOR SHARE')`).Scan(&waiting); err != nil {
+			    WHERE wait_event_type='Lock' AND query LIKE 'SELECT source FROM conversion.integrations%FOR SHARE')`).Scan(&waiting); err != nil {
 				t.Fatal(err)
 			}
 			if waiting {
@@ -170,6 +173,40 @@ func TestPublicationAuditMatchesCommittedScope(t *testing.T) {
 			t.Fatalf("in-flight receipt: %d %s %v", res.Code, res.Body, err)
 		}
 		assertReceipt(receipt, latest.OwnVersion.ID)
+	})
+
+	t.Run("confirms publication after app authorization is revoked", func(t *testing.T) {
+		const id = "0000000000000000000000000000a018"
+		const path = "/integrations/3/payment-policy"
+		body, err := json.Marshal(paymentpolicy.Draft{
+			App: "123", Promotion: "13", PublicationID: id, Operations: fallback,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var published paymentpolicy.View
+		decodePolicyView(t, call(http.MethodPost, path+"/publish", "ops", body, http.StatusOK), &published)
+		mustExec(t, ctx, owner, `UPDATE conversion.integrations SET allowed_apps='{456}' WHERE id=3`)
+
+		receipt := get("ops", "3", "123", "13", id)
+		if receipt.CurrentStatus != "app_unauthorized" || receipt.Current != nil ||
+			receipt.Record == nil || receipt.Record.Action != "publish_payment_policy" ||
+			receipt.Record.VersionID == nil || *receipt.Record.VersionID != fmt.Sprint(published.OwnVersion.ID) ||
+			receipt.Record.VersionNumber == nil || *receipt.Record.VersionNumber != fmt.Sprint(published.OwnVersion.Number) {
+			t.Fatalf("wrong receipt for revoked app: %+v, record: %+v", receipt, receipt.Record)
+		}
+		for _, other := range []publicationAuditResult{
+			get("another-operator", "3", "123", "13", id),
+			get("ops", "3", "123", "14", id),
+			get("ops", "3", "456", "13", id),
+			get("ops", "3", "123", "13", missingID),
+		} {
+			if other.Record != nil {
+				t.Fatalf("publication lookup crossed operator, app, promotion or publication ID: %+v", other)
+			}
+		}
+		call(http.MethodGet, path+"?app_id=123&promotion_id=13", "ops", nil, http.StatusBadRequest)
+		call(http.MethodPost, path+"/publish", "ops", body, http.StatusBadRequest)
 	})
 
 	t.Run("publishes a full batch without reason", func(t *testing.T) {

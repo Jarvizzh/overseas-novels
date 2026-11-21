@@ -154,7 +154,7 @@ flowchart TD
 | `GET /conversion/integrations/:id/payment-policy` | 按 `app_id` 与可选 `promotion_id` 取得专属或继承配置、生效版本、允许条件和当前序号。 |
 | `POST /conversion/integrations/:id/payment-policy/preview` | 校验草案，返回最终区间、自动继承结果、未命中行为和当前序号快照。事务只读。 |
 | `POST /conversion/integrations/:id/payment-policy/publish` | 提交 `expected_version`、作用域和规则操作。服务端为首个专属版本记录「新建回传规则」，为后续版本和恢复继承记录「变更回传规则」。CMS 提交 `publication_id` 以便用审计核对超时请求。首次从继承配置发布链接专属规则时，提交 `expected_version=null` 和当前 `expected_inherited_version`。支持停用专属配置并恢复继承。版本冲突返回 409，配置无效返回 400。成功返回当前有效配置与版本。 |
-| `GET /conversion/audit?subject_type=integration&subject_id=...&app_id=...&publication_id=...` | 按操作人、接入、应用、可选 `promotion_id` 和发布 ID 精确核对。返回本次发布记录或空值，以及同一次核对读取的当前生效配置。 |
+| `GET /conversion/audit?subject_type=integration&subject_id=...&app_id=...&publication_id=...` | 按操作人、接入、应用、可选 `promotion_id` 和发布 ID 精确核对。返回本次发布记录或空值，以及当前作用域状态。可读时 `current_status=available` 并返回生效配置，司南应用已解除授权时返回 `current_status=app_unauthorized` 和 `current=null`。 |
 
 复用 [CMS 私网代理](../cms-backend/internal/tracking/conversion_orders.go)和[转化服务路由](../conversion-backend/internal/operations/http.go)的权限边界。Admin、SuperAdmin 可预览和发布，MediaBuyer、Finance 可读脱敏配置和结果。接口校验接入、应用、环境与操作人权限，审计保存前后版本和操作原因。
 
@@ -198,7 +198,7 @@ flowchart TD
 1. **加载配置。** 切换应用或推广链接时从 GET 接口读取对应范围，展示加载状态；过期的响应丢弃。有未发布修改时，切换范围、切换页签或关闭抽屉前提示是否放弃草稿。
 2. **生成草稿。** 按已读版本维护金额区间表的变更。输入错误定位到字段或区间行，包括金额精度、区间重叠、比例范围和循环参数。发布时将变更转换为新增、更新和删除操作。拆分和合并保留最低金额段的原分支，服务端分配新分支 ID。
 3. **发布草稿。** 可直接发布当前作用域下的草稿。提交期间锁定发布按钮，成功后刷新生效版本、接入审计和展示数据。
-4. **处理错误。** HTTP 400 展示字段错误和发布失败原因。HTTP 409 保留草稿，提供「查看最新配置」，由运营核对后重试发布。发布请求超时时，按发布 ID 精确核对审计。查到成功记录时结束待确认流程，显示本次发布版本和当前生效版本。确实没有记录时保留草稿，供核对后重试。
+4. **处理错误。** HTTP 400 展示字段错误和发布失败原因。HTTP 409 保留草稿，提供「查看最新配置」。刷新后，已完成的区间删除从草稿移除，目标区间已消失的编辑在金额区间表中标记冲突，可单独撤销。发布请求超时时，按发布 ID 精确核对审计。查到成功记录时结束待确认流程，显示本次发布版本，以及当前生效版本或应用已解除授权的状态。确实没有记录时保留草稿，作用域仍可用时可核对后重试。
 5. **权限。** Admin、SuperAdmin 显示编辑和发布操作。MediaBuyer、Finance 打开同一面板查看生效规则、版本和判定结果。API 继续校验访问角色及作用域。
 
 ### 5.4 订单、投递和监控呈现
