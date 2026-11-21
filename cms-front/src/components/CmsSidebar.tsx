@@ -168,7 +168,7 @@ function RailGroupPopover({ node, pathname }: RailGroupPopoverProps) {
         style={{ positionAnchor: anchorName } as React.CSSProperties}
         className="cms-popover anchored-rail-popover w-40 p-1.5 text-left"
       >
-        <div className="px-2.5 py-1.5 text-xs font-semibold text-[var(--cms-muted-fg)] border-b border-[var(--cms-border)] mb-1">
+        <div className="px-2.5 py-1.5 text-[11.5px] font-semibold text-[var(--cms-muted-fg)] border-b border-[var(--cms-border)] mb-1">
           {node.label}
         </div>
         <ul className="space-y-0.5 list-none m-0 p-0">
@@ -180,7 +180,7 @@ function RailGroupPopover({ node, pathname }: RailGroupPopoverProps) {
                   to={child.path}
                   aria-current={active ? 'page' : undefined}
                   onClick={() => hidePopover()}
-                  className={`focus-ring flex items-center justify-between px-2.5 py-1.5 rounded-lg text-sm no-underline transition-colors ${
+                  className={`focus-ring flex items-center justify-between px-2.5 py-1.5 rounded-lg text-[13.5px] no-underline transition-colors ${
                     active
                       ? 'nav-active-item font-semibold'
                       : 'text-[var(--cms-muted-fg)] hover:text-[var(--cms-fg)] hover:bg-[var(--cms-secondary)] font-medium'
@@ -231,7 +231,7 @@ function ExpandedNavList({
                 to={node.path}
                 aria-current={active ? 'page' : undefined}
                 onClick={onNavigate}
-                className={`focus-ring relative w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-sm no-underline transition-colors ${
+                className={`focus-ring relative w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-[13.5px] no-underline transition-colors ${
                   active
                     ? 'nav-active-item font-semibold'
                     : 'text-[var(--cms-muted-fg)] hover:text-[var(--cms-fg)] hover:bg-[var(--cms-secondary)] font-medium'
@@ -256,7 +256,7 @@ function ExpandedNavList({
               aria-expanded={isOpen}
               aria-controls={submenuId}
               onClick={() => onToggleGroup(node.id)}
-              className={`focus-ring w-full flex items-center justify-between gap-1.5 px-2.5 py-1.5 rounded-lg text-sm font-medium cursor-pointer transition-colors ${
+              className={`focus-ring w-full flex items-center justify-between gap-1.5 px-2.5 py-1.5 rounded-lg text-[13.5px] font-medium cursor-pointer transition-colors ${
                 hasActiveChild
                   ? 'text-[var(--cms-fg)] font-semibold'
                   : 'text-[var(--cms-muted-fg)] hover:text-[var(--cms-fg)] hover:bg-[var(--cms-secondary)]'
@@ -302,7 +302,7 @@ function ExpandedNavList({
                       to={child.path}
                       aria-current={active ? 'page' : undefined}
                       onClick={onNavigate}
-                      className={`focus-ring relative w-full flex items-center px-2.5 py-1.5 rounded-lg text-sm no-underline transition-colors ${
+                      className={`focus-ring relative w-full flex items-center px-2.5 py-1.5 rounded-lg text-[13.5px] no-underline transition-colors ${
                         active
                           ? "nav-active-item font-semibold before:content-[''] before:absolute before:-left-[11px] before:top-1.5 before:bottom-1.5 before:w-[2px] before:rounded-full before:bg-[var(--cms-primary)]"
                           : 'text-[var(--cms-muted-fg)] hover:text-[var(--cms-fg)] hover:bg-[var(--cms-secondary)] font-normal'
@@ -345,10 +345,10 @@ function AccountFooter({ admin, collapsed, onLogout }: AccountFooterProps) {
             </span>
             {!collapsed && (
               <span className="min-w-0 text-left flex-1">
-                <span className="block text-[13px] font-medium text-[var(--cms-fg)] truncate">
+                <span className="block text-[12.5px] font-medium text-[var(--cms-fg)] truncate">
                   {admin.nickname || admin.username}
                 </span>
-                <span className="block text-xs text-[var(--cms-muted-fg)] truncate">
+                <span className="block text-[11.5px] text-[var(--cms-muted-fg)] truncate">
                   {ROLE_LABELS[admin.role] || admin.role}
                 </span>
               </span>
@@ -484,7 +484,7 @@ export function CmsSidebar({
               className="w-7 h-7 rounded-lg object-contain border border-[var(--cms-border)] shrink-0"
             />
             {!collapsed && (
-              <span className="text-sm font-semibold tracking-tight text-[var(--cms-fg)] truncate">
+              <span className="text-[13.5px] font-semibold tracking-tight text-[var(--cms-fg)] truncate">
                 STAR NOVEL
               </span>
             )}
@@ -586,7 +586,7 @@ export function CmsSidebar({
                   alt="STAR NOVEL"
                   className="w-7 h-7 rounded-lg object-contain border border-[var(--cms-border)] shrink-0"
                 />
-                <span className="text-sm font-semibold tracking-tight text-[var(--cms-fg)] truncate">
+                <span className="text-[13.5px] font-semibold tracking-tight text-[var(--cms-fg)] truncate">
                   STAR NOVEL
                 </span>
               </Link>
