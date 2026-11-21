@@ -5,16 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strconv"
 	"strings"
 	"time"
 
-	"reader-backend/internal/db"
 	"reader-backend/internal/model"
 	"reader-backend/internal/novel"
 	"reader-backend/internal/payment"
-	"reader-backend/internal/tracking"
-	"reader-backend/internal/workerpool"
 )
 
 var (
@@ -30,7 +26,6 @@ type Service interface {
 	GetHistory(ctx context.Context, userID int64, limit, offset int) ([]model.Transaction, error)
 	GetHistoryPage(ctx context.Context, userID int64, limit int, after *historyCursor) (*HistoryPage, error)
 	UnlockChapter(ctx context.Context, userID int64, novelID int64, chapterIndex int, promoID int, utmSource, utmCampaign string, quoted ChapterQuote) error
-	InitiateCheckout(ctx context.Context, userID int64, amountCents int64, coinsAmount int, fbp, fbc, pixelID, ip, ua, sourceURL, country string) error
 	CreateStripeIntent(ctx context.Context, userID int64, amountCents int64, coinsAmount int, fbp, fbc, pixelID, ip, ua, sourceURL, country string) (string, error)
 	CreatePayPalOrder(context.Context, int64, int, int64, string, string, checkoutAttribution) (string, string, error)
 	CapturePayPalPayment(context.Context, int64, string) (*CheckoutResult, error)
@@ -130,25 +125,6 @@ func (s *service) UnlockChapter(ctx context.Context, userID int64, novelID int64
 	return nil
 }
 
-func (s *service) InitiateCheckout(ctx context.Context, userID int64, amountCents int64, coinsAmount int, fbp, fbc, pixelID, ip, ua, sourceURL, country string) error {
-	email, _ := s.repo.GetUserEmail(ctx, userID)
-
-	// Trigger FB Conversions API InitiateCheckout event asynchronously via WorkerPool strictly using CMS configured pixel
-	workerpool.Submit(func() {
-		taskCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		effectivePixelID := ""
-		if effectivePixelID == "" && db.DB != nil {
-			_ = db.Pool(db.BackgroundContext(taskCtx)).QueryRow(taskCtx, "SELECT fp.pixel_id FROM reader_promotion_for_user($1) pl JOIN fb_pixels fp ON pl.fb_pixel_id = fp.id", userID).Scan(&effectivePixelID)
-		}
-		if effectivePixelID != "" {
-			tracking.SendFacebookEvent(effectivePixelID, "InitiateCheckout", strconv.FormatInt(userID, 10), email, ip, ua, fbc, fbp, float64(amountCents)/100.0, "USD", sourceURL, country)
-		}
-	})
-
-	return nil
-}
-
 func (s *service) CreateStripeIntent(ctx context.Context, userID int64, amountCents int64, coinsAmount int, fbp, fbc, pixelID, ip, ua, sourceURL, country string) (string, error) {
 	// TODO(stripe): implement server-priced orders and authenticated, idempotent settlement.
 	return "", ErrStripeDisabled
@@ -193,7 +169,6 @@ func (s *service) CreatePayPalOrder(ctx context.Context, userID int64, slotID in
 	if err := s.repo.BindCheckout(ctx, checkoutID, orderID); err != nil {
 		return "", "", err
 	}
-	s.trackCheckoutInitiation(orderID)
 	return orderID, approvalURL, nil
 }
 
@@ -269,32 +244,6 @@ func (s *service) completePayPalOrder(ctx context.Context, userID int64, orderID
 		}
 	}
 	return result, err
-}
-
-func (s *service) trackCheckoutInitiation(orderID string) {
-	workerpool.Submit(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		defer cancel()
-		var userID int64
-		var amount int64
-		var pixel, currency, email string
-		var metadata []byte
-		err := db.Pool(ctx).QueryRow(ctx, `SELECT o.user_id,o.amount_cents,o.currency,
-			COALESCE(u.email,''),fp.pixel_id,COALESCE(o.fb_lead_metadata,'{}')
-			FROM recharge_orders o JOIN users u ON u.id=o.user_id
-			JOIN promotion_links p ON p.id=o.promotion_link_id JOIN fb_pixels fp ON fp.id=p.fb_pixel_id
-			WHERE o.external_ref_id=$1 AND o.payment_method='paypal'`, orderID).
-			Scan(&userID, &amount, &currency, &email, &pixel, &metadata)
-		if err != nil {
-			return
-		}
-		var attribution checkoutAttribution
-		if err := json.Unmarshal(metadata, &attribution); err != nil {
-			return
-		}
-		tracking.SendFacebookEvent(pixel, "InitiateCheckout", strconv.FormatInt(userID, 10), email, attribution.IP, attribution.UserAgent,
-			attribution.FBC, attribution.FBP, float64(amount)/100, currency, attribution.SourceURL, attribution.Country)
-	})
 }
 
 func (s *service) ProcessStripeWebhook(ctx context.Context, payload []byte, sigHeader string, webhookSecret string) error {
@@ -461,19 +410,6 @@ func (s *service) CreateSubscription(
 	if err := s.repo.finishSubscriptionIntent(ctx, intent, result); err != nil {
 		return nil, err
 	}
-
-	email, _ := s.repo.GetUserEmail(ctx, userID)
-	workerpool.Submit(func() {
-		taskCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		effectivePixelID := ""
-		if effectivePixelID == "" && db.DB != nil {
-			_ = db.Pool(db.BackgroundContext(taskCtx)).QueryRow(taskCtx, "SELECT fp.pixel_id FROM reader_promotion_for_user($1) pl JOIN fb_pixels fp ON pl.fb_pixel_id = fp.id", userID).Scan(&effectivePixelID)
-		}
-		if effectivePixelID != "" {
-			tracking.SendFacebookEvent(effectivePixelID, "InitiateCheckout", strconv.FormatInt(userID, 10), email, ip, ua, fbc, fbp, float64(slot.PriceCents)/100.0, "USD", sourceURL, country)
-		}
-	})
 
 	return result, nil
 }

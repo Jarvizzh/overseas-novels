@@ -149,16 +149,24 @@ func TestInheritedAndExplicitOffersKeepPromotionIdentity(t *testing.T) {
 				if err := r.BindCheckout(ctx, key, "order"); err != nil {
 					t.Fatal(err)
 				}
+				if err := r.BindCheckout(ctx, key, "order"); err != nil {
+					t.Fatal(err)
+				}
+				var checkoutEvents int
+				if err := p.QueryRow(ctx, `SELECT count(*) FROM reader_conversion_outbox
+					WHERE business_key=$1 AND event_name='InitiateCheckout'`, "checkout:"+key+":InitiateCheckout").Scan(&checkoutEvents); err != nil || checkoutEvents != 1 {
+					t.Fatalf("checkout conversion count=%d, err=%v", checkoutEvents, err)
+				}
 				if _, err := r.settleCheckout(ctx, "order", &payment.PayPalCaptureResult{OrderID: "order", CustomID: key, CaptureID: "capture", CurrencyCode: "USD", GrossAmount: "9.99", FeeAmount: "0.00", NetAmount: "9.99", Status: "COMPLETED", RawPayload: "{}"}); err != nil {
 					t.Fatal(err)
 				}
 				var state string
-				if err := p.QueryRow(ctx, `SELECT state FROM payment_event_outbox`).Scan(&state); err != nil {
+				if err := p.QueryRow(ctx, `SELECT snapshot->>'attribution_state' FROM reader_conversion_outbox WHERE event_name='Purchase'`).Scan(&state); err != nil {
 					t.Fatal(err)
 				}
-				want := "unattributed"
+				want := "missing_pixel"
 				if hasPixel {
-					want = "pending"
+					want = "matched"
 				}
 				if state != want {
 					t.Fatalf("state %s want %s", state, want)
@@ -199,14 +207,14 @@ func TestLegacyRestorationNeverEnrollsPaymentEvents(t *testing.T) {
 		t.Fatal("legacy order implicitly enrolled", err)
 	}
 	var count int
-	if err := p.QueryRow(ctx, `SELECT count(*) FROM payment_event_outbox`).Scan(&count); err != nil || count != 0 {
+	if err := p.QueryRow(ctx, `SELECT count(*) FROM reader_conversion_outbox WHERE event_name IN ('Purchase','Subscribe')`).Scan(&count); err != nil || count != 0 {
 		t.Fatal("legacy payment reemitted", err)
 	}
 	// Even explicitly toggling eligibility cannot turn an already fulfilled UPDATE into first fulfillment.
 	if _, err := p.Exec(ctx, `UPDATE recharge_orders SET payment_events_enabled=true WHERE id=100;UPDATE recharge_orders SET status='RefundPending' WHERE id=100;UPDATE recharge_orders SET status='Success' WHERE id=100`); err != nil {
 		t.Fatal(err)
 	}
-	if err := p.QueryRow(ctx, `SELECT count(*) FROM payment_event_outbox`).Scan(&count); err != nil || count != 0 {
+	if err := p.QueryRow(ctx, `SELECT count(*) FROM reader_conversion_outbox WHERE event_name IN ('Purchase','Subscribe')`).Scan(&count); err != nil || count != 0 {
 		t.Fatal("restoration treated as settlement", err)
 	}
 }
@@ -220,6 +228,10 @@ func TestDeferredNewSubscriptionEmitsOnlyAtFirstFulfillment(t *testing.T) {
 	r := &dbRepository{}
 	sub, err := r.GetSubscriptionByID(ctx, "I-DEFERRED")
 	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Exec(ctx, `UPDATE user_subscriptions SET capi_subscribe_state='eligible',
+		attribution='{"pixel_id":"123"}' WHERE user_id=1`); err != nil {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC()
@@ -243,7 +255,7 @@ func TestDeferredNewSubscriptionEmitsOnlyAtFirstFulfillment(t *testing.T) {
 		t.Fatalf("unproven period not visible: %+v", statuses)
 	}
 	var count int
-	if err := p.QueryRow(ctx, `SELECT count(*) FROM payment_event_outbox`).Scan(&count); err != nil || count != 0 {
+	if err := p.QueryRow(ctx, `SELECT count(*) FROM reader_conversion_outbox WHERE event_name IN ('Purchase','Subscribe')`).Scan(&count); err != nil || count != 0 {
 		t.Fatal("unfulfilled payment emitted", err)
 	}
 	for range 2 {
@@ -254,13 +266,13 @@ func TestDeferredNewSubscriptionEmitsOnlyAtFirstFulfillment(t *testing.T) {
 	if active, err := access.HasActiveSubscription(ctx, 1); err != nil || !active {
 		t.Fatalf("verified period did not grant VIP: %t %v", active, err)
 	}
-	if err := p.QueryRow(ctx, `SELECT count(*) FROM payment_event_outbox`).Scan(&count); err != nil || count != 2 {
+	if err := p.QueryRow(ctx, `SELECT count(*) FROM reader_conversion_outbox WHERE event_name IN ('Purchase','Subscribe')`).Scan(&count); err != nil || count != 2 {
 		t.Fatalf("Purchase/Subscribe count=%d %v", count, err)
 	}
 	if _, err := p.Exec(ctx, `UPDATE recharge_orders SET status='RefundPending';UPDATE recharge_orders SET status='Success'`); err != nil {
 		t.Fatal(err)
 	}
-	if err := p.QueryRow(ctx, `SELECT count(*) FROM payment_event_outbox`).Scan(&count); err != nil || count != 2 {
+	if err := p.QueryRow(ctx, `SELECT count(*) FROM reader_conversion_outbox WHERE event_name IN ('Purchase','Subscribe')`).Scan(&count); err != nil || count != 2 {
 		t.Fatal("restoration duplicated events", err)
 	}
 }

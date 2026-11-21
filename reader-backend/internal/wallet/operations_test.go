@@ -81,19 +81,15 @@ func TestTaskRecoveryFencesAndMonitoring(t *testing.T) {
 	if err := RetryPaymentTask(ctx, "inbox", "OPS-INBOX", nil); !errors.Is(err, ErrTaskNotRetryable) {
 		t.Fatalf("processed inbox retried: %v", err)
 	}
-	for _, id := range []string{"OPS-DELIVERED", "OPS-UNATTRIBUTED"} {
-		if err := RetryPaymentTask(ctx, "outbox", id, nil); !errors.Is(err, ErrTaskNotRetryable) {
-			t.Fatalf("%s retried: %v", id, err)
-		}
+	if err := RetryPaymentTask(ctx, "outbox", "OPS-OUTBOX", nil); !errors.Is(err, ErrUseConversionOps) {
+		t.Fatalf("legacy outbox retry should direct operator to conversion-ops: %v", err)
 	}
-	exec(`UPDATE payment_event_outbox SET lease_until=now()+interval '1 minute' WHERE event_id='OPS-OUTBOX'`)
-	if err := RetryPaymentTask(ctx, "outbox", "OPS-OUTBOX", nil); !errors.Is(err, ErrTaskNotRetryable) {
-		t.Fatalf("active outbox lease bypassed: %v", err)
+	var historicalUnchanged bool
+	if err := pool.QueryRow(ctx, `SELECT next_attempt_at>now()+interval '50 minutes'
+		FROM payment_event_outbox WHERE event_id='OPS-OUTBOX'`).Scan(&historicalUnchanged); err != nil || !historicalUnchanged {
+		t.Fatalf("legacy row changed: %v", err)
 	}
-	exec(`UPDATE payment_event_outbox SET lease_until=NULL WHERE event_id='OPS-OUTBOX'`)
-	if err := RetryPaymentTask(ctx, "outbox", "OPS-OUTBOX", nil); err != nil {
-		t.Fatal(err)
-	}
+
 	from := time.Now().UTC().Add(-48 * time.Hour)
 	if err := RetryPaymentTask(ctx, "subscription", "I-OPS", &from); err != nil {
 		t.Fatal(err)
@@ -123,7 +119,7 @@ func TestTaskRecoveryFencesAndMonitoring(t *testing.T) {
 			t.Fatalf("cancel age reset by update: %+v", item)
 		}
 	}
-	if counts["outbox"] != 1 || counts["inbox"] != 0 || counts["unattributed"] != 1 || counts["cancel_pending"] != 1 || counts["order_pending"] != 1 {
+	if counts["conversion_ingress"] != 0 || counts["inbox"] != 0 || counts["legacy_unattributed"] != 1 || counts["cancel_pending"] != 1 || counts["order_pending"] != 1 {
 		t.Fatalf("unexpected queue status: %+v", status)
 	}
 }

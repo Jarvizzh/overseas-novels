@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"reader-backend/internal/conversion"
 	"reader-backend/internal/db"
 	"reader-backend/internal/model"
 	"reader-backend/internal/payment"
@@ -130,6 +131,16 @@ func (r *dbRepository) finishSubscriptionIntent(ctx context.Context, intent *sub
 		return err
 	}
 	defer tx.Rollback(context.WithoutCancel(ctx))
+	var savedSubscription, savedApproval *string
+	err = tx.QueryRow(ctx, "SELECT subscription_id,approval_url FROM paypal_subscription_intents WHERE intent_id=$1 FOR UPDATE",
+		intent.id).Scan(&savedSubscription, &savedApproval)
+	if errors.Is(err, pgx.ErrNoRows) || (err == nil && savedSubscription != nil && *savedSubscription != result.SubscriptionID) {
+		return ErrSubscriptionConflict
+	}
+	if err != nil {
+		return err
+	}
+	firstApproval := savedApproval == nil || *savedApproval == ""
 	tag, err := tx.Exec(ctx, `UPDATE paypal_subscription_intents SET subscription_id=$2,approval_url=$3,lease_until=NULL
 		WHERE intent_id=$1 AND (subscription_id IS NULL OR subscription_id=$2)`, intent.id, result.SubscriptionID, result.ApproveURL)
 	if err != nil {
@@ -142,8 +153,8 @@ func (r *dbRepository) finishSubscriptionIntent(ctx context.Context, intent *sub
 	sub := model.UserSubscription{UserID: intent.userID, SubscriptionID: result.SubscriptionID, PlanID: intent.planID,
 		SlotID: intent.slotID, TemplateID: intent.templateID, Status: "PENDING", Cycle: intent.cycle,
 		PriceCents: intent.priceCents, Currency: "USD", PaymentMethod: "paypal", CurrentPeriodStart: &now}
-	tag, err = tx.Exec(ctx, `INSERT INTO user_subscriptions(user_id,subscription_id,plan_id,slot_id,template_id,status,cycle,price_cents,currency,payment_method,current_period_start,attribution)
- VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,(SELECT attribution FROM paypal_subscription_intents WHERE intent_id=$12)) ON CONFLICT(subscription_id) DO UPDATE SET updated_at=user_subscriptions.updated_at
+	tag, err = tx.Exec(ctx, `INSERT INTO user_subscriptions(user_id,subscription_id,plan_id,slot_id,template_id,status,cycle,price_cents,currency,payment_method,current_period_start,attribution,capi_subscribe_state)
+ VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,(SELECT attribution FROM paypal_subscription_intents WHERE intent_id=$12),'eligible') ON CONFLICT(subscription_id) DO UPDATE SET updated_at=user_subscriptions.updated_at
 		WHERE user_subscriptions.user_id=EXCLUDED.user_id AND user_subscriptions.plan_id=EXCLUDED.plan_id`,
 		sub.UserID, sub.SubscriptionID, sub.PlanID, sub.SlotID, sub.TemplateID, sub.Status, sub.Cycle, sub.PriceCents, sub.Currency, sub.PaymentMethod, sub.CurrentPeriodStart, intent.id)
 	if err != nil {
@@ -151,6 +162,23 @@ func (r *dbRepository) finishSubscriptionIntent(ctx context.Context, intent *sub
 	}
 	if tag.RowsAffected() != 1 {
 		return ErrSubscriptionConflict
+	}
+	if firstApproval {
+		_, err = tx.Exec(ctx, `
+			INSERT INTO reader_conversion_outbox (business_key,event_name,intent_id,environment,occurred_at,snapshot)
+			SELECT 'subscription-intent:'||i.intent_id||':InitiateCheckout','InitiateCheckout',i.intent_id::text,$2,clock_timestamp(),
+				jsonb_build_object('user_id',u.id::text,'email',u.email,'amount_cents',i.price_cents,'currency','USD',
+					'order_type','subscription','promotion_id',i.attribution->>'promotion_link_id','action_source','website',
+					'attribution',i.attribution,
+					'attribution_state',CASE WHEN NULLIF(i.attribution->>'pixel_id','') IS NOT NULL THEN 'matched'
+						WHEN NULLIF(i.attribution->>'promotion_link_id','') IS NOT NULL
+							OR COALESCE(i.attribution->>'utm_source','')<>'' OR COALESCE(i.attribution->>'utm_campaign','')<>''
+							OR COALESCE(i.attribution->>'fbc','')<>'' THEN 'missing_pixel' ELSE 'organic' END)
+			FROM paypal_subscription_intents i JOIN users u ON u.id=i.user_id WHERE i.intent_id=$1
+			ON CONFLICT (business_key) DO NOTHING`, intent.id, conversion.Environment())
+		if err != nil {
+			return err
+		}
 	}
 	return tx.Commit(ctx)
 }

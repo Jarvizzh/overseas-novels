@@ -24,9 +24,7 @@ import (
 	"reader-backend/internal/redis"
 	"reader-backend/internal/shelf"
 	"reader-backend/internal/storage"
-	"reader-backend/internal/tracking"
 	"reader-backend/internal/wallet"
-	"reader-backend/internal/workerpool"
 )
 
 var buildVersion = "dev"
@@ -51,8 +49,6 @@ func main() {
 
 	redis.InitRedis()
 	defer redis.CloseRedis()
-
-	workerpool.InitPool(10, 1000)
 
 	// 4. Setup Gin engine
 	r := gin.New()
@@ -193,11 +189,6 @@ func main() {
 		log.Print("Background shutdown budget exhausted; durable work will resume")
 		os.Exit(1)
 	}
-	if err := workerpool.ShutdownContext(ctx); err != nil {
-		log.Print("Worker shutdown budget exhausted; durable work will resume")
-		os.Exit(1)
-	}
-	tracking.Shutdown(ctx)
 
 	log.Println("Server exiting")
 }

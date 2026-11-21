@@ -16,7 +16,7 @@ import {
 } from '../components/ui/Primitives';
 
 const statusOptions = [
-  { value: '', label: '全部留言状态' },
+  { value: '', label: '全部状态' },
   { value: 'pending', label: '待处理 (Pending)' },
   { value: 'replied', label: '已回复 (Replied)' },
   { value: 'resolved', label: '已解决 (Resolved)' },
@@ -65,7 +65,7 @@ export default function FeedbackTab() {
       setHasLoadedOnce(true);
     } catch (e: unknown) {
       if (seq !== fetchSeqRef.current) return;
-      window.showToast?.((e instanceof Error ? e.message : '') || '获取留言列表失败', 'error');
+      window.showToast?.((e instanceof Error ? e.message : '') || '获取反馈列表失败', 'error');
       setHasLoadedOnce(true);
     } finally {
       if (seq === fetchSeqRef.current) {
@@ -116,7 +116,7 @@ export default function FeedbackTab() {
         status: editStatus,
         admin_reply: adminReply,
       });
-      window.showToast?.('留言状态与回复已成功保存', 'success');
+      window.showToast?.('反馈状态与回复已成功保存', 'success');
       setSelectedItem(null);
       setQueryState((prev) => ({ ...prev, nonce: prev.nonce + 1 }));
     } catch (e: unknown) {
@@ -159,7 +159,7 @@ export default function FeedbackTab() {
           <div className="flex flex-wrap items-center gap-2 flex-1 min-w-[260px]">
             <SearchInput
               className="w-full sm:w-80"
-              ariaLabel="搜索客服留言"
+              ariaLabel="搜索用户反馈"
               placeholder="搜索联系邮箱、主题或正文..."
               value={keyword}
               onChange={setKeyword}
@@ -171,7 +171,7 @@ export default function FeedbackTab() {
             />
 
             <CustomSelect
-              aria-label="筛选留言状态"
+              aria-label="筛选反馈状态"
               options={statusOptions}
               value={queryState.statusFilter}
               onChange={(val) => {
@@ -206,7 +206,7 @@ export default function FeedbackTab() {
 
       {/* Airy Table + External Pagination */}
       <TableRegion
-        ariaLabel="客服留言列表"
+        ariaLabel="用户反馈列表"
         footer={
           <Pagination
             page={queryState.page}
@@ -216,7 +216,7 @@ export default function FeedbackTab() {
             disabled={loading}
             onPageChange={(nextPage) => setQueryState((prev) => ({ ...prev, page: nextPage }))}
             onPageSizeChange={(nextSize) => setQueryState((prev) => ({ ...prev, page: 1, pageSize: nextSize }))}
-            itemLabel="条留言"
+            itemLabel="条反馈"
           />
         }
       >
@@ -226,7 +226,7 @@ export default function FeedbackTab() {
               <th scope="col">工单 / 用户</th>
               <th scope="col">联系邮箱</th>
               <th scope="col">咨询主题</th>
-              <th scope="col">留言摘要</th>
+              <th scope="col">反馈摘要</th>
               <th scope="col">处理状态</th>
               <th scope="col">提交时间</th>
               <th scope="col" className="text-right w-px whitespace-nowrap">
@@ -240,15 +240,14 @@ export default function FeedbackTab() {
             ) : items.length === 0 ? (
               <tr>
                 <td colSpan={7} className="py-16 text-center text-[var(--cms-muted-fg)]">
-                  暂无客服留言记录
+                  暂无用户反馈记录
                 </td>
               </tr>
             ) : (
               items.map((item) => (
                 <tr
                   key={item.id}
-                  onClick={() => openDetailModal(item)}
-                  className={`cursor-pointer ${selectedItem?.id === item.id ? 'row-selected' : ''}`}
+                  className={selectedItem?.id === item.id ? 'row-selected' : undefined}
                 >
                   <td className="tabular-nums">
                     <div className="text-[var(--cms-fg)]">#{item.id}</div>
@@ -256,7 +255,7 @@ export default function FeedbackTab() {
                       {item.user_id && item.user_id > 0 ? `UID ${item.user_id}` : '访客'}
                     </div>
                   </td>
-                  <td onClick={(e) => e.stopPropagation()}>
+                  <td>
                     <a href={`mailto:${item.email}`} className="text-[var(--cms-fg)] hover:underline">
                       {item.email}
                     </a>
@@ -279,7 +278,7 @@ export default function FeedbackTab() {
                   <td className="tabular-nums text-[var(--cms-muted-fg)] whitespace-nowrap">
                     {new Date(item.created_at).toLocaleString()}
                   </td>
-                  <td className="text-right" onClick={(e) => e.stopPropagation()}>
+                  <td className="text-right">
                     <button
                       type="button"
                       onClick={() => openDetailModal(item)}
@@ -300,7 +299,7 @@ export default function FeedbackTab() {
         open={Boolean(selectedItem)}
         onClose={() => !saving && setSelectedItem(null)}
         variant="drawer"
-        title={selectedItem ? `留言工单 #${selectedItem.id}` : ''}
+        title={selectedItem ? `反馈工单 #${selectedItem.id}` : ''}
         subtitle={selectedItem ? `${selectedItem.email} · ${selectedItem.subject || '常规咨询'}` : undefined}
         size="md"
         closedBy={saving ? 'none' : 'any'}
@@ -344,7 +343,7 @@ export default function FeedbackTab() {
             </div>
 
             <div className="space-y-1.5">
-              <div className="font-medium text-[var(--cms-muted-fg)]">用户留言原始内容</div>
+              <div className="font-medium text-[var(--cms-muted-fg)]">用户反馈原始内容</div>
               <div className="p-3.5 rounded-xl bg-[var(--cms-content)] border border-[var(--cms-border)] text-sm leading-relaxed whitespace-pre-wrap text-[var(--cms-fg)] max-h-52 overflow-y-auto">
                 {selectedItem.content}
               </div>

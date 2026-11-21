@@ -16,12 +16,15 @@ import (
 )
 
 func main() {
-	kind := flag.String("kind", "", "retry kind: inbox, outbox, order, cancel, subscription; empty prints status")
+	kind := flag.String("kind", "", "retry kind: inbox, order, cancel, subscription; empty prints status")
 	id := flag.String("id", "", "exact task ID (local order ID for order)")
 	from := flag.String("from", "", "subscription cursor in RFC3339, never forward")
 	apply := flag.Bool("apply", false, "apply the retry scheduling change; default dry-run")
 	reason := flag.String("reason", "", "required audit reason when applying")
 	flag.Parse()
+	if *kind == "outbox" {
+		log.Fatal(wallet.ErrUseConversionOps)
+	}
 	config.LoadConfig()
 	db.InitDB()
 	defer db.CloseDB()

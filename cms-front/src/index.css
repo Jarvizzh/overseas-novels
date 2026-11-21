@@ -19,16 +19,16 @@
   --light-card: #ffffff;
   --light-border: #e5e7eb;
   --light-fg: #0f172a;
-  --light-muted-fg: #64748b;
-  --light-placeholder: #94a3b8;
-  --light-primary: #2563eb;
-  --light-primary-hover: #1d4ed8;
-  --light-detail: #3b82f6;
+  --light-muted-fg: #475569;
+  --light-placeholder: #64748b;
+  --light-primary: #1d4ed8;
+  --light-primary-hover: #1e40af;
+  --light-detail: #1d4ed8;
   --light-secondary: #f1f5f9;
   --light-secondary-fg: #334155;
   --light-accent: #eff6ff;
   --light-nav-active-bg: #eff6ff;
-  --light-nav-active-fg: #1d4ed8;
+  --light-nav-active-fg: #1e40af;
   --light-success: #059669;
   --light-warning: #d97706;
   --light-error: #dc2626;
@@ -87,11 +87,11 @@
   --bg-surface: 0 0% 100%;
   --bg-card: 210 40% 96.1%;
   --border: 220 13% 91%;
-  --border-focus: 221 83% 53%;
+  --border-focus: 224 76% 48%;
   --text-primary: 222 47% 11%;
-  --text-secondary: 215 16% 47%;
-  --text-muted: 215 20% 65%;
-  --primary: 221 83% 53%;
+  --text-secondary: 215 19% 35%;
+  --text-muted: 215 16% 47%;
+  --primary: 224 76% 48%;
   --primary-glow: rgba(37, 99, 235, 0.14);
   --accent-pink: 330 80% 55%;
   --accent-green: 160 84% 39%;
@@ -213,11 +213,11 @@
   --bg-surface: 0 0% 100%;
   --bg-card: 210 40% 96.1%;
   --border: 220 13% 91%;
-  --border-focus: 221 83% 53%;
+  --border-focus: 224 76% 48%;
   --text-primary: 222 47% 11%;
-  --text-secondary: 215 16% 47%;
-  --text-muted: 215 20% 65%;
-  --primary: 221 83% 53%;
+  --text-secondary: 215 19% 35%;
+  --text-muted: 215 16% 47%;
+  --primary: 224 76% 48%;
   --primary-glow: rgba(37, 99, 235, 0.14);
   --accent-pink: 330 80% 55%;
   --accent-green: 160 84% 39%;
@@ -698,7 +698,8 @@ select.custom-select option {
   white-space: nowrap;
   padding: 13px 16px;
 }
-.cms-table tbody td {
+.cms-table tbody td,
+.cms-table tbody th {
   padding: 14px 16px;
   border-bottom: 1px solid color-mix(in srgb, var(--cms-border) 60%, transparent);
   vertical-align: middle;
@@ -706,6 +707,9 @@ select.custom-select option {
   font-weight: 400;
   color: var(--cms-fg);
   transition: background-color 0.14s ease, padding 0.14s ease;
+}
+.cms-table tbody th {
+  text-align: left;
 }
 .cms-table tbody .btn-ghost {
   height: 30px;
@@ -721,17 +725,21 @@ select.custom-select option {
 .cms-table tbody td:last-child {
   white-space: nowrap;
 }
-.cms-table[data-density="compact"] tbody td {
+.cms-table[data-density="compact"] tbody td,
+.cms-table[data-density="compact"] tbody th {
   padding-top: 9px;
   padding-bottom: 9px;
 }
-.cms-table tbody tr:last-child td {
+.cms-table tbody tr:last-child td,
+.cms-table tbody tr:last-child th {
   border-bottom: none;
 }
-.cms-table tbody tr:hover td {
+.cms-table tbody tr:hover td,
+.cms-table tbody tr:hover th {
   background-color: color-mix(in srgb, var(--cms-content) 75%, transparent);
 }
-.cms-table tbody tr.row-selected td {
+.cms-table tbody tr.row-selected td,
+.cms-table tbody tr.row-selected th {
   background-color: color-mix(in srgb, var(--cms-primary) 6%, var(--cms-card));
 }
 .row-actions-secondary {
@@ -759,7 +767,7 @@ tr:focus-within .row-actions-secondary {
 dialog.cms-dialog {
   position: fixed;
   inset: 0;
-  margin: auto;
+  margin: auto !important;
   height: fit-content;
   padding: 0;
   border: 1px solid var(--cms-border);
@@ -860,6 +868,7 @@ dialog.cms-nav-drawer::backdrop {
   border-radius: 12px;
   box-shadow: var(--shadow-lg);
   padding: 6px;
+  white-space: normal;
 }
 [popover].cms-popover:is(:popover-open, .\:popover-open) {
   display: block;
@@ -955,4 +964,14 @@ dialog.cms-nav-drawer::backdrop {
 .file-upload-dropzone:has(input:focus-visible) {
   border-color: var(--cms-primary) !important;
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--cms-primary) 18%, transparent);
+}
+
+.h5-no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+.h5-no-scrollbar::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
 }

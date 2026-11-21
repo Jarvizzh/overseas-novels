@@ -338,8 +338,7 @@ export default function UsersTab() {
                 return (
                   <tr
                     key={u.id}
-                    onClick={() => void handleUserClick(u.id)}
-                    className={`cursor-pointer ${isViewing ? 'row-selected' : ''}`}
+                    className={isViewing ? 'row-selected' : undefined}
                   >
                     <td>
                       <div className="space-y-0.5">
@@ -415,7 +414,7 @@ export default function UsersTab() {
                     <td className="tabular-nums text-[var(--cms-muted-fg)] whitespace-nowrap">
                       {new Date(u.created_at).toLocaleDateString()}
                     </td>
-                    <td className="text-right" onClick={(e) => e.stopPropagation()}>
+                    <td className="text-right">
                       <button
                         type="button"
                         onClick={() => void handleUserClick(u.id)}
@@ -542,25 +541,25 @@ export default function UsersTab() {
               {detailTab === 'profile' ? (
                 <div className="flex-1 overflow-y-auto p-6 space-y-5 text-xs">
                   {/* Profile Meta Grid */}
-                  <div className="p-4 rounded-xl bg-[var(--cms-content)] border border-[var(--cms-border)] grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  <div className="p-4 rounded-xl bg-[var(--cms-content)] border border-[var(--cms-border)] grid grid-cols-1 sm:grid-cols-2 gap-3">
                     <div>
                       <div className="text-[var(--cms-muted-fg)]">最近 IP</div>
-                      <div className="font-mono-code font-medium text-[var(--cms-fg)] mt-0.5">
+                      <div className="font-mono-code font-medium text-[var(--cms-fg)] mt-0.5 break-all">
                         {selectedUser.ip_address || '未知'}
                       </div>
                     </div>
                     <div>
-                      <div className="text-[var(--cms-muted-fg)]">终端设备</div>
-                      <div className="text-[var(--cms-fg)] truncate mt-0.5" title={selectedUser.device}>
-                        {selectedUser.device || '未知'}
-                      </div>
-                    </div>
-                    <div>
                       <div className="text-[var(--cms-muted-fg)]">推广来源</div>
-                      <div className="text-[var(--cms-fg)] mt-0.5 truncate">
+                      <div className="text-[var(--cms-fg)] mt-0.5 break-words">
                         {selectedUser.utm_source
                           ? `${selectedUser.utm_source}${selectedUser.utm_campaign ? ` · ${selectedUser.utm_campaign}` : ''}`
                           : '自然流量'}
+                      </div>
+                    </div>
+                    <div className="sm:col-span-2">
+                      <div className="text-[var(--cms-muted-fg)]">终端设备</div>
+                      <div className="text-[var(--cms-fg)] mt-0.5 break-all whitespace-normal leading-relaxed">
+                        {selectedUser.device || '未知'}
                       </div>
                     </div>
                   </div>
@@ -624,8 +623,8 @@ export default function UsersTab() {
                   </div>
 
                   {/* Manual Wallet Adjustment */}
-                  <div className="cms-card p-5 space-y-4">
-                    <h2 className="text-sm font-semibold text-[var(--cms-fg)] flex items-center gap-2 m-0">
+                  <div className="cms-card p-5 flex flex-col gap-4">
+                    <h2 className="text-sm font-semibold text-[var(--cms-fg)] flex items-center gap-2">
                       <Wallet size={16} className="text-[var(--cms-primary)]" aria-hidden="true" />
                       <span>运营调币与补偿发放</span>
                     </h2>
@@ -694,8 +693,8 @@ export default function UsersTab() {
               ) : (
                 <div className="flex-1 overflow-y-auto p-6 space-y-5 text-xs">
                   {/* VIP Subscriptions */}
-                  <div className="cms-card p-5 space-y-4">
-                    <h2 className="text-sm font-semibold text-[var(--cms-fg)] flex items-center gap-2 m-0">
+                  <div className="cms-card p-5 flex flex-col gap-4">
+                    <h2 className="text-sm font-semibold text-[var(--cms-fg)] flex items-center gap-2">
                       <Crown size={15} className="text-[var(--cms-warning)]" aria-hidden="true" />
                       <span>VIP 周期订阅记录</span>
                     </h2>

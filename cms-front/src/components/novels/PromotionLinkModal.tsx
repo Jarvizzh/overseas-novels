@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useId } from 'react';
 import CustomSelect from '../CustomSelect';
 import { CmsDialog } from '../ui/CmsDialog';
 import type { SystemDomain } from '../../utils/api';
@@ -42,6 +42,11 @@ interface PromotionLinkModalProps {
   onGenerateLink: () => void;
   generatedLink: string;
   onCopyLink: () => void;
+  ruleChoice: 'inherit' | 'own';
+  ruleSummary: string;
+  onRuleChoice: (choice: 'inherit' | 'own') => void;
+  canConfigureRule: boolean;
+  onConfigureRule?: () => void;
 }
 
 export const PromotionLinkModal: React.FC<PromotionLinkModalProps> = ({
@@ -56,7 +61,13 @@ export const PromotionLinkModal: React.FC<PromotionLinkModalProps> = ({
   onGenerateLink,
   generatedLink,
   onCopyLink,
+  ruleChoice,
+  ruleSummary,
+  onRuleChoice,
+  canConfigureRule,
+  onConfigureRule,
 }) => {
+  const policyId = useId();
   const activeDomains = (domains || []).filter((d) => d.status === 1);
   const defaultDomain =
     activeDomains.find((d) => d.is_default) ||
@@ -76,11 +87,11 @@ export const PromotionLinkModal: React.FC<PromotionLinkModalProps> = ({
       footer={
         <>
           <button type="button" disabled={submitting} className="btn-secondary" onClick={() => !submitting && onClose()}>
-            取消
+            {generatedLink ? '完成' : '取消'}
           </button>
-          <button type="button" disabled={submitting} className="btn-primary" onClick={onGenerateLink}>
-            {submitting ? '生成中...' : '生成并保存推广链接'}
-          </button>
+          {!generatedLink && <button type="button" disabled={submitting} className="btn-primary" onClick={onGenerateLink}>
+            {submitting ? '生成中…' : '生成并保存推广链接'}
+          </button>}
         </>
       }
     >
@@ -165,6 +176,24 @@ export const PromotionLinkModal: React.FC<PromotionLinkModalProps> = ({
               ]}
             />
           </label>
+        </div>
+
+        <div className="space-y-1.5">
+          <label htmlFor={policyId} className="block font-medium text-[var(--cms-muted-fg)]">回传规则</label>
+          {canConfigureRule && !generatedLink ? (
+            <CustomSelect id={policyId} name="payment_policy" width="100%" value={ruleChoice}
+              onChange={(value) => onRuleChoice(value === 'own' ? 'own' : 'inherit')}
+              options={[{ value: 'inherit', label: '继承接入默认规则' }, { value: 'own', label: '配置本链接专属规则' }]}
+              disabled={submitting} />
+          ) : <p id={policyId} className="m-0">{ruleSummary}</p>}
+          {canConfigureRule && !generatedLink && (
+            <p className="m-0 text-[var(--cms-muted-fg)]">
+              {ruleChoice === 'own' ? '生成链接后进入规则配置。专属规则发布前使用接入默认。' : ruleSummary}
+            </p>
+          )}
+          {generatedLink && onConfigureRule && (
+            <button type="button" className="btn-secondary" onClick={onConfigureRule}>配置此链接的回传规则</button>
+          )}
         </div>
 
         <label className="block space-y-1.5">

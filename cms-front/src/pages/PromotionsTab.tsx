@@ -431,9 +431,9 @@ export default function PromotionsTab() {
                           <RowActionMenu
                             ariaLabel={`推广链接 ${link.name || link.id} 操作`}
                             items={[
-                              { label: '编辑参数配置', onClick: () => handleEditClick(link) },
+                              { label: '编辑', onClick: () => handleEditClick(link) },
                               {
-                                label: '删除推广链接',
+                                label: '删除',
                                 tone: 'danger',
                                 dividerBefore: true,
                                 onClick: () => handleDelete(link.id),

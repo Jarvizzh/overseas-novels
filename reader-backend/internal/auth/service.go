@@ -4,9 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/netip"
-	"strconv"
 	"strings"
-	"time"
 	"unicode/utf8"
 
 	"github.com/go-playground/validator/v10"
@@ -14,10 +12,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"golang.org/x/crypto/bcrypt"
 
-	"reader-backend/internal/db"
+	"reader-backend/internal/conversion"
 	"reader-backend/internal/model"
-	"reader-backend/internal/tracking"
-	"reader-backend/internal/workerpool"
 )
 
 const (
@@ -28,10 +24,10 @@ const (
 )
 
 var (
-	ErrInvalidEmail    = errors.New("Enter a valid email address of up to 255 characters")
-	ErrInvalidNickname = errors.New("Nickname must contain at most 50 characters")
-	ErrAlreadyBound    = errors.New("Account is already registered")
-	ErrEmailExists     = errors.New("Email is already registered")
+	ErrInvalidEmail           = errors.New("Enter a valid email address of up to 255 characters")
+	ErrInvalidNickname        = errors.New("Nickname must contain at most 50 characters")
+	ErrAlreadyBound           = errors.New("Account is already registered")
+	ErrEmailExists            = errors.New("Email is already registered")
 	ErrInvalidAuth            = errors.New("Invalid email or password")
 	ErrAccountBanned          = errors.New("This account has been banned")
 	ErrUserNotFound           = errors.New("User not found")
@@ -134,6 +130,11 @@ func (s *authService) GuestLogin(ctx context.Context, device, ipAddress, utmSour
 		return nil, "", err
 	}
 
+	if err = conversion.EnqueueRegistrationTx(ctx, tx, user.ID, conversion.Attribution{
+		FBP: fbp, FBC: fbc, IP: ipAddress, UserAgent: userAgent, SourceURL: sourceURL, Country: country,
+	}, promotionID(ctx) > 0); err != nil {
+		return nil, "", err
+	}
 	if err = tx.Commit(ctx); err != nil {
 		return nil, "", err
 	}
@@ -142,19 +143,6 @@ func (s *authService) GuestLogin(ctx context.Context, device, ipAddress, utmSour
 	if err != nil {
 		return nil, "", err
 	}
-
-	// Trigger FB CompleteRegistration event asynchronously via WorkerPool strictly using CMS configured pixel
-	workerpool.Submit(func() {
-		taskCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		effectivePixelID := ""
-		if effectivePixelID == "" && utmSource != "" && utmCampaign != "" && db.DB != nil {
-			_ = db.DB.QueryRow(taskCtx, "SELECT fp.pixel_id FROM reader_promotion_for_user($1) pl JOIN fb_pixels fp ON pl.fb_pixel_id = fp.id", user.ID).Scan(&effectivePixelID)
-		}
-		if effectivePixelID != "" {
-			tracking.SendFacebookEvent(effectivePixelID, "CompleteRegistration", strconv.FormatInt(user.ID, 10), "", ipAddress, userAgent, fbc, fbp, 0, "", sourceURL, country)
-		}
-	})
 
 	return user, token, nil
 }
@@ -211,6 +199,11 @@ func (s *authService) Register(ctx context.Context, email, password, nickname, d
 		return nil, "", err
 	}
 
+	if err = conversion.EnqueueRegistrationTx(ctx, tx, user.ID, conversion.Attribution{
+		FBP: fbp, FBC: fbc, IP: ipAddress, UserAgent: userAgent, SourceURL: sourceURL, Country: country,
+	}, promotionID(ctx) > 0); err != nil {
+		return nil, "", err
+	}
 	if err = tx.Commit(ctx); err != nil {
 		return nil, "", err
 	}
@@ -219,19 +212,6 @@ func (s *authService) Register(ctx context.Context, email, password, nickname, d
 	if err != nil {
 		return nil, "", err
 	}
-
-	// Trigger FB CompleteRegistration event asynchronously via WorkerPool strictly using CMS configured pixel
-	workerpool.Submit(func() {
-		taskCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		effectivePixelID := ""
-		if effectivePixelID == "" && utmSource != "" && utmCampaign != "" && db.DB != nil {
-			_ = db.DB.QueryRow(taskCtx, "SELECT fp.pixel_id FROM reader_promotion_for_user($1) pl JOIN fb_pixels fp ON pl.fb_pixel_id = fp.id", user.ID).Scan(&effectivePixelID)
-		}
-		if effectivePixelID != "" {
-			tracking.SendFacebookEvent(effectivePixelID, "CompleteRegistration", strconv.FormatInt(user.ID, 10), email, ipAddress, userAgent, fbc, fbp, 0, "", sourceURL, country)
-		}
-	})
 
 	return user, token, nil
 }

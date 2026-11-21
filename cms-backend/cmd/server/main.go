@@ -164,10 +164,9 @@ func main() {
 		userHandler := user.NewHandler(userService)
 		userHandler.RegisterRoutes(api)
 
-		trackingRepo := tracking.NewRepository()
-		trackingService := tracking.NewService(trackingRepo)
-		trackingHandler := tracking.NewHandler(trackingService)
-		trackingHandler.RegisterRoutes(api)
+		if err := tracking.RegisterConversionOrders(api, authRepo, os.Getenv("CONVERSION_PRIVATE_URL"), os.Getenv("CONVERSION_PRIVATE_TOKEN")); err != nil {
+			log.Fatal(err)
+		}
 
 		domainRepo := domain.NewRepository()
 		domainService := domain.NewService(domainRepo)

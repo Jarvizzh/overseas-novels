@@ -141,9 +141,6 @@ type NovelService interface {
 	DeletePromotionLink(ctx context.Context, id int) error
 
 	ListFBPixels(ctx context.Context) ([]FBPixel, error)
-	CreateFBPixel(ctx context.Context, pixel *FBPixel) (*FBPixel, error)
-	UpdateFBPixel(ctx context.Context, id int, name, pixelID, token string) error
-	DeleteFBPixel(ctx context.Context, id int) error
 }
 
 type novelService struct {
@@ -1483,23 +1480,6 @@ func (s *novelService) DeletePromotionLink(ctx context.Context, id int) error {
 
 func (s *novelService) ListFBPixels(ctx context.Context) ([]FBPixel, error) {
 	return s.repo.ListFBPixels(ctx)
-}
-
-func (s *novelService) CreateFBPixel(ctx context.Context, pixel *FBPixel) (*FBPixel, error) {
-	id, err := s.repo.CreateFBPixel(ctx, pixel)
-	if err != nil {
-		return nil, err
-	}
-	pixel.ID = id
-	return pixel, nil
-}
-
-func (s *novelService) UpdateFBPixel(ctx context.Context, id int, name, pixelID, token string) error {
-	return s.repo.UpdateFBPixel(ctx, id, name, pixelID, token)
-}
-
-func (s *novelService) DeleteFBPixel(ctx context.Context, id int) error {
-	return s.repo.DeleteFBPixel(ctx, id)
 }
 
 func countCharacters(s string) int {

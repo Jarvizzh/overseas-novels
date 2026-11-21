@@ -1268,7 +1268,7 @@ export default function TemplatesTab() {
                 </div>
 
                 {/* Real H5 Reader Scrollable Body */}
-                <div className="p-3.5 space-y-4 max-h-[600px] overflow-y-auto">
+                <div className="p-3.5 space-y-4 max-h-[600px] overflow-y-auto h5-no-scrollbar">
                   {/* Section 1: UNLIMITED MEMBERSHIP */}
                   {subscriptionPreviewPacks.length > 0 && (
                     <section className="space-y-2">

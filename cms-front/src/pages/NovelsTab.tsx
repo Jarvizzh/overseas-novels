@@ -2,6 +2,7 @@ import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import {
   AlertCircle,
   BookOpen,
+  Copy,
   Edit,
   Link2,
   Plus,
@@ -15,6 +16,9 @@ import { canWritePromotions, getCurrentAdminRole, validateAndBuildPromotionPaylo
 import { FALLBACK_COVER } from '../components/operations/operationsUtils';
 import { DEFAULT_CHAPTER_DELIMITER_REGEX } from '../components/novels/ChapterUploadFields';
 import { MAX_GENRES_LENGTH, NovelFormModal, type NovelFormData } from '../components/novels/NovelFormModal';
+import { IntegrationConfigDrawer } from '../components/conversion/IntegrationConfigDrawer';
+import { defaultPolicySummary, type PaymentPolicyView, policyEndpoint, policyVersion } from '../components/conversion/paymentPolicy';
+import type { ConversionIntegration } from '../components/conversion/types';
 import { PromotionLinkModal } from '../components/novels/PromotionLinkModal';
 import { CmsDialog } from '../components/ui/CmsDialog';
 import { Pagination } from '../components/ui/Pagination';
@@ -177,6 +181,7 @@ export default function NovelsTab() {
 
   // Book Detail Drawer state
   const [selectedNovel, setSelectedNovel] = useState<Novel | null>(null);
+  const [isDetailOpen, setIsDetailOpen] = useState(false);
   const [chapters, setChapters] = useState<Chapter[]>([]);
   const [chaptersLoading, setChaptersLoading] = useState(false);
   const [chapterPage, setChapterPage] = useState(1);
@@ -287,6 +292,33 @@ export default function NovelsTab() {
     startPayChapterIndex: '',
   });
   const [generatedLink, setGeneratedLink] = useState('');
+  const [promoIntegration, setPromoIntegration] = useState<ConversionIntegration | null>(null);
+  const [promoDefaultPolicy, setPromoDefaultPolicy] = useState<PaymentPolicyView | null>(null);
+  const [promoLinkPolicy, setPromoLinkPolicy] = useState<PaymentPolicyView | null>(null);
+  const [promoLinkId, setPromoLinkId] = useState('');
+  const [promoRuleChoice, setPromoRuleChoice] = useState<'inherit' | 'own'>('inherit');
+  const [isPromoRuleOpen, setIsPromoRuleOpen] = useState(false);
+  const promoWriteRef = useRef(false);
+
+  useEffect(() => {
+    if (!isPromoModalOpen || !['Admin', 'SuperAdmin', 'MediaBuyer', 'Finance'].includes(currentAdminRole)) return;
+    const controller = new AbortController();
+    setPromoIntegration(null);
+    setPromoDefaultPolicy(null);
+    void (async () => {
+      try {
+        const items: ConversionIntegration[] = await apiRequest('GET', '/conversion/integrations', undefined, false, controller.signal);
+        const reader = items.find((item) => item.source === 'starnovel' && item.account_key === 'reader');
+        if (!reader || controller.signal.aborted) return;
+        setPromoIntegration(reader);
+        const defaults: PaymentPolicyView = await apiRequest('GET', policyEndpoint(reader.id, 'reader'), undefined, false, controller.signal);
+        if (!controller.signal.aborted) setPromoDefaultPolicy(defaults);
+      } catch {
+        // Link creation can use the existing default even if the summary is unavailable.
+      }
+    })();
+    return () => controller.abort();
+  }, [isPromoModalOpen, currentAdminRole]);
 
   // Global pricing / chapter settings
   const [globalCoinCost, setGlobalCoinCost] = useState(500);
@@ -493,9 +525,20 @@ export default function NovelsTab() {
     setIsEditing(true);
   };
 
+  const openEditFromList = (novel: Novel) => {
+    chaptersFetchSeqRef.current += 1;
+    clearPreviewState();
+    setIsDetailOpen(false);
+    setSelectedNovel(novel);
+    setChapters([]);
+    openEditNovelModal(novel);
+    void fetchChapters(novel.id, false);
+  };
+
   const closeDetailDrawer = () => {
     chaptersFetchSeqRef.current += 1;
     clearPreviewState();
+    setIsDetailOpen(false);
     setIsEditing(false);
     setEditImportFile(null);
     setEditChapterMapping('');
@@ -513,9 +556,18 @@ export default function NovelsTab() {
     setEditChapterIdentities([]);
     setEditModalError('');
     setSelectedNovel(novel);
+    setIsDetailOpen(true);
     setChapters([]);
     setChapterPage(1);
     void fetchChapters(novel.id, true);
+  };
+
+  const handleCopyTitle = async (title: string) => {
+    const ok = await copyTextToClipboard(title);
+    window.showToast?.(
+      ok ? '书名已复制到剪贴板！' : '复制失败，请手动复制书名',
+      ok ? 'success' : 'error',
+    );
   };
 
   const resetCreateModalState = () => {
@@ -765,12 +817,16 @@ export default function NovelsTab() {
         window.showToast?.('书籍信息更新成功', 'success');
       }
 
-      setSelectedNovel(updated);
       setEditImportFile(null);
       setEditChapterMapping('');
       setIsEditing(false);
       void fetchNovels(novelQuery);
-      void fetchChapters(selectedNovel.id, true);
+      if (isDetailOpen) {
+        setSelectedNovel(updated);
+        void fetchChapters(selectedNovel.id, true);
+      } else {
+        setSelectedNovel(null);
+      }
     } catch (err: unknown) {
       if (savedDuringRun) {
         setSelectedNovel(savedDuringRun);
@@ -989,11 +1045,15 @@ export default function NovelsTab() {
       startPayChapterIndex: '',
     });
     setGeneratedLink('');
+    setPromoLinkId('');
+    setPromoLinkPolicy(null);
+    setPromoRuleChoice('inherit');
+    setIsPromoRuleOpen(false);
     setIsPromoModalOpen(true);
   };
 
   const handleGeneratePromotionLink = async () => {
-    if (!canCreatePromo || promoSubmitting) return;
+    if (!canCreatePromo || promoWriteRef.current || generatedLink) return;
 
     const built = validateAndBuildPromotionPayload(
       {
@@ -1018,6 +1078,7 @@ export default function NovelsTab() {
       return;
     }
 
+    promoWriteRef.current = true;
     setPromoSubmitting(true);
     try {
       const created = await apiRequest('POST', '/promotion-links', built.payload);
@@ -1028,10 +1089,14 @@ export default function NovelsTab() {
         resolvedUrl = `${built.baseUrl}${built.path}?${built.params.toString()}`;
       }
       setGeneratedLink(created?.generated_url || resolvedUrl);
+      const createdId = created?.id ? String(created.id) : '';
+      setPromoLinkId(createdId);
+      if (promoRuleChoice === 'own' && createdId && promoIntegration && canEditGlobalSettings) setIsPromoRuleOpen(true);
       window.showToast?.('推广链接已成功生成并记录！', 'success');
     } catch (err: unknown) {
       window.showToast?.(`保存推广链接失败：${err instanceof Error ? err.message : ''}`, 'error');
     } finally {
+      promoWriteRef.current = false;
       setPromoSubmitting(false);
     }
   };
@@ -1422,7 +1487,7 @@ export default function NovelsTab() {
               novels.map((novel) => {
                 const pubMeta = getPublishStatusMeta(novel.publish_status);
                 const isSelected = selectedNovelIds.includes(novel.id);
-                const isViewing = selectedNovel?.id === novel.id;
+                const isViewing = isDetailOpen && selectedNovel?.id === novel.id;
                 const effectiveCost =
                   novel.coin_cost_per_thousand != null
                     ? novel.coin_cost_per_thousand
@@ -1433,11 +1498,10 @@ export default function NovelsTab() {
                 return (
                   <tr
                     key={novel.id}
-                    onClick={() => handleNovelClick(novel)}
-                    className={`cursor-pointer ${isSelected || isViewing ? 'row-selected' : ''}`}
+                    className={isSelected || isViewing ? 'row-selected' : undefined}
                   >
                     {canEditNovels && (
-                      <td className="text-center" onClick={(e) => e.stopPropagation()}>
+                      <td className="text-center">
                         <input
                           type="checkbox"
                           aria-label={`选择书籍《${novel.title}》`}
@@ -1462,8 +1526,19 @@ export default function NovelsTab() {
                           className="w-10 h-14 object-cover rounded-lg border border-[var(--cms-border)] shrink-0"
                         />
                         <div className="min-w-0">
-                          <div className="text-[var(--cms-fg)] truncate max-w-[230px]" title={novel.title}>
-                            {novel.title}
+                          <div className="flex items-center gap-1 min-w-0 max-w-[260px]">
+                            <span className="text-[var(--cms-fg)] truncate" title={novel.title}>
+                              {novel.title}
+                            </span>
+                            <button
+                              type="button"
+                              aria-label={`复制书名《${novel.title}》`}
+                              title="复制书名"
+                              onClick={() => void handleCopyTitle(novel.title)}
+                              className="focus-ring shrink-0 p-1 rounded-md text-[var(--cms-muted-fg)] hover:text-[var(--cms-fg)] hover:bg-[var(--cms-secondary)] inline-flex items-center justify-center cursor-pointer transition-colors"
+                            >
+                              <Copy size={12} aria-hidden="true" />
+                            </button>
                           </div>
                           <div className="text-[var(--cms-muted-fg)] mt-0.5 truncate tabular-nums">
                             {novel.author} <span className="mx-1">·</span> #{novel.id}
@@ -1525,6 +1600,13 @@ export default function NovelsTab() {
                     )}
                     <td className="text-right whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
                       <div className="inline-flex items-center justify-end gap-0.5 whitespace-nowrap">
+                        <button
+                          type="button"
+                          onClick={() => handleNovelClick(novel)}
+                          className="btn-detail whitespace-nowrap"
+                        >
+                          详情
+                        </button>
                         {canCreatePromo && (
                           <button
                             type="button"
@@ -1534,18 +1616,16 @@ export default function NovelsTab() {
                             推广
                           </button>
                         )}
-                        <button
-                          type="button"
-                          onClick={() => handleNovelClick(novel)}
-                          className="btn-detail whitespace-nowrap"
-                        >
-                          详情
-                        </button>
                         <RowActionMenu
                           ariaLabel={`《${novel.title}》更多操作`}
                           items={[
                             ...(canEditNovels
                               ? [
+                                  {
+                                    label: '编辑',
+                                    tone: 'primary' as const,
+                                    onClick: () => openEditFromList(novel),
+                                  },
                                   {
                                     label:
                                       publishUpdatingId === novel.id
@@ -1585,10 +1665,11 @@ export default function NovelsTab() {
 
       {/* Slide-Over Book Detail & Chapter Reader Drawer */}
       <CmsDialog
-        open={Boolean(selectedNovel)}
+        open={Boolean(isDetailOpen && selectedNovel)}
         onClose={closeDetailDrawer}
         variant="drawer"
         size="xl"
+        wrapTitle
         title={selectedNovel ? selectedNovel.title : undefined}
         subtitle={
           selectedNovel
@@ -2026,7 +2107,7 @@ export default function NovelsTab() {
         isOpen={isEditing}
         isEditing={true}
         isSubmitting={isSubmittingNovel}
-        hasChapters={chapters.length > 0}
+        hasChapters={chapters.length > 0 || (chaptersLoading && (selectedNovel?.word_count ?? 0) > 0)}
         globalCoinCost={globalCoinCost}
         formData={editNovelForm}
         setFormData={(data) => setEditNovelForm(data)}
@@ -2035,6 +2116,9 @@ export default function NovelsTab() {
           setIsEditing(false);
           setEditImportFile(null);
           setEditModalError('');
+          if (!isDetailOpen) {
+            setSelectedNovel(null);
+          }
         }}
         chapterImportType={editImportType}
         onChapterImportTypeChange={setEditImportType}
@@ -2062,7 +2146,30 @@ export default function NovelsTab() {
         onGenerateLink={handleGeneratePromotionLink}
         generatedLink={generatedLink}
         onCopyLink={handleCopyLink}
+        ruleChoice={promoRuleChoice}
+        ruleSummary={promoLinkPolicy?.own_version ? `专属规则 · v${policyVersion(promoLinkPolicy)?.number}`
+          : promoLinkPolicy ? defaultPolicySummary(promoLinkPolicy)
+            : promoDefaultPolicy ? defaultPolicySummary(promoDefaultPolicy) : '继承接入默认'}
+        onRuleChoice={setPromoRuleChoice}
+        canConfigureRule={canEditGlobalSettings && Boolean(promoIntegration)}
+        onConfigureRule={canEditGlobalSettings && promoIntegration && promoLinkId ? () => setIsPromoRuleOpen(true) : undefined}
       />
+      {isPromoRuleOpen && promoIntegration && (
+        <IntegrationConfigDrawer
+          open
+          editingIntegration={promoIntegration}
+          initialTab="policy"
+          initialPolicyPromotion={promoLinkId}
+          destinations={[]}
+          canWrite={canEditGlobalSettings}
+          onClose={() => setIsPromoRuleOpen(false)}
+          onSuccess={() => {}}
+          onPolicyPublished={(policy) => {
+            setPromoLinkPolicy(policy);
+            window.showToast?.('推广链接回传规则已发布', 'success');
+          }}
+        />
+      )}
     </div>
   );
 }

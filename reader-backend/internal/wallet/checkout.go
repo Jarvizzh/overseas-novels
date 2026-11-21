@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"reader-backend/internal/conversion"
 	"reader-backend/internal/db"
 	"reader-backend/internal/model"
 	"reader-backend/internal/payment"
@@ -30,14 +31,7 @@ type checkoutOrder struct {
 	legacyBookProven bool
 }
 
-type checkoutAttribution struct {
-	FBP       string `json:"fbp,omitempty"`
-	FBC       string `json:"fbc,omitempty"`
-	IP        string `json:"ip_address,omitempty"`
-	UserAgent string `json:"user_agent,omitempty"`
-	SourceURL string `json:"source_url,omitempty"`
-	Country   string `json:"country,omitempty"`
-}
+type checkoutAttribution = conversion.Attribution
 
 type CheckoutResult struct {
 	settled   bool
@@ -82,12 +76,37 @@ func (r *dbRepository) CreateCheckout(ctx context.Context, userID int64, slot *m
 }
 
 func (r *dbRepository) BindCheckout(ctx context.Context, checkoutID, orderID string) error {
-	tag, err := db.Pool(ctx).Exec(ctx, `UPDATE recharge_orders SET external_ref_id=$2
-		WHERE checkout_id=$1 AND (external_ref_id IS NULL OR external_ref_id=$2)`, checkoutID, orderID)
-	if err == nil && tag.RowsAffected() != 1 {
+	tx, err := db.Pool(ctx).Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(context.WithoutCancel(ctx))
+	var existing *string
+	err = tx.QueryRow(ctx, "SELECT external_ref_id FROM recharge_orders WHERE checkout_id=$1 FOR UPDATE", checkoutID).Scan(&existing)
+	if errors.Is(err, pgx.ErrNoRows) || (err == nil && existing != nil && *existing != orderID) {
 		return ErrCheckoutUnavailable
 	}
-	return err
+	if err != nil || existing != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, "UPDATE recharge_orders SET external_ref_id=$2 WHERE checkout_id=$1", checkoutID, orderID); err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx, `
+		INSERT INTO reader_conversion_outbox (business_key,event_name,order_id,intent_id,environment,occurred_at,snapshot)
+		SELECT 'checkout:'||o.checkout_id||':InitiateCheckout','InitiateCheckout',o.id,o.checkout_id::text,$2,clock_timestamp(),
+			jsonb_build_object('user_id',u.id::text,'email',u.email,'amount_cents',o.amount_cents,'currency',o.currency,
+				'order_type',o.order_type,'promotion_id',o.promotion_link_id::text,'action_source','website',
+				'attribution',COALESCE(o.fb_lead_metadata,'{}'),
+				'attribution_state',CASE WHEN NULLIF(o.fb_lead_metadata->>'pixel_id','') IS NOT NULL THEN 'matched'
+					WHEN o.promotion_link_id IS NOT NULL OR COALESCE(o.utm_source,'')<>'' OR COALESCE(o.utm_campaign,'')<>''
+						OR COALESCE(o.fb_lead_metadata->>'fbc','')<>'' THEN 'missing_pixel' ELSE 'organic' END)
+		FROM recharge_orders o JOIN users u ON u.id=o.user_id WHERE o.checkout_id=$1
+		ON CONFLICT (business_key) DO NOTHING`, checkoutID, conversion.Environment())
+	if err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 const checkoutSelect = `SELECT id, user_id, COALESCE(checkout_id::text, ''), status, order_type,
@@ -165,7 +184,8 @@ func (r *dbRepository) settleCheckout(ctx context.Context, orderID string, captu
 		if capture.Status != "COMPLETED" {
 			return nil, errRefundUnmatched
 		}
-		_, err = tx.Exec(ctx, `UPDATE recharge_orders SET fulfilled_at=now(),reconciliation_note=NULL,updated_at=now() WHERE id=$1`, o.id)
+		_, err = tx.Exec(ctx, `UPDATE recharge_orders SET fulfilled_at=now(),reconciliation_note=NULL,updated_at=now(),
+            capi_expectation=COALESCE(capi_expectation,jsonb_build_object('events','[]'::jsonb,'reason','historical_entitlement_recovery','environment',$2::text)) WHERE id=$1`, o.id, conversion.Environment())
 		if err != nil {
 			return nil, err
 		}
@@ -187,6 +207,9 @@ func (r *dbRepository) settleCheckout(ctx context.Context, orderID string, captu
 		return nil, err
 	}
 	if refunded {
+		if err := conversion.RecordPaymentTx(ctx, tx, o.id, capture.OccurredAt, "paypal_capture_create_time", false, false); err != nil {
+			return nil, err
+		}
 		if err := tx.Commit(ctx); err != nil {
 			return nil, err
 		}
@@ -210,8 +233,11 @@ func (r *dbRepository) settleCheckout(ctx context.Context, orderID string, captu
 			return nil, err
 		}
 	}
-	_, err = tx.Exec(ctx, `UPDATE recharge_orders SET status='Success', paid_at=now(), fulfilled_at=now(), updated_at=now(),payment_events_enabled=true WHERE id=$1`, o.id)
+	_, err = tx.Exec(ctx, `UPDATE recharge_orders SET status='Success', paid_at=now(), fulfilled_at=clock_timestamp(), updated_at=now() WHERE id=$1`, o.id)
 	if err != nil {
+		return nil, err
+	}
+	if err := conversion.RecordPaymentTx(ctx, tx, o.id, capture.OccurredAt, "paypal_capture_create_time", false, false); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(ctx); err != nil {

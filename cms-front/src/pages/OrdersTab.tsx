@@ -511,8 +511,7 @@ export default function OrdersTab() {
                 return (
                   <tr
                     key={o.id}
-                    onClick={() => void handleOpenPaymentDetails(o.id)}
-                    className={`cursor-pointer ${selectedOrderForDetail === o.id && detailModalOpen ? 'row-selected' : ''}`}
+                    className={selectedOrderForDetail === o.id && detailModalOpen ? 'row-selected' : undefined}
                   >
                     <td className="tabular-nums">
                       <div className="text-[var(--cms-fg)]" title={String(o.id)}>
@@ -520,7 +519,7 @@ export default function OrdersTab() {
                       </div>
                       <div className="text-[var(--cms-muted-fg)] mt-0.5">UID {o.user_id}</div>
                     </td>
-                    <td onClick={(e) => e.stopPropagation()}>
+                    <td>
                       <button
                         type="button"
                         onClick={() => void handleOpenPaymentDetails(o.id)}
@@ -571,13 +570,13 @@ export default function OrdersTab() {
                     <td>
                       <StatusDot tone={statusMeta.tone} label={statusMeta.label} />
                     </td>
-                    <td className="text-right" onClick={(e) => e.stopPropagation()}>
+                    <td className="text-right">
                       <button
                         type="button"
                         onClick={() => void handleOpenPaymentDetails(o.id)}
                         className="btn-detail"
                       >
-                        明细
+                        详情
                       </button>
                     </td>
                   </tr>

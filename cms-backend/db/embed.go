@@ -26,3 +26,78 @@ var ReaderPerformanceSQL string
 //
 //go:embed migrations/2026111704.sql
 var ReaderQueueAndShelfSQL string
+
+// ConversionReportingSQL installs durable conversion queues and Reader snapshots.
+//
+//go:embed migrations/2026111901.sql
+var ConversionReportingSQL string
+
+// ReaderConversionSQL replaces the legacy payment enqueue trigger.
+//
+//go:embed migrations/2026111902.sql
+var ReaderConversionSQL string
+
+// LegacyConversionSQL adds the historical conversion import ledger.
+//
+//go:embed migrations/2026111903.sql
+var LegacyConversionSQL string
+
+// ConversionReconciliationSQL indexes external order lookups.
+//
+//go:embed migrations/2026111904.sql
+var ConversionReconciliationSQL string
+
+// ConversionOperationsSQL adds audited actions, repair evidence and alert state.
+//
+//go:embed migrations/2026111905.sql
+var ConversionOperationsSQL string
+
+// ConversionReviewSQL separates settlement evidence from the queue and isolates row locks.
+//
+//go:embed migrations/2026111906.sql
+var ConversionReviewSQL string
+
+// SinanConversionSQL adds report replay snapshots and live route validation.
+//
+//go:embed migrations/2026111907.sql
+var SinanConversionSQL string
+
+// SinanReviewSQL adds structured partner receipts and account-scoped promotion routing.
+//
+//go:embed migrations/2026111908.sql
+var SinanReviewSQL string
+
+// SinanRecheckSQL versions Inbox digests and preserves partner attempt identity.
+//
+//go:embed migrations/2026111909.sql
+var SinanRecheckSQL string
+
+// PaymentPolicySQL adds versioned payment reporting policies and decision storage.
+//
+//go:embed migrations/2026111910.sql
+var PaymentPolicySQL string
+
+// ReaderPaymentPolicySQL initializes first-payment facts and settlement capture.
+//
+//go:embed migrations/2026111911.sql
+var ReaderPaymentPolicySQL string
+
+// SinanPaymentPolicySQL preserves the scoped payment identity and receipt evidence.
+//
+//go:embed migrations/2026111912.sql
+var SinanPaymentPolicySQL string
+
+// ReaderPaymentReviewSQL uses verified subscription and first-payment facts.
+//
+//go:embed migrations/2026111913.sql
+var ReaderPaymentReviewSQL string
+
+// ReaderPaymentRecoverySQL exposes verified subscription facts to conversion decision writers.
+//
+//go:embed migrations/2026111914.sql
+var ReaderPaymentRecoverySQL string
+
+// ReaderSubscriptionEvidenceSQL scopes subscription evidence and recovers eligible pre-send failures.
+//
+//go:embed migrations/2026111915.sql
+var ReaderSubscriptionEvidenceSQL string

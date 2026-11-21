@@ -181,33 +181,14 @@ type InitiateCheckoutRequest struct {
 }
 
 func (h *Handler) InitiateCheckout(c *gin.Context) {
-	userID := c.MustGet("user_id").(int64)
 	var req InitiateCheckoutRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		httpx.Fail(c, http.StatusBadRequest, "invalid_request", "Invalid request fields", nil)
 		return
 	}
 
-	ctx := c.Request.Context()
-
-	fbp := c.GetHeader("X-FB-FBP")
-	fbc := c.GetHeader("X-FB-FBC")
-	pixelID := c.GetHeader("X-FB-Pixel-ID")
-	ip := c.ClientIP()
-	ua := c.Request.UserAgent()
-	sourceURL := c.GetHeader("X-Event-Source-URL")
-	country := c.GetHeader("X-Country")
-	if country == "" {
-		country = c.GetHeader("CF-IPCountry")
-	}
-
-	err := h.service.InitiateCheckout(ctx, userID, req.AmountCents, req.CoinsAmount, fbp, fbc, pixelID, ip, ua, sourceURL, country)
-	if err != nil {
-		httpx.Fail(c, http.StatusInternalServerError, "internal_error", "Request failed", err)
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{"message": "InitiateCheckout tracked"})
+	// Older clients still submit this request before the PayPal order exists.
+	c.JSON(http.StatusOK, gin.H{"message": "Checkout tracking starts when the payment order is bound"})
 }
 
 type StripeRechargeRequest struct {

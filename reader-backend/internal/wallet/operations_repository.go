@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"reader-backend/internal/conversion"
 	"reader-backend/internal/db"
 )
 
@@ -53,8 +54,8 @@ func PaymentTaskStatus(ctx context.Context) ([]TaskStatus, error) {
    FROM order_attention
  )
  SELECT 'inbox',count(*),min(created_at),COALESCE(max(attempts),0) FROM paypal_event_inbox WHERE processed_at IS NULL
- UNION ALL SELECT 'outbox',count(*),min(created_at),COALESCE(max(attempts),0) FROM payment_event_outbox WHERE state='pending' AND delivered_at IS NULL
- UNION ALL SELECT 'unattributed',COALESCE(sum(event_count),0)::bigint,
+ UNION ALL SELECT 'conversion_ingress',count(*),min(created_at),0 FROM reader_conversion_outbox WHERE environment=$1 AND consumed_at IS NULL
+ UNION ALL SELECT 'legacy_unattributed',COALESCE(sum(event_count),0)::bigint,
    (SELECT created_at FROM payment_event_outbox WHERE state='unattributed' ORDER BY created_at LIMIT 1),
    COALESCE(max(attempts),0) FROM payment_unattributed_counts
  UNION ALL SELECT 'cancel_pending',count(*),min(COALESCE(cancel_requested_at,updated_at)),COALESCE(max(cancel_attempts),0) FROM user_subscriptions WHERE status='CANCEL_PENDING'
@@ -69,7 +70,7 @@ func PaymentTaskStatus(ctx context.Context) ([]TaskStatus, error) {
                             ('manual_review',review_count,review_oldest,review_attempts))
                    AS summary(kind,task_count,oldest_at,max_attempts)
  UNION ALL SELECT 'refund_shortfall',count(*),min(updated_at),0 FROM payment_refunds WHERE charged_coin_shortfall>0 OR bonus_coin_shortfall>0
- UNION ALL SELECT 'subscription_intent_uncertain',count(*),min(submitted_at),0 FROM paypal_subscription_intents WHERE submitted_at IS NOT NULL AND subscription_id IS NULL`)
+ UNION ALL SELECT 'subscription_intent_uncertain',count(*),min(submitted_at),0 FROM paypal_subscription_intents WHERE submitted_at IS NOT NULL AND subscription_id IS NULL`, conversion.Environment())
 	if err != nil {
 		return nil, err
 	}
@@ -81,6 +82,7 @@ func PaymentTaskStatus(ctx context.Context) ([]TaskStatus, error) {
 }
 
 var ErrTaskNotRetryable = errors.New("task is absent, completed or currently leased")
+var ErrUseConversionOps = errors.New("conversion delivery moved to conversion-ops retry-delivery and review-legacy-environment")
 
 // RetryPaymentTask only changes scheduling. It never changes receipts, payloads,
 // balances or entitlements. A subscription cursor may only move backwards.
@@ -91,7 +93,7 @@ func RetryPaymentTask(ctx context.Context, kind, id string, from *time.Time) err
 	case "inbox":
 		query = `UPDATE paypal_event_inbox SET next_attempt_at=now() WHERE event_id=$1 AND processed_at IS NULL AND next_attempt_at<=now()`
 	case "outbox":
-		query = `UPDATE payment_event_outbox SET next_attempt_at=now() WHERE event_id=$1 AND state='pending' AND delivered_at IS NULL AND (lease_until IS NULL OR lease_until<=now())`
+		return ErrUseConversionOps
 	case "order":
 		orderID, err := strconv.ParseInt(id, 10, 64)
 		if err != nil || orderID <= 0 {
