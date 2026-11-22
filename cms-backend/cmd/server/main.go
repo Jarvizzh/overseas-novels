@@ -151,11 +151,8 @@ func main() {
 		novelHandler := novel.NewHandler(novelService)
 		novelHandler.RegisterRoutes(api)
 
-		refundCtx, stopRefunds := context.WithCancel(context.Background())
-		defer stopRefunds()
 		billingRepo := billing.NewBillingRepository()
 		billingService := billing.NewBillingService(billingRepo)
-		go billingService.RunRefundReconciliation(refundCtx)
 		billingHandler := billing.NewHandler(billingService)
 		billingHandler.RegisterRoutes(api)
 

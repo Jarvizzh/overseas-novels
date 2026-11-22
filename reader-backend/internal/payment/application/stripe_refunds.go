@@ -1,0 +1,285 @@
+package application
+
+import (
+	"context"
+	"errors"
+	"log"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"reader-backend/internal/conversion"
+	"reader-backend/internal/db"
+	"reader-backend/internal/payment"
+	"reader-backend/internal/payment/aftercare"
+	"reader-backend/internal/payment/ledger"
+)
+
+type stripeRefundAdapter interface {
+	ResolveStripeRefund(context.Context, payment.RefundRequest) (*payment.StripeRefundProof, error)
+	ReadStripeRefund(context.Context, string) (*payment.StripeRefundProof, error)
+	GetRefundLedgerEvidence(context.Context, string) ([]payment.LedgerEvidence, error)
+	GetLedgerMovement(context.Context, string) (payment.LedgerEvidence, error)
+}
+
+func claimStripeRefunds(ctx context.Context, account payment.WebhookAccount) ([]refundJob, error) {
+	rows, err := db.Pool(ctx).Query(ctx, `WITH due AS (
+		SELECT c.id,p.capture_id,(c.first_sent_at IS NULL AND c.provider_refund_id IS NULL) AS send
+		FROM payment_refund_commands c JOIN third_party_payment_orders p ON p.id=c.receipt_id
+		JOIN payment_channel_accounts a ON a.id=p.account_id JOIN recharge_orders o ON o.id=c.order_id
+		WHERE a.provider='stripe' AND a.account_key=$1 AND a.environment=$2 AND c.environment=$2 AND o.checkout_environment=$3
+		  AND p.object_type='charge' AND p.status='VERIFIED' AND c.currency='USD' AND c.amount_minor>0
+		  AND c.status IN ('pending','confirming') AND c.next_check_at<=now()
+		  AND (c.claimed_until IS NULL OR c.claimed_until<=now())
+		ORDER BY c.next_check_at,c.id LIMIT 5 FOR UPDATE OF c SKIP LOCKED
+	)
+	UPDATE payment_refund_commands c SET claimed_until=now()+interval '5 minutes',status='confirming',
+		first_sent_at=CASE WHEN due.send THEN now() ELSE c.first_sent_at END,updated_at=now()
+	FROM due WHERE c.id=due.id
+	RETURNING c.id::text,c.order_id,c.receipt_id,c.claimed_until,due.capture_id,COALESCE(c.provider_refund_id,''),c.amount_minor,c.currency,due.send`,
+		account.AccountKey, account.Environment, conversion.Environment())
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, func(row pgx.CollectableRow) (refundJob, error) {
+		job := refundJob{request: payment.RefundRequest{Account: account}}
+		err := row.Scan(&job.id, &job.orderID, &job.receiptID, &job.lease, &job.request.ReceiptID, &job.request.RefundID,
+			&job.request.AmountMinor, &job.request.Currency, &job.request.Send)
+		job.request.RequestKey = job.id
+		return job, err
+	})
+}
+
+func applyStripeRefundTx(ctx context.Context, tx pgx.Tx, account payment.WebhookAccount, proof *payment.StripeRefundProof) error {
+	if proof.Currency != "USD" || proof.Status != "succeeded" || proof.AmountMinor <= 0 {
+		return ErrCheckoutUnavailable
+	}
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('stripe-capture:'||$1,0))`, proof.ChargeID); err != nil {
+		return err
+	}
+
+	var accountID, receiptID, orderID, gross int64
+	err := tx.QueryRow(ctx, `SELECT a.id,t.id,t.order_id,(gross_amount*100)::bigint
+		FROM third_party_payment_orders t JOIN payment_channel_accounts a ON a.id=t.account_id
+		JOIN recharge_orders o ON o.id=t.order_id
+		WHERE a.provider='stripe' AND a.account_key=$1 AND a.environment=$2 AND t.capture_id=$3
+		 AND t.object_type='charge' AND t.currency='USD' AND t.status='VERIFIED' AND o.checkout_environment=$4
+		FOR UPDATE OF o`, account.AccountKey, account.Environment, proof.ChargeID, conversion.Environment()).Scan(&accountID, &receiptID, &orderID, &gross)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return errRefundUnmatched
+	}
+	if err != nil {
+		return err
+	}
+	if proof.AmountMinor > gross {
+		return ErrCheckoutUnavailable
+	}
+	var saved string
+	err = tx.QueryRow(ctx, `INSERT INTO payment_stripe_refund_items(account_id,refund_ref,receipt_id,amount_minor)
+		VALUES($1,$2,$3,$4) ON CONFLICT(account_id,refund_ref) DO UPDATE SET refund_ref=EXCLUDED.refund_ref
+		WHERE payment_stripe_refund_items.receipt_id=EXCLUDED.receipt_id AND payment_stripe_refund_items.amount_minor=EXCLUDED.amount_minor
+		RETURNING refund_ref`, accountID, proof.ID, receiptID, proof.AmountMinor).Scan(&saved)
+	if err != nil {
+		return err
+	}
+	var covered bool
+	err = tx.QueryRow(ctx, `WITH amounts AS (
+		SELECT t.gross_amount*100 AS gross,
+		  COALESCE((SELECT sum(amount_minor) FROM payment_stripe_refund_items r WHERE r.receipt_id=t.id),0) AS refunded
+		FROM payment_fulfillment_funding f JOIN third_party_payment_orders t ON t.id=f.receipt_id WHERE f.order_id=$1
+	), deferred AS (
+		SELECT EXISTS(SELECT 1 FROM recharge_orders o JOIN payment_checkout_attempts p ON p.order_id=o.id
+		 JOIN third_party_payment_orders t ON t.order_id=o.id AND t.external_order_id=p.provider_order_id AND t.account_id=p.account_id
+		 WHERE o.id=$1 AND t.id=$2 AND o.fulfilled_at IS NULL AND o.payment_method='stripe' AND t.reconciliation_note IS DISTINCT FROM
+		   'Stripe received a payment outside the active fulfillment attempt') AS original
+	)
+	SELECT CASE WHEN EXISTS(SELECT 1 FROM amounts) THEN
+	  COALESCE((SELECT bool_and(refunded>=gross) FROM amounts),false)
+	  ELSE original AND COALESCE((SELECT sum(amount_minor)>=$3 FROM payment_stripe_refund_items WHERE receipt_id=$2),false)
+	END FROM deferred`, orderID, receiptID, gross).Scan(&covered)
+	if err != nil {
+		return err
+	}
+	if covered {
+		return aftercare.FinalizeStripeRefund(ctx, tx, orderID, proof.ID)
+	}
+	return finalizeUnfulfilledStripeVIPRefund(ctx, tx, orderID)
+}
+
+// A fully refunded collection can be closed before a period has any funding
+// rows. Check the invoice allocations and each original gross charge instead.
+func finalizeUnfulfilledStripeVIPRefund(ctx context.Context, tx pgx.Tx, orderID int64) error {
+	var ref string
+	err := tx.QueryRow(ctx, `WITH collections AS (
+		SELECT a.amount_minor,t.gross_amount*100 AS gross,r.amount_minor AS refunded,r.ref
+		FROM payment_stripe_invoice_periods p JOIN recharge_orders o ON o.id=p.order_id
+		JOIN payment_stripe_invoice_allocations a ON a.account_id=p.account_id AND a.invoice_ref=p.invoice_ref
+		JOIN third_party_payment_orders t ON t.id=a.receipt_id AND t.order_id=o.id AND t.account_id=p.account_id
+		LEFT JOIN LATERAL (SELECT sum(r.amount_minor) AS amount_minor,max(r.refund_ref) AS ref
+			FROM payment_stripe_refund_items r WHERE r.receipt_id=t.id AND r.account_id=p.account_id) r ON true
+		WHERE p.order_id=$1 AND NOT p.admitted AND o.status='Paid' AND o.fulfilled_at IS NULL
+			AND p.provider_status IN ('paid','void','uncollectible') AND t.status='VERIFIED' AND t.currency='USD'
+	)
+	SELECT max(ref) FROM collections HAVING count(*)>0 AND bool_and(COALESCE(refunded>=gross,false))
+		AND EXISTS (SELECT 1 FROM payment_stripe_invoice_periods p WHERE p.order_id=$1
+			AND (p.provider_status<>'paid' OR (SELECT sum(amount_minor) FROM collections)=p.billed_minor))`, orderID).Scan(&ref)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return aftercare.FinalizeStripeRefund(ctx, tx, orderID, ref)
+}
+
+func stripeRefundStatus(proof *payment.StripeRefundProof, lookup error) (string, string, *time.Time) {
+	var retry time.Duration
+	status, note := "review", "Refund result needs provider evidence"
+	switch {
+	case errors.Is(lookup, payment.ErrStripeRefundRequiresReview):
+		note = "Stripe receipt has a dispute or insufficient refundable balance"
+	case lookup != nil:
+		status, note, retry = "confirming", "Checking the original Stripe refund request", time.Minute
+	case proof != nil:
+		switch proof.Status {
+		case "succeeded":
+			return "succeeded", "", nil
+		case "failed", "canceled":
+			return "failed", "Stripe confirmed refund failure", nil
+		case "pending", "requires_action":
+			status, note, retry = "confirming", "Stripe refund is pending", time.Minute
+		}
+	}
+	if retry == 0 {
+		return status, note, nil
+	}
+	next := time.Now().Add(retry)
+	return status, note, &next
+}
+
+func finishStripeRefund(ctx context.Context, job refundJob, proof *payment.StripeRefundProof, lookup error) error {
+	tx, err := db.Pool(ctx).Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(context.WithoutCancel(ctx))
+	var id string
+	err = tx.QueryRow(ctx, `SELECT id::text FROM payment_refund_commands WHERE id=$1 AND claimed_until=$2 AND status='confirming' FOR UPDATE`,
+		job.id, job.lease).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var ref *string
+	if proof != nil {
+		if proof.ChargeID != job.request.ReceiptID || proof.AmountMinor != job.request.AmountMinor || proof.Currency != job.request.Currency ||
+			(proof.CommandKey != job.id && proof.ID != job.request.RefundID) {
+			proof = nil
+			lookup = nil
+		} else {
+			ref = &proof.ID
+			if proof.Status == "succeeded" {
+				if err := applyStripeRefundTx(ctx, tx, job.request.Account, proof); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	status, note, next := stripeRefundStatus(proof, lookup)
+	_, err = tx.Exec(ctx, `UPDATE payment_refund_commands SET status=$2,result_note=NULLIF($3,''),next_check_at=$4,
+		claimed_until=NULL,provider_refund_id=COALESCE($5,provider_refund_id),updated_at=now() WHERE id=$1`,
+		job.id, status, note, next, ref)
+	if err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func syncStripeRefundEvidence(ctx context.Context, adapter stripeRefundAdapter, proof *payment.StripeRefundProof) error {
+	if proof == nil || proof.Status != "succeeded" || proof.Currency != "USD" {
+		return nil
+	}
+	entries, err := adapter.GetRefundLedgerEvidence(ctx, proof.ID)
+	if err != nil {
+		return err
+	}
+	repo := ledger.NewRepository(db.Pool(ctx))
+	for _, entry := range entries {
+		if _, err := repo.Record(ctx, entry); err != nil {
+			return err
+		}
+		authoritative, err := adapter.GetLedgerMovement(ctx, entry.MovementKey)
+		if err != nil {
+			return err
+		}
+		if _, err := repo.Record(ctx, authoritative); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *service) reconcileStripeRefunds(ctx context.Context) {
+	provider, available := s.stripeCheckoutAdapter()
+	if !available {
+		return
+	}
+	adapter, err := payment.Capability[stripeRefundAdapter](s.adapters, payment.ProviderStripe)
+	if err != nil {
+		return
+	}
+	jobs, err := claimStripeRefunds(ctx, provider.AccountScope())
+	if err != nil {
+		log.Printf("task=stripe_refund action=claim error=%v", err)
+		return
+	}
+	for _, job := range jobs {
+		request, cancel := context.WithTimeout(ctx, 45*time.Second)
+		proof, issue := adapter.ResolveStripeRefund(request, job.request)
+		if err := finishStripeRefund(request, job, proof, issue); err != nil {
+			log.Printf("task=stripe_refund action=save id=%s error=%v", job.id, err)
+		} else if err := syncStripeRefundEvidence(request, adapter, proof); err != nil {
+			log.Printf("task=stripe_refund action=ledger id=%s error=%v", job.id, err)
+		}
+		cancel()
+	}
+}
+
+func (s *service) syncStripeRefundNotice(ctx context.Context, account payment.WebhookAccount, id string) error {
+	adapter, err := payment.Capability[stripeRefundAdapter](s.adapters, payment.ProviderStripe)
+	if err != nil {
+		return err
+	}
+	proof, err := adapter.ReadStripeRefund(ctx, id)
+	if err != nil || proof.Status != "succeeded" {
+		return err
+	}
+	if proof.Currency != "USD" {
+		return nil
+	}
+	tx, err := db.Pool(ctx).Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(context.WithoutCancel(ctx))
+	if err := applyStripeRefundTx(ctx, tx, account, proof); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	if proof.CommandKey != "" {
+		_, err = db.Pool(ctx).Exec(ctx, `UPDATE payment_refund_commands c SET status='succeeded',provider_refund_id=$2,
+			claimed_until=NULL,result_note=NULL,next_check_at=NULL,updated_at=now()
+			FROM third_party_payment_orders t JOIN payment_channel_accounts a ON a.id=t.account_id
+			WHERE c.id::text=$1 AND c.receipt_id=t.id AND c.amount_minor=$3 AND c.currency='USD'
+			  AND a.provider='stripe' AND a.account_key=$4 AND a.environment=$5 AND t.capture_id=$6
+			  AND c.status IN ('pending','confirming','review')`, proof.CommandKey, proof.ID, proof.AmountMinor, account.AccountKey, account.Environment, proof.ChargeID)
+		if err != nil {
+			return err
+		}
+	}
+
+	return syncStripeRefundEvidence(ctx, adapter, proof)
+}

@@ -43,6 +43,8 @@ export const ROLE_LABELS: Record<string, string> = {
 };
 
 export const CONVERSION_READ_ROLES = ['SuperAdmin', 'Admin', 'MediaBuyer', 'Finance'];
+export const PAYMENT_FINANCE_ROLES = ['SuperAdmin', 'Finance'];
+export const PAYMENT_SUMMARY_ROLES = [...PAYMENT_FINANCE_ROLES, 'Admin', 'Support'];
 
 export const NAV_TREE: NavNode[] = [
   {
@@ -66,7 +68,21 @@ export const NAV_TREE: NavNode[] = [
     icon: <Coins size={16} aria-hidden="true" />,
     children: [
       { id: 'users', label: '用户管理', path: '/users' },
-      { id: 'orders', label: '订单管理', path: '/orders' },
+    ],
+  },
+  {
+    id: 'payments',
+    label: '支付中心',
+    icon: <Coins size={16} aria-hidden="true" />,
+    roles: PAYMENT_SUMMARY_ROLES,
+    children: [
+      { id: 'payment-orders', label: '交易与订单', path: '/payments/orders', roles: PAYMENT_SUMMARY_ROLES },
+      { id: 'payment-subscriptions', label: '订阅与账期', path: '/payments/subscriptions', roles: PAYMENT_SUMMARY_ROLES },
+      { id: 'payment-refunds', label: '退款', path: '/payments/refunds', roles: PAYMENT_FINANCE_ROLES },
+      { id: 'payment-risk', label: '风控', path: '/payments/risk', roles: PAYMENT_FINANCE_ROLES },
+      { id: 'payment-disputes', label: '争议与冲回', path: '/payments/disputes', roles: PAYMENT_FINANCE_ROLES },
+      { id: 'payment-reconciliation', label: '资金对账', path: '/payments/reconciliation', roles: PAYMENT_FINANCE_ROLES },
+      { id: 'payment-channels', label: '渠道与商户', path: '/payments/channels', roles: ['SuperAdmin'] },
     ],
   },
   {
@@ -93,7 +109,6 @@ export const NAV_TREE: NavNode[] = [
     roles: ['SuperAdmin'],
     children: [
       { id: 'settings-domains', label: '域名管理', path: '/domains', roles: ['SuperAdmin'] },
-      { id: 'settings-payment', label: '支付管理', path: '/payment', roles: ['SuperAdmin'] },
       { id: 'settings-accounts', label: '账号管理', path: '/accounts', roles: ['SuperAdmin'] },
     ],
   },

@@ -79,7 +79,7 @@ StarNovel 支付消息继续受现有履约、退款前置校验和历史权益�
 - 订阅在既有扣款、订单、订阅锁顺序下分配首笔归属。只有 `eligible` 可以转为 `claimed` 并保存首笔订单 ID。迁移优先用现有 `Subscribe` 队列行确认归属。历史首笔已履约但无可用事件记 `historical`，证据不足记 `unknown`，两类都各自按规则生成后续 `Purchase`。
 - 支付原始时间取可验证的渠道交易时间，并保存时间来源。缺证据时业务正常履约，转化记录标记 `event_time_missing` 供对账。司南沿用回调原始 `event_time`。金额经十进制解析，按币种精度保存并生成 Meta 金额。
 
-原始发生时间在归一化、重试、迁移和追加目标时保持不变。支付实现参见 [支付业务规则](reader-payments-business-rules-and-support.md)、[订单绑定与履约](../reader-backend/internal/wallet/checkout.go)、[订阅写入路径](../reader-backend/internal/wallet/repository.go) 和 [注册事务](../reader-backend/internal/auth/service.go)。
+原始发生时间在归一化、重试、迁移和追加目标时保持不变。支付实现参见 [支付业务规则](reader-payments-business-rules-and-support.md)、[订单绑定与履约](../reader-backend/internal/payment/application/checkout.go)、[订阅写入路径](../reader-backend/internal/payment/application/subscription_repository.go) 和 [注册事务](../reader-backend/internal/auth/service.go)。
 
 ### 3.2 存储契约
 

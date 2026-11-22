@@ -1,3 +1,5 @@
+import { StripeMarketReview } from './StripeMarketReview';
+import { CheckoutEvidence } from './CheckoutEvidence';
 import React, { useState } from 'react';
 import {
   AlertCircle,
@@ -5,7 +7,6 @@ import {
   Copy,
   CreditCard,
   DollarSign,
-  FileText,
   Hash,
   RefreshCw,
   ShieldCheck,
@@ -27,11 +28,10 @@ export interface ThirdPartyPaymentDetail {
   payer_country: string;
   currency: string;
   gross_amount: number;
-  fee_amount: number;
-  net_amount: number;
+  fee_amount: number | null;
+  net_amount: number | null;
   status: string;
   seller_protection_status: string;
-  raw_payload?: string;
   created_at: string;
   updated_at: string;
 }
@@ -54,7 +54,6 @@ export const ThirdPartyPaymentModal: React.FC<Props> = ({
   onRefresh,
 }) => {
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
-  const [showRaw, setShowRaw] = useState(false);
 
   const handleCopy = async (text: string, key: string) => {
     if (!text) return;
@@ -67,20 +66,11 @@ export const ThirdPartyPaymentModal: React.FC<Props> = ({
     window.setTimeout(() => setCopiedKey(null), 2000);
   };
 
-  let formattedRaw = '';
-  if (details?.raw_payload) {
-    try {
-      const parsed = typeof details.raw_payload === 'string' ? JSON.parse(details.raw_payload) : details.raw_payload;
-      formattedRaw = JSON.stringify(parsed, null, 2);
-    } catch {
-      formattedRaw = String(details.raw_payload);
-    }
-  }
-
   const providerLower = details?.payment_provider?.toLowerCase();
   const isPayPal = providerLower === 'paypal';
   const isStripe = providerLower === 'stripe';
   const isSuccess =
+    details?.status === 'VERIFIED' ||
     details?.status === 'COMPLETED' ||
     details?.status === 'SUCCESS' ||
     details?.status === 'PAID' ||
@@ -109,6 +99,8 @@ export const ThirdPartyPaymentModal: React.FC<Props> = ({
         </button>
       }
     >
+      {isOpen && orderId !== null && <StripeMarketReview key={orderId} orderID={orderId} />}
+      {isOpen && orderId !== null && <CheckoutEvidence key={`checkout-${orderId}`} orderID={orderId} />}
       {loading ? (
         <div className="py-16 text-center text-xs text-[var(--cms-muted-fg)]">正在请求第三方支付网关数据...</div>
       ) : !details ? (
@@ -165,16 +157,14 @@ export const ThirdPartyPaymentModal: React.FC<Props> = ({
               </div>
               <div className="p-3.5 rounded-xl bg-[var(--cms-content)] border border-[var(--cms-border)] text-center space-y-1">
                 <div className="text-xs text-[var(--cms-muted-fg)]">渠道扣取手续费 (Fee)</div>
-                <div className="text-lg font-bold tabular-nums text-[var(--cms-error)]">
-                  -${details.fee_amount.toFixed(2)}{' '}
-                  <span className="text-xs font-medium text-[var(--cms-muted-fg)]">{details.currency}</span>
+                <div className={`text-lg font-bold tabular-nums ${details.fee_amount == null ? 'text-[var(--cms-muted-fg)]' : 'text-[var(--cms-error)]'}`}>
+                  {details.fee_amount == null ? '待渠道凭证' : `${(-details.fee_amount).toFixed(2)} ${details.currency}`}
                 </div>
               </div>
               <div className="p-3.5 rounded-xl bg-[var(--cms-content)] border border-[var(--cms-border)] text-center space-y-1">
                 <div className="text-xs text-[var(--cms-muted-fg)]">商户实收净额 (Net)</div>
-                <div className="text-lg font-bold tabular-nums text-[var(--cms-success)]">
-                  ${details.net_amount.toFixed(2)}{' '}
-                  <span className="text-xs font-medium text-[var(--cms-muted-fg)]">{details.currency}</span>
+                <div className={`text-lg font-bold tabular-nums ${details.net_amount == null ? 'text-[var(--cms-muted-fg)]' : 'text-[var(--cms-success)]'}`}>
+                  {details.net_amount == null ? '待渠道凭证' : `${details.net_amount.toFixed(2)} ${details.currency}`}
                 </div>
               </div>
             </div>
@@ -240,34 +230,13 @@ export const ThirdPartyPaymentModal: React.FC<Props> = ({
                 <div className="text-xs text-[var(--cms-muted-fg)]">卖家保障风控状态</div>
                 <div className="inline-flex items-center gap-1.5 font-semibold text-[var(--cms-fg)]">
                   <ShieldCheck size={13} className="text-[var(--cms-success)]" aria-hidden="true" />
-                  <span>{details.seller_protection_status || 'ELIGIBLE'}</span>
+                  <span>{details.seller_protection_status || '待渠道凭证'}</span>
                 </div>
               </div>
             </div>
           </div>
 
-          {/* Raw JSON */}
-          {formattedRaw && (
-            <div className="p-4 rounded-xl border border-[var(--cms-border)] bg-[var(--cms-card)] space-y-3">
-              <div className="flex items-center justify-between gap-2">
-                <button type="button" onClick={() => setShowRaw((r) => !r)} className="btn-secondary h-8 text-xs">
-                  <FileText size={13} aria-hidden="true" />
-                  <span>{showRaw ? '收起第三方原始报文' : '展开第三方原始 JSON 报文'}</span>
-                </button>
-                {showRaw && (
-                  <button type="button" onClick={() => handleCopy(formattedRaw, 'raw')} className="btn-secondary h-8 text-xs">
-                    {copiedKey === 'raw' ? <Check size={12} className="text-[var(--cms-success)]" /> : <Copy size={12} />}
-                    <span>{copiedKey === 'raw' ? '已复制' : '复制报文'}</span>
-                  </button>
-                )}
-              </div>
-              {showRaw && (
-                <pre className="p-3.5 rounded-xl bg-[var(--cms-content)] border border-[var(--cms-border)] font-mono-code text-xs max-h-64 overflow-y-auto text-[var(--cms-fg)] whitespace-pre-wrap break-all m-0">
-                  {formattedRaw}
-                </pre>
-              )}
-            </div>
-          )}
+
         </div>
       )}
     </CmsDialog>

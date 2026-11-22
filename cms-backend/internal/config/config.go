@@ -14,7 +14,6 @@ type Config struct {
 	DatabaseURL             string
 	RedisURL                string
 	JWTSecret               string
-	StripeSecretKey         string
 	PayPalClientID          string
 	PayPalClientSecret      string
 	DefaultDomain           string
@@ -59,7 +58,6 @@ func LoadConfig() {
 		DatabaseURL:             getEnv("DATABASE_URL", "postgres://postgres:password@localhost:5432/novel_db?sslmode=disable"),
 		RedisURL:                getEnv("REDIS_URL", "localhost:6379"),
 		JWTSecret:               adminJWTSecret,
-		StripeSecretKey:         getEnv("STRIPE_SECRET_KEY", ""),
 		PayPalClientID:          getEnv("PAYPAL_CLIENT_ID", ""),
 		PayPalClientSecret:      getEnv("PAYPAL_CLIENT_SECRET", ""),
 		DefaultDomain:           getEnv("DEFAULT_DOMAIN", "https://h5.starsfic.com"),

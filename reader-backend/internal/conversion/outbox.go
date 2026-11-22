@@ -46,8 +46,8 @@ func RecordPaymentTx(ctx context.Context, tx pgx.Tx, orderID int64, occurredAt t
 	return recordPaymentTx(ctx, tx, orderID, occurredAt, source, Environment(), subscribe, automatic, nil)
 }
 
-func RecordSubscriptionPaymentTx(ctx context.Context, tx pgx.Tx, orderID int64, occurredAt time.Time, environment string, kind *string, subscribe, automatic bool) error {
-	return recordPaymentTx(ctx, tx, orderID, occurredAt, "paypal_subscription_ledger", environment, subscribe, automatic, kind)
+func RecordSubscriptionPaymentTx(ctx context.Context, tx pgx.Tx, orderID int64, occurredAt time.Time, source, environment string, kind *string, subscribe, automatic bool) error {
+	return recordPaymentTx(ctx, tx, orderID, occurredAt, source, environment, subscribe, automatic, kind)
 }
 
 func recordPaymentTx(ctx context.Context, tx pgx.Tx, orderID int64, occurredAt time.Time, source, environment string, subscribe, automatic bool, subscriptionKind *string) error {

@@ -224,6 +224,116 @@ flowchart TD
 3. 先在隔离环境核对授权缺失、同笔订阅首付、补建和默认全传，再对指定推广链接启用规则。已判定付款沿用原结果。 [部分回传开发方案](docs/conversion-partial-reporting-implementation.md#6-开发顺序与发布)
 4. 司南 Mock 使用独立测试库。升级后重新执行 `cms-backend/db/conversion_sinan_mock_grants.sql`，按模拟接收方确认的 `missing_promotion_encoding` 和 `no_trace_encoding` 重排契约阻塞回告。生产接入前独立确认正式空值编码、原始订单及事件 ID 的唯一范围和重复付款回告口径。
 
+#### 支付渠道账户与事件队列（schema `2026111916`）
+
+1. 在维护窗口停止旧版 Reader、CMS 和转化服务。等在途请求完成后，记录 `paypal_event_inbox` 的待处理事件、尝试次数和最早待处理时间，以及 `reader_conversion_outbox` 的待消费数量。保留 PayPal Webhook URL，维护期间返回可重试的失败响应。
+2. 用新版 CMS 的 `-migrate` 推进 schema 到 `2026111916`。核对 `payment_event_inbox` 中原 PayPal 事件的处理进度和转化 Outbox。若已有真实 PayPal 身份锁，核对 `payment_channel_accounts` 对应的账户及渠道环境。使用共享账号 `star_novel`。
+3. 启动匹配版本的 Reader、CMS 和转化服务。核对新验签事件带账户 ID、原队列继续处理、已审批待扣款订单可补查。若迁移提交后验收失败，暂停新增支付并用匹配 `2026111916` 的构建前滚修复。 [协调切换方案](docs/payment-domain-architecture-and-implementation.md#61-schema-兼容与协调切换)
+
+#### PayPal 购买与退款切换（schema `2026111917`）
+
+1. 进入维护窗口，暂停新增结账、退款和订阅，等待在途数据库事务及渠道请求结束。记录旧 PayPal 未决退款原请求 ID、已知退款 ID、原收款、预留金额和有据可查的发送时间。停止旧 CMS 退款执行端、Reader 和转化服务。
+2. 用新版 CMS 执行 `-migrate`，核对 schema 为 `2026111917`，比对迁移前后 `payment_refunds` 待处理记录和 `payment_refund_commands` 接管结果。验证三个后端用共享账号 `star_novel` 启动。检查 Reader 能查询原收款和原订阅，旧待退款以查证方式接管。
+3. 在隔离环境用同一 PayPal 账户验收新配置引用、Webhook、建单、扣款、续费、退款、补查和旧交易账户归属。完成验收后发布对应 H5 和 CMS。核对旧 `/payment` 和 `/orders` 跳转、旧 `/settings` 只处理通用字段、退款命令刷新恢复和原有小说设置。恢复接收与补查后再开放新增购买。 [切换与续费验收](docs/payment-domain-architecture-and-implementation.md)
+
+#### PayPal VIP 套餐版本（schema `2026111918`）
+
+按第 6.1 节协调 Reader、CMS 与转化服务切换。新版本 CMS 的 `-migrate` 可连续执行尚未应用的支付迁移。核对存量 VIP 套餐的金额、币种和周期，以及能按原账户与新版本匹配的 Plan。Reader 启动后，从 CMS「渠道与商户」检查未绑 Plan 的版本发布结果。Plan 未绑定的套餐暂不接受新购买。用 Sandbox 验证改价前的意向、改价后的新订单以及原 PayPal 协议的续费、取消和退款。
+
+如渠道页显示「待核对」，按核对编号追查原请求，在 PayPal 确定对应的已存在 Plan 后运行 `payment-ops -kind vip-plan -id <核对编号> -plan <PayPal Plan ID>` 查看恢复目标。附上 `-apply -reason <核对依据>` 后，Reader 使用原账户查询 Plan 并核对实际金额、币种、周期和无额外收费，再提交绑定。
+
+#### 资金流水（schema `2026111919`）
+
+按支付架构第 6.1 节协调 Reader、CMS 与转化服务版本。用新版 CMS 执行 `-migrate` 并核对旧 PayPal 收款总额、退款和已付账期。旧 USD 收据缺少手续费和净额凭证时，CMS 显示「待渠道凭证」。查询余额流水时使用与原收款一致的渠道账号和环境。
+
+- PayPal 使用配置中已核验的 `PAYPAL_MERCHANT_ID` 与 Transaction Search 权限。以 `payment-ops -kind paypal-ledger -environment sandbox -from <RFC3339> -through <RFC3339>` 预览指定时间窗，单次范围最多 31 天。
+- Stripe 使用已登记的账户和环境，以及通过运行环境注入的 `STRIPE_LEDGER_API_KEY`。以 `payment-ops -kind stripe-ledger -environment sandbox -account <acct_ID> -id <txn_ID、re_ID 或 frr_ID>` 预览一次余额流水、退款相关流水或已完成的逐笔报表。按对象授权相应查询及文件读取权限。
+- 执行时追加 `-apply -reason <操作依据>`。命令只调用渠道查询接口，将凭证写入本地资金账。失败后可重跑相同入口；金额冲突保留原始入账结果和新凭证，交财务核对。在 Sandbox 或脱敏样本确认单次入账与原收款匹配，再安排实际商户报表验收。
+
+#### 结算与银行对账（schema `2026111920`）
+
+使用匹配版本的 CMS 执行迁移，再协调启动 Reader、CMS 和转化服务。结算报表及银行文件统一使用 USD，银行文件中的金额单位为美分。财务保留原银行账单和渠道文件，根据稳定的银行账号别名及交易 ID 重跑。
+
+- PayPal Settlement 文件按顺序提供所有 CSV 或 TAB 分卷。配置 `PAYPAL_MERCHANT_ID` 后使用 `payment-ops -kind paypal-settlement -environment sandbox -file <第一卷> -file <后续卷>`。提款的核对 ID 使用 `交易ID/T-code/USD`。
+- Stripe 复用 `payment-ops -kind stripe-ledger -environment sandbox -account <acct_ID> -id <frr_ID>` 导入已完成的逐笔报表。使用 `-kind stripe-payout` 配合 `-id <po_ID>` 核对单笔划拨，或以 `-from <RFC3339> -through <RFC3339>` 拉取一个时间窗。通过 `STRIPE_LEDGER_API_KEY` 提供该账户的只读权限。仅为已授权账户安排拉取任务，重复时间窗可刷新晚到的划拨状态。
+- 银行文件使用标题 `transaction_id,booked_at,currency,amount_minor,bank_reference`，入账时间用 RFC3339，贷记为正数。运行 `payment-ops -kind bank-statement -environment sandbox -bank-account <账单账户别名> -id <账单编号> -file <CSV>`。
+- 运行 `payment-ops -kind settlement-match -environment sandbox -provider <paypal或stripe> -account <渠道账户> -id <划拨编号> -bank-account <账单账户别名> -bank-transaction <银行交易ID>`。有渠道参考号时必须一致。渠道未提供参考号时，`-bank-evidence` 记录经财务确认的独立入账依据。用同一渠道参数及 `-kind settlement-status` 查询金额差异、待补流水、延迟和核对结果。
+
+导入和匹配命令默认预览参数，执行时加 `-apply -reason <操作依据>`。渠道返回不同金额时，保留原流水和新凭证，供财务核对。银行账户别名和证据编号使用内部引用，避免输入完整银行账号。PayPal 可由已获得报表权限的 SFTP 任务交付文件。 [PayPal Settlement 报表](https://developer.paypal.com/reports/settlement/) · [Stripe Payout](https://docs.stripe.com/api/payouts/object)
+
+#### 公共结账决策（schema `2026111921`）
+
+使用匹配版本的 CMS 执行 `-migrate` 后，协调启动同版本的 Reader、CMS 和转化服务。迁移增加 `payment_checkout_decisions`，从新请求开始记录。沙箱验证同一整本意向重试、在途渠道尝试、VIP 防重和结束续费后重新开通。查询时按结账环境、阶段和规则版本核对放行、拦截、待确认与待复核的记录。PayPal 拒绝和未知结果继续以原订单查证，账务和权益以已经核实的收款为准。
+
+
+#### 风控、争议与权益处置（schema `2026111922`）
+
+用新版 CMS 迁移并协调启动三个后端。PayPal 复用验签入口，登记 `CUSTOMER.DISPUTE.*`、`PAYMENT.CAPTURE.REVERSED`、`PAYMENT.SALE.REVERSED` 及可用的 Capture 状态事件。确认账户具备 Disputes API 读权限后再配置主动查询。Stripe 的 P2 事件接收使用 `/api/v1/wallet/webhook/stripe`，设置对应账户的 `STRIPE_AFTERCARE_ACCOUNT`、`STRIPE_AFTERCARE_ENVIRONMENT`、`STRIPE_AFTERCARE_API_KEY` 和 `STRIPE_AFTERCARE_WEBHOOK_SECRET`，并验收 Review、Early Fraud Warning、Dispute、Charge 和 PaymentIntent 事件。Stripe Checkout 放行按照 P3、P4 独立验收。
+
+SuperAdmin 以 `PUT /api/v1/admin/payments/channels/{id}/aftercare-policy` 写入已确认的账户策略。接口接受 `dispute_lookup`、`hold_fulfillment`、`reviewer_id`、`finance_id`、`review_seconds`、`refund_seconds`、`reminder_seconds` 和必填的 `reason`。启用暂缓履约时，处理人与值班财务必须是有效的 Finance 或 SuperAdmin，复核和退款时限必须提供。复核提醒在 CMS 的待处理视图查看。用已收款待复核、冲回来件在前、重复通知、退款先到及返还晚到的样本验收权益和钱包流水。
+
+补查命令为 `payment-ops -kind aftercare -provider <paypal|stripe> -account <账户> -environment <sandbox|live> -id <事件或案件ID>`。时间窗补查改用 `-from <RFC3339> -through <RFC3339>`。命令默认预览，执行时追加 `-apply -reason <操作依据>`。PayPal 独立冲回的最终本金核对使用已核验的 Transaction Search 或 Settlement 流水。财务在 CMS 核对原收款、权威余额流水和退款后提交权益处置；Reader 核对当前证据后执行。 [PayPal 交易事件代码](https://developer.paypal.com/reports/reference/t-codes/) · [Stripe 争议对象](https://docs.stripe.com/api/disputes/object)
+
+
+#### Stripe 整本沙箱直收（schema `2026111923`）
+
+请使用与沙箱隔离部署对应的 Stripe 已登记账户、API 密钥和 Webhook 签名密钥。Reader 的 `CONVERSION_ENVIRONMENT` 使用 `sandbox`；审核 Price、Product 及账单地区以后，再开启 `STRIPE_SINGLE_CHECKOUT_ENABLED`。超级管理员使用 `PUT /api/v1/admin/payments/channels/{id}/stripe-one-time/{slot}` 写入 `product_id`、`price_id`、`countries`、`enabled`、`reason`。Stripe Price 必须是有效的 USD 单次价格，与套餐金额完全相符。
+
+Webhook 接收 Checkout 完成、到期、异步支付成功／失败和退款状态事件。当创建响应丢失时，Reader 在同一尝试 ID 下恢复，超过幂等重试窗口仅查询原 Checkout。Sandbox 验收记录应包含回跳、跨渠道在途防重、验签、金额和账单地区不符、额度分次退款、争议及余额流水关联。
+
+#### Stripe VIP 与销售模式扩展（schema `2026111924`）
+
+在隔离数据库或存量副本演练 `2026111923` 到 `2026111924`。用新版 CMS 迁移，随后启动匹配版本的 Reader、CMS 和转化服务。Reader 的 `STRIPE_SINGLE_CHECKOUT_ENABLED` 与 `STRIPE_VIP_CHECKOUT_ENABLED` 默认关闭。沙箱 Worker 继续处理原账户已有的会话、账单和退款。生产模式按支付架构文档第 7 节逐项验收。
+
+在 CMS「渠道与商户」选择已登记的 Stripe 沙箱账户。由 SuperAdmin 分别设置整本和 VIP 映射及账户开关。配置包含 Product ID、Price ID、销售模式和获批账单地区。VIP 使用活动的 USD 周期价格，周期与发布的套餐版本一致。Managed Payments 需有效商品税码及经财务核实的税务责任账户。映射变更用于后续新意向。
+
+同一 Stripe Webhook 注册 Checkout、退款和已有风控事件，并增加 `invoice.paid`、`invoice.payment_succeeded`、`invoice.payment_failed`、`invoice.payment_action_required`、`invoice_payment.paid`、`invoice.finalized`、`invoice.voided`、`invoice.marked_uncollectible` 与 `customer.subscription.created/updated/deleted`。Stripe 直收账户配置可更新支付方式的 Customer Portal。VIP Worker 定期追查近期账单并保存较早账单的分页位置。期末取消以 Stripe 当前协议状态确认，在渠道幂等窗口以外仅查证。
+
+开通前用实际 Sandbox 核实首付、足额续费、部分付款、零额和外部记为已付、扣费失败后恢复、期末取消、退款和争议。财务从账期查原 Charge、余额流水和退款。Managed Payments 还需核实交易地区、客户税务状态、USD 实付和税务责任。Link 用户端订单管理需经授权实测。Stripe 暂停时关闭对应账户开关和 Reader 新增入口，保留回调和已有任务。迁移后已有新交易证据时保留账期和收款记录，沿当前 Schema 前滚恢复。 [Stripe 订阅 Webhook](https://docs.stripe.com/billing/subscriptions/webhooks) · [Stripe Link 验收](https://docs.stripe.com/payments/managed-payments/update-checkout#link)
+
+#### 支付域收尾与正式环境放行（schema `2026111925`）
+
+从 `2026111924` 升级时由 CMS 执行共享迁移，再启动匹配 `2026111925` 的三个后端及 Worker。保留上次事件处理进度和维护窗口补查起点。迁移后正式商品需要重新登记可核验的商品、市场和发布证据。Stripe 新购买开关默认关闭，准备阶段可继续处理已登记账户原有的会话、订阅续费、退款和争议。
+
+- Reader 使用 `STRIPE_AFTERCARE_ACCOUNT`、`STRIPE_AFTERCARE_ENVIRONMENT`、`STRIPE_AFTERCARE_API_KEY` 与 `STRIPE_AFTERCARE_WEBHOOK_SECRET` 锁定收款和事件账户。正式业务环境 `production` 对应 Stripe `live`；隔离验收使用 `sandbox`。CMS 用 `STRIPE_CATALOG_SANDBOX_API_KEY` 或 `STRIPE_CATALOG_LIVE_API_KEY` 查询该环境的 Account、Price 和 Product。密钥从部署环境加载。
+- SuperAdmin 在「渠道与商户」分别登记已批准的 USD 套餐、销售模式、账单市场、发布凭证和财务市场处理方案。核实正式商品通过渠道校验及第 7 节验收后，再开对应账户的单次或订阅能力和 Reader 的 `STRIPE_SINGLE_CHECKOUT_ENABLED`／`STRIPE_VIP_CHECKOUT_ENABLED`。MoR 还需验证实际客户市场、税务责任和经授权的 Link 售后。 [PayPal Webhook API](https://developer.paypal.com/api/rest/webhooks/rest/) · [Stripe Managed Payments 资格](https://docs.stripe.com/payments/managed-payments/eligibility)
+- 在「支付中心 → 对账」按环境提交结算报表、银行流水和匹配命令，并查 Reader 的处理结果。启用自动拉取前核对该账户的 PayPal Transaction Search 或 Stripe Payout／余额明细读取权限。Stripe 注册 `payout.paid`、`payout.failed`、`payout.canceled`、`payout.reconciliation_completed` 和 `reporting.report_run.succeeded` 触发补查和逐笔报表导入。PayPal Settlement 报表按渠道分卷文件顺序完整导入，单批上传上限为 8 MB，较大的正式文件继续使用 `payment-ops`。账单地区或税务复核通过「交易 → 第三方支付凭据详情」处理，批准后按原收款重新核实。
+- 支付恢复 Worker 按账户持久化分页进度。切换后以该账户和环境从维护开始前调度重拉。默认试运行；加 `-apply -reason '维护期事件回补'` 持久化任务。查看 `payment-ops` 的 `event_recovery_attention`、渠道 Inbox、未履约订单和待核对流水。Stripe Events API 可以回查最近 30 天的事件，超过范围按原交易、账单、退款、争议或账本凭证回补。 [Stripe Events API](https://docs.stripe.com/api/events/list)
+
+```bash
+payment-ops -kind event-recovery -provider stripe -account acct_Example -environment sandbox -from 2026-11-19T08:00:00Z
+```
+
+#### 支付复查修复与商户切换（schema `2026111926`）
+
+由 CMS 从 `2026111925` 执行共享迁移，再启动匹配 `2026111926` 的 Reader、CMS 与转化服务。核对旧订单、协议、收据、退款和事件进度。历史 MoR 的含税金额保留在原收据，旧履约记录的税前本金在复查取得证据前标记为未知。渠道报告和付款币种仍按 USD 核对。
+
+切换前把新旧账户登记在 `payment_channel_accounts`，保留旧账户的 API 和 Webhook 凭证。用 `PAYMENT_ACCOUNT_REFERENCES` 注入显式账户列表。每个渠道最多指定一个 `primary: true`。原有 PayPal 绑定保留为历史凭证来源。Stripe 可以继续使用原 `STRIPE_AFTERCARE_*` 配置注册旧账户，或统一把新旧账户登记在账户列表。现有 Webhook 地址继续使用，Reader 按账户配置验签。
+
+以下账户和环境变量名仅为配置示例。`secret_env` 与 `webhook_env` 指向 API 凭证与 Webhook 签名密钥或 Webhook ID。PayPal 另需 `merchant_env` 提供正式商户标识。Stripe 的 `ledger_env` 可指定该账户的独立财务读取凭证。
+
+```json
+[
+  {"provider":"paypal","account":"next_paypal_client","environment":"live","secret_env":"PAYPAL_NEXT_SECRET","webhook_env":"PAYPAL_NEXT_WEBHOOK_ID","merchant_env":"PAYPAL_NEXT_MERCHANT_ID","primary":true},
+  {"provider":"stripe","account":"acct_Example","environment":"live","secret_env":"STRIPE_NEXT_SECRET","webhook_env":"STRIPE_NEXT_WEBHOOK_SECRET","ledger_env":"STRIPE_NEXT_LEDGER_KEY","primary":true}
+]
+```
+
+新 PayPal 主账户可在新订阅暂停期间发布计划。在 CMS「渠道与商户」按账户和环境确认 VIP 套餐状态，核实计划后再开放新订阅。以新旧商户的回调、续费、退款及报表样本验证实际去向，再停用旧账户的新结账。保留仍有在途会话、协议或售后的账户配置。隔离环境使用 `sandbox` 渠道凭证，正式业务环境 `production` 使用 `live` 渠道凭证。
+
+补拉单事件失败时从 `event_recovery_failures` 指标和 `action=held` 日志定位事件。核实修复后补入原 Inbox，默认试运行。加 `-apply -reason '重放已核实的原事件'` 调度该事件。
+
+```bash
+payment-ops -kind event-retry -provider stripe -account acct_Example -environment sandbox -id evt_Example
+```
+
+
+#### 支付代码 Review 修复（schema `2026111927`）
+
+由 CMS 从 `2026111926` 执行共享迁移，随后协调启动对应的 Reader、CMS、转化后端及 Worker。迁移保留订单、协议和退款记录，并恢复未发送 Capture 的旧 PayPal 切换占位。CMS「订阅与账期」标记环境待核对的协议。此类协议在确认渠道身份后才能参与 Reader 权益和续费处理。
+
+PayPal Webhook 保持订阅扣款失败和退款在途、失败通知的订阅。对已登记的 PayPal 完成退款，Finance 或 SuperAdmin 可在原退款命令的待核对记录中核验并关联渠道退款编号，提交核对依据。此操作结清原命令预留，保留审计记录。
+
 ### 3.2 自建 Redis 生产配置
 修改 Redis 所在机器的 `/etc/redis/redis.conf`：
 ```ini
@@ -300,7 +410,6 @@ REDIS_URL=redis://:YOUR_STRONG_REDIS_PASSWORD_2026@172.16.0.15:6379/0
 JWT_SECRET=STAR_NOVEL_SUPER_JWT_KEY_PROD_2026_RANDOM_STRING
 
 # 海外支付 Live 秘钥
-STRIPE_SECRET_KEY=sk_live_xxxxxx
 PAYPAL_CLIENT_ID=xxxxxx
 PAYPAL_CLIENT_SECRET=xxxxxx
 PAYPAL_MODE=live

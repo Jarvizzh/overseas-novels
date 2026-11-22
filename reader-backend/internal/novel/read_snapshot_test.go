@@ -95,6 +95,7 @@ func TestReadingSnapshotChecksLiveAccessBeforeLoadingBody(t *testing.T) {
 		VALUES(1,'I-VIP','ACTIVE','month',100,now()+interval '1 day',now());
 		INSERT INTO recharge_orders(user_id,subscription_id,payment_method,amount_cents,status,order_type,
 		    paid_period_start,paid_period_end) VALUES(1,'I-VIP','paypal',100,'Success','subscription',now()-interval '1 day',now()+interval '1 day');`)
+	testdb.ScopeSubscriptions(t, pool, "paypal", "live", "I-VIP")
 	result := read(1, identified, "pass")
 	if result.Locked || result.Price != 0 || store.loads.Load() != 1 {
 		t.Fatalf("wrong VIP result: %+v", result)
@@ -117,11 +118,16 @@ func TestReadingSnapshotChecksLiveAccessBeforeLoadingBody(t *testing.T) {
 		t.Fatal("changing a different chapter invalidated the body digest cache")
 	}
 
-	exec(`INSERT INTO recharge_orders(user_id,novel_id,amount_cents,payment_method,status,order_type,checkout_id,fulfilled_at)
-		VALUES(3,1,999,'paypal','Success','whole_book',gen_random_uuid(),now())`)
+	exec(`INSERT INTO recharge_orders(user_id,novel_id,amount_cents,payment_method,status,order_type,checkout_id,fulfilled_at,checkout_environment)
+		VALUES(3,1,999,'paypal','Success','whole_book',gen_random_uuid(),now(),'sandbox')`)
+	if result := read(3, ctx, ""); !result.Locked {
+		t.Fatal("sandbox purchase unlocked the production reading snapshot")
+	}
+	t.Setenv("CONVERSION_ENVIRONMENT", "sandbox")
 	if result := read(3, ctx, "pass"); result.Locked {
 		t.Fatal("paid whole-book reader was blocked")
 	}
+	t.Setenv("CONVERSION_ENVIRONMENT", "production")
 	exec(`UPDATE reader_sessions SET expires_at=now()-interval '1 second' WHERE token_hash='reader'`)
 	if _, err := service.GetChapterContent(identified, 1, 1, 0, 0, "", ""); !errors.Is(err, errReadSessionExpired) {
 		t.Fatalf("expired session retained cached full access: %v", err)

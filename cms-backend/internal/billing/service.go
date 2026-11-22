@@ -21,12 +21,16 @@ var (
 )
 
 type BillingService interface {
-	RunRefundReconciliation(context.Context)
-	ListOrders(ctx context.Context, page, pageSize int, status, userID, orderType, promotionLinkID, paidStart, paidEnd string) ([]Order, int, error)
+	ListLedgerMovements(context.Context, movementFilter) (movementPage, error)
+	ListSettlementPayouts(context.Context, payoutFilter) (payoutPage, error)
+	ListSettlementReportIssues(context.Context, reconciliationPage) (reportIssuePage, error)
+	GetPaymentActivity(context.Context, reconciliationScope) (paymentActivity, error)
+
+	ListOrders(ctx context.Context, page, pageSize int, status, userID, orderType, promotionLinkID, paidStart, paidEnd, orderID string) ([]Order, int, error)
 	GetThirdPartyPaymentDetails(ctx context.Context, orderID int64) (*ThirdPartyPaymentOrder, error)
-	RefundOrder(ctx context.Context, orderID, adminID string) error
 
 	ListRechargeTemplates(ctx context.Context) ([]RechargeTemplate, error)
+	ListVIPOfferPublications(ctx context.Context) ([]VIPOfferPublication, error)
 	CreateRechargeTemplate(ctx context.Context, adminID string, name string, isDefault bool, slots []RechargeSlot) (int, error)
 	UpdateRechargeTemplate(ctx context.Context, adminID string, id int, name string, isDefault bool, slots []RechargeSlot) error
 	DeleteRechargeTemplate(ctx context.Context, adminID string, id int) error
@@ -43,12 +47,25 @@ func NewBillingService(repo BillingRepository) BillingService {
 	}
 }
 
-func (s *billingService) ListOrders(ctx context.Context, page, pageSize int, status, userID, orderType, promotionLinkID, paidStart, paidEnd string) ([]Order, int, error) {
+func (s *billingService) ListVIPOfferPublications(ctx context.Context) ([]VIPOfferPublication, error) {
+	return s.repo.ListVIPOfferPublications(ctx)
+}
+
+func (s *billingService) ListOrders(ctx context.Context, page, pageSize int, status, userID, orderType, promotionLinkID, paidStart, paidEnd, orderID string) ([]Order, int, error) {
 	offset := (page - 1) * pageSize
 
 	var whereClauses []string
 	var args []interface{}
 	argCount := 1
+	if orderID != "" {
+		id, err := strconv.ParseInt(orderID, 10, 64)
+		if err != nil {
+			return nil, 0, err
+		}
+		whereClauses = append(whereClauses, fmt.Sprintf("id = $%d", argCount))
+		args = append(args, id)
+		argCount++
+	}
 
 	if status != "" {
 		whereClauses = append(whereClauses, fmt.Sprintf("status = $%d", argCount))
@@ -106,7 +123,9 @@ func (s *billingService) ListOrders(ctx context.Context, page, pageSize int, sta
 	}
 
 	selectQuery := fmt.Sprintf(`
-		SELECT id, user_id, COALESCE(external_ref_id, ''), amount_cents, currency, coins, bonus_coins_credited, payment_method, status, COALESCE(utm_source, ''), COALESCE(utm_campaign, ''), paid_at, order_type, promotion_link_id, novel_id, created_at, updated_at, COALESCE(reconciliation_note, '')
+		SELECT id, user_id, COALESCE(external_ref_id, ''), amount_cents, currency, coins, bonus_coins_credited, payment_method, status, COALESCE(utm_source, ''), COALESCE(utm_campaign, ''), paid_at, order_type, promotion_link_id, novel_id, created_at, updated_at, COALESCE(reconciliation_note, ''),
+			COALESCE((SELECT r.status FROM payment_refund_commands r WHERE r.order_id=recharge_orders.id ORDER BY r.created_at DESC LIMIT 1),''),
+			COALESCE(payment_order_environment(recharge_orders),'')
 		FROM recharge_orders
 		%s
 		ORDER BY created_at DESC

@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { BrowserRouter, Routes, Route, Navigate, useNavigate, useLocation } from 'react-router-dom';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { BrowserRouter, Routes, Route, Navigate, Outlet, useNavigate, useLocation } from 'react-router-dom';
 import { Menu } from 'lucide-react';
 import { ToastProvider } from './context/ToastContext';
 import { ConfirmProvider } from './context/ConfirmContext';
@@ -11,6 +11,8 @@ import { CmsSidebar } from './components/CmsSidebar';
 import {
   CONVERSION_READ_ROLES,
   DEFAULT_EXPANDED_GROUPS,
+  PAYMENT_FINANCE_ROLES,
+  PAYMENT_SUMMARY_ROLES,
   flattenNavEntries,
   getVisibleNavTree,
   isNavPathActive,
@@ -19,8 +21,6 @@ import Login from './pages/Login';
 import DashboardTab from './pages/DashboardTab';
 import NovelsTab from './pages/NovelsTab';
 import UsersTab from './pages/UsersTab';
-import OrdersTab from './pages/OrdersTab';
-import PaymentTab from './pages/PaymentTab';
 import AccountsTab from './pages/AccountsTab';
 import PixelsTab from './pages/PixelsTab';
 import TemplatesTab from './pages/TemplatesTab';
@@ -32,6 +32,13 @@ import OperationsTab from './pages/OperationsTab';
 
 const SIDEBAR_COLLAPSED_KEY = 'cms_sidebar_collapsed';
 const NAV_EXPANDED_GROUPS_KEY = 'cms_nav_expanded_groups';
+const PaymentCases = lazy(() => import('./pages/PaymentCases'));
+const PaymentReconciliation = lazy(() => import('./pages/PaymentReconciliation'));
+const OrdersTab = lazy(() => import('./pages/OrdersTab'));
+const SupportPayments = lazy(() => import('./pages/PaymentCenter').then((page) => ({ default: page.SupportPayments })));
+const PaymentSubscriptions = lazy(() => import('./pages/PaymentCenter').then((page) => ({ default: page.PaymentSubscriptions })));
+const PaymentChannels = lazy(() => import('./pages/PaymentCenter').then((page) => ({ default: page.PaymentChannels })));
+const PaymentRefunds = lazy(() => import('./pages/PaymentRefunds').then((page) => ({ default: page.PaymentRefunds })));
 
 function LegacyAdLogsRedirect() {
   const { search } = useLocation();
@@ -300,10 +307,26 @@ function AppContent() {
         {/* Adaptive Full-Width Page Container */}
         <main className="flex-1 w-full px-4 md:px-6 py-4">
           <Routes>
-            <Route path="/" element={<DashboardTab />} />
+            <Route path="/" element={<DashboardTab finance={PAYMENT_FINANCE_ROLES.includes(admin.role)} />} />
             <Route path="/novels" element={<NovelsTab />} />
             <Route path="/users" element={<UsersTab />} />
-            <Route path="/orders" element={<OrdersTab />} />
+            <Route path="/orders" element={PAYMENT_SUMMARY_ROLES.includes(admin.role) ? <Navigate to="/payments/orders" replace /> : <Navigate to="/" replace />} />
+            <Route path="/payments" element={PAYMENT_SUMMARY_ROLES.includes(admin.role) ? <Navigate to="/payments/orders" replace /> : <Navigate to="/" replace />} />
+            <Route element={<Suspense fallback={<p role="status">正在加载支付中心…</p>}><Outlet /></Suspense>}>
+              <Route path="/payments/orders" element={admin.role === 'Support' ? <SupportPayments /> :
+                PAYMENT_SUMMARY_ROLES.includes(admin.role) ? <OrdersTab finance={PAYMENT_FINANCE_ROLES.includes(admin.role)} /> : <Navigate to="/" replace />} />
+              <Route path="/payments/subscriptions" element={PAYMENT_SUMMARY_ROLES.includes(admin.role) ?
+                <PaymentSubscriptions support={admin.role === 'Support'} finance={PAYMENT_FINANCE_ROLES.includes(admin.role)} /> : <Navigate to="/" replace />} />
+              <Route path="/payments/refunds" element={PAYMENT_FINANCE_ROLES.includes(admin.role) ?
+                <PaymentRefunds key={admin.id} actor={admin.id} /> : <Navigate to="/" replace />} />
+              <Route path="/payments/risk" element={PAYMENT_FINANCE_ROLES.includes(admin.role) ?
+                <PaymentCases key="risk" view="risk" /> : <Navigate to="/" replace />} />
+              <Route path="/payments/disputes" element={PAYMENT_FINANCE_ROLES.includes(admin.role) ?
+                <PaymentCases key="disputes" view="disputes" /> : <Navigate to="/" replace />} />
+              <Route path="/payments/reconciliation" element={PAYMENT_FINANCE_ROLES.includes(admin.role) ?
+                <PaymentReconciliation /> : <Navigate to="/" replace />} />
+              <Route path="/payments/channels" element={admin.role === 'SuperAdmin' ? <PaymentChannels /> : <Navigate to="/" replace />} />
+            </Route>
             <Route path="/feedback" element={<FeedbackTab />} />
             <Route path="/promotions" element={<PromotionsTab />} />
             <Route path="/recharge-templates" element={<TemplatesTab />} />
@@ -328,7 +351,7 @@ function AppContent() {
             />
             <Route
               path="/payment"
-              element={admin.role === 'SuperAdmin' ? <PaymentTab /> : <Navigate to="/" replace />}
+              element={admin.role === 'SuperAdmin' ? <Navigate to="/payments/channels" replace /> : <Navigate to="/" replace />}
             />
             <Route
               path="/accounts"

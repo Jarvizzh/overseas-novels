@@ -1325,7 +1325,17 @@ func (s *novelService) BulkImportChapters(ctx context.Context, novelID int64, zi
 }
 
 func (s *novelService) GetSettings(ctx context.Context) (map[string]string, error) {
-	return s.repo.GetSettings(ctx)
+	all, err := s.repo.GetSettings(ctx)
+	if err != nil {
+		return nil, err
+	}
+	settings := map[string]string{}
+	for _, key := range []string{"global_coin_cost_per_thousand", "global_start_pay_chapter_index"} {
+		if value, ok := all[key]; ok {
+			settings[key] = value
+		}
+	}
+	return settings, nil
 }
 
 func validateSettingInt(val string, minVal int, fieldName string) (int, error) {
@@ -1337,6 +1347,14 @@ func validateSettingInt(val string, minVal int, fieldName string) (int, error) {
 }
 
 func (s *novelService) UpdateSettings(ctx context.Context, configs map[string]string) error {
+	for key := range configs {
+		switch key {
+		case "global_coin_cost_per_thousand", "global_start_pay_chapter_index", "apply_to_all_novels",
+			"apply_coin_cost_to_all_novels", "apply_start_pay_to_all_novels", "reset_novel_coin_cost":
+		default:
+			return fmt.Errorf("%w：不支持的通用设置字段", ErrInvalidSettingValue)
+		}
+	}
 	coin, coinUpdated := configs["global_coin_cost_per_thousand"]
 	cost := 0
 	var err error

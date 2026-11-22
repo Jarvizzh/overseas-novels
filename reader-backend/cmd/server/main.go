@@ -21,6 +21,10 @@ import (
 	"reader-backend/internal/httpx"
 	"reader-backend/internal/novel"
 	"reader-backend/internal/payment"
+	paymentapp "reader-backend/internal/payment/application"
+	"reader-backend/internal/payment/paypal"
+	"reader-backend/internal/payment/paypal/credentialstore"
+	"reader-backend/internal/payment/stripe"
 	"reader-backend/internal/redis"
 	"reader-backend/internal/shelf"
 	"reader-backend/internal/storage"
@@ -128,14 +132,25 @@ func main() {
 		shelfHandler := shelf.NewHandler(shelfService)
 		shelfHandler.RegisterRoutes(api)
 
-		stripeClient := payment.NewStripeClient()
-		paypalClient := payment.NewPayPalClient()
-
 		walletRepo := wallet.NewDBRepository()
-		walletService := wallet.NewService(walletRepo, novelRepo, stripeClient, paypalClient)
-		go func() { defer close(reconciliationDone); walletService.RunReconciliation(reconcileCtx) }()
+		walletService := wallet.NewService(walletRepo, novelRepo)
 		walletHandler := wallet.NewHandler(walletService)
 		walletHandler.RegisterRoutes(api)
+
+		paymentRepo := paymentapp.NewDBRepository(walletRepo)
+		adapters := []payment.Adapter{paypal.NewClient(credentialstore.Load)}
+		if channel, err := newStripeAftercareClient(); err != nil {
+			log.Fatal(err)
+		} else if channel != nil {
+			adapters = append(adapters, channel)
+		}
+		configured := payment.NewAdapters(adapters...)
+		if err := registerPaymentAccounts(configured); err != nil {
+			log.Fatal(err)
+		}
+		paymentService := paymentapp.NewService(paymentRepo, novelRepo, configured)
+		go func() { defer close(reconciliationDone); paymentService.RunReconciliation(reconcileCtx) }()
+		paymentapp.NewHandler(paymentService).RegisterRoutes(api)
 
 		feedbackRepo := feedback.NewRepository()
 		feedbackService := feedback.NewService(feedbackRepo)
@@ -242,4 +257,25 @@ func requestIDMiddleware() gin.HandlerFunc {
 		c.Set("RequestID", reqID)
 		c.Next()
 	}
+}
+
+func newStripeAftercareClient() (*stripe.Client, error) {
+	secret := os.Getenv("STRIPE_AFTERCARE_WEBHOOK_SECRET")
+	if secret == "" {
+		return nil, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	scope := stripe.Scope{AccountID: os.Getenv("STRIPE_AFTERCARE_ACCOUNT"), Environment: stripe.Environment(os.Getenv("STRIPE_AFTERCARE_ENVIRONMENT"))}
+	var registered bool
+	if err := db.DB.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM payment_channel_accounts
+		WHERE provider='stripe' AND account_key=$1 AND environment=$2)`, scope.AccountID, scope.Environment).Scan(&registered); err != nil {
+		return nil, err
+	}
+	if !registered {
+		return nil, errors.New("Stripe aftercare account is not registered")
+	}
+	return stripe.NewClient(ctx, stripe.Config{
+		Scope: scope, APIKey: os.Getenv("STRIPE_AFTERCARE_API_KEY"), WebhookSecret: secret,
+	})
 }

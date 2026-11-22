@@ -1,3 +1,4 @@
+import { readerStorage } from './utils/readerStorage';
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { flushSync } from 'react-dom';
 import { Routes, Route, useNavigate, useLocation, useSearchParams } from 'react-router-dom';
@@ -42,7 +43,7 @@ const TX_PAGE_SIZE = 30;
 function loadScopedUnlockedChapters(userId: number | null): string[] {
   if (!userId) return [];
   try {
-    const raw = localStorage.getItem(`unlocked-chapter-ids-u:${userId}`);
+    const raw = readerStorage.getItem(`unlocked-chapter-ids-u:${userId}`);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     return Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === 'string') : [];
@@ -54,7 +55,7 @@ function loadScopedUnlockedChapters(userId: number | null): string[] {
 function saveScopedUnlockedChapters(userId: number | null, list: string[]): void {
   if (!userId) return;
   try {
-    localStorage.setItem(`unlocked-chapter-ids-u:${userId}`, JSON.stringify(list));
+    readerStorage.setItem(`unlocked-chapter-ids-u:${userId}`, JSON.stringify(list));
   } catch {
     // Ignore storage errors
   }
@@ -249,14 +250,14 @@ function AppContent() {
               error instanceof Error &&
               'status' in error &&
               error.status === 401 &&
-              !localStorage.getItem('auth-token')
+              !readerStorage.getItem('auth-token')
             ) {
               res = await api.guestLogin();
             } else {
               throw error;
             }
           }
-          localStorage.setItem('auth-token', res.token);
+          readerStorage.setItem('auth-token', res.token);
           setSession({ user: res.user, token: res.token });
           await reloadWallet();
           return res.token;
@@ -280,13 +281,13 @@ function AppContent() {
     const templateId = params.get('template_id');
     const linkId = params.get('link_id') || params.get('promo_id');
 
-    if (utmSource) localStorage.setItem('utm_source', utmSource);
-    if (utmCampaign) localStorage.setItem('utm_campaign', utmCampaign);
-    if (pixelId) localStorage.setItem('fb_pixel_id', pixelId);
-    if (templateId) localStorage.setItem('recharge_template_id', templateId);
-    if (linkId) localStorage.setItem('promo_id', linkId);
+    if (utmSource) readerStorage.setItem('utm_source', utmSource);
+    if (utmCampaign) readerStorage.setItem('utm_campaign', utmCampaign);
+    if (pixelId) readerStorage.setItem('fb_pixel_id', pixelId);
+    if (templateId) readerStorage.setItem('recharge_template_id', templateId);
+    if (linkId) readerStorage.setItem('promo_id', linkId);
     if (fbclid) {
-      localStorage.setItem('fbclid', fbclid);
+      readerStorage.setItem('fbclid', fbclid);
       const creationTime = Date.now();
       const fbcValue = `fb.1.${creationTime}.${fbclid}`;
       const date = new Date();
@@ -328,13 +329,13 @@ function AppContent() {
     };
 
     const restoreSession = async () => {
-      const tokenBefore = localStorage.getItem('auth-token');
+      const tokenBefore = readerStorage.getItem('auth-token');
       if (!tokenBefore) {
         await triggerGuestLogin();
       } else {
         try {
           const u = await api.getProfile();
-          if (!disposed && localStorage.getItem('auth-token') === tokenBefore) {
+          if (!disposed && readerStorage.getItem('auth-token') === tokenBefore) {
             setSession({ user: u, token: tokenBefore });
             await reloadWallet();
           }
@@ -404,7 +405,7 @@ function AppContent() {
       const controller = new AbortController();
       request = controller;
       void api.getProfile(controller.signal, token).then((profile) => {
-        if (controller.signal.aborted || localStorage.getItem('auth-token') !== token) return;
+        if (controller.signal.aborted || readerStorage.getItem('auth-token') !== token) return;
         setSession({ user: profile, token });
         void reloadWallet();
       }).catch(() => {});
@@ -418,7 +419,7 @@ function AppContent() {
 
   useEffect(() => {
     if (location.pathname === '/content' || location.pathname === '/detail') {
-      localStorage.setItem('last_read_content_path', `${location.pathname}${location.search}`);
+      readerStorage.setItem('last_read_content_path', `${location.pathname}${location.search}`);
     }
   }, [location.pathname, location.search]);
 
@@ -607,7 +608,7 @@ function AppContent() {
 
   const handleUnlockChapter = useCallback(
     async (bookId: number, chapterIndex: number, price: number, chapterId: string, version: number): Promise<boolean> => {
-      if (!session || localStorage.getItem('auth-token') !== session.token) return false;
+      if (!session || readerStorage.getItem('auth-token') !== session.token) return false;
       await api.unlockChapter(bookId, chapterIndex, price, chapterId, version, session.user.id, session.token);
       await reloadWallet();
       return true;
@@ -673,7 +674,7 @@ function AppContent() {
     void api
       .getRecentBooks(ownerId, 20, { authToken: sessionToken, signal: controller.signal })
       .then((items) => {
-        if (controller.signal.aborted || localStorage.getItem('auth-token') !== sessionToken) return;
+        if (controller.signal.aborted || readerStorage.getItem('auth-token') !== sessionToken) return;
         const list = items || [];
         setRecentBooks((prev) => {
           const mergedByNovel = new Map<number, BookshelfItem>();
@@ -864,14 +865,14 @@ function AppContent() {
                 onLoginSuccess={async (token, u) => {
                   setTransactionHistory([]);
                   setNextTransactionCursor(undefined);
-                  localStorage.setItem('auth-token', token);
+                  readerStorage.setItem('auth-token', token);
                   setSession({ user: u, token });
                   await reloadWallet();
                   navigateTo('profile');
                 }}
                 onProfileUpdated={(updatedUser, nextToken) => {
                   if (nextToken) {
-                    localStorage.setItem('auth-token', nextToken);
+                    readerStorage.setItem('auth-token', nextToken);
                     setSession({ user: updatedUser, token: nextToken });
                   } else {
                     setSession((prev) => (prev ? { ...prev, user: updatedUser } : prev));
@@ -881,7 +882,7 @@ function AppContent() {
                   await api.logout();
                   transactionRequest.current?.abort();
                   transactionRequest.current = null;
-                  localStorage.removeItem('auth-token');
+                  readerStorage.removeItem('auth-token');
                   setSession(null);
                   setRecentBooks([]);
                   setPositions({});
@@ -944,14 +945,15 @@ function AppContent() {
             path="/recharge"
             element={
               <Recharge
+                key={user?.id}
                 authReady={authReady}
+                userId={user?.id}
                 novelId={readerNovelId}
                 novelTitle={
                   novels.find((book) => book.id === readerNovelId)?.title ||
                   shelf.novels.find((book) => book.id === readerNovelId)?.title
                 }
                 userCoins={userCoins}
-                onAddCoins={handleAddCoins}
                 onRefreshStatus={reloadWallet}
                 onBack={navigateBack}
                 onNavigate={navigateTo}

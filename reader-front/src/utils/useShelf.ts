@@ -1,3 +1,4 @@
+import { readerStorage } from './readerStorage';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useToast } from '../context/toastStore';
 import { api, type Novel, type SavedProgress } from './api';
@@ -29,7 +30,7 @@ export function useShelf(
   const ids = membership?.owner === owner ? membership?.ids : undefined;
   const page = feed?.owner === owner ? feed : undefined;
   const isCurrent = useCallback((signal: AbortSignal) =>
-    !signal.aborted && token === localStorage.getItem('auth-token'), [token]);
+    !signal.aborted && token === readerStorage.getItem('auth-token'), [token]);
 
   useEffect(() => {
     if (!owner || !token) return;

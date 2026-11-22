@@ -79,6 +79,22 @@ type fakeNovelRepo struct {
 	nextPromoID         int
 }
 
+func TestGeneralSettingsDenyPaymentFields(t *testing.T) {
+	repo := &fakeNovelRepo{settings: map[string]string{
+		"global_coin_cost_per_thousand": "500", "global_start_pay_chapter_index": "3",
+		"paypal_client_id": "private-app", "paypal_secret_key": "private-secret", "stripe_secret_key": "private-stripe",
+	}}
+	service := &novelService{repo: repo}
+	allowed, err := service.GetSettings(t.Context())
+	if err != nil || len(allowed) != 2 || allowed["global_coin_cost_per_thousand"] != "500" || allowed["global_start_pay_chapter_index"] != "3" {
+		t.Fatalf("unexpected settings projection: %v %v", allowed, err)
+	}
+	err = service.UpdateSettings(t.Context(), map[string]string{"global_coin_cost_per_thousand": "900", "paypal_secret_key": "replacement"})
+	if !errors.Is(err, ErrInvalidSettingValue) || repo.settings["global_coin_cost_per_thousand"] != "500" || repo.settings["paypal_secret_key"] != "private-secret" {
+		t.Fatalf("mixed general and payment settings were not rejected atomically: %v %v", repo.settings, err)
+	}
+}
+
 func newFakeNovelRepo() *fakeNovelRepo {
 	return &fakeNovelRepo{
 		novels:      map[int64]*Novel{},

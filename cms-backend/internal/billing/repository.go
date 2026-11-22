@@ -9,6 +9,11 @@ import (
 )
 
 type BillingRepository interface {
+	ListLedgerMovements(context.Context, movementFilter) (movementPage, error)
+	ListSettlementPayouts(context.Context, payoutFilter) (payoutPage, error)
+	ListSettlementReportIssues(context.Context, reconciliationPage) (reportIssuePage, error)
+	GetPaymentActivity(context.Context, reconciliationScope) (paymentActivity, error)
+
 	BeginTx(ctx context.Context) (pgx.Tx, error)
 	CountOrders(ctx context.Context, countQuery string, args []interface{}) (int, error)
 	ListOrders(ctx context.Context, selectQuery string, args []interface{}) ([]Order, error)
@@ -20,6 +25,7 @@ type BillingRepository interface {
 	GetThirdPartyPaymentDetails(ctx context.Context, orderID int64) (*ThirdPartyPaymentOrder, error)
 
 	ListRechargeTemplates(ctx context.Context) ([]RechargeTemplate, error)
+	ListVIPOfferPublications(ctx context.Context) ([]VIPOfferPublication, error)
 	GetRechargeSlots(ctx context.Context, templateID int) ([]RechargeSlot, error)
 
 	ClearDefaultTemplatesTx(ctx context.Context, tx pgx.Tx) error
@@ -39,6 +45,33 @@ func NewBillingRepository() BillingRepository {
 
 func (r *dbBillingRepository) BeginTx(ctx context.Context) (pgx.Tx, error) {
 	return db.DB.Begin(ctx)
+}
+
+func (r *dbBillingRepository) ListVIPOfferPublications(ctx context.Context) ([]VIPOfferPublication, error) {
+	rows, err := db.DB.Query(ctx, `SELECT COALESCE(a.id,0),CASE WHEN a.id IS NULL THEN '' WHEN length(a.account_key)>4
+		THEN '••••'||right(a.account_key,4) ELSE '••••' END,COALESCE(a.environment,''),
+		v.slot_id,t.name,v.name,v.amount_minor,v.currency,v.cycle,
+		COALESCE(p.plan_id,''),COALESCE(p.request_key::text,''),CASE
+			WHEN a.id IS NULL THEN 'no_account'
+			WHEN p.plan_id IS NOT NULL THEN 'ready'
+			WHEN p.review_required THEN 'review'
+			WHEN p.first_sent_at IS NOT NULL THEN 'publishing'
+			ELSE 'queued'
+		END
+		FROM payment_vip_offer_versions v JOIN recharge_slots s ON s.vip_offer_version_id=v.slot_id
+		JOIN recharge_templates t ON t.id=v.template_id
+		LEFT JOIN payment_channel_accounts a ON a.provider='paypal'
+		LEFT JOIN payment_paypal_vip_plans p ON p.slot_id=v.slot_id AND p.account_id=a.id
+		ORDER BY t.name,v.slot_index,v.slot_id,a.environment,a.id`)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, func(row pgx.CollectableRow) (VIPOfferPublication, error) {
+		var offer VIPOfferPublication
+		err := row.Scan(&offer.AccountID, &offer.AccountLabel, &offer.Environment, &offer.VersionID, &offer.Template, &offer.Name,
+			&offer.Amount, &offer.Currency, &offer.Cycle, &offer.PlanID, &offer.RequestKey, &offer.State)
+		return offer, err
+	})
 }
 
 func (r *dbBillingRepository) CountOrders(ctx context.Context, countQuery string, args []interface{}) (int, error) {
@@ -61,7 +94,7 @@ func (r *dbBillingRepository) ListOrders(ctx context.Context, selectQuery string
 			&o.ID, &o.UserID, &o.ExternalRefID, &o.AmountCents, &o.Currency,
 			&o.Coins, &o.BonusCoinsCredited, &o.PaymentMethod,
 			&o.Status, &o.UtmSource, &o.UtmCampaign, &o.PaidAt, &o.OrderType,
-			&o.PromotionLinkID, &o.NovelID, &o.CreatedAt, &o.UpdatedAt, &o.ReconciliationNote,
+			&o.PromotionLinkID, &o.NovelID, &o.CreatedAt, &o.UpdatedAt, &o.ReconciliationNote, &o.RefundStatus, &o.PaymentEnvironment,
 		)
 		if err != nil {
 			return nil, err
@@ -121,14 +154,25 @@ func (r *dbBillingRepository) InsertAdminAuditLogTx(ctx context.Context, tx pgx.
 
 func (r *dbBillingRepository) GetThirdPartyPaymentDetails(ctx context.Context, orderID int64) (*ThirdPartyPaymentOrder, error) {
 	query := `
-		SELECT id, order_id, payment_provider, COALESCE(external_order_id, ''), COALESCE(capture_id, ''),
-		       COALESCE(payer_id, ''), COALESCE(payer_email, ''), COALESCE(payer_name, ''), COALESCE(payer_country, ''),
-		       currency, gross_amount, fee_amount, net_amount, status,
-		       COALESCE(seller_protection_status, ''), COALESCE(raw_payload::text, '{}'),
-		       created_at, updated_at
-		FROM third_party_payment_orders
-		WHERE order_id = $1
-		ORDER BY id DESC
+		SELECT p.id, p.order_id, p.payment_provider, COALESCE(p.external_order_id, ''), COALESCE(p.capture_id, ''),
+		       COALESCE(p.payer_id, ''), COALESCE(p.payer_email, ''), COALESCE(p.payer_name, ''), COALESCE(p.payer_country, ''),
+		       p.currency, p.gross_amount, COALESCE(finance.fee,p.fee_amount), COALESCE(finance.net,p.net_amount), p.status,
+		       COALESCE(p.seller_protection_status, ''), COALESCE(p.raw_payload::text, '{}'),
+		       p.created_at, p.updated_at
+		FROM third_party_payment_orders p
+		LEFT JOIN LATERAL (
+			SELECT -max(value.amount_minor) FILTER (WHERE value.component='fee')::numeric/100 AS fee,
+			        max(value.amount_minor) FILTER (WHERE value.component='net')::numeric/100 AS net
+			FROM payment_ledger_receipt_matches link
+			JOIN payment_ledger_movements m ON m.id=link.movement_id AND m.kind='payment'
+			JOIN payment_ledger_amounts gross ON gross.movement_id=m.id AND gross.component='gross'
+				AND gross.currency=p.currency AND gross.amount_minor=p.gross_amount*100
+			JOIN payment_ledger_amounts value ON value.movement_id=m.id AND value.currency=p.currency
+			WHERE p.payment_provider='paypal' AND p.currency='USD' AND link.receipt_id=p.id
+			HAVING count(DISTINCT m.id)=1
+		) finance ON true
+		WHERE p.order_id = $1
+		ORDER BY EXISTS(SELECT 1 FROM payment_fulfillment_funding f WHERE f.order_id=p.order_id AND f.receipt_id=p.id) DESC,p.id DESC
 		LIMIT 1`
 	var t ThirdPartyPaymentOrder
 	err := db.DB.QueryRow(ctx, query, orderID).Scan(
@@ -212,8 +256,14 @@ func (r *dbBillingRepository) CreateRechargeTemplateTx(ctx context.Context, tx p
 func (r *dbBillingRepository) CreateRechargeSlotTx(ctx context.Context, tx pgx.Tx, templateID, index int, slotType string, coins, bonus int, duration, cycle, vipName, vipDesc, price string, priceCents int) error {
 	query := `
 		INSERT INTO recharge_slots (template_id, slot_index, type, coins, bonus, vip_duration, subscription_cycle, vip_name, vip_desc, price, price_cents)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`
-	_, err := tx.Exec(ctx, query, templateID, index, slotType, coins, bonus, duration, cycle, vipName, vipDesc, price, priceCents)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		RETURNING id`
+	var slotID int
+	err := tx.QueryRow(ctx, query, templateID, index, slotType, coins, bonus, duration, cycle, vipName, vipDesc, price, priceCents).Scan(&slotID)
+	if err != nil || (slotType != "vip" && slotType != "subscription") {
+		return err
+	}
+	_, err = tx.Exec(ctx, `UPDATE recharge_slots s SET vip_offer_version_id=snapshot_vip_offer(s) WHERE s.id=$1`, slotID)
 	return err
 }
 

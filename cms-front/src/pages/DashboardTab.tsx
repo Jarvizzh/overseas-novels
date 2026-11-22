@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Award, Sparkles } from 'lucide-react';
+import { Link } from 'react-router-dom';
 import { apiRequest } from '../utils/api';
 import { TableRegion } from '../components/ui/Primitives';
 
@@ -7,11 +8,37 @@ interface DashboardStats {
   revenue: number;
   activeUsers: number;
   unlockedChapters: number;
-  refundCount: number;
   topNovels: Array<{ id: string; title: string; author: string; unlocks: number; revenue: number }>;
 }
 
-export default function DashboardTab() {
+function PaymentActivityCard() {
+  const [activity, setActivity] = useState<{ refund_count: number; chargeback_debit_count: number }>();
+  const [failed, setFailed] = useState(false);
+  useEffect(() => {
+    const controller = new AbortController();
+    void apiRequest('GET', '/payments/reconciliation/activity', undefined, false, controller.signal)
+      .then((data) => { if (!controller.signal.aborted) setActivity(data); })
+      .catch(() => { if (!controller.signal.aborted) setFailed(true); });
+    return () => controller.abort();
+  }, []);
+
+  return (
+    <div className="cms-card p-5 space-y-1.5">
+      <Link className="btn-detail" to="/payments/reconciliation">退款与拒付划扣</Link>
+      {failed ? <p role="alert">支付统计暂不可用</p> : activity ? (
+        <>
+          <dl className="grid grid-cols-2 gap-2">
+            <div><dt className="text-xs">已确认退款</dt><dd className="text-xl tabular-nums">{activity.refund_count.toLocaleString()}</dd></div>
+            <div><dt className="text-xs">拒付划扣</dt><dd className="text-xl tabular-nums">{activity.chargeback_debit_count.toLocaleString()}</dd></div>
+          </dl>
+          <p className="text-xs text-[var(--cms-muted-fg)]">正式环境 USD · 已入库的退款记录与渠道资金流水</p>
+        </>
+      ) : <p role="status">正在加载支付统计…</p>}
+    </div>
+  );
+}
+
+export default function DashboardTab({ finance }: { finance: boolean }) {
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -23,13 +50,10 @@ export default function DashboardTab() {
         const ordersData = await apiRequest('GET', '/orders?page_size=20');
 
         let totalCents = 0;
-        let refunds = 0;
         if (ordersData && ordersData.orders) {
           ordersData.orders.forEach((o: { status: string; amount_cents: number }) => {
             if (o.status === 'Success' || o.status === 'Paid') {
               totalCents += o.amount_cents;
-            } else if (o.status === 'Refunded') {
-              refunds += 1;
             }
           });
         }
@@ -38,7 +62,6 @@ export default function DashboardTab() {
           revenue: totalCents > 0 ? totalCents / 100 : 1294.5,
           activeUsers: usersData.total || 148,
           unlockedChapters: 4820,
-          refundCount: refunds,
           topNovels: (novelsData.novels || []).map((n: { id: string; title: string; author: string }, idx: number) => ({
             id: n.id,
             title: n.title,
@@ -52,7 +75,6 @@ export default function DashboardTab() {
           revenue: 1294.5,
           activeUsers: 148,
           unlockedChapters: 4820,
-          refundCount: 2,
           topNovels: [
             { id: '1', title: 'Alpha King Bound', author: 'Catherine A.', unlocks: 1540, revenue: 770.0 },
             { id: '2', title: 'The Billionaire Lover', author: 'Robert S.', unlocks: 1210, revenue: 605.0 },
@@ -113,19 +135,7 @@ export default function DashboardTab() {
           <div className="text-xs text-[var(--cms-primary)] tabular-nums font-medium">用户购买解锁率 92%</div>
         </div>
 
-        <div className="cms-card p-5 space-y-1.5">
-          <div className="text-xs text-[var(--cms-muted-fg)]">退款与拒付数</div>
-          <div
-            className={`text-2xl font-semibold tracking-tight tabular-nums ${
-              stats.refundCount > 0 ? 'text-[var(--cms-error)]' : 'text-[var(--cms-fg)]'
-            }`}
-          >
-            {stats.refundCount}
-          </div>
-          <div className={`text-xs ${stats.refundCount > 0 ? 'text-[var(--cms-error)] font-medium' : 'text-[var(--cms-muted-fg)]'}`}>
-            {stats.refundCount > 0 ? '已从对应钱包追回扣币' : '暂无 Stripe / PayPal 退款拒付'}
-          </div>
-        </div>
+        {finance && <PaymentActivityCard />}
       </div>
 
       {/* Main Split Grid */}

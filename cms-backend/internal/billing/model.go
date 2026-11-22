@@ -2,8 +2,25 @@ package billing
 
 import "time"
 
+type VIPOfferPublication struct {
+	AccountID    int64  `json:"account_id,omitempty"`
+	AccountLabel string `json:"account_label,omitempty"`
+	Environment  string `json:"environment,omitempty"`
+	VersionID    int    `json:"version_id"`
+	Template     string `json:"template"`
+	Name         string `json:"name"`
+	Amount       int    `json:"amount_minor"`
+	Currency     string `json:"currency"`
+	Cycle        string `json:"cycle"`
+	PlanID       string `json:"plan_id,omitempty"`
+	RequestKey   string `json:"request_key,omitempty"`
+	State        string `json:"state"`
+}
+
 type Order struct {
+	PaymentEnvironment string     `json:"payment_environment,omitempty"`
 	ReconciliationNote string     `json:"reconciliation_note,omitempty"`
+	RefundStatus       string     `json:"refund_status,omitempty"`
 	ID                 int64      `json:"id"`
 	UserID             string     `json:"user_id"`
 	ExternalRefID      string     `json:"external_ref_id"`
@@ -59,8 +76,8 @@ type ThirdPartyPaymentOrder struct {
 	PayerCountry           string    `json:"payer_country"`
 	Currency               string    `json:"currency"`
 	GrossAmount            float64   `json:"gross_amount"`
-	FeeAmount              float64   `json:"fee_amount"`
-	NetAmount              float64   `json:"net_amount"`
+	FeeAmount              *float64  `json:"fee_amount"`
+	NetAmount              *float64  `json:"net_amount"`
 	Status                 string    `json:"status"`
 	SellerProtectionStatus string    `json:"seller_protection_status"`
 	RawPayload             string    `json:"raw_payload,omitempty"`

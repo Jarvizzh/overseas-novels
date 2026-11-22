@@ -53,25 +53,37 @@ func InitDB(migrate bool) {
 }
 
 const (
-	baselineSchemaVersion        int64 = 2026111701
-	chapterSchemaVersion         int64 = 2026111702
-	readerPerformanceVersion     int64 = 2026111703
-	readerQueueVersion           int64 = 2026111704
-	conversionSchemaVersion      int64 = 2026111901
-	readerConversionVersion      int64 = 2026111902
-	legacyConversionVersion      int64 = 2026111903
-	conversionReconcileVersion   int64 = 2026111904
-	conversionOperationsVersion  int64 = 2026111905
-	conversionReviewVersion      int64 = 2026111906
-	sinanConversionVersion       int64 = 2026111907
-	sinanReviewVersion           int64 = 2026111908
-	sinanRecheckVersion          int64 = 2026111909
-	paymentPolicyVersion         int64 = 2026111910
-	readerPaymentPolicyVersion   int64 = 2026111911
-	sinanPaymentPolicyVersion    int64 = 2026111912
-	readerPaymentReviewVersion   int64 = 2026111913
-	readerPaymentRecoveryVersion int64 = 2026111914
-	RequiredSchemaVersion        int64 = 2026111915
+	baselineSchemaVersion             int64 = 2026111701
+	chapterSchemaVersion              int64 = 2026111702
+	readerPerformanceVersion          int64 = 2026111703
+	readerQueueVersion                int64 = 2026111704
+	conversionSchemaVersion           int64 = 2026111901
+	readerConversionVersion           int64 = 2026111902
+	legacyConversionVersion           int64 = 2026111903
+	conversionReconcileVersion        int64 = 2026111904
+	conversionOperationsVersion       int64 = 2026111905
+	conversionReviewVersion           int64 = 2026111906
+	sinanConversionVersion            int64 = 2026111907
+	sinanReviewVersion                int64 = 2026111908
+	sinanRecheckVersion               int64 = 2026111909
+	paymentPolicyVersion              int64 = 2026111910
+	readerPaymentPolicyVersion        int64 = 2026111911
+	sinanPaymentPolicyVersion         int64 = 2026111912
+	readerPaymentReviewVersion        int64 = 2026111913
+	readerPaymentRecoveryVersion      int64 = 2026111914
+	readerSubscriptionEvidenceVersion int64 = 2026111915
+	paymentDomainFoundationVersion    int64 = 2026111916
+	paymentCheckoutVersion            int64 = 2026111917
+	vipOfferVersionsVersion           int64 = 2026111918
+	paymentLedgerVersion              int64 = 2026111919
+	paymentSettlementVersion          int64 = 2026111920
+	paymentCheckoutDecisionsVersion   int64 = 2026111921
+	paymentAftercareVersion           int64 = 2026111922
+	stripeOneTimeCheckoutVersion      int64 = 2026111923
+	stripeVIPCheckoutVersion          int64 = 2026111924
+	paymentCompletionVersion          int64 = 2026111925
+	paymentRecoveryVersion            int64 = 2026111926
+	RequiredSchemaVersion             int64 = 2026111927
 )
 
 func autoMigrate(ctx context.Context, pool *pgxpool.Pool) error {
@@ -196,7 +208,67 @@ func autoMigrate(ctx context.Context, pool *pgxpool.Pool) error {
 			return fmt.Errorf("schema migration %d: %w", readerPaymentRecoveryVersion, err)
 		}
 	}
-	if _, err := tx.Exec(ctx, dbassets.ReaderSubscriptionEvidenceSQL); err != nil {
+	if version < readerSubscriptionEvidenceVersion {
+		if _, err := tx.Exec(ctx, dbassets.ReaderSubscriptionEvidenceSQL); err != nil {
+			return fmt.Errorf("schema migration %d: %w", readerSubscriptionEvidenceVersion, err)
+		}
+	}
+	if version < paymentDomainFoundationVersion {
+		if _, err := tx.Exec(ctx, dbassets.PaymentDomainFoundationSQL); err != nil {
+			return fmt.Errorf("schema migration %d: %w", paymentDomainFoundationVersion, err)
+		}
+	}
+	if version < paymentCheckoutVersion {
+		if _, err := tx.Exec(ctx, dbassets.PaymentCheckoutSQL); err != nil {
+			return fmt.Errorf("schema migration %d: %w", paymentCheckoutVersion, err)
+		}
+	}
+	if version < vipOfferVersionsVersion {
+		if _, err := tx.Exec(ctx, dbassets.VIPOfferVersionsSQL); err != nil {
+			return fmt.Errorf("schema migration %d: %w", vipOfferVersionsVersion, err)
+		}
+	}
+	if version < paymentLedgerVersion {
+		if _, err := tx.Exec(ctx, dbassets.PaymentLedgerSQL); err != nil {
+			return fmt.Errorf("schema migration %d: %w", paymentLedgerVersion, err)
+		}
+	}
+	if version < paymentSettlementVersion {
+		if _, err := tx.Exec(ctx, dbassets.PaymentSettlementSQL); err != nil {
+			return fmt.Errorf("schema migration %d: %w", paymentSettlementVersion, err)
+		}
+	}
+	if version < paymentCheckoutDecisionsVersion {
+		if _, err := tx.Exec(ctx, dbassets.PaymentCheckoutDecisionsSQL); err != nil {
+			return fmt.Errorf("schema migration %d: %w", paymentCheckoutDecisionsVersion, err)
+		}
+	}
+	if version < paymentAftercareVersion {
+		if _, err := tx.Exec(ctx, dbassets.PaymentAftercareSQL); err != nil {
+			return fmt.Errorf("schema migration %d: %w", paymentAftercareVersion, err)
+		}
+	}
+	if version < stripeOneTimeCheckoutVersion {
+		if _, err := tx.Exec(ctx, dbassets.StripeOneTimeCheckoutSQL); err != nil {
+			return fmt.Errorf("schema migration %d: %w", stripeOneTimeCheckoutVersion, err)
+		}
+	}
+	if version < stripeVIPCheckoutVersion {
+		if _, err := tx.Exec(ctx, dbassets.StripeVIPCheckoutSQL); err != nil {
+			return fmt.Errorf("schema migration %d: %w", stripeVIPCheckoutVersion, err)
+		}
+	}
+	if version < paymentCompletionVersion {
+		if _, err := tx.Exec(ctx, dbassets.PaymentCompletionSQL); err != nil {
+			return fmt.Errorf("schema migration %d: %w", paymentCompletionVersion, err)
+		}
+	}
+	if version < paymentRecoveryVersion {
+		if _, err := tx.Exec(ctx, dbassets.PaymentRecoverySQL); err != nil {
+			return fmt.Errorf("schema migration %d: %w", paymentRecoveryVersion, err)
+		}
+	}
+	if _, err := tx.Exec(ctx, dbassets.PaymentReviewFixesSQL); err != nil {
 		return fmt.Errorf("schema migration %d: %w", RequiredSchemaVersion, err)
 	}
 	return tx.Commit(ctx)

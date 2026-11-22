@@ -57,6 +57,7 @@ export const CmsDialog: React.FC<CmsDialogProps> = ({
     if (!el) return;
     if (open) {
       if (!el.open) {
+        el.querySelector('[data-dialog-initial-focus]')?.setAttribute('autofocus', '');
         el.showModal();
       }
     } else if (el.open) {

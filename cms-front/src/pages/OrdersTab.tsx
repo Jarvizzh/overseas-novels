@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { CreditCard, SlidersHorizontal } from 'lucide-react';
+import { Link, useSearchParams } from 'react-router-dom';
 import { apiRequest } from '../utils/api';
 import CustomSelect from '../components/CustomSelect';
 import { ThirdPartyPaymentModal, type ThirdPartyPaymentDetail } from '../components/ThirdPartyPaymentModal';
@@ -42,6 +43,7 @@ interface Order {
   coins: number;
   bonus_coins_credited: number;
   payment_method: string;
+  payment_environment?: "live" | "sandbox";
   status: string;
   utm_source: string;
   utm_campaign: string;
@@ -89,8 +91,10 @@ function getOrderTypeLabel(orderType?: string): string {
   return '金币充值';
 }
 
-export default function OrdersTab() {
+export default function OrdersTab({ finance = false }: { finance?: boolean }) {
   const searchFormId = useId();
+  const [params] = useSearchParams();
+  const linkedOrder = params.get('order_id');
   const [orders, setOrders] = useState<Order[]>([]);
   const [total, setTotal] = useState(0);
   const [draft, setDraft] = useState<OrderFilterState>(EMPTY_FILTER);
@@ -127,6 +131,7 @@ export default function OrdersTab() {
         page: String(queryState.page),
         page_size: String(queryState.pageSize),
       });
+      if (linkedOrder) params.set('order_id', linkedOrder);
       if (queryState.status) params.set('status', queryState.status);
       if (queryState.userId) params.set('user_id', queryState.userId);
       if (queryState.orderType) params.set('order_type', queryState.orderType);
@@ -134,7 +139,7 @@ export default function OrdersTab() {
       if (queryState.paidStart) params.set('paid_start', `${queryState.paidStart}T00:00:00Z`);
       if (queryState.paidEnd) params.set('paid_end', `${queryState.paidEnd}T23:59:59Z`);
 
-      const data = await apiRequest('GET', `/orders?${params.toString()}`);
+      const data = await apiRequest('GET', `/payments/orders?${params.toString()}`);
       if (seq !== fetchSeqRef.current) return;
       setOrders(data.orders || []);
       setTotal(data.total || 0);
@@ -148,7 +153,7 @@ export default function OrdersTab() {
         setLoading(false);
       }
     }
-  }, [queryState]);
+  }, [queryState, linkedOrder]);
 
   useEffect(() => {
     void fetchOrders();
@@ -160,7 +165,7 @@ export default function OrdersTab() {
     setDetailModalOpen(true);
     setDetailLoading(true);
     try {
-      const res = await apiRequest('GET', `/orders/${orderId}/payment-details`);
+      const res = await apiRequest('GET', `/payments/orders/${orderId}/payment-details`);
       if (seq !== detailSeqRef.current) return;
       setPaymentDetails(res.details || null);
     } catch (err) {
@@ -461,6 +466,7 @@ export default function OrdersTab() {
       </search>
 
       {/* Airy Orders Table + External Pagination */}
+      {linkedOrder && <Link to="/payments/orders" className="btn-secondary">清除关联订单筛选 #{linkedOrder}</Link>}
       <TableRegion
         ariaLabel="充值交易订单列表"
         footer={
@@ -520,17 +526,19 @@ export default function OrdersTab() {
                       <div className="text-[var(--cms-muted-fg)] mt-0.5">UID {o.user_id}</div>
                     </td>
                     <td>
-                      <button
-                        type="button"
-                        onClick={() => void handleOpenPaymentDetails(o.id)}
-                        className="focus-ring inline-flex items-center gap-1.5 text-[var(--cms-fg)] hover:underline cursor-pointer tabular-nums"
-                        title="点击查看第三方支付凭据"
-                      >
-                        <CreditCard size={13} className="text-[var(--cms-muted-fg)] shrink-0" aria-hidden="true" />
-                        <span>
-                          {o.payment_method.toUpperCase()}: {o.external_ref_id || '无'}
-                        </span>
-                      </button>
+                      {finance ? (
+                        <button
+                          type="button"
+                          onClick={() => void handleOpenPaymentDetails(o.id)}
+                          className="focus-ring inline-flex items-center gap-1.5 text-[var(--cms-fg)] hover:underline cursor-pointer tabular-nums"
+                          title="点击查看第三方支付凭据"
+                        >
+                          <CreditCard size={13} className="text-[var(--cms-muted-fg)] shrink-0" aria-hidden="true" />
+                          <span>
+                            {o.payment_method.toUpperCase()}: {o.external_ref_id || '无'}
+                          </span>
+                        </button>
+                      ) : <span>{o.payment_method.toUpperCase()}</span>}
                     </td>
                     <td className="text-[var(--cms-muted-fg)] whitespace-nowrap">
                       {getOrderTypeLabel(o.order_type)}
@@ -570,14 +578,20 @@ export default function OrdersTab() {
                     <td>
                       <StatusDot tone={statusMeta.tone} label={statusMeta.label} />
                     </td>
-                    <td className="text-right">
-                      <button
-                        type="button"
-                        onClick={() => void handleOpenPaymentDetails(o.id)}
-                        className="btn-detail"
-                      >
-                        详情
-                      </button>
+                    <td className="text-right whitespace-nowrap">
+                      {finance ? (
+                        <>
+                          <button type="button" onClick={() => void handleOpenPaymentDetails(o.id)} className="btn-detail">
+                            详情
+                          </button>
+                          {o.payment_environment ? (
+                            [['reconciliation', '流水'], ['risk', '风控'], ['disputes', '争议'], ['refunds', '退款']].map(([view, label]) => (
+                              <Link key={view} to={`/payments/${view}?${new URLSearchParams({ order_id: String(o.id), environment: o.payment_environment! })}`}
+                                className="btn-detail">{label}</Link>
+                            ))
+                          ) : <span>渠道环境待核对</span>}
+                        </>
+                      ) : '—'}
                     </td>
                   </tr>
                 );

@@ -153,6 +153,9 @@ type UserSubscription struct {
 	PriceCents         int        `json:"price_cents" db:"price_cents"`
 	Currency           string     `json:"currency" db:"currency"`
 	PaymentMethod      string     `json:"payment_method" db:"payment_method"`
+	Management         string     `json:"management,omitempty"`
+	Environment        string     `json:"-"`
+	RenewalFailedAt    *time.Time `json:"renewal_failed_at,omitempty"`
 	CurrentPeriodStart *time.Time `json:"current_period_start" db:"current_period_start"`
 	CurrentPeriodEnd   *time.Time `json:"current_period_end" db:"current_period_end"`
 	NextBillingTime    *time.Time `json:"next_billing_time" db:"next_billing_time"`
