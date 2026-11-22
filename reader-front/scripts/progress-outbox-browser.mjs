@@ -72,6 +72,8 @@ let releaseRequest;
 const libraryIDs = new Set();
 let failLibraryPage = false;
 const libraryRequests = [];
+let sessionFailure;
+let recoveredGuests = 0;
 const novel = { id: 1, title: 'Outbox test', author: 'Author', cover: '', status: 'Ongoing',
   publish_status: 'published', synopsis: 'Test', genres: [], words: 20000, views: 0 };
 const chapters = Array.from({ length: 4 }, (_, index) => ({
@@ -115,8 +117,17 @@ try {
     const profile = { id: user || 1, nickname: 'Reader ' + (user || 1), email: null, status: 1 };
     const json = (value, status = 200) =>
       response.writeHead(status, { 'Content-Type': 'application/json' }).end(JSON.stringify(value));
-    if (path === '/api/v1/auth/profile') return json(profile);
-    if (path === '/api/v1/auth/refresh' || path === '/api/v1/auth/guest') return json({ token: 'u' + profile.id, user: profile });
+    if (path === '/api/v1/auth/profile') {
+      return sessionFailure && user === 2 ? json({}, 401) : json(profile);
+    }
+    if (path === '/api/v1/auth/refresh') {
+      return sessionFailure ? json({}, sessionFailure) : json({ token: 'u' + profile.id, user: profile });
+    }
+    if (path === '/api/v1/auth/guest') {
+      assert.equal(request.headers.authorization, undefined, 'guest creation must omit the stale bearer token');
+      recoveredGuests++;
+      return json({ token: 'u3', user: { ...profile, id: 3 } });
+    }
     if (path === '/api/v1/wallet/balance') return json({ charged_coins: 100, bonus_coins: 0 });
     if (path.endsWith('/history/cursor')) return json({ items: [] });
     if (path === '/api/v1/shelf/ids') {
@@ -124,6 +135,7 @@ try {
         ? json(user === 1 ? [...libraryIDs] : [])
         : json({ code: 'account_changed' }, 409);
     }
+    if (path === '/api/v1/shelf/recent') return json([]);
     if (path === '/api/v1/shelf/cursor') {
       if (Number(url.searchParams.get('user_id')) !== user) return json({ code: 'account_changed' }, 409);
       const cursor = url.searchParams.get('cursor');
@@ -143,7 +155,11 @@ try {
     if (path === '/api/v1/novels') return json([novel]);
     if (path === '/api/v1/novels/1') return json(novel);
     if (path === '/api/v1/novels/3') return json({ ...novel, id: 3, title: 'Library Book 3' });
-    if (path === '/api/v1/novels/1/chapters' || path === '/api/v1/novels/3/chapters') return json(chapters);
+    if (path === '/api/v1/novels/1/chapters' || path === '/api/v1/novels/3/chapters') {
+      return sessionFailure && user === 2
+        ? json({ code: 'invalid_credentials' }, 401)
+        : json(chapters);
+    }
     if (path.startsWith('/api/v1/novels/1/chapters/')) {
       const chapter = chapters[Number(path.split('/').at(-1))];
       return chapter
@@ -353,6 +369,26 @@ try {
   await until(() => first.eval("document.querySelector('.shelf-empty-state')?.textContent.includes('Your library is empty')"), 'account switch clears book cards');
   assert.equal(libraryRequests.at(-1).user, 2);
   console.log('PASS library membership, paginated retry and account switch');
+
+  sessionFailure = 503;
+  await navigate(first, '/detail?novel_id=1');
+  await until(() => first.eval("document.querySelector('[role=alert]')?.textContent.includes('session expired')"), 'chapter error with unavailable session service');
+  assert.equal(recoveredGuests, 0, 'a temporary refresh failure must not replace the existing session');
+  assert.equal(await first.eval("localStorage.getItem('auth-token')"), 'u2');
+
+  sessionFailure = 401;
+  await first.eval("window.dispatchEvent(new Event('online'))");
+  const recoveredChapters = () => first.eval("localStorage.getItem('auth-token') === 'u3' && document.body.innerText.includes('Chapters (4)')");
+  await until(recoveredChapters, 'chapter reload after replacing an expired session in the same tab');
+  assert.equal(recoveredGuests, 1);
+
+  await navigate(first, '/fixture');
+  await until(() => first.eval('document.readyState === "complete" && location.pathname === "/fixture"'), 'setup stale session for a page load');
+  await first.eval("localStorage.setItem('auth-token','u2')");
+  await navigate(first, '/detail?novel_id=1');
+  await until(recoveredChapters, 'boot with an expired session');
+  assert.equal(recoveredGuests, 2, 'concurrent 401s must share guest creation');
+  console.log('PASS expired guest recovery after startup and in-page refresh, with no replacement on 503');
 } finally {
   if (releaseRequest) releaseRequest();
   for (const client of clients) client.close();

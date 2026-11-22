@@ -13,7 +13,7 @@ import { Shelf } from './pages/Shelf';
 import { Profile } from './pages/Profile';
 import { Rewards } from './pages/Rewards';
 import { Recharge } from './pages/Recharge';
-import { api, registerSessionRefreshHandler } from './utils/api';
+import { api, ApiError, registerSessionRefreshHandler } from './utils/api';
 import type { BookshelfItem, Novel, User, Transaction, SubscriptionInfo, SavedProgress } from './utils/api';
 import { useProgressOutbox } from './utils/useProgressOutbox';
 import { useShelf } from './utils/useShelf';
@@ -241,26 +241,27 @@ function AppContent() {
   const triggerGuestLogin = useCallback(async (): Promise<string | null> => {
     if (!guestLoginPromiseRef.current) {
       guestLoginPromiseRef.current = (async () => {
+        const previousToken = readerStorage.getItem('auth-token');
         try {
           let res;
+          let createdGuest = false;
           try {
             res = await api.refresh();
           } catch (error) {
-            if (
-              error instanceof Error &&
-              'status' in error &&
-              error.status === 401 &&
-              !readerStorage.getItem('auth-token')
-            ) {
-              res = await api.guestLogin();
-            } else {
+            if (!(error instanceof ApiError) || error.status !== 401 ||
+              readerStorage.getItem('auth-token') !== previousToken) {
               throw error;
             }
+            res = await api.guestLogin();
+            createdGuest = true;
           }
+          if (readerStorage.getItem('auth-token') !== previousToken) return null;
           readerStorage.setItem('auth-token', res.token);
           setSession({ user: res.user, token: res.token });
-          await reloadWallet();
-          return res.token;
+          void reloadWallet();
+          // An expired session can become a different guest. Keep requests
+          // from the previous identity from being replayed as the new one.
+          return createdGuest ? null : res.token;
         } catch (err) {
           console.error('Guest login failed:', err);
           return null;
@@ -340,8 +341,10 @@ function AppContent() {
             await reloadWallet();
           }
         } catch (err) {
-          console.error('Auth init failed, fallback to guest:', err);
-          await triggerGuestLogin();
+          console.error('Could not restore the current session:', err);
+          if (readerStorage.getItem('auth-token') === tokenBefore) {
+            await triggerGuestLogin();
+          }
         }
       }
     };
@@ -906,6 +909,7 @@ function AppContent() {
             element={
               <Detail
                 authReady={authReady}
+                sessionToken={session?.token}
                 novelId={detailNovelId}
                 novels={novels}
                 onNavigate={navigateTo}
