@@ -36,12 +36,15 @@ const (
 	pubStatusPublished = "published"
 	pubStatusPaused    = "paused"
 	pubStatusRetired   = "retired"
+
+	defaultStripeDigitalTaxCode = "txcd_10103001"
 )
 
 var (
 	productCodePattern   = regexp.MustCompile(`^[A-Z0-9_]{3,64}$`)
 	paypalPlanIDPattern  = regexp.MustCompile(`^P-[A-Z0-9]+$`)
 	paypalProdIDPattern  = regexp.MustCompile(`^PROD-[A-Z0-9]+$`)
+	stripeTaxCodePattern = regexp.MustCompile(`^txcd_[A-Za-z0-9]+$`)
 	countryISO2Pattern   = regexp.MustCompile(`^[A-Z]{2}$`)
 	errProductNotFound   = errors.New("product not found")
 	errProductInvalid    = errors.New("invalid product specification")
@@ -233,6 +236,9 @@ func (h *Handler) ListProducts(c *gin.Context) {
 	if items == nil {
 		items = []ProductView{}
 	}
+	for i := range items {
+		items[i] = productForRole(items[i], c.GetString("payment_role"))
+	}
 	c.JSON(http.StatusOK, gin.H{"products": items, "environment": env})
 }
 
@@ -256,7 +262,21 @@ func (h *Handler) GetProduct(c *gin.Context) {
 		writeProductError(c, errProductNotFound)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"product": items[0], "environment": env})
+	c.JSON(http.StatusOK, gin.H{"product": productForRole(items[0], c.GetString("payment_role")), "environment": env})
+}
+
+func productForRole(item ProductView, role string) ProductView {
+	if role == "SuperAdmin" {
+		return item
+	}
+	item.PayPalBinding = nil
+	item.StripeBinding = nil
+	item.AllBindings = nil
+	item.CreatedBy = ""
+	if role != "Finance" {
+		item.ReadinessReasons = []string{}
+	}
+	return item
 }
 
 func loadProductViews(ctx context.Context, singleID int64, env, filterType, filterStatus, search string) ([]ProductView, error) {
@@ -369,7 +389,8 @@ func loadProductViews(ctx context.Context, singleID int64, env, filterType, filt
 		       b.review_required, b.validated_at, b.enabled
 		FROM product_channel_bindings b
 		JOIN payment_channel_accounts a ON a.id = b.account_id
-		ORDER BY a.is_primary DESC, b.id DESC`)
+		WHERE b.environment = $1
+		ORDER BY a.is_primary DESC, b.id DESC`, env)
 	if err != nil {
 		return nil, err
 	}
@@ -675,7 +696,7 @@ func (h *Handler) UpsertProductPayPalBinding(c *gin.Context) {
 
 	ctx := c.Request.Context()
 	actor := c.GetString("admin_id")
-	if err := verifyFinancialRole(ctx, actor); err != nil {
+	if err := verifyProductSuperAdmin(ctx, actor); err != nil {
 		writeProductError(c, err)
 		return
 	}
@@ -792,14 +813,15 @@ func (h *Handler) UpsertProductPayPalBinding(c *gin.Context) {
 	})
 }
 
-func verifyFinancialRole(ctx context.Context, actor string) error {
-	var role string
-	var status int
-	err := db.DB.QueryRow(ctx, `SELECT role, status FROM admins WHERE id = $1`, actor).Scan(&role, &status)
-	if errors.Is(err, pgx.ErrNoRows) || status != 1 || (role != "SuperAdmin" && role != "Finance") {
-		return ErrRefundForbidden
+func verifyProductSuperAdmin(ctx context.Context, actor string) error {
+	var allowed bool
+	if err := db.DB.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM admins WHERE id=$1 AND status=1 AND role='SuperAdmin')`, actor).Scan(&allowed); err != nil {
+		return err
 	}
-	return err
+	if !allowed {
+		return errCaseForbidden
+	}
+	return nil
 }
 
 func preparePayPalBindingWriteTx(ctx context.Context, productID, accountID int64, env, actor string) (reqKey string, reviewRequired bool, existingPlan, existingProd string, err error) {
@@ -808,6 +830,9 @@ func preparePayPalBindingWriteTx(ctx context.Context, productID, accountID int64
 		return "", false, "", "", err
 	}
 	defer tx.Rollback(context.WithoutCancel(ctx))
+	if err := requireSuperAdminTx(ctx, tx, actor); err != nil {
+		return "", false, "", "", err
+	}
 	err = tx.QueryRow(ctx, `
 		INSERT INTO product_channel_bindings (
 			product_id, account_id, provider, environment, sales_mode, allowed_countries,
@@ -947,10 +972,10 @@ func sendPayPalJSON(ctx context.Context, endpoint, token, idemKey string, body [
 
 func verifyPayPalPlanRemote(ctx context.Context, baseURL, token, planID, expectedCycle string, expectedCents int) ([]byte, string, error) {
 	var plan struct {
-		ID                 string `json:"id"`
-		ProductID          string `json:"product_id"`
-		Status             string `json:"status"`
-		BillingCycles      []struct {
+		ID            string `json:"id"`
+		ProductID     string `json:"product_id"`
+		Status        string `json:"status"`
+		BillingCycles []struct {
 			Tenure    string `json:"tenure_type"`
 			Total     *int   `json:"total_cycles"`
 			Frequency struct {
@@ -1021,6 +1046,9 @@ func savePayPalBindingResultTx(
 		return err
 	}
 	defer tx.Rollback(context.WithoutCancel(ctx))
+	if err := requireSuperAdminTx(ctx, tx, actor); err != nil {
+		return err
+	}
 	var valAt any
 	if state == validationVerified {
 		valAt = time.Now().UTC()
@@ -1056,15 +1084,62 @@ func savePayPalBindingResultTx(
 type bindStripeProductReq struct {
 	Environment         string   `json:"environment" binding:"required,oneof=sandbox live"`
 	AccountID           int64    `json:"account_id"`
-	ProductRef          string   `json:"product_ref" binding:"required,max=100"`
-	PriceRef            string   `json:"price_ref" binding:"required,max=100"`
+	ProductRef          string   `json:"product_ref" binding:"max=100"`
+	PriceRef            string   `json:"price_ref" binding:"max=100"`
 	SalesMode           string   `json:"sales_mode" binding:"omitempty,oneof=direct merchant_of_record"`
 	TaxLiabilityAccount string   `json:"tax_liability_account" binding:"max=100"`
+	TaxCode             string   `json:"tax_code" binding:"max=64"`
+	TaxBehavior         string   `json:"tax_behavior" binding:"omitempty,oneof=exclusive inclusive"`
 	AllowedCountries    []string `json:"countries" binding:"max=250"`
 	ReleaseEvidence     string   `json:"release_evidence" binding:"max=500"`
 	MarketPolicy        string   `json:"market_policy" binding:"max=500"`
 	Enabled             *bool    `json:"enabled"`
 	Reason              string   `json:"reason" binding:"max=500"`
+}
+
+func normalizeStripeBindingReq(req *bindStripeProductReq) error {
+	if strings.TrimSpace(req.ProductRef) != "" || strings.TrimSpace(req.PriceRef) != "" {
+		return errors.New("Stripe binding only supports automatic provisioning; do not pass product_ref or price_ref")
+	}
+	req.TaxLiabilityAccount = strings.TrimSpace(req.TaxLiabilityAccount)
+	req.TaxCode = strings.TrimSpace(req.TaxCode)
+	req.TaxBehavior = strings.TrimSpace(req.TaxBehavior)
+	req.ReleaseEvidence = strings.TrimSpace(req.ReleaseEvidence)
+	req.MarketPolicy = strings.TrimSpace(req.MarketPolicy)
+	if req.SalesMode == "" {
+		req.SalesMode = stripeDirect
+	}
+	if len(req.AllowedCountries) == 0 {
+		req.AllowedCountries = []string{"US"}
+	}
+	for i := range req.AllowedCountries {
+		req.AllowedCountries[i] = strings.ToUpper(strings.TrimSpace(req.AllowedCountries[i]))
+		if !countryISO2Pattern.MatchString(req.AllowedCountries[i]) {
+			return errors.New("countries must contain 2-letter ISO codes")
+		}
+	}
+	slices.Sort(req.AllowedCountries)
+	req.AllowedCountries = slices.Compact(req.AllowedCountries)
+
+	if (req.SalesMode == stripeDirect && req.TaxLiabilityAccount != "") ||
+		(req.SalesMode == stripeManagedPayments && !stripeAccountRef.MatchString(req.TaxLiabilityAccount)) {
+		return errors.New("tax_liability_account must be empty for direct mode or valid acct_* for merchant_of_record")
+	}
+	if req.TaxCode != "" && !stripeTaxCodePattern.MatchString(req.TaxCode) {
+		return errors.New("tax_code must match txcd_*")
+	}
+	if req.SalesMode == stripeManagedPayments {
+		if req.TaxCode == "" {
+			req.TaxCode = defaultStripeDigitalTaxCode
+		}
+		if req.TaxBehavior == "" {
+			req.TaxBehavior = "exclusive"
+		}
+	}
+	if req.Environment == "live" && (req.ReleaseEvidence == "" || req.MarketPolicy == "") {
+		return errors.New("Live Stripe bindings require release_evidence and market_policy")
+	}
+	return nil
 }
 
 func (h *Handler) UpsertProductStripeBinding(c *gin.Context) {
@@ -1078,38 +1153,8 @@ func (h *Handler) UpsertProductStripeBinding(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	req.ProductRef = strings.TrimSpace(req.ProductRef)
-	req.PriceRef = strings.TrimSpace(req.PriceRef)
-	req.TaxLiabilityAccount = strings.TrimSpace(req.TaxLiabilityAccount)
-	req.ReleaseEvidence = strings.TrimSpace(req.ReleaseEvidence)
-	req.MarketPolicy = strings.TrimSpace(req.MarketPolicy)
-	if req.SalesMode == "" {
-		req.SalesMode = stripeDirect
-	}
-	if len(req.AllowedCountries) == 0 {
-		req.AllowedCountries = []string{"US"}
-	}
-	for i := range req.AllowedCountries {
-		req.AllowedCountries[i] = strings.ToUpper(strings.TrimSpace(req.AllowedCountries[i]))
-		if !countryISO2Pattern.MatchString(req.AllowedCountries[i]) {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "countries must contain 2-letter ISO codes"})
-			return
-		}
-	}
-	slices.Sort(req.AllowedCountries)
-	req.AllowedCountries = slices.Compact(req.AllowedCountries)
-
-	if !stripeProductRef.MatchString(req.ProductRef) || !stripePriceRef.MatchString(req.PriceRef) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "product_ref must be prod_* and price_ref must be price_*"})
-		return
-	}
-	if (req.SalesMode == stripeDirect && req.TaxLiabilityAccount != "") ||
-		(req.SalesMode == stripeManagedPayments && !stripeAccountRef.MatchString(req.TaxLiabilityAccount)) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "tax_liability_account must be empty for direct mode or valid acct_* for merchant_of_record"})
-		return
-	}
-	if req.Environment == "live" && (req.ReleaseEvidence == "" || req.MarketPolicy == "") {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Live Stripe bindings require release_evidence and market_policy"})
+	if err := normalizeStripeBindingReq(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 	enabled := true
@@ -1119,15 +1164,17 @@ func (h *Handler) UpsertProductStripeBinding(c *gin.Context) {
 
 	ctx := c.Request.Context()
 	actor := c.GetString("admin_id")
-	if err := verifyFinancialRole(ctx, actor); err != nil {
+	if err := verifyProductSuperAdmin(ctx, actor); err != nil {
 		writeProductError(c, err)
 		return
 	}
 
-	var pType, pCycle string
+	var pType, pCode, pName, pDesc, pCycle string
 	var priceCents int
-	err = db.DB.QueryRow(ctx, `SELECT product_type, price_cents, COALESCE(vip_cycle, '') FROM products WHERE id = $1`, productID).
-		Scan(&pType, &priceCents, &pCycle)
+	err = db.DB.QueryRow(ctx, `
+		SELECT product_type, code, name, description, price_cents, COALESCE(vip_cycle, '')
+		FROM products WHERE id = $1`, productID).
+		Scan(&pType, &pCode, &pName, &pDesc, &priceCents, &pCycle)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeProductError(c, errProductNotFound)
 		return
@@ -1163,106 +1210,190 @@ func (h *Handler) UpsertProductStripeBinding(c *gin.Context) {
 		return
 	}
 
-	// Verify Stripe Account, Product and Price outside DB transactions.
-	catalogBytes, verifyErr := verifyStripeProductBindingRemote(ctx, accountKey, req.Environment, key, req, pType, pCycle, priceCents)
+	reqKey, existingProd, existingPrice, err := prepareStripeBindingWriteTx(ctx, productID, accountID, actor, req)
+	if err != nil {
+		writeProductError(c, err)
+		return
+	}
+
+	prodRef, priceRef, catalogBytes, verifyErr := ensureAndVerifyStripeCatalog(
+		ctx, accountKey, key, req, productID, pType, pCode, pName, pDesc, pCycle, priceCents, reqKey, existingProd, existingPrice,
+	)
 	valState := validationVerified
 	valErr := ""
 	if verifyErr != nil {
 		valState = validationFailed
 		valErr = verifyErr.Error()
 	}
-
-	tx, err := db.DB.Begin(ctx)
-	if err != nil {
-		writeProductError(c, err)
-		return
-	}
-	defer tx.Rollback(context.WithoutCancel(ctx))
-	var valAt any
-	if valState == validationVerified {
-		valAt = time.Now().UTC()
-	}
 	effectiveEnabled := enabled && valState == validationVerified
-	_, err = tx.Exec(ctx, `
-		INSERT INTO product_channel_bindings (
-			product_id, account_id, provider, environment, external_product_ref, external_price_ref,
-			sales_mode, allowed_countries, tax_liability_account, validated_catalog,
-			release_evidence, market_policy, validation_status, validation_error, validated_at,
-			enabled, created_by, updated_by
-		) VALUES (
-			$1, $2, 'stripe', $3, $4, $5,
-			$6, $7, NULLIF($8, ''), $9::jsonb,
-			NULLIF($10, ''), NULLIF($11, ''), $12, NULLIF($13, ''), $14,
-			$15, $16, $16
-		)
-		ON CONFLICT (product_id, account_id) DO UPDATE SET
-			external_product_ref = EXCLUDED.external_product_ref,
-			external_price_ref = EXCLUDED.external_price_ref,
-			sales_mode = EXCLUDED.sales_mode,
-			allowed_countries = EXCLUDED.allowed_countries,
-			tax_liability_account = EXCLUDED.tax_liability_account,
-			validated_catalog = EXCLUDED.validated_catalog,
-			release_evidence = EXCLUDED.release_evidence,
-			market_policy = EXCLUDED.market_policy,
-			validation_status = EXCLUDED.validation_status,
-			validation_error = EXCLUDED.validation_error,
-			validated_at = EXCLUDED.validated_at,
-			enabled = EXCLUDED.enabled,
-			updated_by = EXCLUDED.updated_by,
-			updated_at = now()`,
-		productID, accountID, req.Environment, req.ProductRef, req.PriceRef,
-		req.SalesMode, req.AllowedCountries, req.TaxLiabilityAccount, stringOrNilJSON(catalogBytes),
-		req.ReleaseEvidence, req.MarketPolicy, valState, valErr, valAt,
-		effectiveEnabled, actor)
-	if err != nil {
-		writeProductError(c, err)
-		return
-	}
-	auditAfter, _ := json.Marshal(map[string]any{
-		"provider": "stripe", "environment": req.Environment, "account_id": accountID,
-		"product_ref": req.ProductRef, "price_ref": req.PriceRef, "sales_mode": req.SalesMode,
-		"validation_status": valState, "enabled": effectiveEnabled, "reason": req.Reason,
-	})
-	if err := billingAuditLogTx(ctx, tx, actor, "bind_product_stripe", strconv.FormatInt(productID, 10), "", string(auditAfter)); err != nil {
-		writeProductError(c, err)
-		return
-	}
-	if err := tx.Commit(ctx); err != nil {
+	if err := saveStripeBindingResultTx(
+		ctx, productID, accountID, actor, req, prodRef, priceRef, catalogBytes, valState, valErr, effectiveEnabled,
+	); err != nil {
 		writeProductError(c, err)
 		return
 	}
 	if verifyErr != nil {
-		c.JSON(http.StatusUnprocessableEntity, gin.H{"verified": false, "error": valErr})
+		c.JSON(http.StatusUnprocessableEntity, gin.H{
+			"verified": false, "external_product_ref": prodRef, "external_price_ref": priceRef, "error": valErr,
+		})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"verified": true, "provider": "stripe", "environment": req.Environment, "account_id": accountID,
-		"external_product_ref": req.ProductRef, "external_price_ref": req.PriceRef, "enabled": effectiveEnabled,
+		"external_product_ref": prodRef, "external_price_ref": priceRef, "enabled": effectiveEnabled,
 	})
 }
 
-func verifyStripeProductBindingRemote(ctx context.Context, accountKey, environment, key string, req bindStripeProductReq, productType, vipCycle string, expectedCents int) ([]byte, error) {
-	if key == "" {
-		return nil, errors.New("Stripe account API key is not configured or cannot be decrypted")
+func prepareStripeBindingWriteTx(
+	ctx context.Context, productID, accountID int64, actor string, req bindStripeProductReq,
+) (reqKey, existingProd, existingPrice string, err error) {
+	tx, err := db.DB.Begin(ctx)
+	if err != nil {
+		return "", "", "", err
 	}
-	if err := validateStripeSecretFormat(environment, key, ""); err != nil {
-		return nil, err
+	defer tx.Rollback(context.WithoutCancel(ctx))
+	if err := requireSuperAdminTx(ctx, tx, actor); err != nil {
+		return "", "", "", err
+	}
+	err = tx.QueryRow(ctx, `
+		INSERT INTO product_channel_bindings (
+			product_id, account_id, provider, environment, sales_mode, allowed_countries, tax_liability_account,
+			release_evidence, market_policy, validation_status, first_sent_at, created_by, updated_by
+		) VALUES (
+			$1, $2, 'stripe', $3, $4, $5, NULLIF($6, ''),
+			NULLIF($7, ''), NULLIF($8, ''), 'pending', now(), $9, $9
+		)
+		ON CONFLICT (product_id, account_id) DO UPDATE SET
+			first_sent_at = COALESCE(product_channel_bindings.first_sent_at, now()),
+			updated_by = EXCLUDED.updated_by,
+			updated_at = now()
+		RETURNING request_key::text, external_product_ref, external_price_ref`,
+		productID, accountID, req.Environment, req.SalesMode, req.AllowedCountries, req.TaxLiabilityAccount,
+		req.ReleaseEvidence, req.MarketPolicy, actor).Scan(&reqKey, &existingProd, &existingPrice)
+	if err != nil {
+		return "", "", "", err
+	}
+	return reqKey, existingProd, existingPrice, tx.Commit(ctx)
+}
+
+func saveStripeBindingResultTx(
+	ctx context.Context, productID, accountID int64, actor string, req bindStripeProductReq,
+	prodRef, priceRef string, catalogBytes []byte, valState, valErr string, effectiveEnabled bool,
+) error {
+	tx, err := db.DB.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(context.WithoutCancel(ctx))
+	if err := requireSuperAdminTx(ctx, tx, actor); err != nil {
+		return err
+	}
+	var valAt any
+	if valState == validationVerified {
+		valAt = time.Now().UTC()
+	}
+	_, err = tx.Exec(ctx, `
+		UPDATE product_channel_bindings
+		SET external_product_ref = $3,
+		    external_price_ref = $4,
+		    sales_mode = $5,
+		    allowed_countries = $6,
+		    tax_liability_account = NULLIF($7, ''),
+		    validated_catalog = $8::jsonb,
+		    release_evidence = NULLIF($9, ''),
+		    market_policy = NULLIF($10, ''),
+		    validation_status = $11,
+		    validation_error = NULLIF($12, ''),
+		    validated_at = $13,
+		    enabled = $14,
+		    updated_by = $15,
+		    updated_at = now()
+		WHERE product_id = $1 AND account_id = $2`,
+		productID, accountID, prodRef, priceRef, req.SalesMode, req.AllowedCountries, req.TaxLiabilityAccount,
+		stringOrNilJSON(catalogBytes), req.ReleaseEvidence, req.MarketPolicy, valState, valErr, valAt, effectiveEnabled, actor)
+	if err != nil {
+		return err
+	}
+	auditAfter, _ := json.Marshal(map[string]any{
+		"provider": "stripe", "environment": req.Environment, "account_id": accountID,
+		"product_ref": prodRef, "price_ref": priceRef, "sales_mode": req.SalesMode,
+		"validation_status": valState, "enabled": effectiveEnabled, "reason": strings.TrimSpace(req.Reason),
+	})
+	if err := billingAuditLogTx(ctx, tx, actor, "bind_product_stripe", strconv.FormatInt(productID, 10), "", string(auditAfter)); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func ensureAndVerifyStripeCatalog(
+	ctx context.Context, accountKey, key string, req bindStripeProductReq,
+	productID int64, productType, code, name, desc, vipCycle string, priceCents int,
+	reqKey, prodRef, priceRef string,
+) (string, string, []byte, error) {
+	if key == "" {
+		return prodRef, priceRef, nil, errors.New("Stripe account API key is not configured or cannot be decrypted")
+	}
+	if err := validateStripeSecretFormat(req.Environment, key, ""); err != nil {
+		return prodRef, priceRef, nil, err
 	}
 	var merchant struct {
 		ID string `json:"id"`
 	}
 	if err := getStripeCatalogObject(ctx, "account", key, &merchant); err != nil {
-		return nil, err
+		return prodRef, priceRef, nil, err
 	}
 	if merchant.ID != accountKey {
-		return nil, fmt.Errorf("Stripe API key belongs to %s instead of %s", merchant.ID, accountKey)
+		return prodRef, priceRef, nil, fmt.Errorf("Stripe API key belongs to %s instead of %s", merchant.ID, accountKey)
 	}
+
+	// Reuse previously provisioned Stripe Product & Price when already valid for the target mode.
+	if prodRef != "" && priceRef != "" {
+		if catalogBytes, err := verifyStripeCatalogPair(ctx, req.Environment, key, prodRef, priceRef, req.SalesMode, productType, vipCycle, priceCents); err == nil {
+			return prodRef, priceRef, catalogBytes, nil
+		} else if req.SalesMode == stripeManagedPayments {
+			// When upgrading an existing direct binding to MoR, set tax_code and issue a Price with tax_behavior.
+			if err := updateStripeCatalogProductTaxCode(ctx, key, prodRef, req.TaxCode); err != nil {
+				return prodRef, priceRef, nil, err
+			}
+			priceRef = ""
+		} else {
+			return prodRef, priceRef, nil, err
+		}
+	}
+
+	if prodRef == "" {
+		prodIdem := uuid.NewSHA1(uuid.NameSpaceOID, []byte("stripe:product:"+reqKey)).String()
+		createdProd, err := createStripeCatalogProduct(ctx, key, prodIdem, name, desc, req.Environment, code, productID, productType, req.TaxCode)
+		if err != nil {
+			return prodRef, priceRef, nil, err
+		}
+		prodRef = createdProd
+	} else if req.SalesMode == stripeManagedPayments && req.TaxCode != "" {
+		if err := updateStripeCatalogProductTaxCode(ctx, key, prodRef, req.TaxCode); err != nil {
+			return prodRef, priceRef, nil, err
+		}
+	}
+
+	if priceRef == "" {
+		priceIdem := uuid.NewSHA1(uuid.NameSpaceOID, []byte("stripe:price:"+reqKey+":"+req.SalesMode+":"+req.TaxBehavior)).String()
+		createdPrice, err := createStripeCatalogPrice(ctx, key, priceIdem, prodRef, priceCents, productType, vipCycle, req.Environment, code, productID, req.TaxBehavior)
+		if err != nil {
+			return prodRef, priceRef, nil, err
+		}
+		priceRef = createdPrice
+	}
+
+	catalogBytes, err := verifyStripeCatalogPair(ctx, req.Environment, key, prodRef, priceRef, req.SalesMode, productType, vipCycle, priceCents)
+	return prodRef, priceRef, catalogBytes, err
+}
+
+func verifyStripeCatalogPair(ctx context.Context, environment, key, prodRef, priceRef, salesMode, productType, vipCycle string, expectedCents int) ([]byte, error) {
 	var price stripeCatalogPrice
-	if err := getStripeCatalogObject(ctx, "prices/"+url.PathEscape(req.PriceRef)+"?expand%5B%5D=product", key, &price); err != nil {
+	if err := getStripeCatalogObject(ctx, "prices/"+url.PathEscape(priceRef)+"?expand%5B%5D=product", key, &price); err != nil {
 		return nil, err
 	}
 	live := environment == "live"
-	if price.ID != req.PriceRef || price.Product.ID != req.ProductRef || !price.Active || !price.Product.Active ||
+	if price.ID != priceRef || price.Product.ID != prodRef || !price.Active || !price.Product.Active ||
 		price.Live != live || price.Product.Live != live || !strings.EqualFold(price.Currency, "usd") {
 		return nil, errors.New("Stripe Price/Product must be active, USD and match this environment")
 	}
@@ -1276,7 +1407,7 @@ func verifyStripeProductBindingRemote(ctx context.Context, accountKey, environme
 	} else if price.Kind != "one_time" {
 		return nil, errors.New("Stripe Price for single/whole_book products must have type=one_time")
 	}
-	if req.SalesMode == stripeManagedPayments && (price.Product.TaxCode == "" || (live && price.TaxBehavior != "inclusive" && price.TaxBehavior != "exclusive")) {
+	if salesMode == stripeManagedPayments && (price.Product.TaxCode == "" || (live && price.TaxBehavior != "inclusive" && price.TaxBehavior != "exclusive")) {
 		return nil, errors.New("Managed Payments requires a Stripe product tax_code and explicit tax_behavior")
 	}
 	return json.Marshal(price)
@@ -1300,6 +1431,16 @@ func (h *Handler) PublishProduct(c *gin.Context) {
 	}
 	ctx := c.Request.Context()
 	actor := c.GetString("admin_id")
+	if req.Environment == "live" {
+		if err := verifyProductSuperAdmin(ctx, actor); err != nil {
+			writeProductError(c, err)
+			return
+		}
+		if strings.TrimSpace(req.Reason) == "" {
+			writeProductError(c, fmt.Errorf("%w: a reason is required for live publication", errProductInvalid))
+			return
+		}
+	}
 
 	// Pre-evaluate dual-channel readiness outside lock for crisp diagnostics, then re-verify inside lock.
 	items, err := loadProductViews(ctx, id, req.Environment, "", "", "")
@@ -1327,7 +1468,11 @@ func (h *Handler) PublishProduct(c *gin.Context) {
 		return
 	}
 	defer tx.Rollback(context.WithoutCancel(ctx))
-	if err := requireFinancialAdmin(ctx, tx, actor); err != nil {
+	authorize := requireFinancialAdmin
+	if req.Environment == "live" {
+		authorize = requireSuperAdminTx
+	}
+	if err := authorize(ctx, tx, actor); err != nil {
 		writeProductError(c, err)
 		return
 	}
@@ -1494,7 +1639,9 @@ func stringOrNilJSON(raw []byte) any {
 
 func writeProductError(c *gin.Context, err error) {
 	switch {
-	case errors.Is(err, errCaseForbidden), errors.Is(err, ErrRefundForbidden):
+	case errors.Is(err, errCaseForbidden):
+		c.JSON(http.StatusForbidden, gin.H{"error": "SuperAdmin permission required"})
+	case errors.Is(err, ErrRefundForbidden):
 		c.JSON(http.StatusForbidden, gin.H{"error": "Finance or SuperAdmin permission required"})
 	case errors.Is(err, errProductNotFound):
 		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})

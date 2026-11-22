@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -39,24 +41,118 @@ type stripeCatalogPrice struct {
 }
 
 func getStripeCatalogObject(ctx context.Context, path, key string, output any) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, stripeAPIBaseURL+"/v1/"+path, nil)
+	return doStripeCatalogFormRequest(ctx, http.MethodGet, path, key, "", nil, output)
+}
+
+func doStripeCatalogFormRequest(ctx context.Context, method, path, key, idemKey string, form url.Values, output any) error {
+	var body io.Reader
+	if form != nil {
+		body = strings.NewReader(form.Encode())
+	}
+	req, err := http.NewRequestWithContext(ctx, method, stripeAPIBaseURL+"/v1/"+path, body)
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Authorization", "Bearer "+key)
 	req.Header.Set("Stripe-Version", stripeCatalogAPIVersion)
+	if form != nil {
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	}
+	if idemKey != "" {
+		req.Header.Set("Idempotency-Key", idemKey)
+	}
 	res, err := stripeCatalogHTTP.Do(req)
 	if err != nil {
 		return fmt.Errorf("%w: Stripe API unavailable", errStripeCatalog)
 	}
 	defer res.Body.Close()
-	if res.StatusCode != http.StatusOK {
+	rawBody, err := io.ReadAll(io.LimitReader(res.Body, 1<<20))
+	if err != nil {
+		return fmt.Errorf("%w: failed to read Stripe response", errStripeCatalog)
+	}
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		var apiErr struct {
+			Error struct {
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		if json.Unmarshal(rawBody, &apiErr) == nil && strings.TrimSpace(apiErr.Error.Message) != "" {
+			return fmt.Errorf("%w: Stripe API returned %d: %s", errStripeCatalog, res.StatusCode, strings.TrimSpace(apiErr.Error.Message))
+		}
 		return fmt.Errorf("%w: Stripe API returned %d", errStripeCatalog, res.StatusCode)
 	}
-	if err := json.NewDecoder(io.LimitReader(res.Body, 1<<20)).Decode(output); err != nil {
-		return fmt.Errorf("%w: invalid Stripe catalog response", errStripeCatalog)
+	if output != nil {
+		if err := json.Unmarshal(rawBody, output); err != nil {
+			return fmt.Errorf("%w: invalid Stripe catalog response", errStripeCatalog)
+		}
 	}
 	return nil
+}
+
+func createStripeCatalogProduct(
+	ctx context.Context, key, idemKey, name, desc, env, code string, productID int64, productType, taxCode string,
+) (string, error) {
+	form := url.Values{
+		"name":                            {name},
+		"active":                          {"true"},
+		"metadata[starnovel_product_id]":  {strconv.FormatInt(productID, 10)},
+		"metadata[starnovel_product_code]":{code},
+		"metadata[starnovel_product_type]":{productType},
+		"metadata[starnovel_environment]": {env},
+	}
+	if strings.TrimSpace(desc) != "" {
+		form.Set("description", strings.TrimSpace(desc))
+	}
+	if strings.TrimSpace(taxCode) != "" {
+		form.Set("tax_code", strings.TrimSpace(taxCode))
+	}
+	var out struct {
+		ID string `json:"id"`
+	}
+	if err := doStripeCatalogFormRequest(ctx, http.MethodPost, "products", key, idemKey, form, &out); err != nil {
+		return "", err
+	}
+	if !strings.HasPrefix(out.ID, "prod_") {
+		return "", fmt.Errorf("%w: Stripe did not return a valid product ID", errStripeCatalog)
+	}
+	return out.ID, nil
+}
+
+func updateStripeCatalogProductTaxCode(ctx context.Context, key, prodID, taxCode string) error {
+	form := url.Values{"tax_code": {strings.TrimSpace(taxCode)}}
+	return doStripeCatalogFormRequest(ctx, http.MethodPost, "products/"+url.PathEscape(prodID), key, "", form, nil)
+}
+
+func createStripeCatalogPrice(
+	ctx context.Context, key, idemKey, prodID string, priceCents int, productType, vipCycle, env, code string, productID int64, taxBehavior string,
+) (string, error) {
+	form := url.Values{
+		"product":                         {prodID},
+		"currency":                        {"usd"},
+		"unit_amount":                     {strconv.Itoa(priceCents)},
+		"active":                          {"true"},
+		"metadata[starnovel_product_id]":  {strconv.FormatInt(productID, 10)},
+		"metadata[starnovel_product_code]":{code},
+		"metadata[starnovel_product_type]":{productType},
+		"metadata[starnovel_environment]": {env},
+	}
+	if productType == productTypeVIP {
+		form.Set("recurring[interval]", vipCycle)
+		form.Set("recurring[interval_count]", "1")
+	}
+	if strings.TrimSpace(taxBehavior) != "" {
+		form.Set("tax_behavior", strings.TrimSpace(taxBehavior))
+	}
+	var out struct {
+		ID string `json:"id"`
+	}
+	if err := doStripeCatalogFormRequest(ctx, http.MethodPost, "prices", key, idemKey, form, &out); err != nil {
+		return "", err
+	}
+	if !strings.HasPrefix(out.ID, "price_") {
+		return "", fmt.Errorf("%w: Stripe did not return a valid price ID", errStripeCatalog)
+	}
+	return out.ID, nil
 }
 
 func verifyStripeOffer(ctx context.Context, accountID int64, actor string, input stripeVIPInput) (*stripeCatalogPrice, error) {

@@ -28,7 +28,7 @@ type BillingService interface {
 	ListSettlementReportIssues(context.Context, reconciliationPage) (reportIssuePage, error)
 	GetPaymentActivity(context.Context, reconciliationScope) (paymentActivity, error)
 
-	ListOrders(ctx context.Context, page, pageSize int, status, userID, orderType, promotionLinkID, paidStart, paidEnd, orderID string) ([]Order, int, error)
+	ListOrders(ctx context.Context, page, pageSize int, status, userID, orderType, promotionLinkID, paidStart, paidEnd, orderID string, scope reconciliationScope) ([]Order, int, error)
 	GetThirdPartyPaymentDetails(ctx context.Context, orderID int64) (*ThirdPartyPaymentOrder, error)
 
 	ListRechargeTemplates(ctx context.Context) ([]RechargeTemplate, error)
@@ -53,7 +53,7 @@ func (s *billingService) ListVIPOfferPublications(ctx context.Context) ([]VIPOff
 	return s.repo.ListVIPOfferPublications(ctx)
 }
 
-func (s *billingService) ListOrders(ctx context.Context, page, pageSize int, status, userID, orderType, promotionLinkID, paidStart, paidEnd, orderID string) ([]Order, int, error) {
+func (s *billingService) ListOrders(ctx context.Context, page, pageSize int, status, userID, orderType, promotionLinkID, paidStart, paidEnd, orderID string, scope reconciliationScope) ([]Order, int, error) {
 	offset := (page - 1) * pageSize
 
 	var whereClauses []string
@@ -113,6 +113,25 @@ func (s *billingService) ListOrders(ctx context.Context, page, pageSize int, sta
 		argCount++
 	}
 
+	if scope.Environment != "" {
+		whereClauses = append(whereClauses, fmt.Sprintf("payment_order_environment(recharge_orders)=$%d", argCount))
+		args = append(args, scope.Environment)
+		argCount++
+	}
+	if scope.Provider != "" || scope.AccountID != 0 {
+		whereClauses = append(whereClauses, fmt.Sprintf(`(
+			EXISTS (SELECT 1 FROM third_party_payment_orders p
+				LEFT JOIN payment_channel_accounts a ON a.id=p.account_id
+				WHERE p.order_id=recharge_orders.id AND p.status IN ('VERIFIED','COMPLETED')
+					AND ($%[1]d='' OR p.payment_provider=$%[1]d)
+					AND ($%[2]d::bigint=0 OR (a.id=$%[2]d AND a.provider=p.payment_provider)))
+			OR ($%[2]d::bigint=0 AND payment_method=$%[1]d AND NOT EXISTS
+				(SELECT 1 FROM third_party_payment_orders p WHERE p.order_id=recharge_orders.id AND p.status IN ('VERIFIED','COMPLETED')))
+		)`, argCount, argCount+1))
+		args = append(args, scope.Provider, scope.AccountID)
+		argCount += 2
+	}
+
 	whereSQL := ""
 	if len(whereClauses) > 0 {
 		whereSQL = "WHERE " + strings.Join(whereClauses, " AND ")
@@ -127,10 +146,19 @@ func (s *billingService) ListOrders(ctx context.Context, page, pageSize int, sta
 	selectQuery := fmt.Sprintf(`
 		SELECT id, user_id, COALESCE(external_ref_id, ''), amount_cents, currency, coins, bonus_coins_credited, payment_method, status, COALESCE(utm_source, ''), COALESCE(utm_campaign, ''), paid_at, order_type, promotion_link_id, novel_id, created_at, updated_at, COALESCE(reconciliation_note, ''),
 			COALESCE((SELECT r.status FROM payment_refund_commands r WHERE r.order_id=recharge_orders.id ORDER BY r.created_at DESC LIMIT 1),''),
-			COALESCE(payment_order_environment(recharge_orders),'')
+			COALESCE(payment_order_environment(recharge_orders),''),
+			COALESCE(CASE WHEN receipt_scope.receipts=0 THEN payment_method ELSE receipt_scope.provider END,''),
+			COALESCE(receipt_scope.account_id,'')
 		FROM recharge_orders
+		CROSS JOIN LATERAL (
+			SELECT count(*) AS receipts,
+				CASE WHEN count(DISTINCT p.payment_provider)=1 THEN min(p.payment_provider) END AS provider,
+				CASE WHEN count(DISTINCT a.id)=1 AND count(a.id)=count(*) THEN min(a.id)::text END AS account_id
+			FROM third_party_payment_orders p LEFT JOIN payment_channel_accounts a ON a.id=p.account_id AND a.provider=p.payment_provider
+			WHERE p.order_id=recharge_orders.id AND p.status IN ('VERIFIED','COMPLETED')
+		) receipt_scope
 		%s
-		ORDER BY created_at DESC
+		ORDER BY created_at DESC,id DESC
 		LIMIT $%d OFFSET $%d`, whereSQL, argCount, argCount+1)
 
 	args = append(args, pageSize, offset)

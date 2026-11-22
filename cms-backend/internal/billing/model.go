@@ -19,6 +19,8 @@ type VIPOfferPublication struct {
 
 type Order struct {
 	PaymentEnvironment string     `json:"payment_environment,omitempty"`
+	PaymentProvider    string     `json:"payment_provider,omitempty"`
+	PaymentAccountID   string     `json:"payment_account_id,omitempty"`
 	ReconciliationNote string     `json:"reconciliation_note,omitempty"`
 	RefundStatus       string     `json:"refund_status,omitempty"`
 	ID                 int64      `json:"id"`

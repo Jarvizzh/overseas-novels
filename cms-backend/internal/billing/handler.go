@@ -27,6 +27,7 @@ func (h *Handler) RegisterRoutes(rg *gin.RouterGroup) {
 	orders := rg.Group("/orders", auth.AuthMiddleware())
 	summaryRoles := paymentRoles("SuperAdmin", "Finance", "Admin", "Support")
 	financeRoles := paymentRoles("SuperAdmin", "Finance")
+	superAdmin := paymentRoles("SuperAdmin")
 	{
 		orders.GET("", summaryRoles, h.ListOrders)
 		orders.GET("/:id/payment-details", financeRoles, h.GetThirdPartyPaymentDetails)
@@ -37,6 +38,7 @@ func (h *Handler) RegisterRoutes(rg *gin.RouterGroup) {
 	h.registerAftercareRoutes(payments, financeRoles)
 	{
 		payments.GET("/orders", summaryRoles, h.ListOrders)
+		payments.GET("/accounts", paymentRoles("SuperAdmin", "Finance", "Admin"), h.listPaymentAccountOptions)
 		payments.GET("/orders/:id/payment-details", financeRoles, h.GetThirdPartyPaymentDetails)
 		payments.GET("/orders/:id/receipts", financeRoles, h.ListPaymentReceipts)
 		payments.GET("/orders/:id/checkout-evidence", financeRoles, h.getCheckoutEvidence)
@@ -57,9 +59,11 @@ func (h *Handler) RegisterRoutes(rg *gin.RouterGroup) {
 		payments.PUT("/channels/:id/stripe-one-time/:slot", paymentRoles("SuperAdmin"), h.updateStripeOneTimeOffer)
 		payments.GET("/channels/:id/stripe-vip", paymentRoles("SuperAdmin"), h.listStripeVIPOffers)
 		payments.PUT("/channels/:id/stripe-vip/:slot", paymentRoles("SuperAdmin"), h.updateStripeVIPOffer)
-		payments.PUT("/channels/:id/aftercare-policy", paymentRoles("SuperAdmin"), h.updateAftercarePolicy)
+		payments.GET("/channels/:id/aftercare-policy", superAdmin, h.getAftercarePolicy)
+		payments.PUT("/channels/:id/aftercare-policy", superAdmin, h.updateAftercarePolicy)
 		payments.POST("/refunds", financeRoles, h.SubmitRefundCommand)
 		payments.GET("/refunds", financeRoles, h.ListRefundCommands)
+		payments.GET("/refunds/queue", financeRoles, h.ListRefundQueue)
 		payments.GET("/refunds/request/:key", financeRoles, h.GetRefundCommand)
 		payments.GET("/refunds/:id", financeRoles, h.GetRefundCommand)
 		payments.POST("/refunds/:id/reconcile-paypal", financeRoles, h.ReconcilePayPalRefund)
@@ -71,8 +75,8 @@ func (h *Handler) RegisterRoutes(rg *gin.RouterGroup) {
 		products.GET("/:id", summaryRoles, h.GetProduct)
 		products.POST("", financeRoles, h.CreateProduct)
 		products.POST("/:id/copy", financeRoles, h.CopyProduct)
-		products.PUT("/:id/bindings/paypal", financeRoles, h.UpsertProductPayPalBinding)
-		products.PUT("/:id/bindings/stripe", financeRoles, h.UpsertProductStripeBinding)
+		products.PUT("/:id/bindings/paypal", superAdmin, h.UpsertProductPayPalBinding)
+		products.PUT("/:id/bindings/stripe", superAdmin, h.UpsertProductStripeBinding)
 		products.POST("/:id/publish", financeRoles, h.PublishProduct)
 		products.POST("/:id/pause", financeRoles, h.PauseProduct)
 		products.POST("/:id/retire", financeRoles, h.RetireProduct)
@@ -118,7 +122,8 @@ func (h *Handler) ListOrders(c *gin.Context) {
 	paidStart := c.Query("paid_start")
 	paidEnd := c.Query("paid_end")
 	orderID := c.Query("order_id")
-	if page < 1 || page > 1000000 || pageSize < 1 || pageSize > 100 {
+	var scope reconciliationScope
+	if c.ShouldBindQuery(&scope) != nil || page < 1 || page > 1000000 || pageSize < 1 || pageSize > 100 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid payment order filters"})
 		return
 	}
@@ -137,7 +142,7 @@ func (h *Handler) ListOrders(c *gin.Context) {
 	}
 
 	ctx := c.Request.Context()
-	orders, total, err := h.service.ListOrders(ctx, page, pageSize, status, userID, orderType, promotionLinkID, paidStart, paidEnd, orderID)
+	orders, total, err := h.service.ListOrders(ctx, page, pageSize, status, userID, orderType, promotionLinkID, paidStart, paidEnd, orderID, scope)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to query orders: " + err.Error()})
 		return
@@ -156,6 +161,7 @@ func (h *Handler) ListOrders(c *gin.Context) {
 		for i := range orders {
 			orders[i].ExternalRefID = ""
 			orders[i].ReconciliationNote = ""
+			orders[i].PaymentAccountID = ""
 		}
 	}
 	c.JSON(http.StatusOK, gin.H{
@@ -247,6 +253,16 @@ func (h *Handler) ListRefundCommands(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"refunds": commands})
+}
+
+func (h *Handler) ListRefundQueue(c *gin.Context) {
+	var filter refundQueueFilter
+	if c.ShouldBindQuery(&filter) != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid refund queue filters"})
+		return
+	}
+	result, err := listRefundQueue(c.Request.Context(), filter)
+	writeCaseResult(c, result, err)
 }
 
 func writeRefundCommandError(c *gin.Context, err error) {

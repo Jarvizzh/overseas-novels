@@ -166,10 +166,10 @@ export interface BindPayPalProductPayload {
 export interface BindStripeProductPayload {
   environment: PaymentEnvironment;
   account_id?: number;
-  product_ref: string;
-  price_ref: string;
   sales_mode: StripeSalesMode;
   tax_liability_account?: string;
+  tax_code?: string;
+  tax_behavior?: 'exclusive' | 'inclusive';
   countries: string[];
   release_evidence?: string;
   market_policy?: string;

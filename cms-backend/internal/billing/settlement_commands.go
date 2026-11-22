@@ -21,15 +21,18 @@ import (
 const settlementUploadLimit = 8 << 20
 
 type settlementCommandInput struct {
-	Kind            string `form:"kind" json:"kind" binding:"required,oneof=paypal_report stripe_payout stripe_report bank_statement bank_match"`
-	Environment     string `form:"environment" json:"environment" binding:"required,oneof=sandbox live"`
-	AccountID       int64  `form:"account_id" json:"account_id" binding:"min=0"`
-	Reference       string `form:"reference" json:"reference" binding:"max=160"`
-	BankAccount     string `form:"bank_account" json:"bank_account" binding:"max=160"`
-	BankTransaction string `form:"bank_transaction" json:"bank_transaction" binding:"max=160"`
-	BankEvidence    string `form:"bank_evidence" json:"bank_evidence" binding:"max=500"`
-	Reason          string `form:"reason" json:"reason" binding:"required,max=500"`
-	RequestKey      string `form:"request_key" json:"-" binding:"required,uuid"`
+	Kind             string `form:"kind" json:"kind" binding:"required,oneof=paypal_report stripe_payout stripe_report bank_statement bank_match"`
+	Environment      string `form:"environment" json:"environment" binding:"required,oneof=sandbox live"`
+	AccountID        int64  `form:"account_id" json:"account_id" binding:"min=0"`
+	Reference        string `form:"reference" json:"reference" binding:"max=160"`
+	BankAccount      string `form:"bank_account" json:"bank_account" binding:"max=160"`
+	BankTransaction  string `form:"bank_transaction" json:"bank_transaction" binding:"max=160"`
+	BankEvidence     string `form:"bank_evidence" json:"bank_evidence" binding:"max=500"`
+	Reason           string `form:"reason" json:"reason" binding:"required,max=500"`
+	RequestKey       string `form:"request_key" json:"-" binding:"required,uuid"`
+	ReportImportID   int64  `form:"report_import_id" json:"report_import_id,omitempty" binding:"min=0"`
+	ReportSourceFile string `form:"report_source_file" json:"report_source_file,omitempty" binding:"max=255"`
+	ReportRowNumber  int    `form:"report_row_number" json:"report_row_number,omitempty" binding:"min=0,max=2147483647"`
 }
 
 type settlementUpload struct {
@@ -50,6 +53,13 @@ func (h *Handler) submitSettlementCommand(c *gin.Context) {
 		return
 	}
 	files := c.Request.MultipartForm.File["files"]
+	if input.ReportImportID != 0 || input.ReportSourceFile != "" || input.ReportRowNumber != 0 {
+		if (input.Kind != "paypal_report" && input.Kind != "stripe_report") ||
+			input.ReportImportID == 0 || input.ReportSourceFile == "" || input.ReportRowNumber == 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Provide the original report, source file and row number"})
+			return
+		}
+	}
 	switch input.Kind {
 	case "paypal_report":
 		if input.AccountID == 0 || len(files) == 0 || len(files) > 20 {
@@ -123,6 +133,23 @@ func saveSettlementCommand(ctx context.Context, actor string, input settlementCo
 			return nil, errCaseConflict
 		}
 	}
+	if input.ReportImportID != 0 {
+		source := "stripe_report"
+		if input.Kind == "paypal_report" {
+			source = "paypal_settlement"
+		}
+		var matches bool
+		err := tx.QueryRow(ctx, `SELECT EXISTS (
+			SELECT 1 FROM payment_settlement_imports i JOIN payment_settlement_rows r ON r.import_id=i.id
+			WHERE i.id=$1 AND i.account_id=$2 AND i.source=$3 AND r.source_file=$4 AND r.row_number=$5
+		)`, input.ReportImportID, input.AccountID, source, input.ReportSourceFile, input.ReportRowNumber).Scan(&matches)
+		if err != nil {
+			return nil, err
+		}
+		if !matches {
+			return nil, errCaseConflict
+		}
+	}
 	params, err := json.Marshal(input)
 	if err != nil {
 		return nil, err
@@ -153,16 +180,25 @@ func saveSettlementCommand(ctx context.Context, actor string, input settlementCo
 }
 
 func (h *Handler) listSettlementCommands(c *gin.Context) {
-	environment := c.Query("environment")
-	if environment != "live" && environment != "sandbox" {
+	var filter reconciliationPage
+	if c.ShouldBindQuery(&filter) != nil || filter.Environment == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Select a payment environment"})
 		return
 	}
 	var result json.RawMessage
-	err := db.DB.QueryRow(c.Request.Context(), `SELECT COALESCE(jsonb_agg(to_jsonb(op) ORDER BY op.created_at DESC),'[]') FROM (
-		SELECT id::text,kind,environment,status,parameters->>'reference' AS reference,result,error,actor_id,reason,created_at,updated_at
-		FROM payment_settlement_commands WHERE environment=$1 ORDER BY created_at DESC,id LIMIT 30) op`, environment).Scan(&result)
-	writeCaseResult(c, gin.H{"commands": result}, err)
+	err := db.DB.QueryRow(c.Request.Context(), `WITH filtered AS MATERIALIZED (SELECT
+		c.id::text,c.kind,c.environment,c.status,c.parameters->>'reference' AS reference,c.result,c.error,
+		`+settlementReportIssueSQL+` AS report_issue,
+		COALESCE(NULLIF(o.username,''),c.actor_id) AS actor,c.reason,c.created_at,c.updated_at,
+		a.provider,c.account_id::text
+		FROM payment_settlement_commands c LEFT JOIN payment_channel_accounts a ON a.id=c.account_id
+		LEFT JOIN admins o ON o.id=c.actor_id
+		WHERE c.environment=$1 AND ($2='' OR a.provider=$2) AND ($3::bigint=0 OR c.account_id=$3)
+	), page AS (SELECT * FROM filtered ORDER BY created_at DESC,id DESC LIMIT $4 OFFSET $5)
+	SELECT jsonb_build_object('commands',COALESCE((SELECT jsonb_agg(to_jsonb(page) ORDER BY created_at DESC,id DESC) FROM page),'[]'),
+		'total',(SELECT count(*) FROM filtered))`, filter.Environment, filter.Provider, filter.AccountID,
+		reconciliationPageSize, filter.offset()).Scan(&result)
+	writeCaseResult(c, result, err)
 }
 
 func (h *Handler) listSettlementAccounts(c *gin.Context) {
@@ -174,6 +210,44 @@ func (h *Handler) listSettlementAccounts(c *gin.Context) {
 		FROM payment_channel_accounts a LEFT JOIN payment_ledger_sync_settings s ON s.account_id=a.id`).Scan(&result)
 	writeCaseResult(c, gin.H{"accounts": result}, err)
 }
+
+func (h *Handler) getSettlementCommand(c *gin.Context) {
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil || id == uuid.Nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid settlement command identifier"})
+		return
+	}
+	result, err := findSettlementCommand(c.Request.Context(), id, uuid.Nil, "")
+	writeCaseResult(c, result, err)
+}
+
+func (h *Handler) getOwnSettlementCommand(c *gin.Context) {
+	key, err := uuid.Parse(c.Param("key"))
+	if err != nil || key == uuid.Nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid settlement request key"})
+		return
+	}
+	result, err := findSettlementCommand(c.Request.Context(), uuid.Nil, key, c.GetString("admin_id"))
+	writeCaseResult(c, result, err)
+}
+
+func findSettlementCommand(ctx context.Context, id, key uuid.UUID, actor string) (json.RawMessage, error) {
+	var result json.RawMessage
+	err := db.DB.QueryRow(ctx, `SELECT to_jsonb(op) FROM (SELECT
+		c.id::text,c.kind,c.environment,c.status,c.parameters->>'reference' AS reference,c.result,c.error,
+		`+settlementReportIssueSQL+` AS report_issue,
+		COALESCE(NULLIF(o.username,''),c.actor_id) AS actor,c.reason,c.created_at,c.updated_at,
+		a.provider,c.account_id::text
+		FROM payment_settlement_commands c LEFT JOIN payment_channel_accounts a ON a.id=c.account_id
+		LEFT JOIN admins o ON o.id=c.actor_id
+		WHERE (c.id=$1 AND $2::uuid='00000000-0000-0000-0000-000000000000')
+			OR (c.request_key=$2 AND c.actor_id=$3)) op`, id, key, actor).Scan(&result)
+	return result, err
+}
+
+const settlementReportIssueSQL = `CASE WHEN c.parameters ? 'report_import_id' THEN jsonb_build_object(
+	'import_id',c.parameters->>'report_import_id','source_file',c.parameters->>'report_source_file',
+	'row_number',c.parameters->'report_row_number') END`
 
 func (h *Handler) updateAutomaticLedger(c *gin.Context) {
 	id, err := strconv.ParseInt(c.Param("id"), 10, 64)

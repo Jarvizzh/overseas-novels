@@ -310,8 +310,8 @@ function AppContent() {
           <Routes>
             <Route path="/" element={<DashboardTab finance={PAYMENT_FINANCE_ROLES.includes(admin.role)} />} />
             <Route path="/novels" element={<NovelsTab />} />
-            <Route path="/users" element={<UsersTab />} />
-            <Route path="/orders" element={PAYMENT_SUMMARY_ROLES.includes(admin.role) ? <Navigate to="/payments/orders" replace /> : <Navigate to="/" replace />} />
+            <Route path="/users" element={<UsersTab showPaymentLinks={PAYMENT_SUMMARY_ROLES.includes(admin.role)} />} />
+            <Route path="/orders" element={PAYMENT_SUMMARY_ROLES.includes(admin.role) ? <Navigate to={'/payments/orders' + location.search} replace /> : <Navigate to="/" replace />} />
             <Route path="/payments" element={PAYMENT_SUMMARY_ROLES.includes(admin.role) ? <Navigate to="/payments/orders" replace /> : <Navigate to="/" replace />} />
             <Route element={<Suspense fallback={<p role="status">正在加载支付中心…</p>}><Outlet /></Suspense>}>
               <Route path="/payments/orders" element={admin.role === 'Support' ? <SupportPayments /> :
@@ -325,11 +325,14 @@ function AppContent() {
               <Route path="/payments/disputes" element={PAYMENT_FINANCE_ROLES.includes(admin.role) ?
                 <PaymentCases key="disputes" view="disputes" /> : <Navigate to="/" replace />} />
               <Route path="/payments/reconciliation" element={PAYMENT_FINANCE_ROLES.includes(admin.role) ?
-                <PaymentReconciliation /> : <Navigate to="/" replace />} />
+                <PaymentReconciliation key={admin.id} actor={admin.id} /> : <Navigate to="/" replace />} />
               <Route path="/payments/channels" element={admin.role === 'SuperAdmin' ? <PaymentChannels /> : <Navigate to="/" replace />} />
+              <Route path="/payments/products" element={PAYMENT_SUMMARY_ROLES.includes(admin.role) ?
+                <ProductsPage canWrite={PAYMENT_FINANCE_ROLES.includes(admin.role)} canManageBindings={admin.role === 'SuperAdmin'} /> :
+                <Navigate to="/" replace />} />
             </Route>
             <Route path="/products" element={PAYMENT_SUMMARY_ROLES.includes(admin.role) ?
-              <Suspense fallback={<p role="status">正在加载商品中心…</p>}><ProductsPage canWrite={PAYMENT_FINANCE_ROLES.includes(admin.role)} /></Suspense> :
+              <Navigate to={'/payments/products' + location.search} replace /> :
               <Navigate to="/" replace />} />
             <Route path="/feedback" element={<FeedbackTab />} />
             <Route path="/promotions" element={<PromotionsTab />} />

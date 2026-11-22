@@ -83,6 +83,7 @@ export const NAV_TREE: NavNode[] = [
       { id: 'payment-disputes', label: '争议与冲回', path: '/payments/disputes', roles: PAYMENT_FINANCE_ROLES },
       { id: 'payment-reconciliation', label: '资金对账', path: '/payments/reconciliation', roles: PAYMENT_FINANCE_ROLES },
       { id: 'payment-channels', label: '渠道与商户', path: '/payments/channels', roles: ['SuperAdmin'] },
+      { id: 'products', label: '商品与定价', path: '/payments/products', roles: PAYMENT_SUMMARY_ROLES },
     ],
   },
   {
@@ -91,7 +92,6 @@ export const NAV_TREE: NavNode[] = [
     icon: <Target size={16} aria-hidden="true" />,
     children: [
       { id: 'promotions', label: '推广链接', path: '/promotions' },
-      { id: 'products', label: '商品与定价', path: '/products', roles: PAYMENT_SUMMARY_ROLES },
       { id: 'templates', label: '充值模板', path: '/recharge-templates' },
       { id: 'ad-pixels', label: '像素管理', path: '/pixels', roles: CONVERSION_READ_ROLES },
       { id: 'ad-conversions', label: '回传中心', path: '/conversions', roles: CONVERSION_READ_ROLES },

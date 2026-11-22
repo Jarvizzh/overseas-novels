@@ -2,25 +2,41 @@ package billing
 
 import (
 	"context"
-	"errors"
+	"encoding/json"
 	"net/http"
 	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
-	"github.com/jackc/pgx/v5"
 	"star-novel-cms/internal/db"
 )
 
 type aftercarePolicy struct {
-	DisputeLookup   bool   `json:"dispute_lookup"`
-	HoldFulfillment bool   `json:"hold_fulfillment"`
-	ReviewerID      string `json:"reviewer_id" binding:"max=36"`
-	FinanceID       string `json:"finance_id" binding:"max=36"`
-	ReviewSeconds   *int   `json:"review_seconds" binding:"omitempty,min=1"`
-	RefundSeconds   *int   `json:"refund_seconds" binding:"omitempty,min=1"`
-	ReminderSeconds *int   `json:"reminder_seconds" binding:"omitempty,min=1"`
-	Reason          string `json:"reason" binding:"required,max=500"`
+	DisputeLookup   bool    `json:"dispute_lookup"`
+	HoldFulfillment bool    `json:"hold_fulfillment"`
+	ReviewerID      string  `json:"reviewer_id" binding:"max=36"`
+	FinanceID       string  `json:"finance_id" binding:"max=36"`
+	ReviewSeconds   *int    `json:"review_seconds" binding:"omitempty,min=1"`
+	RefundSeconds   *int    `json:"refund_seconds" binding:"omitempty,min=1"`
+	ReminderSeconds *int    `json:"reminder_seconds" binding:"omitempty,min=1"`
+	Reason          string  `json:"reason" binding:"required,max=500"`
+	Revision        *string `json:"revision" binding:"omitempty,max=32"`
+}
+
+func (h *Handler) getAftercarePolicy(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || id <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid payment account"})
+		return
+	}
+	var policy json.RawMessage
+	err = db.DB.QueryRow(c.Request.Context(), `SELECT jsonb_build_object(
+		'configured',p.account_id IS NOT NULL,'revision',COALESCE(md5(to_jsonb(p)::text),''),
+		'dispute_lookup',COALESCE(p.dispute_lookup,false),'hold_fulfillment',COALESCE(p.hold_fulfillment,false),
+		'reviewer_id',COALESCE(p.reviewer_id,''),'finance_id',COALESCE(p.finance_id,''),
+		'review_seconds',p.review_seconds,'refund_seconds',p.refund_seconds,'reminder_seconds',p.reminder_seconds
+	) FROM payment_channel_accounts a LEFT JOIN payment_aftercare_policies p ON p.account_id=a.id WHERE a.id=$1`, id).Scan(&policy)
+	writeCaseResult(c, policy, err)
 }
 
 func (h *Handler) updateAftercarePolicy(c *gin.Context) {
@@ -44,12 +60,7 @@ func saveAftercarePolicy(ctx context.Context, id int64, actor string, input afte
 		return err
 	}
 	defer tx.Rollback(context.WithoutCancel(ctx))
-	var ok bool
-	err = tx.QueryRow(ctx, `SELECT true FROM admins WHERE id=$1 AND role='SuperAdmin' AND status=1 FOR SHARE`, actor).Scan(&ok)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return errCaseForbidden
-	}
-	if err != nil {
+	if err := requireSuperAdminTx(ctx, tx, actor); err != nil {
 		return err
 	}
 	for _, owner := range []string{input.ReviewerID, input.FinanceID} {
@@ -62,6 +73,17 @@ func saveAftercarePolicy(ctx context.Context, id int64, actor string, input afte
 	var accountID int64
 	if err = tx.QueryRow(ctx, `SELECT id FROM payment_channel_accounts WHERE id=$1 FOR UPDATE`, id).Scan(&accountID); err != nil {
 		return err
+	}
+	if input.Revision != nil {
+		var revision string
+		err := tx.QueryRow(ctx, `SELECT COALESCE((SELECT md5(to_jsonb(p)::text)
+			FROM payment_aftercare_policies p WHERE account_id=$1),'')`, accountID).Scan(&revision)
+		if err != nil {
+			return err
+		}
+		if revision != *input.Revision {
+			return errCaseConflict
+		}
 	}
 	_, err = tx.Exec(ctx, `WITH previous AS MATERIALIZED (
 		SELECT to_jsonb(p) AS data FROM payment_aftercare_policies p WHERE account_id=$1

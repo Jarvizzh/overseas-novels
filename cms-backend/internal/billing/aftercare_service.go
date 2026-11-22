@@ -14,6 +14,22 @@ var (
 	errCaseForbidden = errors.New("payment case action requires finance permission")
 )
 
+// These predicates are used both to project available actions and to recheck
+// eligibility under the case lock at submission time.
+const caseCanApproveSQL = `c.kind='risk_review' AND c.work_state IN ('pending','refund_due','dispute_due')
+	AND NOT EXISTS(SELECT 1 FROM payment_case_receipts r JOIN payment_case_receipts d ON d.receipt_id=r.receipt_id
+		JOIN payment_cases dc ON dc.id=d.case_id AND dc.kind='dispute' AND dc.is_open WHERE r.case_id=c.id)`
+
+const caseCanRejectSQL = `c.kind='risk_review' AND c.work_state='pending'
+	AND EXISTS(SELECT 1 FROM payment_aftercare_policies p JOIN admins finance ON finance.id=p.finance_id AND finance.status=1
+		AND finance.role IN ('SuperAdmin','Finance') WHERE p.account_id=c.account_id AND p.refund_seconds IS NOT NULL)
+	AND EXISTS(SELECT 1 FROM payment_deferred_fulfillment h JOIN recharge_orders o ON o.id=h.order_id
+		WHERE h.case_id=c.id AND h.resolved_at IS NULL AND o.fulfilled_at IS NULL AND o.status IN ('Success','Paid'))`
+
+const caseCanAdjustEntitlementSQL = `l.evidence_key IS NOT NULL AND COALESCE(adj.blocked,false)<>l.target_blocked
+	AND o.fulfilled_at IS NOT NULL AND o.status<>'Refunded'
+	AND NOT EXISTS(SELECT 1 FROM payment_loss_commands pending WHERE pending.order_id=o.id AND pending.status='pending')`
+
 func applyCaseAction(ctx context.Context, actor string, id int64, input caseAction) error {
 	input.Reason = strings.TrimSpace(input.Reason)
 	if input.Reason == "" {
@@ -27,8 +43,8 @@ func applyCaseAction(ctx context.Context, actor string, id int64, input caseActi
 	if err = lockCaseOperator(ctx, tx, actor); err != nil {
 		return err
 	}
-	var kind, state string
-	err = tx.QueryRow(ctx, `SELECT kind,work_state FROM payment_cases WHERE id=$1 FOR UPDATE`, id).Scan(&kind, &state)
+	var kind string
+	err = tx.QueryRow(ctx, `SELECT kind FROM payment_cases WHERE id=$1 FOR UPDATE`, id).Scan(&kind)
 	if err != nil {
 		return err
 	}
@@ -52,9 +68,6 @@ func applyCaseAction(ctx context.Context, actor string, id int64, input caseActi
 		}
 		_, err = tx.Exec(ctx, `UPDATE payment_cases SET owner_id=$2,updated_at=now() WHERE id=$1`, id, input.Owner)
 	case "approve", "reject":
-		if kind != "risk_review" || (state != "pending" && !(input.Action == "approve" && (state == "refund_due" || state == "dispute_due"))) {
-			return errCaseConflict
-		}
 		err = reviewCase(ctx, tx, id, input.Action)
 	case "apply_loss", "restore":
 		if kind != "dispute" && kind != "reversal" {
@@ -87,9 +100,7 @@ func lockCaseOperator(ctx context.Context, tx pgx.Tx, actor string) error {
 func reviewCase(ctx context.Context, tx pgx.Tx, id int64, decision string) error {
 	if decision == "approve" {
 		tag, err := tx.Exec(ctx, `UPDATE payment_cases c SET work_state='approved',updated_at=now()
-			WHERE c.id=$1 AND NOT EXISTS(SELECT 1 FROM payment_case_receipts r
-				JOIN payment_case_receipts d ON d.receipt_id=r.receipt_id
-				JOIN payment_cases dc ON dc.id=d.case_id AND dc.kind='dispute' AND dc.is_open WHERE r.case_id=c.id)`, id)
+			WHERE c.id=$1 AND `+caseCanApproveSQL, id)
 		if err == nil && tag.RowsAffected() != 1 {
 			return errCaseConflict
 		}
@@ -101,10 +112,7 @@ func reviewCase(ctx context.Context, tx pgx.Tx, id int64, decision string) error
 			JOIN payment_cases d ON d.id=r.case_id AND d.kind='dispute' AND d.is_open
 			WHERE h.case_id=c.id AND h.resolved_at IS NULL) THEN 'dispute_due' ELSE 'refund_due' END,
 		owner_id=p.finance_id,work_due_at=now()+make_interval(secs=>p.refund_seconds),updated_at=now()
-		FROM payment_aftercare_policies p JOIN admins finance ON finance.id=p.finance_id AND finance.status=1
-		AND finance.role IN ('SuperAdmin','Finance') WHERE p.account_id=c.account_id AND c.id=$1
-		  AND EXISTS(SELECT 1 FROM payment_deferred_fulfillment h JOIN recharge_orders o ON o.id=h.order_id
-			WHERE h.case_id=c.id AND h.resolved_at IS NULL AND o.fulfilled_at IS NULL AND o.status IN ('Success','Paid'))`, id)
+		FROM payment_aftercare_policies p WHERE p.account_id=c.account_id AND c.id=$1 AND `+caseCanRejectSQL, id)
 	if err == nil && tag.RowsAffected() != 1 {
 		return errCaseConflict
 	}
@@ -113,13 +121,13 @@ func reviewCase(ctx context.Context, tx pgx.Tx, id int64, decision string) error
 
 func submitLossAction(ctx context.Context, tx pgx.Tx, id int64, actor string, input caseAction) error {
 	tag, err := tx.Exec(ctx, `INSERT INTO payment_loss_commands(id,case_id,order_id,requested_by,blocked,evidence_key)
-		SELECT DISTINCT $1,$2,l.order_id,$3,l.target_blocked,l.evidence_key
+		SELECT DISTINCT $1::uuid,r.case_id,l.order_id,$3::text,l.target_blocked,l.evidence_key
 		FROM payment_principal_loss l JOIN payment_fulfillment_funding funding ON funding.order_id=l.order_id
-        JOIN payment_case_receipts r ON r.receipt_id=funding.receipt_id
+		JOIN payment_case_receipts r ON r.receipt_id=funding.receipt_id AND r.order_id=funding.order_id
 		JOIN recharge_orders o ON o.id=l.order_id
 		LEFT JOIN payment_entitlement_adjustments adj ON adj.order_id=l.order_id
 		WHERE r.case_id=$2 AND l.target_blocked=$4 AND l.evidence_key=$5
-		  AND COALESCE(adj.blocked,false)<>l.target_blocked AND o.fulfilled_at IS NOT NULL AND o.status<>'Refunded'
+		  AND `+caseCanAdjustEntitlementSQL+`
 		ON CONFLICT DO NOTHING`, input.RequestID, id, actor, input.Action == "apply_loss", input.EvidenceKey)
 	if err == nil && tag.RowsAffected() != 1 {
 		return errCaseConflict

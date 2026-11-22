@@ -1,73 +1,147 @@
 import { useEffect, useId, useRef, useState, type FormEvent } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
-import { SkeletonRows, TableRegion } from '../components/ui/Primitives';
-import { ApiError, apiRequest } from '../utils/api';
+import { Activity, FileSearch, ListChecks } from 'lucide-react';
+import CustomSelect from '../components/CustomSelect';
+import { CmsDialog } from '../components/ui/CmsDialog';
+import { CursorPagination } from '../components/ui/Pagination';
+import { FilterChipsBar, SearchInput, SkeletonRows, StatusDot, TableRegion } from '../components/ui/Primitives';
+import { PaymentLoadError, PaymentScopeBar, PaymentTabs } from '../components/payments/PaymentWorkspace';
+import { apiRequest } from '../utils/api';
+import { copyTextToClipboard } from '../utils/clipboard';
+import {
+  paymentError,
+  paymentMoney,
+  paymentParams,
+  paymentScope,
+  paymentScopeLabel,
+  paymentTime,
+  providerLabels,
+  usePaymentQuery,
+} from '../utils/paymentWorkspace';
 
 type View = 'risk' | 'disputes';
 type CaseRow = {
-  id: string; provider: string; environment: string; kind: string; external_id: string;
-  provider_status: string; stage: string; reason: string; outcome: string; is_open: boolean;
-  work_state: string; owner: string | null; due_at: string | null; work_due_at: string | null;
-  escalated_at: string | null; amount_minor: string | null; sales_mode: 'direct' | 'merchant_of_record' | null;
-  receipt_refs: string[]; order_ids: string[]; reminder: boolean;
+  id: string;
+  provider: string;
+  environment: string;
+  account_id: string;
+  kind: string;
+  external_id: string;
+  provider_status: string;
+  stage: string;
+  reason: string;
+  outcome: string;
+  is_open: boolean;
+  work_state: string;
+  owner: string | null;
+  due_at: string | null;
+  work_due_at: string | null;
+  escalated_at: string | null;
+  amount_minor: string | null;
+  sales_mode: 'direct' | 'merchant_of_record' | null;
+  receipt_refs: string[];
+  order_ids: string[];
+  reminder: boolean;
 };
 type Receipt = {
-  id: string; receipt: string; order_id: string; type: string; state: string;
-  paid_at: string | null; fulfilled_at: string | null; paid_period_start: string | null; paid_period_end: string | null;
-  usage_count: number; refunds: { id: string; amount_minor: string }[];
-  loss_minor: string | null; blocked: boolean; target_blocked: boolean | null; evidence_key: string | null; adjustment_pending: boolean;
+  id: string;
+  receipt: string;
+  order_id: string;
+  type: string;
+  state: string;
+  paid_at: string | null;
+  fulfilled_at: string | null;
+  paid_period_start: string | null;
+  paid_period_end: string | null;
+  usage_count: number;
+  refunds: { id: string; amount_minor: string }[];
+  loss_minor: string | null;
+  blocked: boolean;
+  evidence_key: string | null;
+  adjustment_pending: boolean;
+  entitlement_action: 'apply_loss' | 'restore' | null;
+  entitlement_result: {
+    id: string;
+    status: 'pending' | 'applied' | 'stale';
+    blocked: boolean;
+    finished_at: string | null;
+  } | null;
 };
 type Detail = CaseRow & {
+  available_actions: ('assign' | 'approve' | 'reject')[];
   receipts: Receipt[];
   audit: { actor: string; action: string; reason: string; recorded_at: string }[];
   sources: { source: string; source_ref: string; observed_at: string; codes?: object }[];
 };
 type Decision = {
-  id: string; order_id: string | null; checkout_environment: string; provider: string | null;
-  stage: string; reason: string; outcome: string; rule_version: number; evaluated_at: string;
+  id: string;
+  order_id: string | null;
+  checkout_environment: string;
+  provider: string | null;
+  stage: string;
+  reason: string;
+  outcome: string;
+  rule_version: number;
+  evaluated_at: string;
 };
 type Owner = { id: string; name: string };
 type Action = 'assign' | 'approve' | 'reject' | 'apply_loss' | 'restore';
-const providerResponseStates = new Set(['WAITING_FOR_SELLER_RESPONSE', 'needs_response', 'warning_needs_response', 'appeal_needs_response']);
+const entitlementStatus = {
+  pending: { tone: 'warning', label: '等待执行' },
+  applied: { tone: 'success', label: '执行完成' },
+  stale: { tone: 'warning', label: '凭证或状态已变化' },
+} as const;
+const providerResponseStates = new Set([
+  'WAITING_FOR_SELLER_RESPONSE',
+  'needs_response',
+  'warning_needs_response',
+  'appeal_needs_response',
+]);
 const labels: Record<string, string> = {
-  risk_review: '渠道复核', risk_signal: '渠道风险信号', dispute: '争议', reversal: '独立冲回',
-  observed: '已记录', pending: '待复核', approved: '已批准，待核验', refund_due: '财务退款待办',
-  dispute_due: '跟踪关联争议', closed: '已处置', allow: '放行', block: '拦截', verify: '待确认', review: '待复核',
-  assign: '分派负责人', approve: '批准重新核验', reject: '拒绝并转财务', apply_loss: '确认权益冲回', restore: '确认权益恢复',
+  risk_review: '渠道复核',
+  risk_signal: '渠道风险信号',
+  dispute: '争议',
+  reversal: '独立冲回',
+  observed: '已记录',
+  pending: '待复核',
+  approved: '已批准，待核验',
+  refund_due: '财务退款待办',
+  dispute_due: '跟踪关联争议',
+  closed: '已处置',
+  allow: '放行',
+  block: '拦截',
+  verify: '待确认',
+  review: '待复核',
+  assign: '分派负责人',
+  approve: '批准重新核验',
+  reject: '拒绝并转财务',
+  apply_loss: '确认权益冲回',
+  restore: '确认权益恢复',
 };
 
-function formatDate(value?: string | null) {
-  return value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '—';
-}
+const formatDate = paymentTime;
+const usd = paymentMoney;
+const workTone = (state: string) =>
+  ['pending', 'refund_due', 'dispute_due', 'review', 'verify'].includes(state)
+    ? 'warning'
+    : ['closed', 'allow'].includes(state)
+      ? 'success'
+      : state === 'block'
+        ? 'error'
+        : 'muted';
 
-function usd(value?: string | null) {
-  if (value == null) return '—';
-  const amount = BigInt(value);
-  const absolute = amount < 0n ? -amount : amount;
-  return `${amount < 0n ? '−' : ''}$${(absolute / 100n).toLocaleString('en-US')}.${String(absolute % 100n).padStart(2, '0')}`;
-}
-
-function requestError(error: unknown) {
-  if (error instanceof ApiError && error.status === 403) return '当前账号没有支付案件权限。';
-  if (error instanceof ApiError && error.status === 409) return '案件或资金凭证已变化。请刷新后重新核对。';
-  return '请求失败，请重试。';
-}
-
-function useCaseData<T>(url: string, revision: number) {
-  const [result, setResult] = useState<{ url: string; revision: number; data?: T; error?: string }>();
-  useEffect(() => {
-    if (!url) return;
-    const controller = new AbortController();
-    void apiRequest('GET', url, undefined, false, controller.signal)
-      .then((data: T) => { if (!controller.signal.aborted) setResult({ url, revision, data }); })
-      .catch((error: unknown) => { if (!controller.signal.aborted) setResult({ url, revision, error: requestError(error) }); });
-    return () => controller.abort();
-  }, [url, revision]);
-  return result?.url === url && result.revision === revision ? result : undefined;
-}
-
-function CaseActionForm({ detail, action, evidenceKey, onDone }: {
-  detail: Detail; action: Action; evidenceKey?: string; onDone: () => void;
+function CaseActionForm({
+  detail,
+  action,
+  target,
+  onClose,
+  onDone,
+}: {
+  detail: Detail;
+  action: Action;
+  target?: Receipt;
+  onClose: () => void;
+  onDone: () => void;
 }) {
   const id = useId();
   const [owner, setOwner] = useState('');
@@ -76,12 +150,12 @@ function CaseActionForm({ detail, action, evidenceKey, onDone }: {
   const [error, setError] = useState('');
   const [ownersRevision, setOwnersRevision] = useState(0);
   const request = useRef<{ body: string; id: string } | undefined>(undefined);
-  const owners = useCaseData<Owner[]>(action === 'assign' ? '/payments/cases/owners' : '', ownersRevision);
+  const owners = usePaymentQuery<Owner[]>(action === 'assign' ? '/payments/cases/owners' : '', ownersRevision);
 
   async function submit(event: FormEvent) {
     event.preventDefault();
     if (pending || !reason.trim()) return;
-    const body = { action, reason: reason.trim(), owner, evidence_key: evidenceKey };
+    const body = { action, reason: reason.trim(), owner, evidence_key: target?.evidence_key };
     const serialized = JSON.stringify(body);
     if (request.current?.body !== serialized) request.current = { body: serialized, id: crypto.randomUUID() };
     setError('');
@@ -90,32 +164,97 @@ function CaseActionForm({ detail, action, evidenceKey, onDone }: {
       await apiRequest('POST', `/payments/cases/${detail.id}/actions`, { ...body, request_id: request.current.id });
       onDone();
     } catch (failure) {
-      setError(requestError(failure));
+      setError(paymentError(failure));
     } finally {
       setPending(false);
     }
   }
 
   return (
-    <form className="space-y-2 p-3 border border-[var(--cms-border)] rounded" onSubmit={(event) => void submit(event)}>
-      <h3 className="font-medium">{labels[action]}</h3>
-      {action === 'assign' && <div className="grid gap-1">
-        <label htmlFor={`${id}-owner`}>负责人（必填）</label>
-        <select id={`${id}-owner`} className="input-field" required value={owner} onChange={(event) => setOwner(event.target.value)}>
-          <option value="">选择财务账号</option>
-          {owners?.data?.map((entry) => <option key={entry.id} value={entry.id}>{entry.name}</option>)}
-        </select>
-        {owners?.error && <div><span role="alert">{owners.error}</span> <button type="button" onClick={() => setOwnersRevision((value) => value + 1)}>重试</button></div>}
-      </div>}
-      <div className="grid gap-1">
-        <label htmlFor={`${id}-reason`}>处理依据（必填）</label>
-        <textarea id={`${id}-reason`} className="input-field" required maxLength={500} value={reason} onChange={(event) => setReason(event.target.value)} />
-      </div>
-      <button className="btn-primary" type="submit" disabled={pending || (action === 'assign' && !owners?.data)}>
-        {pending ? '提交中…' : '确认提交'}
-      </button>
-      {error && <p role="alert">{error}</p>}
-    </form>
+    <CmsDialog
+      open
+      onClose={onClose}
+      title={labels[action]}
+      subtitle={paymentScopeLabel(detail)}
+      closedBy="closerequest"
+      closeDisabled={pending}
+    >
+      <form className="space-y-3 text-sm" onSubmit={(event) => void submit(event)}>
+        <p>
+          案件 {detail.external_id}
+          {target
+            ? ` · 原收款 ${target.receipt} · 已确认本金损失 ${usd(target.loss_minor)}`
+            : ` · ${usd(detail.amount_minor)}`}
+        </p>
+        {action === 'approve' && <p>批准后会重新核验原收款和售后状态，再决定是否继续履约。</p>}
+        {action === 'reject' && <p>确认后转交财务，并按案件状态生成退款或争议待办。</p>}
+        {target && (
+          <>
+            <p>
+              作用订单 #{target.order_id} · 证据版本 <span className="font-mono">{target.evidence_key}</span>
+            </p>
+            <p>
+              {action === 'apply_loss'
+                ? '执行前会重新核验本金损失。执行完成后调整该订单发放的权益。'
+                : '执行前会重新核验资金状态。执行完成后恢复该订单此前冲回的权益。'}
+            </p>
+          </>
+        )}
+        {action === 'assign' && (
+          <div className="grid gap-1">
+            <label htmlFor={`${id}-owner`}>负责人（必填）</label>
+            <CustomSelect
+              id={`${id}-owner`}
+              width="100%"
+              value={owner}
+              onChange={setOwner}
+              options={[
+                { value: '', label: '选择财务账号' },
+                ...(owners?.data ?? []).map((entry) => ({ value: entry.id, label: entry.name })),
+              ]}
+            />
+            {owners?.error && (
+              <div>
+                <span role="alert">{owners.error}</span>{' '}
+                <button type="button" onClick={() => setOwnersRevision((value) => value + 1)}>
+                  重试
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+        <div className="grid gap-1">
+          <label htmlFor={`${id}-reason`}>处理依据（必填）</label>
+          <textarea
+            id={`${id}-reason`}
+            className="input-field"
+            required
+            maxLength={500}
+            value={reason}
+            onChange={(event) => setReason(event.target.value)}
+          />
+        </div>
+        <div className="flex justify-end gap-2">
+          <button
+            className="btn-secondary"
+            type="button"
+            data-dialog-initial-focus
+            disabled={pending}
+            onClick={onClose}
+          >
+            取消
+          </button>
+          <button
+            className="btn-primary"
+            type="submit"
+            disabled={pending || !reason.trim() || (action === 'assign' && !owner)}
+          >
+            {pending ? '提交中…' : '确认提交'}
+          </button>
+        </div>
+        {error && <p role="alert">{error}</p>}
+      </form>
+    </CmsDialog>
   );
 }
 
@@ -127,162 +266,602 @@ function providerConsole(row: CaseRow) {
   return `https://dashboard.stripe.com/${row.environment === 'sandbox' ? 'test/' : ''}disputes/${encodeURIComponent(row.external_id)}`;
 }
 
-function CaseDetail({ detail, onDone }: { detail: Detail; onDone: () => void }) {
-  const [action, setAction] = useState<{ name: Action; evidence?: string }>();
+function CaseDetail({
+  detail,
+  refreshing,
+  onRefresh,
+  onDone,
+}: {
+  detail: Detail;
+  refreshing: boolean;
+  onRefresh: () => void;
+  onDone: () => void;
+}) {
+  const [action, setAction] = useState<{ name: Action; target?: Receipt }>();
+  const scope = { provider: detail.provider, environment: detail.environment, account_id: detail.account_id };
   const consoleURL = providerConsole(detail);
   const managed = detail.provider === 'stripe' && detail.sales_mode === 'merchant_of_record';
   const merchant = detail.provider === 'paypal' || detail.sales_mode === 'direct';
   const responsibility = managed ? 'Stripe 负责渠道处置' : merchant ? '商户负责渠道处置' : '销售模式待核实';
   const responseHint = managed ? '跟踪 Stripe 处置进度' : merchant ? '等待商户响应' : '核实处理责任后响应';
-  const confirm = () => { setAction(undefined); onDone(); };
+  const confirm = () => {
+    setAction(undefined);
+    onDone();
+  };
   return (
-    <section className="cms-card p-4 space-y-3" aria-labelledby="payment-case-title">
-      <h2 id="payment-case-title" className="font-semibold">{labels[detail.kind]} · {detail.external_id}</h2>
-      <p>{detail.provider.toUpperCase()} · {detail.environment} · {responsibility}</p>
-      <p>{detail.stage || '—'} · {detail.provider_status || '—'} · {detail.outcome || '裁决待确认'}
-        {detail.kind === 'dispute' && detail.is_open && providerResponseStates.has(detail.provider_status) && ` · ${responseHint}`}</p>
-      <p>渠道原因 {detail.reason || '未提供'} · 金额 {usd(detail.amount_minor)}</p>
-      <p>举证截止 {formatDate(detail.due_at)} · 处置期限 {formatDate(detail.work_due_at)} · {detail.owner || '未分派'}</p>
-      {consoleURL && <a href={consoleURL} target="_blank" rel="noreferrer" className="btn-detail">打开渠道后台</a>}
+    <section className="space-y-4 text-sm">
+      <StatusDot tone={workTone(detail.work_state)} label={labels[detail.work_state] ?? detail.work_state} />
+      {detail.kind === 'dispute' && <p>{responsibility}</p>}
+      <p>
+        {detail.stage || '—'} · {detail.provider_status || '—'} · {detail.outcome || '裁决待确认'}
+        {detail.kind === 'dispute' &&
+          detail.is_open &&
+          providerResponseStates.has(detail.provider_status) &&
+          ` · ${responseHint}`}
+      </p>
+      <p>
+        渠道原因 {detail.reason || '未提供'} · 金额 {usd(detail.amount_minor)}
+      </p>
+      <p>
+        举证截止（UTC） {formatDate(detail.due_at)} · 处置期限 {formatDate(detail.work_due_at)} ·{' '}
+        {detail.owner || '未分派'}
+      </p>
+      {consoleURL && (
+        <div className="flex flex-wrap items-center gap-2">
+          <a href={consoleURL} target="_blank" rel="noreferrer" className="btn-detail">
+            打开渠道后台
+          </a>
+          <button
+            type="button"
+            className="btn-detail"
+            onClick={async () => {
+              const copied = await copyTextToClipboard(detail.external_id);
+              window.showToast?.(
+                copied ? '案件编号已复制' : '复制失败，请选中标题中的案件编号',
+                copied ? 'success' : 'error',
+              );
+            }}
+          >
+            复制渠道案件编号
+          </button>
+        </div>
+      )}
       <div className="flex flex-wrap gap-2">
-        <button className="btn-secondary" onClick={() => setAction({ name: 'assign' })}>分派负责人</button>
-        {detail.kind === 'risk_review' && ['pending', 'refund_due', 'dispute_due'].includes(detail.work_state) &&
-          <button className="btn-secondary" onClick={() => setAction({ name: 'approve' })}>批准后重新核验收款</button>}
-        {detail.kind === 'risk_review' && detail.work_state === 'pending' &&
-          <button className="btn-secondary" onClick={() => setAction({ name: 'reject' })}>拒绝并转财务</button>}
+        <button type="button" className="btn-secondary" disabled={refreshing} onClick={onRefresh}>
+          {refreshing ? '刷新中…' : '刷新案件'}
+        </button>
+        {detail.available_actions.map((name) => (
+          <button
+            key={name}
+            type="button"
+            className="btn-secondary"
+            disabled={refreshing}
+            onClick={() => setAction({ name })}
+          >
+            {labels[name]}
+          </button>
+        ))}
       </div>
       {detail.receipts.map((receipt) => (
         <article key={receipt.id} className="rounded border border-[var(--cms-border)] p-3 space-y-2">
           <h3 className="font-medium">原收款 {receipt.receipt}</h3>
-          <p>订单 {receipt.state} · 收款 {formatDate(receipt.paid_at)} · 履约 {formatDate(receipt.fulfilled_at)}</p>
-          {receipt.paid_period_end && <p>原账期 {formatDate(receipt.paid_period_start)} 至 {formatDate(receipt.paid_period_end)}</p>}
-          <p>相关章节解锁 {receipt.usage_count} 次 · 已确认本金损失 {usd(receipt.loss_minor)}{receipt.blocked && ' · 权益已冲回'}</p>
+          <p>
+            订单 {receipt.state} · 收款 {formatDate(receipt.paid_at)} · 履约 {formatDate(receipt.fulfilled_at)}
+          </p>
+          {receipt.paid_period_end && (
+            <p>
+              原账期 {formatDate(receipt.paid_period_start)} 至 {formatDate(receipt.paid_period_end)}
+            </p>
+          )}
+          <p>
+            相关章节解锁 {receipt.usage_count} 次 · 已确认本金损失 {usd(receipt.loss_minor)}
+            {receipt.blocked && ' · 权益已冲回'}
+          </p>
           <div className="flex flex-wrap gap-2">
-            <Link className="btn-detail" to={`/payments/orders?order_id=${receipt.order_id}`}>订单 #{receipt.order_id}</Link>
-            <Link className="btn-detail" to={`/payments/reconciliation?order_id=${receipt.order_id}&environment=${detail.environment}`}>流水与结算</Link>
-            <Link className="btn-detail" to={`/payments/refunds?order_id=${receipt.order_id}&receipt_id=${receipt.id}&environment=${detail.environment}`}>退款</Link>
-            <Link className="btn-detail" to={`/payments/disputes?receipt=${encodeURIComponent(receipt.receipt)}&environment=${detail.environment}`}>关联争议和冲回</Link>
+            <Link className="btn-detail" to={`/payments/orders?order_id=${receipt.order_id}`}>
+              订单 #{receipt.order_id}
+            </Link>
+            <Link
+              className="btn-detail"
+              to={`/payments/reconciliation?${paymentParams({ ...scope, order_id: receipt.order_id })}`}
+            >
+              流水与结算
+            </Link>
+            <Link
+              className="btn-detail"
+              to={`/payments/refunds?${paymentParams({ ...scope, order_id: receipt.order_id, receipt_id: receipt.id })}`}
+            >
+              退款
+            </Link>
+            <Link
+              className="btn-detail"
+              to={`/payments/disputes?${paymentParams({ ...scope, receipt: receipt.receipt })}`}
+            >
+              关联争议和冲回
+            </Link>
           </div>
-          {receipt.refunds.length > 0 && <ul>{receipt.refunds.map((refund) => <li key={refund.id}>{refund.id} · {usd(refund.amount_minor)}</li>)}</ul>}
-          {receipt.adjustment_pending ? <p role="status">权益处置等待执行</p>
-            : ['dispute', 'reversal'].includes(detail.kind) && receipt.evidence_key && receipt.target_blocked !== receipt.blocked && receipt.fulfilled_at &&
-              <button className="btn-secondary" onClick={() => setAction({ name: receipt.target_blocked ? 'apply_loss' : 'restore', evidence: receipt.evidence_key! })}>
-                {receipt.target_blocked ? labels.apply_loss : labels.restore}
-              </button>}
+          {receipt.refunds.length > 0 && (
+            <ul>
+              {receipt.refunds.map((refund) => (
+                <li key={refund.id}>
+                  {refund.id} · {usd(refund.amount_minor)}
+                </li>
+              ))}
+            </ul>
+          )}
+          {receipt.entitlement_result && (
+            <div role="status" className="flex flex-wrap items-center gap-2">
+              <span>{receipt.entitlement_result.blocked ? '权益冲回' : '权益恢复'}</span>
+              <StatusDot {...entitlementStatus[receipt.entitlement_result.status]} />
+              {receipt.entitlement_result.finished_at && (
+                <span>{formatDate(receipt.entitlement_result.finished_at)} UTC</span>
+              )}
+              <span className="font-mono break-all">{receipt.entitlement_result.id}</span>
+            </div>
+          )}
+          {receipt.adjustment_pending && receipt.entitlement_result?.status !== 'pending' && (
+            <p role="status">关联案件已有权益处置等待执行</p>
+          )}
+          {receipt.entitlement_action && (
+            <button
+              type="button"
+              className="btn-secondary"
+              disabled={refreshing}
+              onClick={() => {
+                if (receipt.entitlement_action) setAction({ name: receipt.entitlement_action, target: receipt });
+              }}
+            >
+              {labels[receipt.entitlement_action]}
+            </button>
+          )}
         </article>
       ))}
-      {detail.receipts.length === 0 && detail.order_ids.map((order) => (
-        <Link key={order} className="btn-detail" to={`/payments/orders?order_id=${order}`}>订单 #{order}</Link>
-      ))}
+      {detail.receipts.length === 0 &&
+        detail.order_ids.map((order) => (
+          <Link key={order} className="btn-detail" to={`/payments/orders?order_id=${order}`}>
+            订单 #{order}
+          </Link>
+        ))}
       {detail.receipts.length === 0 && <p>暂无同账户已验证原收款。</p>}
-      {action && <CaseActionForm key={`${action.name}/${action.evidence ?? ''}`} detail={detail} action={action.name} evidenceKey={action.evidence} onDone={confirm} />}
-      {detail.sources.length > 0 && <details><summary>渠道信号与来源</summary>
-        {detail.sources.map((source, index) => <article key={`${source.source_ref}/${index}`}>
-          <p>{source.source} · {source.source_ref} · {formatDate(source.observed_at)}</p>
-          <pre className="overflow-x-auto">{JSON.stringify(source.codes, null, 2)}</pre>
-        </article>)}
-      </details>}
-      {detail.audit.length > 0 && <details><summary>操作审计</summary><ul>
-        {detail.audit.map((entry, index) => <li key={index}>{formatDate(entry.recorded_at)} · {entry.actor} · {labels[entry.action] ?? entry.action} · {entry.reason}</li>)}
-      </ul></details>}
+      {action && (
+        <CaseActionForm
+          key={`${action.name}/${action.target?.id ?? ''}`}
+          detail={detail}
+          action={action.name}
+          target={action.target}
+          onClose={() => setAction(undefined)}
+          onDone={confirm}
+        />
+      )}
+      {detail.sources.length > 0 && (
+        <details>
+          <summary>渠道信号与来源</summary>
+          {detail.sources.map((source, index) => (
+            <article key={`${source.source_ref}/${index}`}>
+              <p>
+                {source.source} · {source.source_ref} · {formatDate(source.observed_at)}
+              </p>
+              <pre className="overflow-x-auto">{JSON.stringify(source.codes, null, 2)}</pre>
+            </article>
+          ))}
+        </details>
+      )}
+      {detail.audit.length > 0 && (
+        <details>
+          <summary>操作审计</summary>
+          <ul>
+            {detail.audit.map((entry, index) => (
+              <li key={index}>
+                {formatDate(entry.recorded_at)} · {entry.actor} · {labels[entry.action] ?? entry.action} ·{' '}
+                {entry.reason}
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
     </section>
   );
 }
 
+const riskTabs = [
+  { value: 'review', label: '履约复核', icon: <ListChecks size={14} aria-hidden="true" /> },
+  { value: 'signals', label: '渠道信号', icon: <Activity size={14} aria-hidden="true" /> },
+  { value: 'decisions', label: '结账决策', icon: <FileSearch size={14} aria-hidden="true" /> },
+] as const;
+const disputeTabs = [
+  { value: 'cases', label: '争议案件', icon: <FileSearch size={14} aria-hidden="true" /> },
+  { value: 'reversals', label: '独立冲回', icon: <ListChecks size={14} aria-hidden="true" /> },
+] as const;
+const kinds: Record<string, string> = {
+  review: 'risk_review',
+  signals: 'risk_signal',
+  cases: 'dispute',
+  reversals: 'reversal',
+};
+const searchFields = [
+  { value: 'order_id', label: '订单号' },
+  { value: 'receipt', label: '原收款编号' },
+  { value: 'external_id', label: '渠道案件编号' },
+];
+const caseStates = ['observed', 'pending', 'approved', 'refund_due', 'dispute_due', 'closed'];
+const deadlineOptions = [
+  { value: '', label: '全部期限' },
+  { value: 'overdue', label: '已逾期' },
+  { value: 'upcoming', label: '24 小时内到期' },
+];
+type CursorPage<T> = { items: T[]; next_cursor?: string | null };
+const signalEmptyStates = {
+  unconfigured: '当前范围没有已启用渠道信号接收的账户。',
+  awaiting_signals: '当前范围的渠道账户已配置，尚未采集到风险信号。',
+  collected: '当前筛选没有匹配的风险信号。',
+};
+type CasePage = CursorPage<CaseRow> & { signal_state?: keyof typeof signalEmptyStates | null };
+
 export default function PaymentCases({ view }: { view: View }) {
   const [params, setParams] = useSearchParams();
-  const id = useId();
   const [revision, setRevision] = useState(0);
+  const [detailRevision, setDetailRevision] = useState(0);
   const [notice, setNotice] = useState('');
+  const [searchField, setSearchField] = useState('order_id');
+  const [search, setSearch] = useState('');
+  const [searchError, setSearchError] = useState('');
+  const trigger = useRef<HTMLButtonElement | null>(null);
+  const pollAttempts = useRef(0);
   const selected = params.get('case_id');
-  const decisions = view === 'risk' && params.get('tab') === 'decisions';
-  const formKey = `${view}/${params.get('order_id') ?? ''}/${params.get('receipt') ?? ''}/${params.get('external_id') ?? ''}`;
-  const query = new URLSearchParams({ view });
-  for (const key of ['environment', 'provider', 'order_id', 'receipt', 'external_id', 'before', 'attention']) {
-    const value = params.get(key);
-    if (value) query.set(key, value);
-  }
-  const casePage = useCaseData<{ items: CaseRow[] }>(decisions ? '' : `/payments/cases?${query}`, revision);
-  const decisionPage = useCaseData<{ items: Decision[] }>(decisions ? `/payments/cases/decisions?${query}` : '', revision);
-  const detail = useCaseData<Detail>(selected && !decisions ? `/payments/cases/${selected}` : '', revision);
-  const data = decisions ? decisionPage : casePage;
-  const title = view === 'risk' ? '支付风控' : '争议与独立冲回';
-  const headers = decisions ? ['阶段', '决定', '原因', '环境 / 版本', '订单', '时间']
-    : ['案件', '渠道 / 阶段', '处理状态', '负责人', '截止时间', '金额 USD'];
+  const scope = paymentScope(params);
+  const tabs = view === 'risk' ? riskTabs : disputeTabs;
+  const tab = tabs.find((item) => item.value === params.get('tab'))?.value ?? tabs[0].value;
+  const decisions = tab === 'decisions';
+  const linked = searchFields.some((field) => params.has(field.value));
+  const kind = !params.has('tab') && linked ? '' : kinds[tab];
+  const before = params.get('before') ?? '';
+  const trail = (params.get('trail') ?? '').split(',').filter((item) => /^\d+$/.test(item));
+  const query = decisions
+    ? paymentParams({
+        order_id: params.get('order_id'),
+        before,
+        provider: scope.provider,
+        checkout_environment: scope.environment === 'live' ? 'production' : scope.environment,
+      })
+    : paymentParams({
+        ...scope,
+        view,
+        kind,
+        before,
+        order_id: params.get('order_id'),
+        receipt: params.get('receipt'),
+        external_id: params.get('external_id'),
+        attention: params.get('attention'),
+        owner_id: params.get('owner_id'),
+        work_state: params.get('work_state'),
+        deadline: params.get('deadline'),
+      });
+  const cases = usePaymentQuery<CasePage>(decisions ? '' : `/payments/cases?${query}`, revision);
+  const decisionsPage = usePaymentQuery<CursorPage<Decision>>(
+    decisions ? `/payments/cases/decisions?${query}` : '',
+    revision,
+  );
+  const detail = usePaymentQuery<Detail>(
+    selected && !decisions ? `/payments/cases/${encodeURIComponent(selected)}` : '',
+    detailRevision,
+    true,
+  );
+  const waitingForExecution =
+    detail?.data?.work_state === 'approved' || detail?.data?.receipts.some((receipt) => receipt.adjustment_pending);
+  const matchingDetail =
+    detail?.data &&
+    detail.data.id === selected &&
+    (!params.has('tab') || detail.data.kind === kind) &&
+    (view === 'risk' ? ['risk_review', 'risk_signal'] : ['dispute', 'reversal']).includes(detail.data.kind) &&
+    (['provider', 'environment', 'account_id'] as const).every(
+      (key) => !params.get(key) || detail.data?.[key] === params.get(key),
+    );
+  const owners = usePaymentQuery<Owner[]>(decisions ? '' : '/payments/cases/owners', revision);
+  const data = decisions ? decisionsPage : cases;
+  const signalState = cases?.data?.signal_state;
+  const headers = decisions
+    ? ['阶段', '决定', '原因', '渠道 / 环境 / 版本', '订单', '时间 UTC']
+    : [
+        '案件',
+        '渠道 / 商户',
+        view === 'disputes' ? '责任 / 状态' : '处理状态',
+        '负责人',
+        '截止时间 UTC',
+        '金额',
+        '操作',
+      ];
 
-  function update(key: string, value: string, reset = true) {
+  useEffect(() => {
+    if (!selected) trigger.current?.focus();
+    pollAttempts.current = 0;
+  }, [selected]);
+
+  useEffect(() => {
+    if (!matchingDetail || !waitingForExecution || detail?.refreshing || pollAttempts.current >= 15) return;
+    const timer = window.setTimeout(() => {
+      pollAttempts.current += 1;
+      setDetailRevision((value) => value + 1);
+    }, 4000);
+    return () => window.clearTimeout(timer);
+  }, [matchingDetail, waitingForExecution, detail?.refreshing, detailRevision]);
+
+  function refreshDetail() {
+    pollAttempts.current = 0;
+    setDetailRevision((value) => value + 1);
+  }
+
+  function update(fields: Record<string, string>, reset = true) {
     const next = new URLSearchParams(params);
-    if (reset) { next.delete('before'); next.delete('case_id'); }
-    if (value) next.set(key, value); else next.delete(key);
-    setNotice('');
+    if (reset) {
+      next.delete('before');
+      next.delete('trail');
+      next.delete('case_id');
+    }
+    for (const [key, value] of Object.entries(fields)) {
+      if (value) next.set(key, value);
+      else next.delete(key);
+    }
     setParams(next);
   }
 
+  function updateSearch(event: FormEvent) {
+    event.preventDefault();
+    const field = decisions ? 'order_id' : searchField;
+    const value = search.trim();
+    if (field === 'order_id' && value && (!/^\d+$/.test(value) || /^0+$/.test(value))) {
+      setSearchError('请输入有效的订单号。');
+      return;
+    }
+    setSearchError('');
+    update({ tab, order_id: '', receipt: '', external_id: '', [field]: value });
+  }
+
+  const chips = searchFields.flatMap(({ value, label }) =>
+    params.get(value) && (!decisions || value === 'order_id')
+      ? [
+          {
+            key: value,
+            label: `${label} ${params.get(value)}`,
+            onClear: () => update({ [value]: '' }),
+          },
+        ]
+      : [],
+  );
+  const cursorFooter = data?.data && (
+    <CursorPagination
+      page={before ? trail.length + 2 : 1}
+      count={data.data.items.length}
+      hasNext={Boolean(data.data.next_cursor)}
+      onFirst={() => update({ before: '', trail: '' })}
+      onPrevious={() => update({ before: trail.at(-1) || '', trail: trail.slice(0, -1).join(',') }, false)}
+      onNext={() =>
+        update({ before: data.data?.next_cursor || '', trail: [...trail, before].filter(Boolean).join(',') }, false)
+      }
+    />
+  );
+
   return (
-    <div className="space-y-4">
-      <h1 className="text-xl font-semibold">{title}</h1>
-      {view === 'risk' && <nav aria-label="风控视图" className="flex gap-2">
-        <button type="button" className={decisions ? 'btn-secondary' : 'btn-primary'} onClick={() => update('tab', '')}>渠道信号与复核</button>
-        <button type="button" className={decisions ? 'btn-primary' : 'btn-secondary'} onClick={() => update('tab', 'decisions')}>公共结账决策</button>
-      </nav>}
-      <form key={formKey} className="flex flex-wrap items-end gap-2" onSubmit={(event) => {
-        event.preventDefault();
-        const fields = new FormData(event.currentTarget);
-        const next = new URLSearchParams(params);
-        next.delete('before'); next.delete('case_id');
-        for (const field of ['order_id', 'receipt', 'external_id']) {
-          const value = String(fields.get(field) ?? '').trim();
-          if (value) next.set(field, value); else next.delete(field);
-        }
-        setParams(next);
-      }}>
-        {!decisions && <div className="grid gap-1"><label htmlFor={`${id}-environment`}>环境</label>
-          <select id={`${id}-environment`} className="input-field" value={params.get('environment') ?? 'live'} onChange={(event) => update('environment', event.target.value)}>
-            <option value="live">正式</option><option value="sandbox">沙箱</option>
-          </select>
-        </div>}
-        <div className="grid gap-1"><label htmlFor={`${id}-order`}>订单号</label>
-          <input id={`${id}-order`} className="input-field" name="order_id" inputMode="numeric" pattern="[0-9]+" defaultValue={params.get('order_id') ?? ''} />
-        </div>
-        {!decisions && <><div className="grid gap-1"><label htmlFor={`${id}-receipt`}>原收款编号</label>
-          <input id={`${id}-receipt`} className="input-field" name="receipt" maxLength={128} defaultValue={params.get('receipt') ?? ''} />
-        </div><div className="grid gap-1"><label htmlFor={`${id}-external`}>渠道案件编号</label>
-          <input id={`${id}-external`} className="input-field" name="external_id" maxLength={128} defaultValue={params.get('external_id') ?? ''} />
-        </div></>}
-        <button type="submit" className="btn-primary">查询</button>
-        {!decisions && <label className="flex items-center gap-1"><input type="checkbox" checked={params.get('attention') === 'true'}
-          onChange={(event) => update('attention', event.target.checked ? 'true' : '')} />待处理与期限提醒</label>}
-      </form>
-      {notice && <p role="status">{notice}</p>}
-      {data?.error ? <div><p role="alert">{data.error}</p><button className="btn-secondary" onClick={() => setRevision((value) => value + 1)}>重试</button></div>
-        : <TableRegion ariaLabel={title}>
+    <PaymentTabs
+      tabs={tabs}
+      value={tab}
+      label={view === 'risk' ? '风控视图' : '争议视图'}
+      onChange={(value) => {
+        setSearch('');
+        setSearchError('');
+        setNotice('');
+        update({ tab: value, owner_id: '', attention: '', work_state: '', deadline: '' });
+      }}
+    >
+      <PaymentScopeBar scope={scope} showAccount={!decisions} onChange={(next) => update(next)} />
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <form className="flex flex-wrap items-center gap-2" onSubmit={updateSearch}>
+          {!decisions && (
+            <CustomSelect
+              aria-label="查询字段"
+              width="142px"
+              options={searchFields}
+              value={searchField}
+              onChange={(value) => {
+                setSearchField(value);
+                setSearch('');
+              }}
+            />
+          )}
+          <SearchInput
+            value={search}
+            placeholder={`搜索${decisions ? '订单号' : searchFields.find((field) => field.value === searchField)?.label}`}
+            onChange={(value) => {
+              setSearch(value);
+              setSearchError('');
+            }}
+          />
+          <button type="submit" className="btn-secondary">
+            查询
+          </button>
+        </form>
+        {!decisions && (
+          <div className="flex flex-wrap items-center gap-2">
+            <CustomSelect
+              aria-label="负责人"
+              width="132px"
+              value={params.get('owner_id') ?? ''}
+              options={[
+                { value: '', label: '全部负责人' },
+                ...(owners?.data ?? []).map((owner) => ({ value: owner.id, label: owner.name })),
+              ]}
+              onChange={(owner_id) => update({ owner_id })}
+            />
+            <CustomSelect
+              aria-label="处理状态"
+              width="142px"
+              value={params.get('work_state') ?? ''}
+              options={[
+                { value: '', label: '全部处理状态' },
+                ...caseStates.map((value) => ({ value, label: labels[value] })),
+              ]}
+              onChange={(work_state) => update({ work_state })}
+            />
+            {(tab === 'review' || tab === 'cases') && (
+              <CustomSelect
+                aria-label="案件期限"
+                width="142px"
+                value={params.get('deadline') ?? ''}
+                options={deadlineOptions}
+                onChange={(deadline) => update({ deadline })}
+              />
+            )}
+            <label className="flex items-center gap-1 text-xs">
+              <input
+                type="checkbox"
+                checked={params.get('attention') === 'true'}
+                onChange={(event) => update({ attention: event.target.checked ? 'true' : '' })}
+              />
+              待处理与期限提醒
+            </label>
+          </div>
+        )}
+      </div>
+      {searchError && (
+        <p role="alert" className="text-sm text-[var(--cms-error)]">
+          {searchError}
+        </p>
+      )}
+      <FilterChipsBar chips={chips} onResetAll={() => update({ order_id: '', receipt: '', external_id: '' })} />
+      {notice && (
+        <p role="status" className="text-xs text-[var(--cms-muted-fg)]">
+          {notice}
+        </p>
+      )}
+      {data?.error ? (
+        <PaymentLoadError message={data.error} onRetry={() => setRevision((value) => value + 1)} />
+      ) : (
+        <TableRegion ariaLabel={tabs.find((item) => item.value === tab)?.label || '支付案件'} footer={cursorFooter}>
           <table className="cms-table" aria-busy={!data}>
-            <thead><tr>{headers.map((header) => <th scope="col" key={header}>{header}</th>)}</tr></thead>
+            <thead>
+              <tr>
+                {headers.map((header) => (
+                  <th scope="col" key={header} className={header === '金额' ? 'text-right' : ''}>
+                    {header}
+                  </th>
+                ))}
+              </tr>
+            </thead>
             <tbody>
               {!data && <SkeletonRows rows={4} cols={headers.length} />}
-              {decisions ? decisionPage?.data?.items.map((row) => <tr key={row.id}>
-                <td>{row.stage}</td><td>{labels[row.outcome]}</td><td>{row.reason}</td>
-                <td>{row.checkout_environment} / {row.rule_version}</td>
-                <td>{row.order_id ? <Link to={`/payments/orders?order_id=${row.order_id}`}>#{row.order_id}</Link> : '—'}</td>
-                <td>{formatDate(row.evaluated_at)}</td>
-              </tr>) : casePage?.data?.items.map((row) => <tr key={row.id}>
-                <td><button className="btn-detail" onClick={() => update('case_id', row.id, false)}>{row.external_id}</button><div>{labels[row.kind]}</div></td>
-                <td>{row.provider} · {row.stage || row.provider_status || '—'}</td>
-                <td>{labels[row.work_state]}{row.escalated_at && ' · 已升级'}{row.reminder && row.is_open && ' · 举证提醒'}</td>
-                <td>{row.owner || '未分派'}</td><td>{formatDate(row.due_at ?? row.work_due_at)}</td><td className="tabular-nums">{usd(row.amount_minor)}</td>
-              </tr>)}
+              {decisions
+                ? decisionsPage?.data?.items.map((row) => (
+                    <tr key={row.id}>
+                      <td>{row.stage}</td>
+                      <td>
+                        <StatusDot tone={workTone(row.outcome)} label={labels[row.outcome] ?? row.outcome} />
+                      </td>
+                      <td>{row.reason}</td>
+                      <td>
+                        {providerLabels[row.provider ?? ''] ?? (row.provider || '尚未选渠道')} ·{' '}
+                        {row.checkout_environment === 'production'
+                          ? '正式'
+                          : row.checkout_environment === 'sandbox'
+                            ? '沙箱'
+                            : row.checkout_environment}{' '}
+                        · v{row.rule_version}
+                      </td>
+                      <td>
+                        {row.order_id ? (
+                          <Link className="btn-detail" to={`/payments/orders?order_id=${row.order_id}`}>
+                            #{row.order_id}
+                          </Link>
+                        ) : (
+                          '—'
+                        )}
+                      </td>
+                      <td>{formatDate(row.evaluated_at)}</td>
+                    </tr>
+                  ))
+                : cases?.data?.items.map((row) => (
+                    <tr key={row.id}>
+                      <td>
+                        <div className="font-mono">{row.external_id}</div>
+                        <div className="text-[var(--cms-muted-fg)]">{labels[row.kind] ?? row.kind}</div>
+                      </td>
+                      <td>{paymentScopeLabel(row)}</td>
+                      <td>
+                        {row.kind === 'dispute' && (
+                          <div>
+                            {row.sales_mode === 'merchant_of_record'
+                              ? 'Stripe 负责'
+                              : row.provider === 'paypal' || row.sales_mode === 'direct'
+                                ? '商户负责'
+                                : '责任待核实'}
+                          </div>
+                        )}
+                        <StatusDot tone={workTone(row.work_state)} label={labels[row.work_state] ?? row.work_state} />
+                        {row.escalated_at && <div>已升级</div>}
+                        {row.reminder && row.is_open && <div>举证提醒</div>}
+                      </td>
+                      <td>{row.owner || '未分派'}</td>
+                      <td>{formatDate(row.due_at ?? row.work_due_at)}</td>
+                      <td className="text-right tabular-nums">{usd(row.amount_minor)}</td>
+                      <td>
+                        <button
+                          type="button"
+                          className="btn-detail"
+                          aria-label={`查看 ${row.external_id}`}
+                          onClick={(event) => {
+                            trigger.current = event.currentTarget;
+                            update({ case_id: row.id }, false);
+                          }}
+                        >
+                          详情
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+              {data?.data?.items.length === 0 && (
+                <tr>
+                  <td colSpan={headers.length} className="text-center">
+                    <p role="status" className="text-[11px] text-[var(--cms-muted-fg)]">
+                      {tab === 'signals' && signalState ? signalEmptyStates[signalState] : '当前范围没有匹配记录。'}
+                    </p>
+                  </td>
+                </tr>
+              )}
             </tbody>
           </table>
-        </TableRegion>}
-      {data?.data?.items.length === 0 && <p role="status">没有符合条件的记录。</p>}
-      <div className="flex gap-2">
-        {params.has('before') && <button className="btn-secondary" onClick={() => update('before', '')}>返回第一页</button>}
-        {data?.data?.items.length === 20 && <button className="btn-secondary"
-          onClick={() => update('before', data.data!.items.at(-1)!.id)}>下一页</button>}
-      </div>
-      {selected && !decisions && (detail?.error ? <p role="alert">{detail.error}</p> : detail?.data ?
-        <CaseDetail key={detail.data.id} detail={detail.data} onDone={() => { setRevision((value) => value + 1); setNotice('已提交，执行结果以案件状态为准。'); }} />
-        : <p role="status">正在加载案件详情…</p>)}
-    </div>
+        </TableRegion>
+      )}
+      <CmsDialog
+        open={Boolean(selected) && !decisions}
+        onClose={() => update({ case_id: '' }, false)}
+        variant="drawer"
+        size="lg"
+        title={detail?.data && matchingDetail ? detail.data.external_id : '案件详情'}
+        subtitle={detail?.data && matchingDetail ? paymentScopeLabel(detail.data) : undefined}
+      >
+        {detail?.error ? (
+          <PaymentLoadError message={detail.error} onRetry={refreshDetail} />
+        ) : !detail?.data ? (
+          <p role="status" className="text-sm">
+            正在加载案件详情…
+          </p>
+        ) : !matchingDetail ? (
+          <p role="alert" className="text-sm text-[var(--cms-error)]">
+            指定案件与当前视图或渠道范围不匹配。
+          </p>
+        ) : (
+          <CaseDetail
+            key={detail.data.id}
+            detail={detail.data}
+            refreshing={detail.refreshing}
+            onRefresh={refreshDetail}
+            onDone={() => {
+              refreshDetail();
+              setRevision((value) => value + 1);
+              setNotice('操作已受理。执行结果以案件状态为准。');
+              window.showToast?.('操作已受理', 'info');
+            }}
+          />
+        )}
+      </CmsDialog>
+    </PaymentTabs>
   );
 }

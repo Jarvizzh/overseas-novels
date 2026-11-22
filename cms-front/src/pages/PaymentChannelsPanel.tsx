@@ -1,13 +1,29 @@
-import { useCallback, useContext, useEffect, useId, useMemo, useState } from 'react';
+import { useCallback, useContext, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { Copy, KeyRound, Plus, RefreshCw, ShieldCheck, ShieldOff } from 'lucide-react';
+import { Copy, Plus, RefreshCw } from 'lucide-react';
+import { AftercarePolicyDrawer } from '../components/payments/AftercarePolicyDrawer';
+import { PaymentLoadError } from '../components/payments/PaymentWorkspace';
 import { CmsDialog } from '../components/ui/CmsDialog';
-import { SkeletonRows, StatusDot, TableRegion } from '../components/ui/Primitives';
+import { Pagination } from '../components/ui/Pagination';
+import {
+  type ColumnOption,
+  type FilterChip,
+  FilterChipsBar,
+  RowActionMenu,
+  type RowActionItem,
+  SearchInput,
+  SkeletonRows,
+  StatusDot,
+  type TableDensity,
+  TableRegion,
+  ViewOptionsPopover,
+} from '../components/ui/Primitives';
 import CustomSelect from '../components/CustomSelect';
 import { ToastContext } from '../context/ToastContext';
 import {
   CHANNEL_STATUS_META,
   type ChannelAccount,
+  type ChannelStatus,
   type ChannelValidationSummary,
   channelsApi,
   type CreateChannelPayload,
@@ -51,15 +67,28 @@ export function PaymentChannelsPanel() {
     [toastCtx],
   );
   const [channels, setChannels] = useState<ChannelAccount[] | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [hasLoadedOnce, setHasLoadedOnce] = useState(false);
   const [loadError, setLoadError] = useState('');
   const [providerFilter, setProviderFilter] = useState<'all' | PaymentProvider>('all');
   const [envFilter, setEnvFilter] = useState<'all' | PaymentEnvironment>('all');
+  const [statusFilter, setStatusFilter] = useState<'all' | ChannelStatus>('all');
+  const [searchQuery, setSearchQuery] = useState('');
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(10);
+  const [density, setDensity] = useState<TableDensity>('comfortable');
+  const [visibleCols, setVisibleCols] = useState<{ credentials: boolean; webhook: boolean }>({
+    credentials: true,
+    webhook: true,
+  });
+  const loadSeqRef = useRef(0);
 
   const [createOpen, setCreateOpen] = useState(false);
   const [createProvider, setCreateProvider] = useState<PaymentProvider>('paypal');
   const [createEnv, setCreateEnv] = useState<PaymentEnvironment>('sandbox');
   const [createForm, setCreateForm] = useState<SecretForm>(EMPTY_FORM);
 
+  const [policyTarget, setPolicyTarget] = useState<ChannelAccount | null>(null);
   const [editTarget, setEditTarget] = useState<ChannelAccount | null>(null);
   const [editForm, setEditForm] = useState<SecretForm>(EMPTY_FORM);
 
@@ -77,12 +106,24 @@ export function PaymentChannelsPanel() {
   const formId = useId();
 
   const loadChannels = useCallback(async (signal?: AbortSignal) => {
+    const seq = ++loadSeqRef.current;
+    setLoading(true);
     setLoadError('');
     try {
       const res = await channelsApi.list(signal);
-      if (!signal?.aborted) setChannels(res.channels ?? []);
+      if (!signal?.aborted && seq === loadSeqRef.current) {
+        setChannels(res.channels ?? []);
+        setHasLoadedOnce(true);
+      }
     } catch (err) {
-      if (!signal?.aborted) setLoadError(errMsg(err, '加载渠道列表失败'));
+      if (!signal?.aborted && seq === loadSeqRef.current) {
+        setLoadError(errMsg(err, '加载渠道列表失败'));
+        setHasLoadedOnce(true);
+      }
+    } finally {
+      if (!signal?.aborted && seq === loadSeqRef.current) {
+        setLoading(false);
+      }
     }
   }, []);
 
@@ -94,12 +135,88 @@ export function PaymentChannelsPanel() {
 
   const filteredChannels = useMemo(() => {
     if (!channels) return null;
+    const q = searchQuery.trim().toLowerCase();
     return channels.filter((c) => {
       if (providerFilter !== 'all' && c.provider !== providerFilter) return false;
       if (envFilter !== 'all' && c.environment !== envFilter) return false;
+      if (statusFilter !== 'all' && c.status !== statusFilter) return false;
+      if (q) {
+        const hay = `${c.display_name || ''} ${c.account_label || ''} ${c.merchant_id || ''} ${c.account_key || ''}`.toLowerCase();
+        if (!hay.includes(q)) return false;
+      }
       return true;
     });
-  }, [channels, providerFilter, envFilter]);
+  }, [channels, providerFilter, envFilter, statusFilter, searchQuery]);
+
+  const totalFiltered = filteredChannels?.length ?? 0;
+  const totalPages = Math.max(1, Math.ceil(totalFiltered / pageSize));
+  const safePage = Math.min(page, totalPages);
+  const pagedChannels = useMemo(() => {
+    if (!filteredChannels) return null;
+    const start = (safePage - 1) * pageSize;
+    return filteredChannels.slice(start, start + pageSize);
+  }, [filteredChannels, safePage, pageSize]);
+
+  const resetFilters = () => {
+    setProviderFilter('all');
+    setEnvFilter('all');
+    setStatusFilter('all');
+    setSearchQuery('');
+    setPage(1);
+  };
+
+  const hasAnyFilter = Boolean(providerFilter !== 'all' || envFilter !== 'all' || statusFilter !== 'all' || searchQuery.trim());
+
+  const filterChips = useMemo<FilterChip[]>(() => {
+    const chips: FilterChip[] = [];
+    if (searchQuery.trim()) {
+      chips.push({
+        key: 'q',
+        label: `关键词: ${searchQuery.trim()}`,
+        onClear: () => {
+          setSearchQuery('');
+          setPage(1);
+        },
+      });
+    }
+    if (providerFilter !== 'all') {
+      chips.push({
+        key: 'provider',
+        label: `渠道: ${providerFilter === 'paypal' ? 'PayPal' : 'Stripe'}`,
+        onClear: () => {
+          setProviderFilter('all');
+          setPage(1);
+        },
+      });
+    }
+    if (envFilter !== 'all') {
+      chips.push({
+        key: 'env',
+        label: `环境: ${envFilter === 'live' ? 'Live 正式' : 'Sandbox 沙箱'}`,
+        onClear: () => {
+          setEnvFilter('all');
+          setPage(1);
+        },
+      });
+    }
+    if (statusFilter !== 'all') {
+      chips.push({
+        key: 'status',
+        label: `状态: ${CHANNEL_STATUS_META[statusFilter]?.label ?? statusFilter}`,
+        onClear: () => {
+          setStatusFilter('all');
+          setPage(1);
+        },
+      });
+    }
+    return chips;
+  }, [searchQuery, providerFilter, envFilter, statusFilter]);
+
+  const columnOptions: ColumnOption[] = [
+    { key: 'credentials', label: '加密凭据摘要', visible: visibleCols.credentials },
+    { key: 'webhook', label: 'Webhook 入口', visible: visibleCols.webhook },
+  ];
+  const colSpan = 6 + (visibleCols.credentials ? 1 : 0) + (visibleCols.webhook ? 1 : 0);
 
   const webhookOrigin = typeof window !== 'undefined' ? window.location.origin : '';
 
@@ -259,86 +376,144 @@ export function PaymentChannelsPanel() {
   };
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-4 animate-fade-in">
+      {/* Scope & Primary Actions Strip */}
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h1 className="text-xl font-semibold text-[var(--cms-fg)]">渠道与商户</h1>
-          <p className="text-xs text-[var(--cms-muted-fg)] mt-1">
-            管理 PayPal 与 Stripe 商户账户的加密密钥、版本验证、主备切换与独立 Webhook 回调入口；修改经验证并发布后即时热加载至 Reader 支付域。
-          </p>
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <Link to="/products" className="btn-secondary text-sm">前往商品与定价</Link>
-          <button type="button" className="btn-secondary inline-flex items-center gap-1.5" onClick={() => void loadChannels()}>
-            <RefreshCw size={14} aria-hidden="true" />
-            刷新
-          </button>
-          <button type="button" className="btn-primary inline-flex items-center gap-1.5" onClick={openCreate}>
-            <Plus size={15} aria-hidden="true" />
-            新增渠道账户
-          </button>
-        </div>
-      </div>
-
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex flex-wrap items-center gap-1.5" role="group" aria-label="环境筛选">
-          {([
-            { key: 'all', label: '全部环境' },
-            { key: 'sandbox', label: 'Sandbox 沙箱' },
-            { key: 'live', label: 'Live 正式' },
-          ] as const).map((item) => (
-            <button
-              key={item.key}
-              type="button"
-              aria-pressed={envFilter === item.key}
-              onClick={() => setEnvFilter(item.key)}
-              className={`focus-ring px-3 py-1.5 rounded-xl text-xs font-medium transition-colors cursor-pointer ${
-                envFilter === item.key
-                  ? 'bg-[var(--cms-primary)] text-[var(--cms-primary-fg)]'
-                  : 'bg-[var(--cms-secondary)] text-[var(--cms-muted-fg)] hover:text-[var(--cms-fg)]'
-              }`}
-            >
-              {item.label}
-            </button>
-          ))}
-        </div>
-        <div className="flex flex-wrap items-center gap-1.5" role="group" aria-label="渠道筛选">
+        <div
+          role="group"
+          aria-label="支付渠道筛选"
+          className="inline-flex flex-wrap items-center gap-1 rounded-xl bg-[var(--cms-secondary)] p-1"
+        >
           {(['all', 'paypal', 'stripe'] as const).map((prov) => (
             <button
               key={prov}
               type="button"
               aria-pressed={providerFilter === prov}
-              onClick={() => setProviderFilter(prov)}
-              className={`focus-ring px-2.5 py-1.5 rounded-xl text-xs font-medium transition-colors cursor-pointer ${
+              onClick={() => {
+                setProviderFilter(prov);
+                setPage(1);
+              }}
+              className={`focus-ring px-3 py-1.5 rounded-lg text-xs font-medium inline-flex items-center gap-2 cursor-pointer transition-colors ${
                 providerFilter === prov
-                  ? 'bg-[var(--cms-primary-soft)] text-[var(--cms-primary)]'
-                  : 'text-[var(--cms-muted-fg)] hover:bg-[var(--cms-surface-hover)]'
+                  ? 'bg-[var(--cms-card)] text-[var(--cms-fg)] shadow-xs'
+                  : 'text-[var(--cms-muted-fg)] hover:text-[var(--cms-fg)]'
               }`}
             >
               {prov === 'all' ? '全部渠道' : prov === 'paypal' ? 'PayPal' : 'Stripe'}
             </button>
           ))}
         </div>
+
+        <div className="flex flex-wrap items-center gap-2">
+          <CustomSelect
+            aria-label="筛选运行环境"
+            width="124px"
+            value={envFilter}
+            onChange={(val) => {
+              setEnvFilter(val as 'all' | PaymentEnvironment);
+              setPage(1);
+            }}
+            options={[
+              { value: 'all', label: '全部环境' },
+              { value: 'sandbox', label: 'Sandbox 沙箱' },
+              { value: 'live', label: 'Live 正式' },
+            ]}
+          />
+          <Link to="/payments/products" className="btn-secondary h-9 px-3 text-xs font-normal whitespace-nowrap">
+            商品与定价
+          </Link>
+          <button
+            type="button"
+            className="btn-secondary h-9 px-3 text-xs font-normal whitespace-nowrap"
+            onClick={() => void loadChannels()}
+          >
+            <RefreshCw size={13} className={loading ? 'animate-spin' : ''} aria-hidden="true" />
+            <span>刷新</span>
+          </button>
+          <button type="button" className="btn-primary h-9 px-3.5 text-xs" onClick={openCreate}>
+            <Plus size={14} aria-hidden="true" />
+            <span>新增渠道账户</span>
+          </button>
+        </div>
       </div>
 
-      {loadError && (
-        <div role="alert" className="p-3 rounded-xl border border-[var(--cms-error)] bg-[var(--cms-error-soft)] text-sm text-[var(--cms-error)]">
-          {loadError}
+      {/* Unified Borderless Filter Strip */}
+      <search className="block space-y-2">
+        <div className="flex flex-wrap items-center justify-between gap-2.5">
+          <div className="flex flex-wrap items-center gap-2 flex-1 min-w-[260px]">
+            <SearchInput
+              className="w-full sm:w-64"
+              ariaLabel="搜索渠道名称或账号"
+              placeholder="搜索名称 / Account / 商户号..."
+              value={searchQuery}
+              onChange={(val) => {
+                setSearchQuery(val);
+                setPage(1);
+              }}
+              onClear={() => {
+                setSearchQuery('');
+                setPage(1);
+              }}
+            />
+
+            <CustomSelect
+              aria-label="筛选渠道状态"
+              width="132px"
+              value={statusFilter}
+              onChange={(val) => {
+                setStatusFilter(val as 'all' | ChannelStatus);
+                setPage(1);
+              }}
+              options={[
+                { value: 'all', label: '全部状态' },
+                { value: 'draft', label: '草稿' },
+                { value: 'verified', label: '已验证' },
+                { value: 'published', label: '已发布' },
+                { value: 'disabled', label: '已停用' },
+              ]}
+            />
+
+            {hasAnyFilter && (
+              <button type="button" onClick={resetFilters} className="btn-ghost h-9 text-xs text-[var(--cms-muted-fg)]">
+                重置
+              </button>
+            )}
+          </div>
+
+          <div className="flex items-center gap-2 text-xs text-[var(--cms-muted-fg)]">
+            <span className="tabular-nums">共 {totalFiltered} 个账户</span>
+            <ViewOptionsPopover
+              density={density}
+              onDensityChange={setDensity}
+              columns={columnOptions}
+              onToggleColumn={(k) =>
+                setVisibleCols((prev) => ({
+                  ...prev,
+                  [k as 'credentials' | 'webhook']: !prev[k as 'credentials' | 'webhook'],
+                }))
+              }
+            />
+          </div>
         </div>
-      )}
+
+        <FilterChipsBar chips={filterChips} onResetAll={resetFilters} />
+      </search>
 
       {validationNote && (
         <div
           role={validationNote.ok ? 'status' : 'alert'}
-          className={`p-3.5 rounded-xl border text-sm flex flex-wrap items-start justify-between gap-3 ${
-            validationNote.ok
-              ? 'border-[var(--cms-success)] bg-[var(--cms-success-soft)] text-[var(--cms-fg)]'
-              : 'border-[var(--cms-error)] bg-[var(--cms-error-soft)] text-[var(--cms-error)]'
-          }`}
+          className="cms-card px-4 py-3 text-sm flex flex-wrap items-center justify-between gap-3"
         >
           <div className="space-y-1">
-            <div className="font-medium">
-              {validationNote.account.display_name || validationNote.account.account_label} · {validationNote.message}
+            <div className="flex flex-wrap items-center gap-2">
+              <StatusDot
+                tone={validationNote.ok ? 'success' : 'error'}
+                label={validationNote.ok ? '校验通过' : '校验未通过'}
+              />
+              <span className="font-medium text-[var(--cms-fg)]">
+                {validationNote.account.display_name || validationNote.account.account_label}
+              </span>
+              <span className="text-xs text-[var(--cms-muted-fg)]">{validationNote.message}</span>
             </div>
             {validationNote.summary && (
               <div className="text-xs text-[var(--cms-muted-fg)] flex flex-wrap gap-3">
@@ -351,158 +526,189 @@ export function PaymentChannelsPanel() {
               </div>
             )}
           </div>
-          <button type="button" className="btn-ghost text-xs" onClick={() => setValidationNote(null)}>关闭</button>
+          <button type="button" className="btn-ghost h-8 px-2.5 text-xs" onClick={() => setValidationNote(null)}>
+            关闭
+          </button>
         </div>
       )}
 
-      <TableRegion ariaLabel="支付渠道账户列表">
-        <table className="cms-table">
-          <thead>
-            <tr>
-              <th scope="col">渠道 / 环境</th>
-              <th scope="col">显示名称与账号</th>
-              <th scope="col">状态与版本</th>
-              <th scope="col">加密凭据摘要</th>
-              <th scope="col">独立 Webhook 入口</th>
-              <th scope="col">业务开关</th>
-              <th scope="col" className="text-right">操作</th>
-            </tr>
-          </thead>
-          <tbody>
-            {!filteredChannels && !loadError ? (
-              <SkeletonRows rows={3} cols={7} />
-            ) : filteredChannels?.length === 0 ? (
+      {loadError ? (
+        <PaymentLoadError message={loadError} onRetry={() => void loadChannels()} />
+      ) : (
+        <TableRegion
+          ariaLabel="支付渠道账户列表"
+          footer={
+            <Pagination
+              page={safePage}
+              pageSize={pageSize}
+              total={totalFiltered}
+              disabled={loading}
+              onPageChange={setPage}
+              onPageSizeChange={(nextSize) => {
+                setPage(1);
+                setPageSize(nextSize);
+              }}
+              itemLabel="个账户"
+            />
+          }
+        >
+          <table className="cms-table min-w-[920px]" data-density={density} aria-busy={loading && !hasLoadedOnce}>
+            <thead>
               <tr>
-                <td colSpan={7} className="text-center py-8 text-sm text-[var(--cms-muted-fg)]">
-                  暂无符合筛选条件的渠道账户
-                </td>
+                <th scope="col">商户账户</th>
+                <th scope="col">渠道 / 环境</th>
+                <th scope="col">版本 / 校验</th>
+                {visibleCols.credentials && <th scope="col">加密凭据摘要</th>}
+                {visibleCols.webhook && <th scope="col">Webhook 入口</th>}
+                <th scope="col">业务开关</th>
+                <th scope="col">状态</th>
+                <th scope="col" className="text-right w-px whitespace-nowrap">
+                  操作
+                </th>
               </tr>
-            ) : (
-              filteredChannels?.map((ch) => {
-                const statusMeta = CHANNEL_STATUS_META[ch.status] ?? { label: ch.status, tone: 'muted' as const };
-                const pendingDiff = ch.pending_version > ch.active_version;
-                const fullWebhookUrl = ch.webhook_path ? `${webhookOrigin}${ch.webhook_path}` : '';
-                return (
-                  <tr key={ch.id}>
-                    <td>
-                      <div className="flex items-center gap-1.5">
-                        <span className={`badge ${ch.provider === 'paypal' ? 'badge-blue' : 'badge-purple'}`}>
-                          {ch.provider === 'paypal' ? 'PayPal' : 'Stripe'}
-                        </span>
-                        <span className={`badge ${ch.environment === 'live' ? 'badge-red' : 'badge-gray'}`}>
-                          {ch.environment === 'live' ? 'Live' : 'Sandbox'}
-                        </span>
-                      </div>
-                    </td>
-                    <td>
-                      <div className="flex items-center gap-1.5 font-medium text-[var(--cms-fg)]">
-                        <span>{ch.display_name || ch.account_label}</span>
-                        {ch.is_primary && <span className="badge badge-green">主用</span>}
-                      </div>
-                      <div className="text-xs text-[var(--cms-muted-fg)] font-mono-code mt-0.5">
-                        {ch.account_label}
-                        {ch.merchant_id ? ` · 商户 ${ch.merchant_id}` : ''}
-                      </div>
-                    </td>
-                    <td>
-                      <StatusDot tone={statusMeta.tone} label={statusMeta.label} />
-                      <div className="text-xs text-[var(--cms-muted-fg)] mt-1 tabular-nums">
-                        生效 v{ch.active_version}
-                        {pendingDiff && (
-                          <span className="ml-1.5 text-[var(--cms-warning)]">· 待发布 v{ch.pending_version}</span>
-                        )}
-                      </div>
-                      <div className="text-xs text-[var(--cms-muted-fg)] mt-0.5">
-                        校验: {ch.validation_status === 'verified' ? '通过' : ch.validation_status === 'failed' ? '失败' : '待验证'}
-                      </div>
-                    </td>
-                    <td>
-                      <div className="text-xs text-[var(--cms-muted-fg)] space-y-0.5">
-                        <div>来源: <span className="font-mono-code">{ch.credentials_ref}</span></div>
-                        {Object.entries(ch.credential_hints || {}).map(([k, v]) => (
-                          <div key={k} className="font-mono-code text-[11px]">{k}: {v}</div>
-                        ))}
-                      </div>
-                    </td>
-                    <td>
-                      {fullWebhookUrl ? (
-                        <div className="flex items-center gap-1.5 max-w-[220px]">
-                          <code className="text-[11px] font-mono-code truncate text-[var(--cms-muted-fg)]" title={fullWebhookUrl}>
-                            {ch.webhook_path}
-                          </code>
+            </thead>
+            <tbody className={loading && hasLoadedOnce ? 'opacity-65 transition-opacity' : ''}>
+              {!hasLoadedOnce && loading ? (
+                <SkeletonRows rows={4} cols={colSpan} />
+              ) : !pagedChannels || pagedChannels.length === 0 ? (
+                <tr>
+                  <td colSpan={colSpan} className="py-16 text-center text-[var(--cms-muted-fg)]">
+                    暂无符合筛选条件的渠道账户
+                  </td>
+                </tr>
+              ) : (
+                pagedChannels.map((ch) => {
+                  const statusMeta = CHANNEL_STATUS_META[ch.status] ?? { label: ch.status, tone: 'muted' as const };
+                  const pendingDiff = ch.pending_version > ch.active_version;
+                  const fullWebhookUrl = ch.webhook_path ? `${webhookOrigin}${ch.webhook_path}` : '';
+                  const hintEntries = Object.entries(ch.credential_hints || {});
+                  const menuItems: RowActionItem[] = [
+                    { label: '编辑 / 轮换密钥', onClick: () => openEdit(ch) },
+                    { label: '风控策略', onClick: () => setPolicyTarget(ch) },
+                  ];
+                  if (ch.status !== 'disabled') {
+                    menuItems.push({
+                      label: '停用账户',
+                      tone: 'danger',
+                      dividerBefore: true,
+                      onClick: () => {
+                        setDialogError('');
+                        setDeactivateTarget(ch);
+                      },
+                    });
+                  }
+                  return (
+                    <tr key={ch.id}>
+                      <td>
+                        <div className="text-[var(--cms-fg)]">
+                          <span>{ch.display_name || ch.account_label}</span>
+                          {ch.is_primary && (
+                            <span className="ml-1.5 text-[var(--cms-primary)]">· 主用</span>
+                          )}
+                        </div>
+                        <div className="text-[var(--cms-muted-fg)] mt-0.5 tabular-nums font-mono-code">
+                          {ch.account_label}
+                          {ch.merchant_id ? ` · 商户 ${ch.merchant_id}` : ''}
+                        </div>
+                      </td>
+                      <td>
+                        <div className="text-[var(--cms-fg)] whitespace-nowrap">
+                          {ch.provider === 'paypal' ? 'PayPal' : 'Stripe'} · {ch.environment === 'live' ? 'Live 正式' : 'Sandbox 沙箱'}
+                        </div>
+                        <div className="text-[var(--cms-muted-fg)] mt-0.5">
+                          {ch.is_primary ? '默认收款主账户' : '备用 / 历史账户'}
+                        </div>
+                      </td>
+                      <td className="tabular-nums">
+                        <div className="text-[var(--cms-fg)] whitespace-nowrap">
+                          v{ch.active_version}
+                          {pendingDiff && (
+                            <span className="text-[var(--cms-warning)]"> · 待发布 v{ch.pending_version}</span>
+                          )}
+                        </div>
+                        <div className="text-[var(--cms-muted-fg)] mt-0.5">
+                          校验: {ch.validation_status === 'verified' ? '通过' : ch.validation_status === 'failed' ? '失败' : '待验证'}
+                        </div>
+                      </td>
+                      {visibleCols.credentials && (
+                        <td>
+                          <div className="text-[var(--cms-fg)] font-mono-code whitespace-nowrap">
+                            {ch.credentials_ref}
+                          </div>
+                          <div className="text-[var(--cms-muted-fg)] mt-0.5 font-mono-code max-w-[200px] truncate" title={hintEntries.map(([k, v]) => `${k}: ${v}`).join(' · ')}>
+                            {hintEntries.length > 0 ? hintEntries.map(([k, v]) => `${k}: ${v}`).join(' · ') : '—'}
+                          </div>
+                        </td>
+                      )}
+                      {visibleCols.webhook && (
+                        <td>
+                          {fullWebhookUrl ? (
+                            <div className="flex items-center gap-1.5 max-w-[210px]">
+                              <span className="font-mono-code truncate text-[var(--cms-muted-fg)]" title={fullWebhookUrl}>
+                                {ch.webhook_path}
+                              </span>
+                              <button
+                                type="button"
+                                className="btn-ghost px-1.5"
+                                aria-label={`复制 ${ch.display_name || ch.account_label} Webhook 地址`}
+                                onClick={() => void copyText(fullWebhookUrl, 'Webhook 回调地址')}
+                              >
+                                <Copy size={12} aria-hidden="true" />
+                              </button>
+                            </div>
+                          ) : (
+                            <span className="text-[var(--cms-muted-fg)]">{ch.webhook_ref || '—'}</span>
+                          )}
+                          {ch.previous_webhook_expires_at && (
+                            <div className="text-[var(--cms-warning)] mt-0.5 whitespace-nowrap">
+                              旧密钥宽限至 {new Date(ch.previous_webhook_expires_at).toLocaleString('zh-CN', { hour12: false })}
+                            </div>
+                          )}
+                        </td>
+                      )}
+                      <td>
+                        <div className="flex flex-col gap-1">
+                          <StatusDot
+                            tone={ch.new_orders_enabled ? 'success' : 'muted'}
+                            label={`单次: ${ch.new_orders_enabled ? '开放' : '关闭'}`}
+                          />
+                          <StatusDot
+                            tone={ch.new_subscriptions_enabled ? 'success' : 'muted'}
+                            label={`订阅: ${ch.new_subscriptions_enabled ? '开放' : '关闭'}`}
+                          />
+                        </div>
+                      </td>
+                      <td>
+                        <StatusDot tone={statusMeta.tone} label={statusMeta.label} />
+                      </td>
+                      <td className="text-right whitespace-nowrap">
+                        <div className="inline-flex items-center justify-end gap-0.5 whitespace-nowrap">
                           <button
                             type="button"
-                            className="btn-ghost p-1"
-                            aria-label="复制 Webhook 地址"
-                            onClick={() => void copyText(fullWebhookUrl, 'Webhook 回调地址')}
+                            className="btn-detail"
+                            disabled={busyId === ch.id}
+                            onClick={() => void handleValidate(ch)}
                           >
-                            <Copy size={13} aria-hidden="true" />
+                            {busyId === ch.id ? '验证中…' : '验证'}
                           </button>
-                        </div>
-                      ) : (
-                        <span className="text-xs text-[var(--cms-muted-fg)]">{ch.webhook_ref}</span>
-                      )}
-                      {ch.previous_webhook_expires_at && (
-                        <div className="text-[11px] text-[var(--cms-warning)] mt-0.5">
-                          旧 Webhook 宽限至 {new Date(ch.previous_webhook_expires_at).toLocaleString()}
-                        </div>
-                      )}
-                    </td>
-                    <td>
-                      <div className="flex flex-col gap-1 text-xs">
-                        <StatusDot
-                          tone={ch.new_orders_enabled ? 'success' : 'muted'}
-                          label={`单次: ${ch.new_orders_enabled ? '开放' : '关闭'}`}
-                        />
-                        <StatusDot
-                          tone={ch.new_subscriptions_enabled ? 'success' : 'muted'}
-                          label={`订阅: ${ch.new_subscriptions_enabled ? '开放' : '关闭'}`}
-                        />
-                      </div>
-                    </td>
-                    <td className="text-right">
-                      <div className="inline-flex flex-wrap justify-end gap-1.5">
-                        <button type="button" className="btn-detail inline-flex items-center gap-1" onClick={() => openEdit(ch)}>
-                          <KeyRound size={12} aria-hidden="true" />
-                          编辑/轮换
-                        </button>
-                        <button
-                          type="button"
-                          className="btn-detail inline-flex items-center gap-1"
-                          disabled={busyId === ch.id}
-                          onClick={() => void handleValidate(ch)}
-                        >
-                          <ShieldCheck size={12} aria-hidden="true" />
-                          {busyId === ch.id ? '验证中…' : '验证'}
-                        </button>
-                        <button
-                          type="button"
-                          className="btn-primary text-xs px-2.5 py-1.5"
-                          onClick={() => openPublish(ch)}
-                        >
-                          发布
-                        </button>
-                        {ch.status !== 'disabled' && (
-                          <button
-                            type="button"
-                            className="btn-ghost text-xs text-[var(--cms-error)] inline-flex items-center gap-1"
-                            onClick={() => { setDialogError(''); setDeactivateTarget(ch); }}
-                          >
-                            <ShieldOff size={12} aria-hidden="true" />
-                            停用
+                          <button type="button" className="btn-detail" onClick={() => openPublish(ch)}>
+                            发布
                           </button>
-                        )}
-                      </div>
-                    </td>
-                  </tr>
-                );
-              })
-            )}
-          </tbody>
-        </table>
-      </TableRegion>
+                          <RowActionMenu ariaLabel={`${ch.display_name || ch.account_label} 更多操作`} items={menuItems} />
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })
+              )}
+            </tbody>
+          </table>
+        </TableRegion>
+      )}
 
       {/* 新增渠道账户弹窗 */}
+      {policyTarget && <AftercarePolicyDrawer key={policyTarget.id} account={policyTarget} onClose={() => setPolicyTarget(null)} />}
+
       <CmsDialog
         open={createOpen}
         onClose={() => { if (!submitting) setCreateOpen(false); }}

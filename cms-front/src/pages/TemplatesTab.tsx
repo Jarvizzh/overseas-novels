@@ -399,7 +399,7 @@ export default function TemplatesTab() {
           </div>
 
           <div className="flex items-center gap-2">
-            <Link to="/products" className="btn-secondary text-xs">管理 / 新建商品</Link>
+            <Link to="/payments/products" className="btn-secondary text-xs">管理 / 新建商品</Link>
             <button type="submit" form={`${formId}-editor`} className="btn-primary inline-flex items-center gap-1.5" disabled={saving}>
               <Save size={15} aria-hidden="true" />
               {saving ? '保存中…' : '保存模板'}
@@ -454,7 +454,7 @@ export default function TemplatesTab() {
 
               {publishedProducts.length === 0 && !productsLoading && (
                 <div role="alert" className="p-3 rounded-xl border border-[var(--cms-warning)] bg-[var(--cms-warning-soft)] text-xs text-[var(--cms-warning)]">
-                  当前尚未有在 Sandbox 或 Live 环境下「已上架」的商品，请先前往 <Link to="/products" className="underline font-medium">商品与定价</Link> 完成 PayPal / Stripe 绑定并上架。
+                  当前尚未有在 Sandbox 或 Live 环境下「已上架」的商品，请先前往 <Link to="/payments/products" className="underline font-medium">商品与定价</Link> 完成 PayPal / Stripe 绑定并上架。
                 </div>
               )}
 
@@ -666,7 +666,7 @@ export default function TemplatesTab() {
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <Link to="/products" className="btn-secondary text-sm">商品与定价</Link>
+          <Link to="/payments/products" className="btn-secondary text-sm">商品与定价</Link>
           <button type="button" className="btn-secondary inline-flex items-center gap-1.5" onClick={() => void loadTemplates()}>
             <RefreshCw size={14} aria-hidden="true" />
             刷新

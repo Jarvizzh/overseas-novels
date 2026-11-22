@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { Link } from 'react-router-dom';
 import {
   AlertCircle,
   Ban,
@@ -86,7 +87,7 @@ function formatVipCycleShort(cycle?: string): string {
   return cycle || '会员';
 }
 
-export default function UsersTab() {
+export default function UsersTab({ showPaymentLinks = false }: { showPaymentLinks?: boolean }) {
   const [users, setUsers] = useState<User[]>([]);
   const [total, setTotal] = useState(0);
   const [searchDraft, setSearchDraft] = useState('');
@@ -477,6 +478,16 @@ export default function UsersTab() {
           selectedUser && (
             <>
               {/* Drawer Internal Sub-Tabs */}
+              {showPaymentLinks && (
+                <div className="flex flex-wrap gap-2 border-b border-[var(--cms-border)] bg-[var(--cms-card)] px-6 py-2 shrink-0">
+                  <Link className="btn-detail" to={`/payments/orders?user_id=${selectedUser.id}`}>
+                    该用户的订单
+                  </Link>
+                  <Link className="btn-detail" to={`/payments/subscriptions?user_id=${selectedUser.id}`}>
+                    该用户的订阅
+                  </Link>
+                </div>
+              )}
               <div className="px-6 border-b border-[var(--cms-border)] bg-[var(--cms-card)] flex items-center justify-between gap-4 shrink-0">
                 <div role="tablist" aria-label="用户档案视图切换" className="flex items-center gap-6 overflow-x-auto">
                   <button

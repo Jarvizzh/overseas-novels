@@ -264,7 +264,9 @@ func TestChannelLifecycleEncryptionValidationAndPrimarySwitch(t *testing.T) {
 	if st2Rec.Code != http.StatusCreated {
 		t.Fatalf("create Stripe 2 failed: %s", st2Rec.Body.String())
 	}
-	var st2Created struct{ ID int64 `json:"id"` }
+	var st2Created struct {
+		ID int64 `json:"id"`
+	}
 	_ = json.Unmarshal(st2Rec.Body.Bytes(), &st2Created)
 	_ = doJSON(t, r, http.MethodPost, fmt.Sprintf("/cms/payments/channels/%d/validate", st2Created.ID), "cfg-super", nil)
 	if rec := doJSON(t, r, http.MethodPost, fmt.Sprintf("/cms/payments/channels/%d/publish", st2Created.ID), "cfg-super", map[string]any{"set_primary": true}); rec.Code != http.StatusOK {
@@ -292,6 +294,8 @@ func TestChannelLifecycleEncryptionValidationAndPrimarySwitch(t *testing.T) {
 func TestProductCatalogDualChannelGateAndTemplateDecoupling(t *testing.T) {
 	r, ctx := setupChannelCatalogRouter(t)
 
+	stripeProdCreates := 0
+	stripePriceCreates := 0
 	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
@@ -307,7 +311,23 @@ func TestProductCatalogDualChannelGateAndTemplateDecoupling(t *testing.T) {
 			_, _ = w.Write([]byte(`{"id":"P-ANNUAL-9999","product_id":"PROD-PP-ANNUAL-01","status":"ACTIVE","billing_cycles":[{"tenure_type":"REGULAR","total_cycles":0,"frequency":{"interval_unit":"YEAR","interval_count":1},"pricing_scheme":{"fixed_price":{"value":"99.99","currency_code":"USD"}}}]}`))
 		case req.URL.Path == "/v1/account":
 			_, _ = w.Write([]byte(`{"id":"acct_StripeCat01"}`))
-		case req.URL.Path == "/v1/prices/price_AnnualVIP9999":
+		case req.Method == http.MethodPost && req.URL.Path == "/v1/products":
+			if req.Header.Get("Idempotency-Key") == "" || req.ParseForm() != nil || req.PostForm.Get("name") == "" {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			stripeProdCreates++
+			_, _ = w.Write([]byte(`{"id":"prod_AnnualVIP","active":true,"livemode":false}`))
+		case req.Method == http.MethodPost && req.URL.Path == "/v1/prices":
+			if req.Header.Get("Idempotency-Key") == "" || req.ParseForm() != nil ||
+				req.PostForm.Get("product") != "prod_AnnualVIP" || req.PostForm.Get("currency") != "usd" ||
+				req.PostForm.Get("unit_amount") != "9999" || req.PostForm.Get("recurring[interval]") != "year" {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			stripePriceCreates++
+			_, _ = w.Write([]byte(`{"id":"price_AnnualVIP9999","active":true,"livemode":false}`))
+		case req.Method == http.MethodGet && req.URL.Path == "/v1/prices/price_AnnualVIP9999":
 			_, _ = w.Write([]byte(`{"id":"price_AnnualVIP9999","currency":"usd","type":"recurring","tax_behavior":"exclusive","unit_amount":9999,"active":true,"livemode":false,"recurring":{"interval":"year","interval_count":1},"product":{"id":"prod_AnnualVIP","active":true,"livemode":false,"tax_code":"txcd_10103001"}}`))
 		case req.URL.Path == "/v1/prices/price_Coin499":
 			_, _ = w.Write([]byte(`{"id":"price_Coin499","currency":"usd","type":"one_time","tax_behavior":"exclusive","unit_amount":499,"active":true,"livemode":false,"product":{"id":"prod_Coin499","active":true,"livemode":false,"tax_code":"txcd_10103001"}}`))
@@ -326,14 +346,18 @@ func TestProductCatalogDualChannelGateAndTemplateDecoupling(t *testing.T) {
 	_ = json.Unmarshal(doJSON(t, r, http.MethodPost, "/cms/payments/channels", "cfg-super", map[string]any{
 		"provider": "paypal", "environment": "sandbox", "display_name": "PP Cat",
 		"account_key": "pp_cat_client", "client_secret": "pp_cat_secret", "webhook_id": "WH_CAT_01",
-	}).Body.Bytes(), &struct{ ID *int64 `json:"id"` }{&ppID})
+	}).Body.Bytes(), &struct {
+		ID *int64 `json:"id"`
+	}{&ppID})
 	_ = doJSON(t, r, http.MethodPost, fmt.Sprintf("/cms/payments/channels/%d/validate", ppID), "cfg-super", nil)
 	_ = doJSON(t, r, http.MethodPost, fmt.Sprintf("/cms/payments/channels/%d/publish", ppID), "cfg-super", map[string]any{"set_primary": true})
 
 	_ = json.Unmarshal(doJSON(t, r, http.MethodPost, "/cms/payments/channels", "cfg-super", map[string]any{
 		"provider": "stripe", "environment": "sandbox", "display_name": "ST Cat",
 		"account_key": "acct_StripeCat01", "api_key": "sk_test_cat_1234", "webhook_secret": "whsec_cat_1234",
-	}).Body.Bytes(), &struct{ ID *int64 `json:"id"` }{&stID})
+	}).Body.Bytes(), &struct {
+		ID *int64 `json:"id"`
+	}{&stID})
 	_ = doJSON(t, r, http.MethodPost, fmt.Sprintf("/cms/payments/channels/%d/validate", stID), "cfg-super", nil)
 	_ = doJSON(t, r, http.MethodPost, fmt.Sprintf("/cms/payments/channels/%d/publish", stID), "cfg-super", map[string]any{"set_primary": true})
 
@@ -358,7 +382,9 @@ func TestProductCatalogDualChannelGateAndTemplateDecoupling(t *testing.T) {
 	if vipRec.Code != http.StatusCreated {
 		t.Fatalf("create VIP annual failed (%d): %s", vipRec.Code, vipRec.Body.String())
 	}
-	_ = json.Unmarshal(vipRec.Body.Bytes(), &struct{ ID *int64 `json:"id"` }{&vipID})
+	_ = json.Unmarshal(vipRec.Body.Bytes(), &struct {
+		ID *int64 `json:"id"`
+	}{&vipID})
 
 	// Database immutability trigger forbids mutating commercial terms
 	if _, err := db.DB.Exec(ctx, `UPDATE products SET price_cents = 1 WHERE id = $1`, vipID); err == nil {
@@ -373,10 +399,28 @@ func TestProductCatalogDualChannelGateAndTemplateDecoupling(t *testing.T) {
 	if copyRec.Code != http.StatusCreated {
 		t.Fatalf("copy product failed (%d): %s", copyRec.Code, copyRec.Body.String())
 	}
-	_ = json.Unmarshal(copyRec.Body.Bytes(), &struct{ ID *int64 `json:"id"` }{&copyID})
+	_ = json.Unmarshal(copyRec.Body.Bytes(), &struct {
+		ID *int64 `json:"id"`
+	}{&copyID})
 
 	// 3. Dual-channel publish gate: PayPal alone must NOT allow publish
-	if rec := doJSON(t, r, http.MethodPut, fmt.Sprintf("/cms/products/%d/bindings/paypal", vipID), "cfg-finance", map[string]any{
+	for _, provider := range []string{"paypal", "stripe"} {
+		rec := doJSON(t, r, http.MethodPut, fmt.Sprintf("/cms/products/%d/bindings/%s", vipID, provider), "cfg-finance", map[string]any{"environment": "sandbox"})
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("finance binding %s: %d %s", provider, rec.Code, rec.Body.String())
+		}
+	}
+	if rec := doJSON(t, r, http.MethodPost, fmt.Sprintf("/cms/products/%d/publish", vipID), "cfg-finance", map[string]any{
+		"environment": "live", "reason": "unauthorized live publication",
+	}); rec.Code != http.StatusForbidden {
+		t.Fatalf("finance live publish: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := doJSON(t, r, http.MethodPost, fmt.Sprintf("/cms/products/%d/publish", vipID), "cfg-super", map[string]any{
+		"environment": "live",
+	}); rec.Code != http.StatusBadRequest {
+		t.Fatalf("live publish without reason: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := doJSON(t, r, http.MethodPut, fmt.Sprintf("/cms/products/%d/bindings/paypal", vipID), "cfg-super", map[string]any{
 		"environment": "sandbox", "reason": "provision annual plan",
 	}); rec.Code != http.StatusOK {
 		t.Fatalf("PayPal annual VIP binding failed (%d): %s", rec.Code, rec.Body.String())
@@ -411,16 +455,78 @@ func TestProductCatalogDualChannelGateAndTemplateDecoupling(t *testing.T) {
 		t.Fatalf("expected unpublished product rejection (409), got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	// Bind Stripe to complete dual-channel readiness & publish annual VIP
-	if rec := doJSON(t, r, http.MethodPut, fmt.Sprintf("/cms/products/%d/bindings/stripe", vipID), "cfg-finance", map[string]any{
+	// Manual product_ref / price_ref binding must be rejected (auto-provisioning only).
+	if rec := doJSON(t, r, http.MethodPut, fmt.Sprintf("/cms/products/%d/bindings/stripe", vipID), "cfg-super", map[string]any{
 		"environment": "sandbox", "product_ref": "prod_AnnualVIP", "price_ref": "price_AnnualVIP9999",
-		"sales_mode": "direct", "countries": []string{"US", "GB"}, "reason": "bind annual stripe",
-	}); rec.Code != http.StatusOK {
+		"sales_mode": "direct", "countries": []string{"US", "GB"}, "reason": "manual ref should fail",
+	}); rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected manual Stripe ref rejection (400), got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Auto-provision Stripe Product + Price to complete dual-channel readiness & publish annual VIP
+	if rec := doJSON(t, r, http.MethodPut, fmt.Sprintf("/cms/products/%d/bindings/stripe", vipID), "cfg-super", map[string]any{
+		"environment": "sandbox",
+		"sales_mode":  "direct", "countries": []string{"US", "GB"}, "reason": "auto provision annual stripe",
+	}); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"external_price_ref":"price_AnnualVIP9999"`) {
 		t.Fatalf("Stripe annual VIP binding failed (%d): %s", rec.Code, rec.Body.String())
+	}
+	if stripeProdCreates != 1 || stripePriceCreates != 1 {
+		t.Fatalf("expected 1 product and 1 price auto-created, got prod=%d price=%d", stripeProdCreates, stripePriceCreates)
+	}
+	// Updating countries reuses the provisioned Stripe Product/Price without re-creating
+	if rec := doJSON(t, r, http.MethodPut, fmt.Sprintf("/cms/products/%d/bindings/stripe", vipID), "cfg-super", map[string]any{
+		"environment": "sandbox",
+		"sales_mode":  "direct", "countries": []string{"US", "GB", "CA"}, "reason": "expand countries",
+	}); rec.Code != http.StatusOK {
+		t.Fatalf("Stripe binding update failed (%d): %s", rec.Code, rec.Body.String())
+	}
+	if stripeProdCreates != 1 || stripePriceCreates != 1 {
+		t.Fatalf("expected reuse of provisioned Stripe refs without re-create, got prod=%d price=%d", stripeProdCreates, stripePriceCreates)
 	}
 	if rec := doJSON(t, r, http.MethodPost, fmt.Sprintf("/cms/products/%d/publish", vipID), "cfg-finance", map[string]any{
 		"environment": "sandbox",
 	}); rec.Code != http.StatusOK {
 		t.Fatalf("expected dual-channel ready publish success (200), got %d: %s", rec.Code, rec.Body.String())
+	}
+	for _, actor := range []string{"cfg-finance", "cfg-support"} {
+		rec := doJSON(t, r, http.MethodGet, fmt.Sprintf("/cms/products/%d?environment=sandbox", vipID), actor, nil)
+		if rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), "price_AnnualVIP9999") || !strings.Contains(rec.Body.String(), `"dual_channel_ready":true`) {
+			t.Fatalf("summary projection for %s: %d %s", actor, rec.Code, rec.Body.String())
+		}
+	}
+	policyPath := fmt.Sprintf("/cms/payments/channels/%d/aftercare-policy", ppID)
+	draft := map[string]any{"reason": "test review policy", "revision": "", "hold_fulfillment": true,
+		"reviewer_id": "cfg-super", "finance_id": "cfg-finance", "review_seconds": 600, "refund_seconds": 1200}
+	for _, method := range []string{http.MethodGet, http.MethodPut} {
+		if rec := doJSON(t, r, method, policyPath, "cfg-finance", draft); rec.Code != http.StatusForbidden {
+			t.Fatalf("finance policy %s: %d %s", method, rec.Code, rec.Body.String())
+		}
+	}
+	readPolicy := func() struct {
+		Configured    bool `json:"configured"`
+		ReviewSeconds int  `json:"review_seconds"`
+	} {
+		rec := doJSON(t, r, http.MethodGet, policyPath, "cfg-super", nil)
+		var policy struct {
+			Configured    bool `json:"configured"`
+			ReviewSeconds int  `json:"review_seconds"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &policy); rec.Code != http.StatusOK || err != nil {
+			t.Fatalf("read policy: %d %s %v", rec.Code, rec.Body.String(), err)
+		}
+		return policy
+	}
+	if readPolicy().Configured {
+		t.Fatal("new account policy must be unconfigured")
+	}
+	if rec := doJSON(t, r, http.MethodPut, policyPath, "cfg-super", draft); rec.Code != http.StatusOK {
+		t.Fatalf("policy save: %d %s", rec.Code, rec.Body.String())
+	}
+	draft["review_seconds"] = 60
+	if rec := doJSON(t, r, http.MethodPut, policyPath, "cfg-super", draft); rec.Code != http.StatusConflict {
+		t.Fatalf("stale policy edit: %d %s", rec.Code, rec.Body.String())
+	}
+	if policy := readPolicy(); !policy.Configured || policy.ReviewSeconds != 600 {
+		t.Fatalf("saved policy projection: %+v", policy)
 	}
 }

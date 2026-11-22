@@ -2,6 +2,7 @@ package billing
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strconv"
 	"time"
@@ -172,6 +173,39 @@ func refundCommandsForReceipt(ctx context.Context, receiptID int64) ([]RefundCom
 		return nil, err
 	}
 	return pgx.CollectRows(rows, func(row pgx.CollectableRow) (RefundCommand, error) { return scanRefundCommand(row) })
+}
+
+type refundQueueFilter struct {
+	reconciliationPage
+	OrderID   int64  `form:"order_id" binding:"min=0"`
+	CommandID string `form:"command_id" binding:"omitempty,uuid"`
+	Status    string `form:"status" binding:"omitempty,oneof=pending confirming review succeeded failed"`
+	Attention bool   `form:"attention"`
+}
+
+func listRefundQueue(ctx context.Context, f refundQueueFilter) (json.RawMessage, error) {
+	var result json.RawMessage
+	err := db.DB.QueryRow(ctx, `
+		WITH filtered AS MATERIALIZED (
+			SELECT c.id::text,c.order_id::text,c.receipt_id::text,c.amount_minor::text,c.currency,c.status,c.environment,
+				COALESCE(c.result_note,'') AS result_note,c.created_at,c.updated_at,c.provider_refund_id,
+				COALESCE(NULLIF(admin.username,''),c.actor_id) AS actor,
+				COALESCE(p.payment_provider,CASE WHEN c.legacy_source THEN 'paypal' END,'') AS provider,
+				p.account_id::text AS account_id,p.capture_id AS receipt_ref
+			FROM payment_refund_commands c
+			LEFT JOIN third_party_payment_orders p ON p.id=c.receipt_id
+			LEFT JOIN admins admin ON admin.id=c.actor_id
+			WHERE c.environment=$1 AND ($2='' OR COALESCE(p.payment_provider,CASE WHEN c.legacy_source THEN 'paypal' END)=$2)
+			  AND ($3::bigint=0 OR p.account_id=$3) AND ($4::bigint=0 OR c.order_id=$4)
+			  AND ($5='' OR c.status=$5) AND (NOT $6 OR c.status IN ('pending','confirming','review'))
+			  AND (NULLIF($9,'')::uuid IS NULL OR c.id=NULLIF($9,'')::uuid)
+		), page AS (
+			SELECT * FROM filtered ORDER BY updated_at DESC,id DESC LIMIT $7 OFFSET $8
+		)
+		SELECT jsonb_build_object('total',(SELECT count(*) FROM filtered),
+			'items',COALESCE((SELECT jsonb_agg(to_jsonb(page) ORDER BY updated_at DESC,id DESC) FROM page),'[]'))`,
+		f.environment(), f.Provider, f.AccountID, f.OrderID, f.Status, f.Attention, reconciliationPageSize, f.offset(), f.CommandID).Scan(&result)
+	return result, err
 }
 
 // linkConfirmedPayPalRefund records a finance attestation against a completed

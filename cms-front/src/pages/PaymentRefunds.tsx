@@ -1,16 +1,34 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { History, ListChecks } from 'lucide-react';
 import { Link, useSearchParams } from 'react-router-dom';
-import { ApiError, apiRequest } from '../utils/api';
+import CustomSelect from '../components/CustomSelect';
 import { CmsDialog } from '../components/ui/CmsDialog';
-import { SkeletonRows, StatusDot, TableRegion } from '../components/ui/Primitives';
+import { Pagination } from '../components/ui/Pagination';
+import { FilterChipsBar, SearchInput, SkeletonRows, StatusDot, TableRegion } from '../components/ui/Primitives';
+import { PaymentLoadError, PaymentScopeBar, PaymentTabs } from '../components/payments/PaymentWorkspace';
+import { ApiError, apiRequest } from '../utils/api';
+import {
+  PAYMENT_PAGE_SIZE,
+  paymentError,
+  paymentGet,
+  paymentMoney,
+  paymentParams,
+  paymentScope,
+  paymentScopeLabel,
+  paymentTime,
+  usePaymentQuery,
+  type PaymentScope,
+} from '../utils/paymentWorkspace';
 
-type Receipt = {
+type Receipt = PaymentScope & {
   id: number;
-  provider: string;
-  environment?: string;
+  receipt_ref: string;
   currency: string;
   amount_minor: number;
   available_minor: number;
+  refunded_minor: number;
+  reserved_minor: number;
+  refund_facts: { ref: string; amount_minor: string }[];
   funds_entitlement: boolean;
   refundable: boolean;
   note: string;
@@ -18,15 +36,29 @@ type Receipt = {
 
 type Refund = {
   id: string;
-  status: 'pending' | 'confirming' | 'review' | 'succeeded' | 'failed';
-  amount_minor?: number;
+  status: keyof typeof statuses;
+  amount_minor?: number | string;
   currency: string;
   result_note?: string;
   can_reconcile?: boolean;
+  created_at: string;
+  updated_at: string;
 };
-
+type QueueItem = Refund &
+  PaymentScope & {
+    order_id: string;
+    receipt_id: string | null;
+    receipt_ref: string | null;
+    actor: string;
+    provider_refund_id: string | null;
+  };
 type RefundDraft = { receipt_id: number; amount_minor: number; currency: string; request_key: string };
+type RefundTab = 'queue' | 'history';
 
+const tabs = [
+  { value: 'queue', label: '退款待办', icon: <ListChecks size={14} aria-hidden="true" /> },
+  { value: 'history', label: '退款记录', icon: <History size={14} aria-hidden="true" /> },
+] as const;
 const statuses = {
   pending: { label: '等待处理', tone: 'muted' },
   confirming: { label: '渠道确认中', tone: 'warning' },
@@ -34,6 +66,7 @@ const statuses = {
   succeeded: { label: '退款成功', tone: 'success' },
   failed: { label: '退款失败', tone: 'error' },
 } as const;
+const inProgress = new Set(['pending', 'confirming', 'review']);
 
 function amountInMinorUnits(text: string) {
   if (!/^\d+(\.\d{1,2})?$/.test(text)) return 0;
@@ -42,265 +75,826 @@ function amountInMinorUnits(text: string) {
   return Number.isSafeInteger(minor) ? minor : 0;
 }
 
-const money = (minor: number, currency: string) => `${(minor / 100).toFixed(2)} ${currency}`;
-const errorText = (error: unknown) => error instanceof Error ? error.message : '退款查询失败，请重试。';
-
-export function PaymentRefunds({ actor }: { actor: string }) {
-  const [params, setParams] = useSearchParams();
-  const order = params.get('order_id') || '';
-  const selected = params.get('receipt_id') || '';
-  const [orderInput, setOrderInput] = useState(order);
-  const [receipts, setReceipts] = useState<Receipt[] | null>(null);
-  const [refunds, setRefunds] = useState<Refund[] | null>(null);
-  const [selectedReceiptID, setSelectedReceiptID] = useState<number | null>(null);
+function RefundReceipt({
+  actor,
+  order,
+  receipt,
+  balanceRefreshing,
+  onUpdated,
+}: {
+  actor: string;
+  order: string;
+  receipt: Receipt;
+  balanceRefreshing: boolean;
+  onUpdated: () => void;
+}) {
   const [amount, setAmount] = useState('');
-  const [confirm, setConfirm] = useState<RefundDraft | null>(null);
-  const [reconciliation, setReconciliation] = useState<{ id: string; refundRef: string; reason: string } | null>(null);
-  const [draft, setDraft] = useState<RefundDraft | null>(null);
+  const [confirm, setConfirm] = useState<RefundDraft>();
+  const [reconciliation, setReconciliation] = useState<{ id: string; ref: string; reason: string }>();
   const [submission, setSubmission] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
-  const inFlight = useRef(false);
+  const [revision, setRevision] = useState(0);
+  const lock = useRef(false);
+  const storageKey = `cms-refund:${actor}:${receipt.id}`;
+  const [draft, setDraft] = useState<RefundDraft | undefined>(() => {
+    try {
+      const saved: RefundDraft = JSON.parse(localStorage.getItem(storageKey) || 'null');
+      if (
+        saved?.receipt_id === receipt.id &&
+        saved.currency === receipt.currency &&
+        typeof saved.request_key === 'string'
+      )
+        return saved;
+    } catch {
+      /* Server history remains available. */
+    }
+    return undefined;
+  });
+  const history = usePaymentQuery<{ refunds: Refund[] }>(`/payments/refunds?receipt_id=${receipt.id}`, revision);
+  const operation = usePaymentQuery<Refund>(
+    draft ? `/payments/refunds/request/${encodeURIComponent(draft.request_key)}` : '',
+    revision,
+  );
+  const tracked = operation?.data;
+  const activeRefund = history?.data?.refunds.some((item) => inProgress.has(item.status));
 
-  const activeReceipt = receipts?.find((item) => item.id === selectedReceiptID);
-  const environment = activeReceipt?.environment || '';
-  const draftKey = activeReceipt ? `cms-refund:${actor}:${activeReceipt.id}` : '';
-  const activeReceiptID = activeReceipt?.id;
-  const activeRefund = refunds?.some((item) => ['pending', 'confirming', 'review'].includes(item.status));
-  const loadReceipts = useCallback(async (signal?: AbortSignal) => {
-    if (!order) return;
-    const result = await apiRequest('GET', `/payments/orders/${encodeURIComponent(order)}/receipts`, undefined, false, signal);
-    if (signal?.aborted) return;
-    const items: Receipt[] = result.receipts || [];
-    setReceipts(items);
-    setSelectedReceiptID((current) => items.find((item) => item.id === current)?.id ??
-      items.find((item) => String(item.id) === selected)?.id ??
-      items.find((item) => item.funds_entitlement)?.id ?? items[0]?.id ?? null);
-  }, [order, selected]);
+  function forgetDraft() {
+    setDraft(undefined);
+    try {
+      localStorage.removeItem(storageKey);
+    } catch {
+      /* Server history remains available. */
+    }
+  }
 
   useEffect(() => {
-    const controller = new AbortController();
-    setReceipts(null);
-    setError('');
-    void loadReceipts(controller.signal).catch((failure) => {
-      if (!controller.signal.aborted) setError(errorText(failure));
-    });
-    return () => controller.abort();
-  }, [loadReceipts]);
+    if (!activeRefund && (!tracked || !inProgress.has(tracked.status))) return;
+    const timer = window.setTimeout(() => {
+      setRevision((value) => value + 1);
+      onUpdated();
+    }, 5000);
+    return () => window.clearTimeout(timer);
+  }, [activeRefund, tracked, onUpdated]);
 
-  const dropDraft = useCallback(() => {
-    setDraft(null);
-    try { localStorage.removeItem(draftKey); } catch { /* Continue with server history. */ }
-  }, [draftKey]);
+  function refresh() {
+    setRevision((value) => value + 1);
+    onUpdated();
+  }
 
-  const readOperation = useCallback(async (request: RefundDraft, signal?: AbortSignal) => {
-    try {
-      const command: Refund = await apiRequest('GET', `/payments/refunds/request/${request.request_key}`, undefined, false, signal);
-      if (signal?.aborted) return undefined;
-      if (command.status === 'succeeded' || command.status === 'failed') dropDraft();
-      setSubmission(statuses[command.status].label);
-      return command;
-    } catch (failure) {
-      if (signal?.aborted) return undefined;
-      if (!(failure instanceof ApiError && failure.status === 404)) throw failure;
-      setSubmission('暂未查到原命令。如需重试，将使用原请求和金额。');
-      return undefined;
-    }
-  }, [dropDraft]);
-
-  const loadRefunds = useCallback(async (signal?: AbortSignal) => {
-    if (!activeReceiptID) return;
-    const result = await apiRequest('GET', `/payments/refunds?receipt_id=${activeReceiptID}`, undefined, false, signal);
-    if (!signal?.aborted) setRefunds(result.refunds || []);
-  }, [activeReceiptID]);
-
-  useEffect(() => {
-    if (!activeReceiptID || !draftKey) return;
-    const controller = new AbortController();
-    setAmount('');
-    setSubmission('');
-    setRefunds(null);
-    setDraft(null);
-    let saved: RefundDraft | null = null;
-    try {
-      const value = JSON.parse(localStorage.getItem(draftKey) || 'null');
-      if (value?.receipt_id === activeReceiptID && typeof value.request_key === 'string') saved = value;
-    } catch { /* Continue with server history. */ }
-    if (saved) setDraft(saved);
-    void loadRefunds(controller.signal).then(() => {
-      if (saved && !controller.signal.aborted) return readOperation(saved, controller.signal);
-    }).catch((failure) => {
-      if (!controller.signal.aborted) setError(errorText(failure));
-    });
-    return () => controller.abort();
-  }, [activeReceiptID, draftKey, loadRefunds, readOperation]);
-
-  const refresh = async () => {
-    try {
-      await Promise.all([loadReceipts(), loadRefunds(), draft ? readOperation(draft) : undefined]);
-    } catch (failure) {
-      setError(errorText(failure));
-    }
-  };
-
-  const submit = async (request: RefundDraft, retry: boolean) => {
-    if (inFlight.current) return;
-    inFlight.current = true;
+  async function submit(request: RefundDraft, retry: boolean) {
+    if (lock.current) return;
+    lock.current = true;
     setBusy(true);
     setError('');
     try {
       if (retry) {
-        const existing = await readOperation(request);
-        if (existing) {
-          await loadRefunds();
+        try {
+          const existing = await paymentGet<Refund>(
+            `/payments/refunds/request/${encodeURIComponent(request.request_key)}`,
+          );
+          setSubmission(statuses[existing.status].label);
+          refresh();
           return;
+        } catch (failure) {
+          if (!(failure instanceof ApiError && failure.status === 404)) throw failure;
         }
       }
       setDraft(request);
-      try { localStorage.setItem(draftKey, JSON.stringify(request)); } catch { /* The current form still has the original key. */ }
+      try {
+        localStorage.setItem(storageKey, JSON.stringify(request));
+      } catch {
+        /* Retain the same key in this session. */
+      }
       const command: Refund = await apiRequest('POST', '/payments/refunds', request);
-      setSubmission(statuses[command.status].label);
-      if (command.status === 'succeeded' || command.status === 'failed') dropDraft();
-      setConfirm(null);
-      await Promise.all([loadReceipts(), loadRefunds()]);
+      setSubmission(`操作 ${command.id} · ${statuses[command.status].label}`);
+      if (!inProgress.has(command.status)) forgetDraft();
+      setAmount('');
+      refresh();
     } catch (failure) {
-      setConfirm(null);
-      if (failure instanceof ApiError && [400, 403, 409].includes(failure.status) && !retry) {
-        dropDraft();
-        setError(errorText(failure));
+      if (!retry && failure instanceof ApiError && [400, 403, 409].includes(failure.status)) {
+        forgetDraft();
+        setError(paymentError(failure));
+        refresh();
       } else {
-        setSubmission('提交结果待确认。请查询原命令或重试同一请求。');
+        setSubmission('提交结果待确认。请查询原命令，或按原参数重试。');
       }
     } finally {
-      inFlight.current = false;
+      setConfirm(undefined);
       setBusy(false);
+      lock.current = false;
     }
-  };
+  }
 
-  const requestedMinor = amountInMinorUnits(amount);
-  const reconcilePayPal = async () => {
-    if (!reconciliation || inFlight.current) return;
-    inFlight.current = true;
+  async function reconcile() {
+    if (!reconciliation || lock.current) return;
+    lock.current = true;
     setBusy(true);
     setError('');
     try {
       await apiRequest('POST', `/payments/refunds/${encodeURIComponent(reconciliation.id)}/reconcile-paypal`, {
-        refund_ref: reconciliation.refundRef.trim(), reason: reconciliation.reason.trim(),
+        refund_ref: reconciliation.ref.trim(),
+        reason: reconciliation.reason.trim(),
       });
-      setReconciliation(null);
+      setReconciliation(undefined);
       setSubmission('已关联 PayPal 退款凭证。');
-      await refresh();
+      refresh();
     } catch (failure) {
-      setError(errorText(failure));
+      setError(paymentError(failure));
     } finally {
-      inFlight.current = false;
+      lock.current = false;
       setBusy(false);
     }
-  };
+  }
 
-  const canRequest = !!activeReceipt?.refundable && requestedMinor > 0 && requestedMinor <= activeReceipt.available_minor &&
-    refunds !== null && !draft && !activeRefund;
-
+  const requestedMinor = amountInMinorUnits(amount);
+  const terminal = tracked && !inProgress.has(tracked.status);
+  const canRefund =
+    Number.isSafeInteger(receipt.id) &&
+    receipt.refundable &&
+    ['paypal', 'stripe'].includes(receipt.provider) &&
+    ['live', 'sandbox'].includes(receipt.environment) &&
+    requestedMinor > 0 &&
+    requestedMinor <= receipt.available_minor &&
+    Boolean(history?.data) &&
+    !balanceRefreshing &&
+    !draft &&
+    !activeRefund;
+  const scopeLabel = paymentScopeLabel(receipt);
   return (
-    <div className="space-y-4">
-      <h1 className="text-xl font-semibold">退款</h1>
-      <form className="flex flex-wrap items-end gap-2" onSubmit={(event) => {
-        event.preventDefault();
-        setParams({ order_id: orderInput.trim() });
-      }}>
-        <label className="grid gap-1 text-sm">原订单号
-          <input className="input-field" value={orderInput} onChange={(event) => setOrderInput(event.target.value)}
-            inputMode="numeric" pattern="[0-9]+" required />
-        </label>
-        <button type="submit" className="btn-primary" disabled={busy}>查收款</button>
-      </form>
-      {order && environment && <Link className="btn-detail" to={`/payments/disputes?${new URLSearchParams({ order_id: order, environment })}`}>关联争议与冲回</Link>}
-      {activeReceipt && !environment && <p>收款环境待核对。</p>}
-      {error && <p role="alert" className="text-[var(--cms-error)]">{error}</p>}
-      {order && !receipts && !error && <p role="status">正在查询收款…</p>}
-      {receipts?.length === 0 && <p role="status">该订单没有可查的收款凭证。</p>}
-      {!!receipts?.length && (
-        <label className="grid gap-1 max-w-md text-sm">原收款
-          <select className="input-field" disabled={busy} value={selectedReceiptID || ''} onChange={(event) => {
-            const id = Number(event.target.value);
-            setSelectedReceiptID(id);
-            setParams({ order_id: order, receipt_id: String(id) }, { replace: true });
-          }}>
-            {receipts.map((receipt) => <option key={receipt.id} value={receipt.id}>
-              #{receipt.id} · {receipt.provider} · {money(receipt.amount_minor, receipt.currency)}
-              {receipt.funds_entitlement ? ' · 履约收款' : ''}
-            </option>)}
-          </select>
-        </label>
-      )}
-      {activeReceipt && (
-        <>
-          <p className="text-sm">当前可退 {money(activeReceipt.available_minor, activeReceipt.currency)}</p>
-          {activeReceipt.note && <p className="text-sm text-[var(--cms-muted-fg)]">{activeReceipt.note}</p>}
-          <div className="flex flex-wrap items-end gap-2">
-            <label className="grid gap-1 text-sm">退款金额（{activeReceipt.currency}）
-              <input className="input-field" inputMode="decimal" value={amount} disabled={!!draft || busy}
-                onChange={(event) => setAmount(event.target.value)} />
-            </label>
-            <button type="button" className="btn-primary" disabled={!canRequest || busy} onClick={() => setConfirm({
-              receipt_id: activeReceipt.id, amount_minor: requestedMinor, currency: activeReceipt.currency, request_key: crypto.randomUUID(),
-            })}>发起退款</button>
-            <button type="button" className="btn-secondary" disabled={busy} onClick={() => void refresh()}>刷新退款记录</button>
-            {draft && <button type="button" className="btn-secondary" disabled={busy} onClick={() => void submit(draft, true)}>重试同一请求</button>}
+    <div className="space-y-4 text-sm">
+      <dl className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+        {(
+          [
+            ['原收款', receipt.amount_minor],
+            ['已退', receipt.refunded_minor],
+            ['预留', receipt.reserved_minor],
+            ['当前可退', receipt.available_minor],
+          ] as const
+        ).map(([label, value]) => (
+          <div key={label}>
+            <dt className="text-xs text-[var(--cms-muted-fg)]">{label}</dt>
+            <dd className="mt-1 font-medium tabular-nums">{paymentMoney(value, receipt.currency)}</dd>
           </div>
-          <p role="status" className="text-sm">{submission || (activeRefund ? '原款有在途或待核对的退款。' : '')}</p>
-          <TableRegion ariaLabel="退款操作记录">
-            <table className="cms-table">
-              <thead><tr><th>操作编号</th><th className="text-right">退款金额</th><th>状态</th><th>处理结果</th></tr></thead>
-              <tbody>
-                {!refunds ? <SkeletonRows rows={2} cols={4} /> : refunds.map((refund) => (
+        ))}
+      </dl>
+      <p className="text-xs text-[var(--cms-muted-fg)]">
+        {receipt.funds_entitlement ? '此收款用于履约' : '此收款未用于履约'}
+        {receipt.note ? ` · ${receipt.note}` : ''}
+      </p>
+      {receipt.environment && (
+        <Link
+          className="btn-detail"
+          to={`/payments/disputes?${paymentParams({ provider: receipt.provider, environment: receipt.environment, account_id: receipt.account_id, order_id: order, receipt: receipt.receipt_ref })}`}
+        >
+          查看关联争议与冲回
+        </Link>
+      )}
+      <form
+        className="flex flex-wrap items-end gap-2"
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (canRefund && !busy)
+            setConfirm({
+              receipt_id: receipt.id,
+              amount_minor: requestedMinor,
+              currency: receipt.currency,
+              request_key: crypto.randomUUID(),
+            });
+        }}
+      >
+        <label className="grid gap-1 text-xs">
+          退款金额（{receipt.currency}）
+          <input
+            className="input-field"
+            inputMode="decimal"
+            value={amount}
+            disabled={!!draft || busy}
+            onChange={(event) => setAmount(event.target.value)}
+          />
+        </label>
+        <button type="submit" className="btn-primary" disabled={!canRefund || busy}>
+          发起退款
+        </button>
+        <button type="button" className="btn-secondary" disabled={busy} onClick={refresh}>
+          刷新状态
+        </button>
+        {draft && !tracked && (
+          <button
+            type="button"
+            className="btn-secondary"
+            disabled={busy || !operation}
+            onClick={() => void submit(draft, true)}
+          >
+            重试同一请求
+          </button>
+        )}
+        {terminal && (
+          <button type="button" className="btn-secondary" onClick={forgetDraft}>
+            结束跟踪
+          </button>
+        )}
+      </form>
+      {error && !reconciliation && (
+        <p role="alert" className="text-[var(--cms-error)]">
+          {error}
+        </p>
+      )}
+      <p role="status" className="text-xs text-[var(--cms-muted-fg)]">
+        {tracked
+          ? `操作 ${tracked.id} · ${statuses[tracked.status].label}`
+          : submission ||
+            (draft ? '正在核对原退款请求，确认前暂停新申请。' : activeRefund ? '原款有在途或待核对的退款。' : '')}
+      </p>
+      {history?.error ? (
+        <PaymentLoadError message={history.error} onRetry={refresh} />
+      ) : (
+        <TableRegion ariaLabel="退款操作记录">
+          <table className="cms-table" aria-busy={!history}>
+            <thead>
+              <tr>
+                <th scope="col">操作编号 / 时间 UTC</th>
+                <th scope="col" className="text-right">
+                  金额
+                </th>
+                <th scope="col">状态</th>
+                <th scope="col">操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              {!history ? (
+                <SkeletonRows rows={2} cols={4} />
+              ) : history.data?.refunds.length ? (
+                history.data.refunds.map((refund) => (
                   <tr key={refund.id}>
-                    <td className="font-mono">{refund.id}</td><td className="text-right">{refund.amount_minor ? money(refund.amount_minor, refund.currency) : '—'}</td>
-                    <td><StatusDot {...statuses[refund.status]} /></td>
-                    <td>{refund.result_note || '—'}
-                      {activeReceipt.provider === 'paypal' && refund.can_reconcile && (
-                        <button type="button" className="btn-detail" disabled={busy}
-                          onClick={() => setReconciliation({ id: refund.id, refundRef: '', reason: '' })}>关联已确认退款</button>
+                    <td>
+                      <span className="font-mono">{refund.id}</span>
+                      <div className="text-[var(--cms-muted-fg)]">{paymentTime(refund.created_at)}</div>
+                    </td>
+                    <td className="text-right tabular-nums">{paymentMoney(refund.amount_minor, refund.currency)}</td>
+                    <td>
+                      <StatusDot {...statuses[refund.status]} />
+                      {refund.result_note && <div>{refund.result_note}</div>}
+                    </td>
+                    <td>
+                      {receipt.provider === 'paypal' && refund.can_reconcile && (
+                        <button
+                          type="button"
+                          className="btn-detail"
+                          disabled={busy}
+                          onClick={() => {
+                            setError('');
+                            setReconciliation({ id: refund.id, ref: '', reason: '' });
+                          }}
+                        >
+                          关联已确认退款
+                        </button>
                       )}
                     </td>
+                  </tr>
+                ))
+              ) : (
+                <tr>
+                  <td colSpan={4} className="text-center">
+                    <p role="status" className="text-[11px] text-[var(--cms-muted-fg)]">
+                      暂无退款操作记录
+                    </p>
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </TableRegion>
+      )}
+      {!!receipt.refund_facts?.length && (
+        <div>
+          <h3 className="mb-2 text-sm font-semibold">已确认渠道退款</h3>
+          <TableRegion ariaLabel="已确认渠道退款">
+            <table className="cms-table">
+              <thead>
+                <tr>
+                  <th scope="col">渠道退款编号</th>
+                  <th scope="col" className="text-right">
+                    金额
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {receipt.refund_facts.map((item) => (
+                  <tr key={item.ref}>
+                    <td className="font-mono">{item.ref}</td>
+                    <td className="text-right tabular-nums">{paymentMoney(item.amount_minor, receipt.currency)}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </TableRegion>
-          {refunds?.length === 0 && <p role="status">暂无退款记录。</p>}
-        </>
+        </div>
       )}
-      <CmsDialog open={reconciliation !== null} onClose={() => { if (!busy) setReconciliation(null); }}
-        title="核对 PayPal 退款" closedBy="closerequest" closeDisabled={busy}>
-        {reconciliation && (
-          <form className="grid gap-3" onSubmit={(event) => { event.preventDefault(); void reconcilePayPal(); }}>
-            <p>提交前，请在 PayPal 核实该退款编号对应此退款操作。存在同额退款时，请核对发起记录。</p>
-            <label>PayPal 退款编号
-              <input className="input-field" required maxLength={100} value={reconciliation.refundRef}
-                onChange={(event) => setReconciliation({ ...reconciliation, refundRef: event.target.value })} />
-            </label>
-            <label>核对依据
-              <textarea className="input-field" required maxLength={500} value={reconciliation.reason}
-                onChange={(event) => setReconciliation({ ...reconciliation, reason: event.target.value })} />
-            </label>
-            {error && <p role="alert">{error}</p>}
-            <button type="submit" className="btn-primary" disabled={busy || !reconciliation.refundRef.trim() || !reconciliation.reason.trim()}>
-              确认关联
+      <CmsDialog
+        open={Boolean(confirm)}
+        onClose={() => setConfirm(undefined)}
+        title="确认退款"
+        subtitle={scopeLabel}
+        closedBy="closerequest"
+        closeDisabled={busy}
+        footer={
+          <>
+            <button
+              type="button"
+              className="btn-secondary"
+              data-dialog-initial-focus
+              disabled={busy}
+              onClick={() => setConfirm(undefined)}
+            >
+              取消
             </button>
+            <button
+              type="button"
+              className="btn-primary"
+              disabled={busy}
+              onClick={() => confirm && void submit(confirm, false)}
+            >
+              {busy ? '提交中…' : '确认提交'}
+            </button>
+          </>
+        }
+      >
+        {confirm && (
+          <p className="text-sm">
+            订单 #{order} · 原收款 {receipt.receipt_ref || `#${receipt.id}`} · 申请退款{' '}
+            {paymentMoney(confirm.amount_minor, confirm.currency)}
+          </p>
+        )}
+      </CmsDialog>
+      <CmsDialog
+        open={Boolean(reconciliation)}
+        onClose={() => setReconciliation(undefined)}
+        title="核对 PayPal 退款"
+        subtitle={scopeLabel}
+        closedBy="closerequest"
+        closeDisabled={busy}
+      >
+        {reconciliation && (
+          <form
+            className="space-y-3 text-sm"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void reconcile();
+            }}
+          >
+            <p>原收款 {receipt.receipt_ref || `#${receipt.id}`}。提交会关联已确认凭证。</p>
+            <label className="grid gap-1">
+              PayPal 退款编号
+              <input
+                required
+                maxLength={100}
+                className="input-field"
+                value={reconciliation.ref}
+                onChange={(event) => setReconciliation({ ...reconciliation, ref: event.target.value })}
+              />
+            </label>
+            <label className="grid gap-1">
+              核对依据
+              <textarea
+                required
+                maxLength={500}
+                className="input-field"
+                value={reconciliation.reason}
+                onChange={(event) => setReconciliation({ ...reconciliation, reason: event.target.value })}
+              />
+            </label>
+            {error && (
+              <p role="alert" className="text-[var(--cms-error)]">
+                {error}
+              </p>
+            )}
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                className="btn-secondary"
+                data-dialog-initial-focus
+                disabled={busy}
+                onClick={() => setReconciliation(undefined)}
+              >
+                取消
+              </button>
+              <button
+                type="submit"
+                className="btn-primary"
+                disabled={busy || !reconciliation.ref.trim() || !reconciliation.reason.trim()}
+              >
+                确认关联
+              </button>
+            </div>
           </form>
         )}
       </CmsDialog>
-      <CmsDialog open={confirm !== null} onClose={() => { if (!busy) setConfirm(null); }} title="确认退款"
-        closedBy="closerequest" closeDisabled={busy}
-        footer={<>
-          <button type="button" data-dialog-initial-focus className="btn-secondary" onClick={() => setConfirm(null)} disabled={busy}>取消</button>
-          <button type="button" className="btn-primary" disabled={busy} onClick={() => confirm && void submit(confirm, false)}>
-            {busy ? '提交中…' : '确认提交'}
-          </button>
-        </>}>
-        {confirm && <p>订单 #{order} 的收款 #{confirm.receipt_id} 将申请退款 {money(confirm.amount_minor, confirm.currency)}。</p>}
-      </CmsDialog>
     </div>
+  );
+}
+
+function RefundDrawer({
+  actor,
+  order,
+  params,
+  onClose,
+  onUpdated,
+  onSelect,
+}: {
+  actor: string;
+  order: string;
+  params: URLSearchParams;
+  onClose: () => void;
+  onUpdated: () => void;
+  onSelect: (receipt: string) => void;
+}) {
+  const [revision, setRevision] = useState(0);
+  const pin = params.get('receipt_id');
+  const legacy = params.get('legacy_command');
+  const source = usePaymentQuery<{ receipts: Receipt[] }>(
+    legacy ? '' : `/payments/orders/${encodeURIComponent(order)}/receipts?${paymentParams({ receipt_id: pin })}`,
+    revision,
+    true,
+  );
+  const candidates =
+    source?.data?.receipts.filter((receipt) =>
+      (['provider', 'environment', 'account_id'] as const).every((key) => {
+        const expected = params.get('target_' + key) ?? params.get(key);
+        return !expected || String(receipt[key] ?? '') === expected;
+      }),
+    ) ?? [];
+  const receipt = pin
+    ? candidates.find((item) => String(item.id) === pin)
+    : candidates.length === 1
+      ? candidates[0]
+      : undefined;
+
+  const refreshReceipt = useCallback(() => {
+    setRevision((value) => value + 1);
+    onUpdated();
+  }, [onUpdated]);
+
+  return (
+    <CmsDialog
+      open
+      onClose={onClose}
+      title={`订单 #${order} · 退款`}
+      subtitle={receipt ? paymentScopeLabel(receipt) : undefined}
+      variant="drawer"
+      size="lg"
+    >
+      <div className="space-y-4">
+        {legacy ? (
+          <p className="text-sm" role="status">
+            操作 {legacy} 尚未关联原收款。请先核实旧退款凭证。
+          </p>
+        ) : source?.error ? (
+          <PaymentLoadError message={source.error} onRetry={() => setRevision((value) => value + 1)} />
+        ) : !source?.data ? (
+          <p role="status" className="text-sm">
+            正在查询原收款…
+          </p>
+        ) : pin && !receipt ? (
+          <p role="alert" className="text-sm text-[var(--cms-error)]">
+            指定原收款不存在或与链接的渠道、环境、商户不匹配。
+          </p>
+        ) : !candidates.length ? (
+          <p role="status" className="text-sm">
+            当前范围没有可查的原收款。
+          </p>
+        ) : (
+          <>
+            {pin ? (
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <p className="text-sm">
+                  原收款 <span className="font-mono">{receipt?.receipt_ref || `#${pin}`}</span>
+                </p>
+                <button type="button" className="btn-secondary" onClick={() => onSelect('')}>
+                  查看本单其他收款
+                </button>
+              </div>
+            ) : (
+              <CustomSelect
+                aria-label="原收款"
+                width="100%"
+                value={receipt ? String(receipt.id) : ''}
+                options={[
+                  { value: '', label: '请选择原收款' },
+                  ...candidates.map((item) => ({
+                    value: String(item.id),
+                    label: `${item.receipt_ref || `#${item.id}`} · ${paymentScopeLabel(item)} · ${paymentMoney(item.amount_minor, item.currency)}`,
+                  })),
+                ]}
+                onChange={onSelect}
+              />
+            )}
+            {receipt && (
+              <RefundReceipt
+                key={receipt.id}
+                actor={actor}
+                order={order}
+                receipt={receipt}
+                balanceRefreshing={Boolean(source.refreshing)}
+                onUpdated={refreshReceipt}
+              />
+            )}
+          </>
+        )}
+      </div>
+    </CmsDialog>
+  );
+}
+
+export function PaymentRefunds({ actor }: { actor: string }) {
+  const [params, setParams] = useSearchParams();
+  const [search, setSearch] = useState('');
+  const [searchField, setSearchField] = useState<'order' | 'command'>('order');
+  const [error, setError] = useState('');
+  const [revision, setRevision] = useState(0);
+  const refresh = useCallback(() => setRevision((value) => value + 1), []);
+  const triggerRef = useRef<HTMLElement | null>(null);
+  const scope = paymentScope(params);
+  const page = Math.max(1, Number(params.get('page')) || 1);
+  const order = params.get('order_id') ?? '';
+  const queueOrder = params.get('queue_order_id') ?? '';
+  const command = params.get('command_id') ?? '';
+  const view: RefundTab = command || params.get('tab') === 'history' ? 'history' : 'queue';
+  const status = params.get('status') ?? '';
+  useEffect(() => {
+    if (!order) triggerRef.current?.focus();
+  }, [order]);
+  const result = usePaymentQuery<{ total: number; items: QueueItem[] }>(
+    `/payments/refunds/queue?${paymentParams({
+      ...scope,
+      page: String(page),
+      attention: view === 'queue' ? 'true' : '',
+      status,
+      order_id: queueOrder,
+      command_id: command,
+    })}`,
+    revision,
+  );
+
+  function update(fields: Record<string, string | undefined>) {
+    const next = new URLSearchParams(params);
+    for (const [key, value] of Object.entries(fields)) {
+      if (value) next.set(key, value);
+      else next.delete(key);
+    }
+    setParams(next);
+  }
+
+  function startLookup(openReceipts = false) {
+    const value = search.trim();
+    if (searchField === 'command') {
+      if (!/^[\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12}$/i.test(value)) {
+        setError('请输入完整的退款操作号。');
+        return;
+      }
+      setError('');
+      update({
+        command_id: value.toLowerCase(),
+        queue_order_id: '',
+        tab: 'history',
+        status: '',
+        page: '',
+        order_id: '',
+        receipt_id: '',
+        legacy_command: '',
+      });
+      return;
+    }
+    if (!/^\d+$/.test(value) || /^0+$/.test(value)) {
+      setError('请输入有效的订单号。');
+      return;
+    }
+    setError('');
+    const orderID = value.replace(/^0+/, '');
+    if (!openReceipts) {
+      update({ queue_order_id: orderID, command_id: '', page: '' });
+      return;
+    }
+    triggerRef.current = document.activeElement as HTMLElement | null;
+    update({
+      ...scope,
+      order_id: orderID,
+      receipt_id: '',
+      legacy_command: '',
+      target_provider: '',
+      target_environment: '',
+      target_account_id: '',
+    });
+  }
+
+  return (
+    <PaymentTabs
+      tabs={tabs}
+      value={view}
+      label="退款视图"
+      onChange={(tab) => update({ tab, status: '', command_id: '', page: '' })}
+    >
+      <PaymentScopeBar
+        scope={scope}
+        onChange={(next) => update({ ...next, page: '', order_id: '', receipt_id: '', legacy_command: '' })}
+      />
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <search>
+          <form
+            aria-label="查询退款"
+            className="flex flex-wrap items-center gap-2"
+            onSubmit={(event) => {
+              event.preventDefault();
+              startLookup();
+            }}
+          >
+            <CustomSelect
+              aria-label="退款查询字段"
+              width="142px"
+              value={searchField}
+              options={[
+                { value: 'order', label: '订单号' },
+                { value: 'command', label: '退款操作号' },
+              ]}
+              onChange={(value) => {
+                setSearchField(value === 'command' ? 'command' : 'order');
+                setSearch('');
+                setError('');
+              }}
+            />
+            <SearchInput
+              value={search}
+              onChange={(value) => {
+                setSearch(value);
+                setError('');
+              }}
+              placeholder={searchField === 'order' ? '输入订单号' : '输入退款操作号'}
+            />
+            <button type="submit" className="btn-secondary">
+              {searchField === 'order' ? '筛选退款' : '查操作记录'}
+            </button>
+            {searchField === 'order' && (
+              <button type="button" className="btn-secondary" onClick={() => startLookup(true)}>
+                查原收款
+              </button>
+            )}
+          </form>
+        </search>
+        <CustomSelect
+          aria-label="退款状态"
+          value={status}
+          options={[
+            { value: '', label: '全部状态' },
+            ...Object.entries(statuses)
+              .filter(([value]) => view === 'history' || inProgress.has(value))
+              .map(([value, entry]) => ({ value, label: entry.label })),
+          ]}
+          onChange={(value) => update({ status: value, page: '' })}
+        />
+      </div>
+      {error && (
+        <p role="alert" className="text-sm text-[var(--cms-error)]">
+          {error}
+        </p>
+      )}
+      <FilterChipsBar
+        chips={[
+          ...(queueOrder
+            ? [
+                {
+                  key: 'queue_order_id',
+                  label: `订单号 ${queueOrder}`,
+                  onClear: () => update({ queue_order_id: '', page: '' }),
+                },
+              ]
+            : []),
+          ...(status && statuses[status as keyof typeof statuses]
+            ? [
+                {
+                  key: 'status',
+                  label: statuses[status as keyof typeof statuses].label,
+                  onClear: () => update({ status: '', page: '' }),
+                },
+              ]
+            : []),
+          ...(command
+            ? [
+                {
+                  key: 'command_id',
+                  label: `退款操作号 ${command}`,
+                  onClear: () => update({ command_id: '', page: '' }),
+                },
+              ]
+            : []),
+        ]}
+        onResetAll={() => update({ status: '', command_id: '', queue_order_id: '', page: '' })}
+      />
+      {result?.error ? (
+        <PaymentLoadError message={result.error} onRetry={() => setRevision((value) => value + 1)} />
+      ) : (
+        <TableRegion
+          ariaLabel="退款队列"
+          footer={
+            result?.data && (
+              <Pagination
+                page={page}
+                pageSize={PAYMENT_PAGE_SIZE}
+                total={result.data.total}
+                onPageChange={(value) => update({ page: String(value) })}
+              />
+            )
+          }
+        >
+          <table className="cms-table" aria-busy={!result}>
+            <thead>
+              <tr>
+                <th scope="col">订单 / 原收款</th>
+                <th scope="col">渠道账户</th>
+                <th scope="col">退款操作 / 状态</th>
+                <th scope="col" className="text-right">
+                  退款金额
+                </th>
+                <th scope="col">更新时间 UTC</th>
+                <th scope="col">操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              {!result ? (
+                <SkeletonRows rows={4} cols={6} />
+              ) : result.data?.items.length ? (
+                result.data.items.map((item) => (
+                  <tr key={item.id}>
+                    <td>
+                      <strong>#{item.order_id}</strong>
+                      <div className="font-mono">{item.receipt_ref || '原收款待核对'}</div>
+                    </td>
+                    <td>{paymentScopeLabel(item)}</td>
+                    <td>
+                      <StatusDot {...statuses[item.status]} />
+                      <div className="font-mono break-all">{item.id}</div>
+                      {item.provider_refund_id && (
+                        <div className="text-[var(--cms-muted-fg)] break-all">渠道退款 {item.provider_refund_id}</div>
+                      )}
+                    </td>
+                    <td className="text-right tabular-nums">{paymentMoney(item.amount_minor, item.currency)}</td>
+                    <td>
+                      {paymentTime(item.updated_at)}
+                      {item.actor && <div className="text-[var(--cms-muted-fg)]">{item.actor}</div>}
+                    </td>
+                    <td>
+                      <button
+                        type="button"
+                        className="btn-detail"
+                        onClick={(event) => {
+                          triggerRef.current = event.currentTarget;
+                          update({
+                            target_provider: item.provider || scope.provider,
+                            target_environment: item.environment,
+                            target_account_id: item.account_id || '',
+                            order_id: item.order_id,
+                            receipt_id: item.receipt_id || '',
+                            legacy_command: item.receipt_id ? '' : item.id,
+                          });
+                        }}
+                      >
+                        详情
+                      </button>
+                    </td>
+                  </tr>
+                ))
+              ) : (
+                <tr>
+                  <td colSpan={6} className="text-center">
+                    <p role="status" className="text-[11px] text-[var(--cms-muted-fg)]">
+                      {view === 'queue' ? '当前范围没有匹配的退款待办。' : '当前范围没有匹配的退款记录。'}
+                    </p>
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </TableRegion>
+      )}
+      {order && (
+        <RefundDrawer
+          key={`${order}/${params.get('receipt_id') ?? ''}/${scope.provider}/${scope.environment}/${scope.account_id}`}
+          actor={actor}
+          order={order}
+          params={params}
+          onSelect={(receipt_id) => update({ receipt_id })}
+          onClose={() =>
+            update({
+              order_id: '',
+              receipt_id: '',
+              legacy_command: '',
+              target_provider: '',
+              target_environment: '',
+              target_account_id: '',
+            })
+          }
+          onUpdated={refresh}
+        />
+      )}
+    </PaymentTabs>
   );
 }

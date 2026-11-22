@@ -1,9 +1,23 @@
-import { useCallback, useContext, useEffect, useId, useMemo, useState } from 'react';
-import { Link } from 'react-router-dom';
-import { CheckCircle2, Copy, Layers, Link2, Lock, PauseCircle, Plus, RefreshCw, Rocket, XCircle } from 'lucide-react';
+import { useCallback, useContext, useEffect, useId, useMemo, useRef, useState } from 'react';
+import { Link, useSearchParams } from 'react-router-dom';
+import { CheckCircle2, Plus, RefreshCw } from 'lucide-react';
 import CustomSelect from '../components/CustomSelect';
+import { PaymentLoadError } from '../components/payments/PaymentWorkspace';
 import { CmsDialog } from '../components/ui/CmsDialog';
-import { SearchInput, SkeletonRows, StatusDot, TableRegion } from '../components/ui/Primitives';
+import { Pagination } from '../components/ui/Pagination';
+import {
+  type ColumnOption,
+  type FilterChip,
+  FilterChipsBar,
+  RowActionMenu,
+  type RowActionItem,
+  SearchInput,
+  SkeletonRows,
+  StatusDot,
+  type TableDensity,
+  TableRegion,
+  ViewOptionsPopover,
+} from '../components/ui/Primitives';
 import { ToastContext } from '../context/ToastContext';
 import { operationsApi, type RecommendationNovel } from '../utils/api';
 import {
@@ -25,6 +39,7 @@ import {
 
 interface ProductsPageProps {
   canWrite: boolean;
+  canManageBindings: boolean;
 }
 
 type ProductFormState = {
@@ -65,10 +80,10 @@ type PayPalBindForm = {
 
 type StripeBindForm = {
   account_id: string;
-  product_ref: string;
-  price_ref: string;
   sales_mode: StripeSalesMode;
   tax_liability_account: string;
+  tax_code: string;
+  tax_behavior: 'exclusive' | 'inclusive';
   countries: string;
   release_evidence: string;
   market_policy: string;
@@ -80,7 +95,7 @@ function errMsg(err: unknown, fallback: string): string {
   return err instanceof Error ? err.message : fallback;
 }
 
-export default function ProductsPage({ canWrite }: ProductsPageProps) {
+export default function ProductsPage({ canWrite, canManageBindings }: ProductsPageProps) {
   const toastCtx = useContext(ToastContext);
   const showToast = useCallback(
     (msg: string, type: 'success' | 'error' | 'info' = 'success') => {
@@ -89,15 +104,27 @@ export default function ProductsPage({ canWrite }: ProductsPageProps) {
     },
     [toastCtx],
   );
-  const [env, setEnv] = useState<PaymentEnvironment>('sandbox');
+  const [params, setParams] = useSearchParams();
+  const env: PaymentEnvironment = params.get('environment') === 'live' ? 'live' : 'sandbox';
+  const canPublish = canWrite && (env === 'sandbox' || canManageBindings);
   const [typeFilter, setTypeFilter] = useState<'all' | ProductType>('all');
   const [statusFilter, setStatusFilter] = useState<'all' | PublicationStatus>('all');
   const [searchQuery, setSearchQuery] = useState('');
   const [readyOnly, setReadyOnly] = useState(false);
 
-  const [products, setProducts] = useState<ProductView[] | null>(null);
+  const [catalog, setCatalog] = useState<{ environment: PaymentEnvironment; products: ProductView[] }>();
+  const products = catalog?.environment === env ? catalog.products : null;
   const [accounts, setAccounts] = useState<ChannelAccount[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [hasLoadedOnce, setHasLoadedOnce] = useState(false);
   const [loadError, setLoadError] = useState('');
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(10);
+  const [density, setDensity] = useState<TableDensity>('comfortable');
+  const [visibleCols, setVisibleCols] = useState<{ bindings: boolean; templates: boolean }>({
+    bindings: true,
+    templates: true,
+  });
 
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [copySource, setCopySource] = useState<ProductView | null>(null);
@@ -108,8 +135,8 @@ export default function ProductsPage({ canWrite }: ProductsPageProps) {
   const [bindingProduct, setBindingProduct] = useState<ProductView | null>(null);
   const [ppForm, setPpForm] = useState<PayPalBindForm>({ account_id: '', external_product_ref: '', external_price_ref: '', enabled: true, reason: '' });
   const [stForm, setStForm] = useState<StripeBindForm>({
-    account_id: '', product_ref: '', price_ref: '', sales_mode: 'direct',
-    tax_liability_account: '', countries: 'US', release_evidence: '', market_policy: '', enabled: true, reason: '',
+    account_id: '', sales_mode: 'direct', tax_liability_account: '', tax_code: 'txcd_10103001',
+    tax_behavior: 'exclusive', countries: 'US', release_evidence: '', market_policy: '', enabled: true, reason: '',
   });
 
   const [statusDialog, setStatusDialog] = useState<{ product: ProductView; action: 'publish' | 'pause' | 'retire' } | null>(null);
@@ -118,8 +145,18 @@ export default function ProductsPage({ canWrite }: ProductsPageProps) {
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState('');
   const formId = useId();
+  const loadSequence = useRef(0);
+  const bindingSequence = useRef(0);
+
+  useEffect(() => {
+    bindingSequence.current += 1;
+    setBindingProduct(null);
+    setStatusDialog(null);
+  }, [env]);
 
   const loadData = useCallback(async (signal?: AbortSignal) => {
+    const sequence = ++loadSequence.current;
+    setLoading(true);
     setLoadError('');
     try {
       const [prodRes, chRes] = await Promise.all([
@@ -133,16 +170,24 @@ export default function ProductsPage({ canWrite }: ProductsPageProps) {
           },
           signal,
         ),
-        channelsApi.list(signal).catch(() => ({ channels: [] as ChannelAccount[] })),
+        canManageBindings ? channelsApi.list(signal) : Promise.resolve({ channels: [] as ChannelAccount[] }),
       ]);
-      if (!signal?.aborted) {
-        setProducts(prodRes.products ?? []);
+      if (!signal?.aborted && sequence === loadSequence.current) {
+        setCatalog({ environment: env, products: prodRes.products ?? [] });
         setAccounts(chRes.channels ?? []);
+        setHasLoadedOnce(true);
       }
     } catch (err) {
-      if (!signal?.aborted) setLoadError(errMsg(err, '加载商品列表失败'));
+      if (!signal?.aborted && sequence === loadSequence.current) {
+        setLoadError(errMsg(err, '加载商品列表失败'));
+        setHasLoadedOnce(true);
+      }
+    } finally {
+      if (!signal?.aborted && sequence === loadSequence.current) {
+        setLoading(false);
+      }
     }
-  }, [env, typeFilter, statusFilter, searchQuery, readyOnly]);
+  }, [env, typeFilter, statusFilter, searchQuery, readyOnly, canManageBindings]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -261,10 +306,10 @@ export default function ProductsPage({ canWrite }: ProductsPageProps) {
     });
     setStForm({
       account_id: String(prod.stripe_binding?.account_id ?? stAccDefault?.id ?? ''),
-      product_ref: prod.stripe_binding?.external_product_ref ?? '',
-      price_ref: prod.stripe_binding?.external_price_ref ?? '',
       sales_mode: prod.stripe_binding?.sales_mode ?? 'direct',
       tax_liability_account: prod.stripe_binding?.tax_liability_account ?? '',
+      tax_code: 'txcd_10103001',
+      tax_behavior: 'exclusive',
       countries: prod.stripe_binding?.allowed_countries?.join(', ') || 'US',
       release_evidence: prod.stripe_binding?.release_evidence ?? '',
       market_policy: prod.stripe_binding?.market_policy ?? '',
@@ -273,12 +318,20 @@ export default function ProductsPage({ canWrite }: ProductsPageProps) {
     });
   };
 
+  const closeBindingsDrawer = () => {
+    if (submitting) return;
+    bindingSequence.current += 1;
+    setBindingProduct(null);
+  };
+
   const openBindingsDrawer = async (prod: ProductView) => {
+    const sequence = ++bindingSequence.current;
     setFormError('');
     setBindingProduct(prod);
     syncBindingFormsFromProduct(prod);
     try {
       const fresh = await productsApi.get(prod.id, env);
+      if (sequence !== bindingSequence.current) return;
       setBindingProduct(fresh.product);
       syncBindingFormsFromProduct(fresh.product);
     } catch {
@@ -288,6 +341,7 @@ export default function ProductsPage({ canWrite }: ProductsPageProps) {
 
   const handleSavePayPalBinding = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!canManageBindings) return;
     if (!bindingProduct || submitting) return;
     setFormError('');
     setSubmitting(true);
@@ -314,6 +368,7 @@ export default function ProductsPage({ canWrite }: ProductsPageProps) {
 
   const handleSaveStripeBinding = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!canManageBindings) return;
     if (!bindingProduct || submitting) return;
     setFormError('');
     const countries = stForm.countries
@@ -333,10 +388,10 @@ export default function ProductsPage({ canWrite }: ProductsPageProps) {
       await productsApi.bindStripe(bindingProduct.id, {
         environment: env,
         account_id: stForm.account_id ? Number(stForm.account_id) : undefined,
-        product_ref: stForm.product_ref.trim(),
-        price_ref: stForm.price_ref.trim(),
         sales_mode: stForm.sales_mode,
         tax_liability_account: stForm.sales_mode === 'merchant_of_record' ? stForm.tax_liability_account.trim() : '',
+        tax_code: stForm.sales_mode === 'merchant_of_record' ? stForm.tax_code.trim() : undefined,
+        tax_behavior: stForm.sales_mode === 'merchant_of_record' ? stForm.tax_behavior : undefined,
         countries,
         release_evidence: stForm.release_evidence.trim(),
         market_policy: stForm.market_policy.trim(),
@@ -346,7 +401,7 @@ export default function ProductsPage({ canWrite }: ProductsPageProps) {
       const updated = await productsApi.get(bindingProduct.id, env);
       setBindingProduct(updated.product);
       syncBindingFormsFromProduct(updated.product);
-      showToast('Stripe 渠道绑定已验证并保存', 'success');
+      showToast('已联动 Stripe 自动创建/核验并保存绑定', 'success');
       await loadData();
     } catch (err) {
       setFormError(errMsg(err, 'Stripe 渠道绑定失败'));
@@ -357,6 +412,7 @@ export default function ProductsPage({ canWrite }: ProductsPageProps) {
 
   const handleTransitionStatus = async () => {
     if (!statusDialog || submitting) return;
+    if (!canWrite || (statusDialog.action === 'publish' && (!canPublish || (env === 'live' && !statusReason.trim())))) return;
     setSubmitting(true);
     setFormError('');
     try {
@@ -392,83 +448,85 @@ export default function ProductsPage({ canWrite }: ProductsPageProps) {
     }));
   };
 
+  const totalProducts = products?.length ?? 0;
+  const totalPages = Math.max(1, Math.ceil(totalProducts / pageSize));
+  const safePage = Math.min(page, totalPages);
+  const pagedProducts = useMemo(() => {
+    if (!products) return null;
+    const start = (safePage - 1) * pageSize;
+    return products.slice(start, start + pageSize);
+  }, [products, safePage, pageSize]);
+
+  const resetFilters = () => {
+    setTypeFilter('all');
+    setStatusFilter('all');
+    setSearchQuery('');
+    setReadyOnly(false);
+    setPage(1);
+  };
+
+  const hasAnyFilter = Boolean(typeFilter !== 'all' || statusFilter !== 'all' || searchQuery.trim() || readyOnly);
+
+  const filterChips = useMemo<FilterChip[]>(() => {
+    const chips: FilterChip[] = [];
+    if (searchQuery.trim()) {
+      chips.push({
+        key: 'q',
+        label: `关键词: ${searchQuery.trim()}`,
+        onClear: () => {
+          setSearchQuery('');
+          setPage(1);
+        },
+      });
+    }
+    if (typeFilter !== 'all') {
+      chips.push({
+        key: 'type',
+        label: `类型: ${PRODUCT_TYPE_LABELS[typeFilter]}`,
+        onClear: () => {
+          setTypeFilter('all');
+          setPage(1);
+        },
+      });
+    }
+    if (statusFilter !== 'all') {
+      chips.push({
+        key: 'status',
+        label: `状态: ${PUBLICATION_STATUS_META[statusFilter].label}`,
+        onClear: () => {
+          setStatusFilter('all');
+          setPage(1);
+        },
+      });
+    }
+    if (readyOnly) {
+      chips.push({
+        key: 'ready',
+        label: '仅看双渠道就绪',
+        onClear: () => {
+          setReadyOnly(false);
+          setPage(1);
+        },
+      });
+    }
+    return chips;
+  }, [searchQuery, typeFilter, statusFilter, readyOnly]);
+
+  const columnOptions: ColumnOption[] = [
+    { key: 'bindings', label: '渠道绑定状态', visible: visibleCols.bindings },
+    { key: 'templates', label: '模板引用', visible: visibleCols.templates },
+  ];
+  const colSpan = 6 + (visibleCols.bindings ? 1 : 0) + (visibleCols.templates ? 1 : 0);
+
   return (
-    <div className="space-y-4">
+    <div className="space-y-4 animate-fade-in">
+      {/* Scope & Primary Actions Strip */}
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h1 className="text-xl font-semibold text-[var(--cms-fg)]">商品与定价（不可变商品目录）</h1>
-          <p className="text-xs text-[var(--cms-muted-fg)] mt-1">
-            商业规格（价格、金币/赠币、VIP 周期、整本范围）创建后不可变；商品必须在选定环境下同时完成 PayPal 与 Stripe 双渠道验证后才可上架销售。
-          </p>
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <Link to="/recharge-templates" className="btn-secondary inline-flex items-center gap-1.5 text-sm">
-            <Layers size={14} aria-hidden="true" />
-            前往充值模板编排
-          </Link>
-          <button type="button" className="btn-secondary inline-flex items-center gap-1.5" onClick={() => void loadData()}>
-            <RefreshCw size={14} aria-hidden="true" />
-            刷新
-          </button>
-          {canWrite && (
-            <button type="button" className="btn-primary inline-flex items-center gap-1.5" onClick={openCreateDrawer}>
-              <Plus size={15} aria-hidden="true" />
-              新建商品
-            </button>
-          )}
-        </div>
-      </div>
-
-      {/* 环境 + 类型 + 状态 + 搜索 */}
-      <div className="cms-card p-3 space-y-3">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="inline-flex rounded-xl border border-[var(--cms-border)] p-0.5 bg-[var(--cms-bg)]" role="group" aria-label="环境切换">
-            {(['sandbox', 'live'] as const).map((e) => (
-              <button
-                key={e}
-                type="button"
-                onClick={() => setEnv(e)}
-                className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer ${
-                  env === e
-                    ? e === 'live'
-                      ? 'bg-[var(--cms-error)] text-white'
-                      : 'bg-[var(--cms-primary)] text-white'
-                    : 'text-[var(--cms-muted-fg)] hover:text-[var(--cms-fg)]'
-                }`}
-              >
-                {e === 'sandbox' ? 'Sandbox 沙箱环境' : 'Live 正式生产环境'}
-              </button>
-            ))}
-          </div>
-
-          <div className="flex flex-wrap items-center gap-2.5">
-            <SearchInput
-              value={searchQuery}
-              onChange={setSearchQuery}
-              placeholder="搜索商品编码 / 名称…"
-              ariaLabel="搜索商品"
-            />
-            <CustomSelect
-              value={statusFilter}
-              onChange={(v) => setStatusFilter(v as 'all' | PublicationStatus)}
-              width="140px"
-              aria-label="按发布状态筛选"
-              options={[
-                { value: 'all', label: '全部状态' },
-                { value: 'draft', label: '草稿' },
-                { value: 'published', label: '已上架' },
-                { value: 'paused', label: '已暂停' },
-                { value: 'retired', label: '已下线' },
-              ]}
-            />
-            <label className="inline-flex items-center gap-1.5 text-xs text-[var(--cms-muted-fg)] cursor-pointer select-none">
-              <input type="checkbox" checked={readyOnly} onChange={(e) => setReadyOnly(e.target.checked)} />
-              <span>仅看双渠道就绪</span>
-            </label>
-          </div>
-        </div>
-
-        <div className="flex flex-wrap items-center gap-1.5" role="group" aria-label="商品类型筛选">
+        <div
+          role="group"
+          aria-label="商品类型筛选"
+          className="inline-flex flex-wrap items-center gap-1 rounded-xl bg-[var(--cms-secondary)] p-1"
+        >
           {([
             { key: 'all', label: '全部类型' },
             { key: 'single', label: '金币充值' },
@@ -479,188 +537,327 @@ export default function ProductsPage({ canWrite }: ProductsPageProps) {
               key={item.key}
               type="button"
               aria-pressed={typeFilter === item.key}
-              onClick={() => setTypeFilter(item.key)}
-              className={`focus-ring px-3 py-1.5 rounded-xl text-xs font-medium transition-colors cursor-pointer ${
+              onClick={() => {
+                setTypeFilter(item.key);
+                setPage(1);
+              }}
+              className={`focus-ring px-3 py-1.5 rounded-lg text-xs font-medium inline-flex items-center gap-2 cursor-pointer transition-colors ${
                 typeFilter === item.key
-                  ? 'bg-[var(--cms-primary)] text-[var(--cms-primary-fg)]'
-                  : 'bg-[var(--cms-secondary)] text-[var(--cms-muted-fg)] hover:text-[var(--cms-fg)]'
+                  ? 'bg-[var(--cms-card)] text-[var(--cms-fg)] shadow-xs'
+                  : 'text-[var(--cms-muted-fg)] hover:text-[var(--cms-fg)]'
               }`}
             >
               {item.label}
             </button>
           ))}
         </div>
+
+        <div className="flex flex-wrap items-center gap-2">
+          <CustomSelect
+            aria-label="切换商品环境"
+            width="124px"
+            value={env}
+            options={[
+              { value: 'sandbox', label: 'Sandbox 沙箱' },
+              { value: 'live', label: 'Live 正式' },
+            ]}
+            onChange={(value) => {
+              setPage(1);
+              const next = new URLSearchParams(params);
+              next.set('environment', value);
+              setParams(next);
+            }}
+          />
+          <Link to="/recharge-templates" className="btn-secondary h-9 px-3 text-xs font-normal whitespace-nowrap">
+            充值模板
+          </Link>
+          <button
+            type="button"
+            className="btn-secondary h-9 px-3 text-xs font-normal whitespace-nowrap"
+            onClick={() => void loadData()}
+          >
+            <RefreshCw size={13} className={loading ? 'animate-spin' : ''} aria-hidden="true" />
+            <span>刷新</span>
+          </button>
+          {canWrite && (
+            <button type="button" className="btn-primary h-9 px-3.5 text-xs" onClick={openCreateDrawer}>
+              <Plus size={14} aria-hidden="true" />
+              <span>新建商品</span>
+            </button>
+          )}
+        </div>
       </div>
 
-      {loadError && (
-        <div role="alert" className="p-3 rounded-xl border border-[var(--cms-error)] bg-[var(--cms-error-soft)] text-sm text-[var(--cms-error)]">
-          {loadError}
-        </div>
-      )}
-
-      <TableRegion ariaLabel="商品与双渠道定价列表">
-        <table className="cms-table">
-          <thead>
-            <tr>
-              <th scope="col">商品编码与名称</th>
-              <th scope="col">商品类型</th>
-              <th scope="col">商业规格（不可变）</th>
-              <th scope="col">PayPal / Stripe 绑定状态 ({env})</th>
-              <th scope="col">环境上架状态与模板引用</th>
-              <th scope="col" className="text-right">操作</th>
-            </tr>
-          </thead>
-          <tbody>
-            {!products && !loadError ? (
-              <SkeletonRows rows={4} cols={6} />
-            ) : products?.length === 0 ? (
-              <tr>
-                <td colSpan={6} className="text-center py-8 text-sm text-[var(--cms-muted-fg)]">
-                  暂无符合条件的商品
-                </td>
-              </tr>
-            ) : (
-              products?.map((p) => {
-                const pub = p.publications?.[env];
-                const pubStatus: PublicationStatus = pub?.status ?? 'draft';
-                const pubMeta = PUBLICATION_STATUS_META[pubStatus];
-                return (
-                  <tr key={p.id}>
-                    <td>
-                      <div className="flex items-center gap-1.5 font-medium text-[var(--cms-fg)]">
-                        <span>{p.name}</span>
-                        {p.source_product_id && (
-                          <span className="badge badge-gray text-[10px]">复制自 #{p.source_product_id}</span>
-                        )}
-                      </div>
-                      <div className="text-xs font-mono-code text-[var(--cms-muted-fg)] mt-0.5 flex items-center gap-1">
-                        <Lock size={11} aria-hidden="true" />
-                        <span>{p.code}</span>
-                      </div>
-                      {p.description && (
-                        <div className="text-xs text-[var(--cms-muted-fg)] mt-0.5 line-clamp-1">{p.description}</div>
-                      )}
-                    </td>
-                    <td>
-                      <span
-                        className={`badge ${
-                          p.product_type === 'vip' ? 'badge-purple' : p.product_type === 'whole_book' ? 'badge-blue' : 'badge-amber'
-                        }`}
-                      >
-                        {PRODUCT_TYPE_LABELS[p.product_type]}
-                      </span>
-                    </td>
-                    <td>
-                      <div className="font-semibold tabular-nums text-[var(--cms-fg)]">{p.price} USD</div>
-                      {p.product_type === 'single' && (
-                        <div className="text-xs text-[var(--cms-muted-fg)] mt-0.5 tabular-nums">
-                          {p.coins} 金币{p.bonus > 0 ? ` + ${p.bonus} 赠币` : ''}
-                        </div>
-                      )}
-                      {p.product_type === 'whole_book' && (
-                        <div className="text-xs text-[var(--cms-muted-fg)] mt-0.5">
-                          {NOVEL_SCOPE_LABELS[p.novel_scope_type]}
-                          {p.novel_scope_type === 'specific_novels' ? ` (${p.novel_scope_ids.join(', ')})` : ''} · 无赠币
-                        </div>
-                      )}
-                      {p.product_type === 'vip' && (
-                        <div className="text-xs text-[var(--cms-muted-fg)] mt-0.5">
-                          {p.vip_cycle ? VIP_CYCLE_LABELS[p.vip_cycle] : '—'} · 自动续订 · 无赠币
-                        </div>
-                      )}
-                    </td>
-                    <td>
-                      <div className="space-y-1 text-xs">
-                        <div className="flex items-center gap-2">
-                          <StatusDot tone={p.paypal_ready ? 'success' : 'warning'} label={`PayPal: ${p.paypal_ready ? '就绪' : '待完善'}`} />
-                          {p.paypal_binding?.external_price_ref && (
-                            <code className="text-[11px] font-mono-code text-[var(--cms-muted-fg)]">{p.paypal_binding.external_price_ref}</code>
-                          )}
-                        </div>
-                        <div className="flex items-center gap-2">
-                          <StatusDot tone={p.stripe_ready ? 'success' : 'warning'} label={`Stripe: ${p.stripe_ready ? '就绪' : '待完善'}`} />
-                          {p.stripe_binding?.external_price_ref && (
-                            <code className="text-[11px] font-mono-code text-[var(--cms-muted-fg)]">{p.stripe_binding.external_price_ref}</code>
-                          )}
-                        </div>
-                        {!p.dual_channel_ready && p.readiness_reasons.length > 0 && (
-                          <div className="text-[11px] text-[var(--cms-warning)]">{p.readiness_reasons[0]}</div>
-                        )}
-                      </div>
-                    </td>
-                    <td>
-                      <StatusDot tone={pubMeta.tone} label={pubMeta.label} />
-                      <div className="text-xs text-[var(--cms-muted-fg)] mt-1">
-                        {p.linked_template_names.length > 0 ? (
-                          <span>关联模板: {p.linked_template_names.join('、')}</span>
-                        ) : (
-                          <span>尚未被模板引用</span>
-                        )}
-                      </div>
-                    </td>
-                    <td className="text-right">
-                      <div className="inline-flex flex-wrap justify-end gap-1.5">
-                        <button type="button" className="btn-detail inline-flex items-center gap-1" onClick={() => void openBindingsDrawer(p)}>
-                          <Link2 size={12} aria-hidden="true" />
-                          {canWrite ? '绑定配置' : '查看绑定'}
-                        </button>
-                        {canWrite && pubStatus !== 'retired' && pubStatus !== 'published' && (
-                          <button
-                            type="button"
-                            className="btn-primary text-xs px-2.5 py-1.5 inline-flex items-center gap-1"
-                            onClick={() => {
-                              setStatusReason('');
-                              setFormError('');
-                              setStatusDialog({ product: p, action: 'publish' });
-                            }}
-                          >
-                            <Rocket size={12} aria-hidden="true" />
-                            上架
-                          </button>
-                        )}
-                        {canWrite && pubStatus === 'published' && (
-                          <button
-                            type="button"
-                            className="btn-detail inline-flex items-center gap-1"
-                            onClick={() => {
-                              setStatusReason('');
-                              setFormError('');
-                              setStatusDialog({ product: p, action: 'pause' });
-                            }}
-                          >
-                            <PauseCircle size={12} aria-hidden="true" />
-                            暂停
-                          </button>
-                        )}
-                        {canWrite && (
-                          <button type="button" className="btn-detail inline-flex items-center gap-1" onClick={() => openCopyDrawer(p)}>
-                            <Copy size={12} aria-hidden="true" />
-                            复制调价
-                          </button>
-                        )}
-                        {canWrite && pubStatus !== 'retired' && (
-                          <button
-                            type="button"
-                            className="btn-ghost text-xs text-[var(--cms-error)] inline-flex items-center gap-1"
-                            onClick={() => {
-                              setStatusReason('');
-                              setFormError('');
-                              setStatusDialog({ product: p, action: 'retire' });
-                            }}
-                          >
-                            <XCircle size={12} aria-hidden="true" />
-                            下线
-                          </button>
-                        )}
-                      </div>
-                    </td>
-                  </tr>
-                );
-              })
+      {/* Unified Borderless Filter Strip */}
+      <search className="block space-y-2">
+        <div className="flex flex-wrap items-center justify-between gap-2.5">
+          <div className="flex flex-wrap items-center gap-2 flex-1 min-w-[260px]">
+            <SearchInput
+              className="w-full sm:w-64"
+              ariaLabel="搜索商品"
+              placeholder="搜索商品编码 / 名称..."
+              value={searchQuery}
+              onChange={(val) => {
+                setSearchQuery(val);
+                setPage(1);
+              }}
+              onClear={() => {
+                setSearchQuery('');
+                setPage(1);
+              }}
+            />
+            <CustomSelect
+              value={statusFilter}
+              onChange={(v) => {
+                setStatusFilter(v as 'all' | PublicationStatus);
+                setPage(1);
+              }}
+              width="136px"
+              aria-label="按发布状态筛选"
+              options={[
+                { value: 'all', label: '全部状态' },
+                { value: 'draft', label: '草稿' },
+                { value: 'published', label: '已上架' },
+                { value: 'paused', label: '已暂停' },
+                { value: 'retired', label: '已下线' },
+              ]}
+            />
+            <label className="inline-flex items-center gap-1.5 h-9 px-2 text-xs text-[var(--cms-muted-fg)] hover:text-[var(--cms-fg)] cursor-pointer select-none whitespace-nowrap">
+              <input
+                type="checkbox"
+                checked={readyOnly}
+                onChange={(e) => {
+                  setReadyOnly(e.target.checked);
+                  setPage(1);
+                }}
+              />
+              <span>仅看双渠道就绪</span>
+            </label>
+            {hasAnyFilter && (
+              <button type="button" onClick={resetFilters} className="btn-ghost h-9 text-xs text-[var(--cms-muted-fg)]">
+                重置
+              </button>
             )}
-          </tbody>
-        </table>
-      </TableRegion>
+          </div>
+
+          <div className="flex items-center gap-2 text-xs text-[var(--cms-muted-fg)]">
+            <span className="tabular-nums">共 {totalProducts} 件商品</span>
+            <ViewOptionsPopover
+              density={density}
+              onDensityChange={setDensity}
+              columns={columnOptions}
+              onToggleColumn={(k) =>
+                setVisibleCols((prev) => ({
+                  ...prev,
+                  [k as 'bindings' | 'templates']: !prev[k as 'bindings' | 'templates'],
+                }))
+              }
+            />
+          </div>
+        </div>
+
+        <FilterChipsBar chips={filterChips} onResetAll={resetFilters} />
+      </search>
+
+      {loadError ? (
+        <PaymentLoadError message={loadError} onRetry={() => void loadData()} />
+      ) : (
+        <TableRegion
+          ariaLabel="商品与双渠道定价列表"
+          footer={
+            <Pagination
+              page={safePage}
+              pageSize={pageSize}
+              total={totalProducts}
+              disabled={loading}
+              onPageChange={setPage}
+              onPageSizeChange={(nextSize) => {
+                setPage(1);
+                setPageSize(nextSize);
+              }}
+              itemLabel="件商品"
+            />
+          }
+        >
+          <table className="cms-table min-w-[920px]" data-density={density} aria-busy={loading && !hasLoadedOnce}>
+            <thead>
+              <tr>
+                <th scope="col">商品 / 编码</th>
+                <th scope="col">类型</th>
+                <th scope="col" className="text-right">
+                  售价
+                </th>
+                <th scope="col">商业权益（不可变）</th>
+                {visibleCols.bindings && (
+                  <th scope="col">渠道绑定 ({env === 'live' ? 'Live' : 'Sandbox'})</th>
+                )}
+                {visibleCols.templates && <th scope="col">模板引用</th>}
+                <th scope="col">状态</th>
+                <th scope="col" className="text-right w-px whitespace-nowrap">
+                  操作
+                </th>
+              </tr>
+            </thead>
+            <tbody className={loading && hasLoadedOnce ? 'opacity-65 transition-opacity' : ''}>
+              {!hasLoadedOnce && loading ? (
+                <SkeletonRows rows={5} cols={colSpan} />
+              ) : !pagedProducts || pagedProducts.length === 0 ? (
+                <tr>
+                  <td colSpan={colSpan} className="py-16 text-center text-[var(--cms-muted-fg)]">
+                    暂无符合条件的商品记录
+                  </td>
+                </tr>
+              ) : (
+                pagedProducts.map((p) => {
+                  const pub = p.publications?.[env];
+                  const pubStatus: PublicationStatus = pub?.status ?? 'draft';
+                  const pubMeta = PUBLICATION_STATUS_META[pubStatus];
+                  const menuItems: RowActionItem[] = [];
+                  if (canWrite && pubStatus === 'published') {
+                    menuItems.push({
+                      label: '暂停销售',
+                      onClick: () => {
+                        setStatusReason('');
+                        setFormError('');
+                        setStatusDialog({ product: p, action: 'pause' });
+                      },
+                    });
+                  }
+                  if (canWrite) {
+                    menuItems.push({ label: '复制调价', onClick: () => openCopyDrawer(p) });
+                  }
+                  if (canWrite && pubStatus !== 'retired') {
+                    menuItems.push({
+                      label: '下线商品',
+                      tone: 'danger',
+                      dividerBefore: menuItems.length > 0,
+                      onClick: () => {
+                        setStatusReason('');
+                        setFormError('');
+                        setStatusDialog({ product: p, action: 'retire' });
+                      },
+                    });
+                  }
+                  return (
+                    <tr key={p.id} className={bindingProduct?.id === p.id ? 'row-selected' : undefined}>
+                      <td>
+                        <div className="text-[var(--cms-fg)]">
+                          <span>{p.name}</span>
+                          {p.source_product_id && (
+                            <span className="ml-1.5 text-[var(--cms-muted-fg)]">· 复制自 #{p.source_product_id}</span>
+                          )}
+                        </div>
+                        <div className="text-[var(--cms-muted-fg)] mt-0.5 font-mono-code truncate max-w-[260px]" title={p.description ? `${p.code} · ${p.description}` : p.code}>
+                          {p.code}
+                          {p.description ? ` · ${p.description}` : ''}
+                        </div>
+                      </td>
+                      <td className="text-[var(--cms-muted-fg)] whitespace-nowrap">
+                        {PRODUCT_TYPE_LABELS[p.product_type]}
+                      </td>
+                      <td className="text-right tabular-nums text-[var(--cms-fg)] whitespace-nowrap">
+                        <div>{p.price}</div>
+                        <div className="text-[var(--cms-muted-fg)] mt-0.5">USD</div>
+                      </td>
+                      <td>
+                        {p.product_type === 'single' && (
+                          <>
+                            <div className="tabular-nums text-[var(--cms-fg)] whitespace-nowrap">
+                              {p.coins} 金币
+                              {p.bonus > 0 && <span className="text-[var(--cms-muted-fg)]"> +{p.bonus}</span>}
+                            </div>
+                            <div className="text-[var(--cms-muted-fg)] mt-0.5">单次充值</div>
+                          </>
+                        )}
+                        {p.product_type === 'whole_book' && (
+                          <>
+                            <div className="text-[var(--cms-fg)] whitespace-nowrap">
+                              {NOVEL_SCOPE_LABELS[p.novel_scope_type]}
+                            </div>
+                            <div className="text-[var(--cms-muted-fg)] mt-0.5 tabular-nums">
+                              {p.novel_scope_type === 'specific_novels' ? `书籍 ${p.novel_scope_ids.join(', ')} · ` : ''}无赠币
+                            </div>
+                          </>
+                        )}
+                        {p.product_type === 'vip' && (
+                          <>
+                            <div className="text-[var(--cms-fg)] whitespace-nowrap">
+                              {p.vip_cycle ? VIP_CYCLE_LABELS[p.vip_cycle] : '—'}
+                            </div>
+                            <div className="text-[var(--cms-muted-fg)] mt-0.5">自动续订 · 无赠币</div>
+                          </>
+                        )}
+                      </td>
+                      {visibleCols.bindings && (
+                        <td>
+                          <div className="flex flex-col gap-1">
+                            <div className="flex items-center gap-1.5">
+                              <StatusDot
+                                tone={p.paypal_ready ? 'success' : 'warning'}
+                                label={`PayPal: ${p.paypal_ready ? '就绪' : '待完善'}`}
+                              />
+                              {p.paypal_binding?.external_price_ref && (
+                                <span className="font-mono-code text-[var(--cms-muted-fg)] truncate max-w-[140px]">
+                                  {p.paypal_binding.external_price_ref}
+                                </span>
+                              )}
+                            </div>
+                            <div className="flex items-center gap-1.5">
+                              <StatusDot
+                                tone={p.stripe_ready ? 'success' : 'warning'}
+                                label={`Stripe: ${p.stripe_ready ? '就绪' : '待完善'}`}
+                              />
+                              {p.stripe_binding?.external_price_ref && (
+                                <span className="font-mono-code text-[var(--cms-muted-fg)] truncate max-w-[140px]">
+                                  {p.stripe_binding.external_price_ref}
+                                </span>
+                              )}
+                            </div>
+                            {!p.dual_channel_ready && p.readiness_reasons.length > 0 && (
+                              <div className="text-[var(--cms-warning)]">{p.readiness_reasons[0]}</div>
+                            )}
+                          </div>
+                        </td>
+                      )}
+                      {visibleCols.templates && (
+                        <td className="text-[var(--cms-muted-fg)] max-w-[200px]">
+                          {p.linked_template_names.length > 0 ? p.linked_template_names.join('、') : '—'}
+                        </td>
+                      )}
+                      <td>
+                        <StatusDot tone={pubMeta.tone} label={pubMeta.label} />
+                      </td>
+                      <td className="text-right whitespace-nowrap">
+                        <div className="inline-flex items-center justify-end gap-0.5 whitespace-nowrap">
+                          <button type="button" className="btn-detail" onClick={() => void openBindingsDrawer(p)}>
+                            {canManageBindings ? '绑定' : '绑定详情'}
+                          </button>
+                          {canPublish && pubStatus !== 'retired' && pubStatus !== 'published' && (
+                            <button
+                              type="button"
+                              className="btn-detail"
+                              onClick={() => {
+                                setStatusReason('');
+                                setFormError('');
+                                setStatusDialog({ product: p, action: 'publish' });
+                              }}
+                            >
+                              上架
+                            </button>
+                          )}
+                          {menuItems.length > 0 && (
+                            <RowActionMenu ariaLabel={`${p.name} 更多操作`} items={menuItems} />
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })
+              )}
+            </tbody>
+          </table>
+        </TableRegion>
+      )}
 
       {/* 新建 / 复制商品抽屉 */}
       <CmsDialog
@@ -866,7 +1063,7 @@ export default function ProductsPage({ canWrite }: ProductsPageProps) {
       {/* 双渠道绑定抽屉 */}
       <CmsDialog
         open={bindingProduct !== null}
-        onClose={() => { if (!submitting) setBindingProduct(null); }}
+        onClose={closeBindingsDrawer}
         variant="drawer"
         size="lg"
         title={bindingProduct ? `双渠道绑定配置 · ${bindingProduct.name}` : '双渠道绑定'}
@@ -874,7 +1071,7 @@ export default function ProductsPage({ canWrite }: ProductsPageProps) {
         closedBy="closerequest"
         closeDisabled={submitting}
         footer={
-          <button type="button" className="btn-secondary" disabled={submitting} onClick={() => setBindingProduct(null)}>完成并关闭</button>
+          <button type="button" className="btn-secondary" disabled={submitting} onClick={closeBindingsDrawer}>完成并关闭</button>
         }
       >
         {bindingProduct && (
@@ -904,7 +1101,7 @@ export default function ProductsPage({ canWrite }: ProductsPageProps) {
                   </ul>
                 )}
               </div>
-              {canWrite && bindingProduct.dual_channel_ready && bindingProduct.publications?.[env]?.status !== 'published' && (
+              {canPublish && bindingProduct.dual_channel_ready && bindingProduct.publications?.[env]?.status !== 'published' && (
                 <button
                   type="button"
                   className="btn-primary text-xs"
@@ -921,6 +1118,7 @@ export default function ProductsPage({ canWrite }: ProductsPageProps) {
 
             {formError && <p role="alert" className="text-xs text-[var(--cms-error)]">{formError}</p>}
 
+            {canManageBindings && <>
             {/* PayPal 绑定表单 */}
             <form onSubmit={handleSavePayPalBinding} className="cms-card p-4 space-y-3">
               <div className="flex items-center justify-between">
@@ -979,7 +1177,7 @@ export default function ProductsPage({ canWrite }: ProductsPageProps) {
                   <input type="checkbox" checked={ppForm.enabled} onChange={(e) => setPpForm((prev) => ({ ...prev, enabled: e.target.checked }))} />
                   <span>启用该商品在 PayPal 的下单能力</span>
                 </label>
-                {canWrite && (
+                {canManageBindings && (
                   <button type="submit" className="btn-primary text-xs" disabled={submitting}>
                     {submitting ? '校验并保存中…' : '校验并保存 PayPal 绑定'}
                   </button>
@@ -1024,45 +1222,65 @@ export default function ProductsPage({ canWrite }: ProductsPageProps) {
                 </div>
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div>
-                  <label htmlFor={`${formId}-st-prod`} className="block text-xs font-medium text-[var(--cms-muted-fg)] mb-1">Stripe Product ID (prod_...) *</label>
-                  <input
-                    id={`${formId}-st-prod`}
-                    type="text"
-                    required
-                    className="input-field w-full font-mono-code"
-                    placeholder="prod_..."
-                    value={stForm.product_ref}
-                    onChange={(e) => setStForm((prev) => ({ ...prev, product_ref: e.target.value }))}
-                  />
+              {bindingProduct.stripe_binding?.external_price_ref ? (
+                <div className="rounded-lg border border-[var(--cms-border)] bg-[var(--cms-surface-alt)] px-3 py-2 text-xs space-y-1">
+                  <div className="font-medium text-[var(--cms-fg)]">已自动联动 Stripe 外部资源（不可手动绑定）</div>
+                  <div className="flex flex-wrap gap-x-4 gap-y-1 font-mono-code text-[var(--cms-muted-fg)]">
+                    <span>Product: {bindingProduct.stripe_binding.external_product_ref || '—'}</span>
+                    <span>Price: {bindingProduct.stripe_binding.external_price_ref}</span>
+                  </div>
                 </div>
-                <div>
-                  <label htmlFor={`${formId}-st-price`} className="block text-xs font-medium text-[var(--cms-muted-fg)] mb-1">Stripe Price ID (price_...) *</label>
-                  <input
-                    id={`${formId}-st-price`}
-                    type="text"
-                    required
-                    className="input-field w-full font-mono-code"
-                    placeholder="price_..."
-                    value={stForm.price_ref}
-                    onChange={(e) => setStForm((prev) => ({ ...prev, price_ref: e.target.value }))}
-                  />
-                </div>
-              </div>
+              ) : (
+                <p className="text-xs text-[var(--cms-muted-fg)]">
+                  仅支持自动联动创建：保存时系统将按当前商品名称、USD 售价与计费周期在所选 Stripe 账户自动创建 Product 与 Price（不支持手动绑定已有 ID）。
+                </p>
+              )}
+
+              {bindingProduct.stripe_binding?.validation_error && (
+                <p role="alert" className="text-xs text-[var(--cms-error)]">
+                  上次同步异常：{bindingProduct.stripe_binding.validation_error}
+                </p>
+              )}
 
               {stForm.sales_mode === 'merchant_of_record' && (
-                <div>
-                  <label htmlFor={`${formId}-st-tax`} className="block text-xs font-medium text-[var(--cms-muted-fg)] mb-1">Tax Liability Account (acct_...) *</label>
-                  <input
-                    id={`${formId}-st-tax`}
-                    type="text"
-                    required
-                    className="input-field w-full font-mono-code"
-                    placeholder="acct_..."
-                    value={stForm.tax_liability_account}
-                    onChange={(e) => setStForm((prev) => ({ ...prev, tax_liability_account: e.target.value }))}
-                  />
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  <div>
+                    <label htmlFor={`${formId}-st-tax`} className="block text-xs font-medium text-[var(--cms-muted-fg)] mb-1">Tax Liability Account (acct_...) *</label>
+                    <input
+                      id={`${formId}-st-tax`}
+                      type="text"
+                      required
+                      className="input-field w-full font-mono-code"
+                      placeholder="acct_..."
+                      value={stForm.tax_liability_account}
+                      onChange={(e) => setStForm((prev) => ({ ...prev, tax_liability_account: e.target.value }))}
+                    />
+                  </div>
+                  <div>
+                    <label htmlFor={`${formId}-st-taxcode`} className="block text-xs font-medium text-[var(--cms-muted-fg)] mb-1">Stripe Tax Code *</label>
+                    <input
+                      id={`${formId}-st-taxcode`}
+                      type="text"
+                      required
+                      className="input-field w-full font-mono-code"
+                      placeholder="txcd_10103001"
+                      value={stForm.tax_code}
+                      onChange={(e) => setStForm((prev) => ({ ...prev, tax_code: e.target.value }))}
+                    />
+                  </div>
+                  <div>
+                    <label htmlFor={`${formId}-st-taxbehav`} className="block text-xs font-medium text-[var(--cms-muted-fg)] mb-1">含税方式 (Tax Behavior) *</label>
+                    <CustomSelect
+                      id={`${formId}-st-taxbehav`}
+                      width="100%"
+                      value={stForm.tax_behavior}
+                      onChange={(v) => setStForm((prev) => ({ ...prev, tax_behavior: v as 'exclusive' | 'inclusive' }))}
+                      options={[
+                        { value: 'exclusive', label: '不含税 (exclusive)' },
+                        { value: 'inclusive', label: '含税 (inclusive)' },
+                      ]}
+                    />
+                  </div>
                 </div>
               )}
 
@@ -1125,13 +1343,18 @@ export default function ProductsPage({ canWrite }: ProductsPageProps) {
                   <input type="checkbox" checked={stForm.enabled} onChange={(e) => setStForm((prev) => ({ ...prev, enabled: e.target.checked }))} />
                   <span>启用该商品在 Stripe 的下单能力</span>
                 </label>
-                {canWrite && (
+                {canManageBindings && (
                   <button type="submit" className="btn-primary text-xs" disabled={submitting}>
-                    {submitting ? '调用 Stripe 核验中…' : '校验并保存 Stripe 绑定'}
+                    {submitting
+                      ? '联动 Stripe 创建并核验中…'
+                      : bindingProduct.stripe_binding?.external_price_ref
+                        ? '同步并保存 Stripe 绑定'
+                        : '联动 Stripe 创建并绑定'}
                   </button>
                 )}
               </div>
             </form>
+            </>}
           </div>
         )}
       </CmsDialog>
@@ -1157,7 +1380,7 @@ export default function ProductsPage({ canWrite }: ProductsPageProps) {
             <button
               type="button"
               className={`btn-primary ${statusDialog?.action === 'retire' ? 'bg-[var(--cms-error)] border-[var(--cms-error)]' : ''}`}
-              disabled={submitting}
+              disabled={submitting || (statusDialog?.action === 'publish' && env === 'live' && !statusReason.trim())}
               onClick={() => void handleTransitionStatus()}
             >
               {submitting ? '提交中…' : '确认'}
@@ -1173,7 +1396,7 @@ export default function ProductsPage({ canWrite }: ProductsPageProps) {
               </p>
             )}
             <div>
-              <label htmlFor={`${formId}-sreason`} className="block text-xs font-medium text-[var(--cms-muted-fg)] mb-1">操作备注（可选）</label>
+              <label htmlFor={`${formId}-sreason`} className="block text-xs font-medium text-[var(--cms-muted-fg)] mb-1">{statusDialog.action === 'publish' && env === 'live' ? '正式发布依据（必填）' : '操作备注（可选）'}</label>
               <input
                 id={`${formId}-sreason`}
                 type="text"

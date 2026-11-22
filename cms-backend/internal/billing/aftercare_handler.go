@@ -23,11 +23,15 @@ func (h *Handler) registerAftercareRoutes(payments *gin.RouterGroup, role gin.Ha
 type caseFilter struct {
 	reconciliationScope
 	View       string `form:"view" binding:"required,oneof=risk disputes"`
+	Kind       string `form:"kind" binding:"omitempty,oneof=risk_review risk_signal dispute reversal"`
+	Owner      string `form:"owner_id" binding:"max=36"`
 	OrderID    int64  `form:"order_id" binding:"min=0"`
 	Receipt    string `form:"receipt" binding:"max=128"`
 	ExternalID string `form:"external_id" binding:"max=128"`
 	Before     int64  `form:"before" binding:"min=0"`
 	Attention  bool   `form:"attention"`
+	WorkState  string `form:"work_state" binding:"omitempty,oneof=observed pending approved refund_due dispute_due closed"`
+	Deadline   string `form:"deadline" binding:"omitempty,oneof=overdue upcoming"`
 }
 
 func (h *Handler) listPaymentCases(c *gin.Context) {
@@ -92,12 +96,13 @@ func (h *Handler) listCheckoutDecisions(c *gin.Context) {
 		OrderID     int64  `form:"order_id" binding:"min=0"`
 		Before      int64  `form:"before" binding:"min=0"`
 		Environment string `form:"checkout_environment" binding:"max=60"`
+		Provider    string `form:"provider" binding:"omitempty,oneof=paypal stripe"`
 	}
 	if c.ShouldBindQuery(&filter) != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid checkout decision filters"})
 		return
 	}
-	data, err := listDecisions(c.Request.Context(), filter.OrderID, filter.Before, filter.Environment)
+	data, err := listDecisions(c.Request.Context(), filter.OrderID, filter.Before, filter.Environment, filter.Provider)
 	writeCaseResult(c, data, err)
 }
 

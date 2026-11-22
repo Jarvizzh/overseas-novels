@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -472,9 +473,52 @@ func TestPaymentCenterRefundAuthorizationIntegration(t *testing.T) {
 		testAftercareRoutes(t, s, exec)
 	})
 	t.Run("order links use the verified receipt's environment", func(t *testing.T) {
-		orders, _, err := s.ListOrders(ctx, 1, 20, "", "", "", "", "", "", "95503")
+		orders, _, err := s.ListOrders(ctx, 1, 20, "", "", "", "", "", "", "95503", reconciliationScope{})
 		if err != nil || len(orders) != 1 || orders[0].PaymentEnvironment != "sandbox" {
 			t.Fatalf("order list scope: %+v %v", orders, err)
+		}
+		accountID := orders[0].PaymentAccountID
+		account, err := strconv.ParseInt(accountID, 10, 64)
+		if err != nil || orders[0].PaymentProvider != "paypal" {
+			t.Fatalf("order account scope: %+v %v", orders[0], err)
+		}
+		for _, test := range []struct {
+			scope reconciliationScope
+			total int
+		}{
+			{reconciliationScope{Environment: "sandbox", Provider: "paypal", AccountID: account}, 1},
+			{reconciliationScope{Environment: "live", Provider: "paypal", AccountID: account}, 0},
+			{reconciliationScope{Environment: "sandbox", Provider: "stripe", AccountID: account}, 0},
+		} {
+			_, total, err := s.ListOrders(ctx, 1, 20, "", "", "", "", "", "", "95503", test.scope)
+			if err != nil || total != test.total {
+				t.Fatalf("order filter %+v returned %d: %v", test.scope, total, err)
+			}
+		}
+		exec(`INSERT INTO user_subscriptions(id,user_id,subscription_id,payment_method,status,checkout_account_id)
+			VALUES(95510,501,'I-SCOPE-95510','paypal','ACTIVE',$1), (95511,501,'I-SCOPE-95511','paypal','SUSPENDED',$1)`, account)
+		subscriptions := gin.New()
+		subscriptions.Use(func(c *gin.Context) { c.Set("payment_role", c.GetHeader("X-Test-Role")); c.Next() })
+		subscriptions.GET("/subscriptions", NewHandler(s).ListPaymentSubscriptions)
+		for _, test := range []struct {
+			role, query    string
+			status         int
+			accountVisible bool
+		}{
+			{"Finance", "?environment=sandbox&provider=paypal&account_id=" + accountID + "&status=ACTIVE&page=1&page_size=1", http.StatusOK, true},
+			{"Support", "", http.StatusForbidden, false},
+			{"Support", "?user_id=501", http.StatusOK, false},
+		} {
+			req := httptest.NewRequest(http.MethodGet, "/subscriptions"+test.query, nil)
+			req.Header.Set("X-Test-Role", test.role)
+			rec := httptest.NewRecorder()
+			subscriptions.ServeHTTP(rec, req)
+			if rec.Code != test.status || strings.Contains(rec.Body.String(), `"account_id"`) != test.accountVisible {
+				t.Fatalf("subscription visibility %s: %d %s", test.role, rec.Code, rec.Body.String())
+			}
+			if test.accountVisible && (!strings.Contains(rec.Body.String(), "95510") || strings.Contains(rec.Body.String(), "95511")) {
+				t.Fatalf("subscription scope: %s", rec.Body.String())
+			}
 		}
 		handler := NewHandler(s)
 		router := gin.New()
@@ -486,6 +530,11 @@ func TestPaymentCenterRefundAuthorizationIntegration(t *testing.T) {
 			if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"environment":"sandbox"`) {
 				t.Fatalf("scope missing at %s: %d %s", endpoint, rec.Code, rec.Body.String())
 			}
+		}
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/orders/95503/receipts?receipt_id=1", nil))
+		if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"receipts":[]`) {
+			t.Fatalf("pinned receipt lookup returned a different receipt: %d %s", rec.Code, rec.Body.String())
 		}
 	})
 	t.Run("verified PayPal refund closes only the attested reservation", func(t *testing.T) {
@@ -514,6 +563,27 @@ func TestPaymentCenterRefundAuthorizationIntegration(t *testing.T) {
 			WHERE action='reconcile_paypal_refund' AND target_id=$1::text) FROM payment_refund_commands WHERE id=$1::uuid`,
 			cmd.ID).Scan(&ref, &audit); err != nil || ref != "refund-known-2" || audit != 1 {
 			t.Fatalf("linked %q audit %d: %v", ref, audit, err)
+		}
+		queue, err := listRefundQueue(ctx, refundQueueFilter{
+			reconciliationPage: reconciliationPage{reconciliationScope: reconciliationScope{Environment: "live", Provider: "paypal"}},
+			OrderID:            95508, Status: "succeeded", CommandID: cmd.ID,
+		})
+		if err != nil || !strings.Contains(string(queue), cmd.ID) || !strings.Contains(string(queue), "refund-known-2") {
+			t.Fatalf("completed refund queue: %s, %v", queue, err)
+		}
+		queue, err = listRefundQueue(ctx, refundQueueFilter{
+			reconciliationPage: reconciliationPage{reconciliationScope: reconciliationScope{Environment: "sandbox", Provider: "paypal"}},
+			CommandID:          cmd.ID,
+		})
+		if err != nil || strings.Contains(string(queue), cmd.ID) {
+			t.Fatalf("refund command crossed environment: %s, %v", queue, err)
+		}
+		queue, err = listRefundQueue(ctx, refundQueueFilter{
+			reconciliationPage: reconciliationPage{reconciliationScope: reconciliationScope{Environment: "live", Provider: "paypal"}},
+			OrderID:            95508, Status: "succeeded",
+		})
+		if err != nil || !strings.Contains(string(queue), cmd.ID) {
+			t.Fatalf("refund queue by order: %s, %v", queue, err)
 		}
 	})
 	t.Run("migrated PayPal refund can close with verified evidence and no send timestamp", func(t *testing.T) {

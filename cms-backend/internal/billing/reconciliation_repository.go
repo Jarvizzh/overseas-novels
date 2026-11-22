@@ -2,6 +2,7 @@ package billing
 
 import (
 	"context"
+	"time"
 
 	"star-novel-cms/internal/db"
 )
@@ -17,6 +18,11 @@ const reconciliationMembershipSQL = `
 
 func (r *dbBillingRepository) ListLedgerMovements(ctx context.Context, f movementFilter) (movementPage, error) {
 	var data movementPage
+	var before *time.Time
+	if f.Through != nil {
+		nextDay := f.Through.AddDate(0, 0, 1)
+		before = &nextDay
+	}
 	err := db.DB.QueryRow(ctx, `
 		WITH filtered AS MATERIALIZED (
 			SELECT m.*,a.provider, a.environment
@@ -28,8 +34,11 @@ func (r *dbBillingRepository) ListLedgerMovements(ctx context.Context, f movemen
 					JOIN third_party_payment_orders t ON t.id=x.receipt_id
 					WHERE x.movement_id=m.id AND t.order_id=$5
 				))
-				AND ($9::bigint=0 OR m.id=$9)
- AND ($6::bigint=0 OR EXISTS (
+				AND ($9::bigint=0 OR m.id=$9) AND ($10::bigint=0 OR a.id=$10)
+				AND ($11='' OR m.movement_key=$11) AND ($12='' OR m.kind=$12)
+				AND ($13::timestamptz IS NULL OR m.occurred_at >= $13)
+				AND ($14::timestamptz IS NULL OR m.occurred_at < $14)
+				AND ($6::bigint=0 OR EXISTS (
 					SELECT 1 FROM payment_settlement_payouts p WHERE p.id=$6 AND p.account_id=m.account_id
 						AND p.currency=m.currency AND `+reconciliationMembershipSQL+`
 				))
@@ -72,7 +81,7 @@ func (r *dbBillingRepository) ListLedgerMovements(ctx context.Context, f movemen
 			'totals',COALESCE((SELECT amounts FROM totals),'{}'),
 			'items',COALESCE((SELECT jsonb_agg(to_jsonb(page)-'sort_id' ORDER BY occurred_at DESC NULLS LAST,sort_id DESC) FROM page),'[]'))`,
 		reconciliationCurrency, f.environment(), f.Provider, f.ReviewRequired, f.OrderID, f.PayoutID,
-		reconciliationPageSize, f.offset(), f.MovementID).Scan(&data)
+		reconciliationPageSize, f.offset(), f.MovementID, f.AccountID, f.MovementKey, f.Kind, f.From, before).Scan(&data)
 	return reconciliationResult(data, err)
 }
 
@@ -83,8 +92,9 @@ func (r *dbBillingRepository) ListSettlementPayouts(ctx context.Context, f payou
 			SELECT p.*,a.provider,a.environment FROM payment_settlement_reconciliation p
 			JOIN payment_channel_accounts a ON a.id=p.account_id
 			WHERE p.currency=$1 AND a.environment=$2 AND ($3='' OR a.provider=$3)
-				AND ($7::bigint=0 OR p.id=$7)
- AND (NOT $4 OR p.status NOT IN ('matched','awaiting_channel','awaiting_bank'))
+				AND ($7::bigint=0 OR p.id=$7) AND ($8::bigint=0 OR a.id=$8)
+				AND ($9='' OR p.external_ref=$9)
+				AND (NOT $4 OR p.status NOT IN ('matched','awaiting_channel','awaiting_bank'))
 		), page AS (
 			SELECT id::text AS id,account_id::text AS account_id,provider,environment,external_ref,channel_status,
 				expected_minor::text AS expected_minor, expected_at, bank_reference, allocation_required,
@@ -95,7 +105,7 @@ func (r *dbBillingRepository) ListSettlementPayouts(ctx context.Context, f payou
 		)
 		SELECT jsonb_build_object('currency',$1::text,'total',(SELECT count(*) FROM filtered),
 			'items',COALESCE((SELECT jsonb_agg(to_jsonb(page)-'sort_id' ORDER BY expected_at DESC NULLS LAST,sort_id DESC) FROM page),'[]'))`,
-		reconciliationCurrency, f.environment(), f.Provider, f.DifferencesOnly, reconciliationPageSize, f.offset(), f.PayoutID).Scan(&data)
+		reconciliationCurrency, f.environment(), f.Provider, f.DifferencesOnly, reconciliationPageSize, f.offset(), f.PayoutID, f.AccountID, f.PayoutRef).Scan(&data)
 	return reconciliationResult(data, err)
 }
 
@@ -109,12 +119,13 @@ func (r *dbBillingRepository) ListSettlementReportIssues(ctx context.Context, f 
 			FROM payment_settlement_rows r JOIN payment_settlement_imports i ON i.id=r.import_id
 			JOIN payment_channel_accounts a ON a.id=i.account_id
 			WHERE a.environment=$1 AND ($2='' OR a.provider=$2) AND r.review_reason IS NOT NULL
+				AND ($5::bigint=0 OR a.id=$5)
 		), page AS (
 			SELECT * FROM filtered ORDER BY sort_id DESC,source_file,row_number LIMIT $3 OFFSET $4
 		)
 		SELECT jsonb_build_object('total',(SELECT count(*) FROM filtered),
 			'items',COALESCE((SELECT jsonb_agg(to_jsonb(page)-'sort_id' ORDER BY sort_id DESC,source_file,row_number) FROM page),'[]'))`,
-		f.environment(), f.Provider, reconciliationPageSize, f.offset()).Scan(&data)
+		f.environment(), f.Provider, reconciliationPageSize, f.offset(), f.AccountID).Scan(&data)
 	return reconciliationResult(data, err)
 }
 
@@ -124,7 +135,7 @@ func (r *dbBillingRepository) GetPaymentActivity(ctx context.Context, s reconcil
 		WITH movements AS MATERIALIZED (
 			SELECT m.id,m.kind,a.provider FROM payment_ledger_movements m
 			JOIN payment_channel_accounts a ON a.id=m.account_id
-			WHERE m.currency=$1 AND a.environment=$2 AND ($3='' OR a.provider=$3)
+			WHERE m.currency=$1 AND a.environment=$2 AND ($3='' OR a.provider=$3) AND ($4::bigint=0 OR a.id=$4)
 				AND m.posted_at IS NOT NULL AND NOT m.review_required AND m.kind IN ('refund','dispute_debit')
 		), refunds AS (
 			SELECT m.provider,r.object_id FROM movements m JOIN payment_ledger_references r ON r.movement_id=m.id
@@ -137,15 +148,15 @@ func (r *dbBillingRepository) GetPaymentActivity(ctx context.Context, s reconcil
 			WHERE f.currency=$1 AND $3 IN ('','paypal') AND EXISTS (
 				SELECT 1 FROM third_party_payment_orders t JOIN payment_channel_accounts a ON a.id=t.account_id
 				WHERE t.capture_id=f.capture_id AND t.currency=f.currency
-					AND a.provider='paypal' AND a.environment=$2 AND t.status='VERIFIED'
+					AND a.provider='paypal' AND a.environment=$2 AND t.status='VERIFIED' AND ($4::bigint=0 OR a.id=$4)
 			)
 			UNION
 			SELECT 'stripe',refund.refund_ref FROM payment_stripe_refund_items refund
 			JOIN payment_channel_accounts a ON a.id=refund.account_id
-			WHERE a.environment=$2 AND a.provider='stripe' AND $3 IN ('','stripe')
+			WHERE a.environment=$2 AND a.provider='stripe' AND $3 IN ('','stripe') AND ($4::bigint=0 OR a.id=$4)
 		)
 		SELECT jsonb_build_object('refund_count',(SELECT count(*) FROM refunds),
 			'chargeback_debit_count',(SELECT count(*) FROM movements WHERE kind='dispute_debit'))`,
-		reconciliationCurrency, s.environment(), s.Provider).Scan(&data)
+		reconciliationCurrency, s.environment(), s.Provider, s.AccountID).Scan(&data)
 	return reconciliationResult(data, err)
 }
