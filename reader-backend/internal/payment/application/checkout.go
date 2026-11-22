@@ -32,11 +32,13 @@ type checkoutOrder struct {
 	novelID          int64
 	fulfilled        bool
 	legacyBookProven bool
+	agedLegacyBook   bool
 	managedAttempt   bool
 	providerSettled  bool
 	closedAttempt    bool
 	paymentMethod    string
 	deferred         bool
+	additionalBook   bool
 }
 
 type checkoutAttribution = conversion.Attribution
@@ -176,14 +178,15 @@ func recordCheckoutInitiatedTx(ctx context.Context, tx pgx.Tx, checkoutID, order
 	return nil
 }
 
-const checkoutSelect = `SELECT id, user_id, COALESCE(checkout_id::text, ''), status, order_type,
+var checkoutSelect = `SELECT id, user_id, COALESCE(checkout_id::text, ''), status, order_type,
 	amount_cents, currency, coins, bonus_coins_credited, COALESCE(novel_id,0), fulfilled_at IS NOT NULL, EXISTS(SELECT 1 FROM legacy_whole_book_proofs b
  WHERE b.order_id=recharge_orders.id AND b.novel_id=recharge_orders.novel_id),
 	EXISTS (SELECT 1 FROM payment_checkout_attempts a WHERE a.order_id=recharge_orders.id AND a.provider='paypal' AND a.provider_order_id=$1),
 	EXISTS (SELECT 1 FROM payment_checkout_attempts a WHERE a.order_id=recharge_orders.id AND a.provider='paypal' AND a.provider_order_id=$1 AND a.status='settled'),
 		EXISTS (SELECT 1 FROM payment_checkout_attempts a WHERE a.order_id=recharge_orders.id AND a.provider='paypal' AND a.provider_order_id=$1 AND a.status='closed'),
 		payment_method,
- EXISTS(SELECT 1 FROM payment_deferred_fulfillment d WHERE d.order_id=recharge_orders.id AND d.resolved_at IS NULL)
+ EXISTS(SELECT 1 FROM payment_deferred_fulfillment d WHERE d.order_id=recharge_orders.id AND d.resolved_at IS NULL),
+ COALESCE(reconciliation_note='` + additionalWholeBookPaymentNote + `',false),(` + agedLegacyBookLookupOnly("recharge_orders") + `)
 	FROM recharge_orders
 	WHERE id=COALESCE((SELECT order_id FROM payment_checkout_attempts WHERE provider='paypal' AND provider_order_id=$1),
 		(SELECT id FROM recharge_orders WHERE external_ref_id=$1))
@@ -197,7 +200,7 @@ func (r *dbRepository) findCheckout(ctx context.Context, orderID string) (*check
 
 func scanCheckout(row pgx.Row) (*checkoutOrder, error) {
 	var o checkoutOrder
-	err := row.Scan(&o.id, &o.userID, &o.checkoutID, &o.status, &o.orderType, &o.amount, &o.currency, &o.coins, &o.bonus, &o.novelID, &o.fulfilled, &o.legacyBookProven, &o.managedAttempt, &o.providerSettled, &o.closedAttempt, &o.paymentMethod, &o.deferred)
+	err := row.Scan(&o.id, &o.userID, &o.checkoutID, &o.status, &o.orderType, &o.amount, &o.currency, &o.coins, &o.bonus, &o.novelID, &o.fulfilled, &o.legacyBookProven, &o.managedAttempt, &o.providerSettled, &o.closedAttempt, &o.paymentMethod, &o.deferred, &o.additionalBook, &o.agedLegacyBook)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrCheckoutUnavailable
 	}
@@ -217,6 +220,13 @@ func (r *dbRepository) settleCheckout(ctx context.Context, orderID string, captu
 		return nil, err
 	}
 
+	if _, err := tx.Exec(ctx, `SELECT u.id FROM users u JOIN recharge_orders o ON o.user_id=u.id
+		WHERE o.order_type='whole_book' AND (o.external_ref_id=$1 OR EXISTS(SELECT 1 FROM payment_checkout_attempts a
+			WHERE a.order_id=o.id AND a.provider='paypal' AND a.provider_order_id=$1))
+		FOR NO KEY UPDATE OF u`, orderID); err != nil {
+		return nil, err
+	}
+
 	o, err := scanCheckout(tx.QueryRow(ctx, checkoutSelect+" FOR UPDATE", orderID))
 	if err != nil {
 		return nil, err
@@ -230,6 +240,15 @@ func (r *dbRepository) settleCheckout(ctx context.Context, orderID string, captu
 		return result, nil
 	}
 	extra := o.managedAttempt && (o.closedAttempt || o.paymentMethod != payment.ProviderPayPal || o.fulfilled || o.status == "Refunded")
+	var duplicateBook bool
+	if o.orderType == "whole_book" && !o.fulfilled {
+		duplicateBook, err = anotherWholeBookFulfilled(ctx, tx, o.id, conversion.Environment())
+		if err != nil {
+			return nil, err
+		}
+	}
+	lateBook := o.isLegacyWholeBook() && (o.status == "Failed" || o.additionalBook)
+	extra = extra || duplicateBook || lateBook
 	if (o.status != "Pending" && !o.deferred && !historicalBook && !extra) || !o.matchesPayPalOrder(capture, orderID) ||
 		(capture.Status != "COMPLETED" && capture.Status != "REFUNDED") {
 		return nil, ErrCheckoutUnavailable
@@ -293,6 +312,12 @@ func (r *dbRepository) settleCheckout(ctx context.Context, orderID string, captu
 		}
 	}
 
+	if duplicateBook || lateBook {
+		if err := parkAdditionalWholeBookPayment(ctx, tx, o.id, payment.ProviderPayPal, verifiedPaidAt(capture.OccurredAt)); err != nil {
+			return nil, err
+		}
+		return &CheckoutResult{OrderType: o.orderType}, tx.Commit(ctx)
+	}
 	if extra {
 		return result, tx.Commit(ctx)
 	}
@@ -386,6 +411,16 @@ func recordCheckoutReceipt(ctx context.Context, tx pgx.Tx, o *checkoutOrder, cap
 			return 0, err
 		}
 	}
+	if o.isLegacyWholeBook() && capture.Account.AccountKey != "" {
+		if !paymentEnvironmentMatches(capture.Account) {
+			return 0, ErrCheckoutUnavailable
+		}
+		err := tx.QueryRow(ctx, `SELECT id FROM payment_channel_accounts WHERE provider='paypal' AND account_key=$1 AND environment=$2`,
+			capture.Account.AccountKey, capture.Account.Environment).Scan(&accountID)
+		if err != nil {
+			return 0, err
+		}
+	}
 	var note *string
 	if extra {
 		reason := "Payment arrived after the order's funding outcome and requires review"
@@ -414,6 +449,10 @@ func (o *checkoutOrder) matchesCapture(customID string) bool {
 	}
 	return customID == fmt.Sprintf("%d:%d", o.userID, o.coins+o.bonus) ||
 		customID == fmt.Sprintf("%d:%d", o.userID, o.coins)
+}
+
+func (o *checkoutOrder) isLegacyWholeBook() bool {
+	return o.orderType == "whole_book" && o.paymentMethod == payment.ProviderPayPal && !o.managedAttempt
 }
 
 func (o *checkoutOrder) needsHistoricalBookVerification() bool {

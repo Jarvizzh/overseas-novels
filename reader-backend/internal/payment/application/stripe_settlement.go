@@ -28,6 +28,12 @@ func (r *dbRepository) applyStripeProof(ctx context.Context, a stripePurchaseAtt
 		}
 	}
 
+	if proof.Receipt != nil {
+		if err := lockWholeBookBuyer(ctx, tx, a.OrderID); err != nil {
+			return err
+		}
+	}
+
 	var userID int64
 	var state string
 	var fulfilled bool
@@ -101,7 +107,15 @@ func (r *dbRepository) applyStripeProof(ctx context.Context, a stripePurchaseAtt
 	if err != nil {
 		return err
 	}
-	extra := differentAttempt || current == "closed" || state == "Refunded"
+	var duplicateBook bool
+	if orderType == "whole_book" {
+		duplicateBook, err = anotherWholeBookFulfilled(ctx, tx, a.OrderID, conversion.Environment())
+		if err != nil {
+			return err
+		}
+		duplicateBook = duplicateBook && !fulfilled
+	}
+	extra := differentAttempt || current == "closed" || state == "Refunded" || duplicateBook
 	var note *string
 	principal := receipt.PrincipalMinor
 	if a.Offer.SalesMode == payment.StripeSaleDirect && principal == 0 {
@@ -194,6 +208,11 @@ func (r *dbRepository) applyStripeProof(ctx context.Context, a stripePurchaseAtt
 			WHERE p.id=$1 AND EXISTS(SELECT 1 FROM payment_fulfillment_funding f
 				WHERE f.order_id=p.order_id AND f.receipt_id=$2 AND f.principal_minor IS NULL)`, a.ID, receiptID)
 		if err != nil {
+			return err
+		}
+	}
+	if duplicateBook {
+		if err := parkAdditionalWholeBookPayment(ctx, tx, a.OrderID, payment.ProviderStripe, &receipt.PaidAt); err != nil {
 			return err
 		}
 	}

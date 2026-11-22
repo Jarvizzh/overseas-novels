@@ -61,6 +61,11 @@ func reserveStripeAttemptTx(ctx context.Context, tx pgx.Tx, e *checkoutEvaluatio
 		return nil, err
 	}
 	e.orderID, e.accountID, e.checkoutID, e.slotID = orderID, accountID, intent, slot
+	if orderType == "whole_book" {
+		if err := checkOtherWholeBookReservation(ctx, tx, orderID, conversion.Environment()); err != nil {
+			return nil, err
+		}
+	}
 	var activeID, provider string
 	var activeAccount int64
 	err = tx.QueryRow(ctx, `SELECT id::text,provider,account_id FROM payment_checkout_attempts
@@ -132,11 +137,12 @@ func loadStripeAttempt(ctx context.Context, q checkoutQueryer, account payment.W
 // On restart, the worker either reuses that key or switches to lookups.
 func (r *dbRepository) claimStripeAttempts(ctx context.Context, account payment.WebhookAccount, id string, allowNew bool) ([]stripePurchaseAttempt, error) {
 	rows, err := db.Pool(ctx).Query(ctx, `WITH due AS (
-		SELECT p.id FROM payment_checkout_attempts p JOIN payment_channel_accounts a ON a.id=p.account_id
+		SELECT p.id,(o.status='Pending' AND NOT `+wholeBookWriteBlocked("o", "$3")+`) AS allow_write FROM payment_checkout_attempts p JOIN payment_channel_accounts a ON a.id=p.account_id
 		JOIN payment_stripe_checkout_terms t ON t.attempt_id=p.id JOIN recharge_orders o ON o.id=p.order_id
 		WHERE p.provider='stripe' AND a.account_key=$1 AND a.environment=$2 AND o.checkout_environment=$3
 		 AND ($4='' OR p.id=NULLIF($4,'')::uuid) AND p.next_create_at<=now()
-		 AND (p.status<>'creating' OR p.first_sent_at IS NOT NULL OR ($7 AND a.new_orders_enabled))
+		 AND (p.status<>'creating' OR p.first_sent_at IS NOT NULL OR
+			($7 AND a.new_orders_enabled AND o.status='Pending' AND NOT `+wholeBookWriteBlocked("o", "$3")+`))
          AND (p.status IN ('creating','buyer_action','capturing') OR
 		      p.status='settled' AND (t.ledger_observed_at IS NULL OR (o.status IN ('Success','Paid') AND EXISTS (
 				SELECT 1 FROM payment_fulfillment_funding f JOIN third_party_payment_orders receipt ON receipt.id=f.receipt_id
@@ -148,11 +154,11 @@ func (r *dbRepository) claimStripeAttempts(ctx context.Context, account payment.
 		          AND (h.case_id IS NULL OR c.work_state='approved'))))
 		ORDER BY p.next_create_at,p.id LIMIT 5 FOR UPDATE OF p SKIP LOCKED
 	), leased AS (
-		UPDATE payment_checkout_attempts p SET first_sent_at=CASE WHEN p.status='creating' THEN COALESCE(p.first_sent_at,now()) ELSE p.first_sent_at END,
-		  retry_until=CASE WHEN p.status='creating' THEN COALESCE(p.retry_until,now()+make_interval(secs=>$5::int)) ELSE p.retry_until END,
+		UPDATE payment_checkout_attempts p SET first_sent_at=CASE WHEN p.status='creating' AND due.allow_write THEN COALESCE(p.first_sent_at,now()) ELSE p.first_sent_at END,
+		  retry_until=CASE WHEN p.status='creating' AND due.allow_write THEN COALESCE(p.retry_until,now()+make_interval(secs=>$5::int)) ELSE p.retry_until END,
 		  next_create_at=now()+make_interval(secs=>$6::int)
-		FROM due WHERE p.id=due.id RETURNING p.*
-	) SELECT `+stripeAttemptFields+` FROM leased p JOIN recharge_orders o ON o.id=p.order_id
+		FROM due WHERE p.id=due.id RETURNING p.*,due.allow_write
+	) SELECT `+stripeAttemptFields+` OR NOT p.allow_write FROM leased p JOIN recharge_orders o ON o.id=p.order_id
 		JOIN payment_stripe_checkout_terms t ON t.attempt_id=p.id`,
 		account.AccountKey, account.Environment, conversion.Environment(), id, int(stripeCreateRetryWindow/time.Second), int(stripeCheckoutLease/time.Second), allowNew)
 	if err != nil {

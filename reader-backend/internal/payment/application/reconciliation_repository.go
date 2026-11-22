@@ -22,7 +22,8 @@ type subscriptionJob struct {
 
 const (
 	paypalOrder         = `payment_method='paypal' AND external_ref_id IS NOT NULL AND external_ref_id NOT LIKE 'mock%'`
-	recentPayPalOrder   = `status='Pending' AND checkout_id IS NOT NULL AND created_at > now()-interval '30 days'`
+	payPalOrderWindow   = "interval '30 days'"
+	recentPayPalOrder   = `status='Pending' AND checkout_id IS NOT NULL AND created_at > now()-` + payPalOrderWindow
 	retainedPayPalOrder = `((status='Pending' AND checkout_id IS NULL)
 		OR (status IN ('Success','Paid') AND order_type='whole_book' AND fulfilled_at IS NULL))`
 	orderCheckAt = `COALESCE(reconciliation_at,created_at)`
@@ -45,7 +46,7 @@ func claimPayPalOrders(ctx context.Context) ([]orderJob, error) {
 			ORDER BY c.due_at,o.id LIMIT 5 FOR UPDATE OF o SKIP LOCKED
 		), retained AS (
 			SELECT id, `+orderCheckAt+` AS due_at FROM recharge_orders
-			WHERE `+orderDue+retainedPayPalOrder+`
+			WHERE `+orderDue+`(`+retainedPayPalOrder+` OR (`+agedLegacyBookRecovery("recharge_orders", "$1")+`))
 			ORDER BY due_at,id LIMIT 5 FOR UPDATE SKIP LOCKED
 		), batch AS (
 			SELECT id FROM (SELECT id,due_at FROM recent UNION ALL SELECT id,due_at FROM retained) candidates
@@ -55,7 +56,7 @@ func claimPayPalOrders(ctx context.Context) ([]orderJob, error) {
 		FROM batch WHERE o.id=batch.id RETURNING COALESCE((
 			SELECT a.provider_order_id FROM payment_checkout_attempts a WHERE a.order_id=o.id AND a.provider='paypal'
 			AND a.status IN ('buyer_action','capturing') AND a.provider_order_id IS NOT NULL
-		),o.external_ref_id),o.reconciliation_attempts`)
+		),o.external_ref_id),o.reconciliation_attempts`, conversion.Environment())
 	if err != nil {
 		return nil, err
 	}

@@ -277,6 +277,15 @@ func (s *service) startPayPalAttempt(ctx context.Context, userID int64, intentID
 }
 
 func (s *service) sendPayPalCheckout(ctx context.Context, attempt *paypalCheckoutAttempt) (string, string, error) {
+	if attempt.orderType == "whole_book" {
+		allowed, err := s.repo.wholeBookWriteAllowed(ctx, attempt.orderID)
+		if err != nil {
+			return "", "", err
+		}
+		if !allowed {
+			return "", "", ErrCheckoutPending
+		}
+	}
 	if !paymentEnvironmentMatches(attempt.account) {
 		return "", "", ErrCheckoutPaused
 	}
@@ -338,18 +347,32 @@ func (s *service) completePayPalOrder(ctx context.Context, userID int64, orderID
 	if userID != 0 && order.userID != userID {
 		return nil, ErrCheckoutUnavailable
 	}
+	if order.agedLegacyBook && !order.fulfilled && (order.status == "Pending" || order.status == "Failed" || order.needsHistoricalBookVerification()) {
+		return nil, s.reconcileAgedLegacyBook(ctx, order, orderID)
+	}
 	if order.status != "Refunded" && order.orderType == "whole_book" && (order.novelID <= 0 || (order.checkoutID == "" && !order.legacyBookProven)) {
-		if err := s.repo.flagCheckoutForReview(ctx, order.id, "Independent historical whole-book purchase evidence is required"); err != nil {
+		if err := s.repo.flagCheckoutForReview(ctx, order.id, unprovenLegacyBookNote); err != nil {
 			return nil, err
+		}
+		if order.isLegacyWholeBook() && !order.fulfilled {
+			return nil, s.reconcileUnprovenLegacyBook(ctx, order, orderID)
 		}
 		return nil, ErrCheckoutUnavailable
 	}
 	switch order.status {
 	case "Success", "Paid":
+		if order.additionalBook {
+			return nil, ErrCheckoutPending
+		}
 		if !order.deferred && !order.needsHistoricalBookVerification() && (!order.managedAttempt || order.providerSettled) {
 			return &CheckoutResult{Coins: order.coins + order.bonus, OrderType: order.orderType}, nil
 		}
 	case "Pending":
+	case "Failed":
+		if !order.isLegacyWholeBook() {
+			return nil, ErrCheckoutUnavailable
+		}
+		allowCapture = false
 	case "Refunded":
 		if !order.managedAttempt || order.providerSettled {
 			return nil, ErrPaymentRefunded
@@ -379,6 +402,13 @@ func (s *service) completePayPalOrder(ctx context.Context, userID int64, orderID
 		}
 	}
 	capture, err := client.GetCapture(ctx, orderID)
+	if errors.Is(err, paypal.ErrOrderClosed) && !order.managedAttempt && order.orderType == "whole_book" &&
+		order.status == "Pending" && order.matchesPayPalOrder(capture, orderID) && paymentEnvironmentMatches(capture.Account) {
+		if err := s.repo.closeLegacyWholeBookOrder(ctx, order.id, capture.Account); err != nil {
+			return nil, err
+		}
+		return nil, ErrCheckoutPending
+	}
 	if errors.Is(err, paypal.ErrOrderClosed) && order.managedAttempt && order.matchesPayPalOrder(capture, orderID) {
 		matched, err := s.repo.matchPayPalAttempt(ctx, orderID, capture.Account)
 		if err != nil {
@@ -408,6 +438,15 @@ func (s *service) completePayPalOrder(ctx context.Context, userID int64, orderID
 		}
 		if !allowed {
 			return nil, ErrCheckoutPending
+		}
+		if order.orderType == "whole_book" && order.managedAttempt {
+			allowed, err := s.repo.wholeBookWriteAllowed(ctx, order.id)
+			if err != nil {
+				return nil, err
+			}
+			if !allowed {
+				return nil, ErrCheckoutPending
+			}
 		}
 		captureAccount := capture.Account
 		capture, err = client.CaptureOrder(ctx, orderID, captureAccount)

@@ -91,13 +91,13 @@ func applyStripeRefundTx(ctx context.Context, tx pgx.Tx, account payment.Webhook
 	), deferred AS (
 		SELECT EXISTS(SELECT 1 FROM recharge_orders o JOIN payment_checkout_attempts p ON p.order_id=o.id
 		 JOIN third_party_payment_orders t ON t.order_id=o.id AND t.external_order_id=p.provider_order_id AND t.account_id=p.account_id
-		 WHERE o.id=$1 AND t.id=$2 AND o.fulfilled_at IS NULL AND o.payment_method='stripe' AND t.reconciliation_note IS DISTINCT FROM
-		   'Stripe received a payment outside the active fulfillment attempt') AS original
+		 WHERE o.id=$1 AND t.id=$2 AND o.fulfilled_at IS NULL AND o.payment_method='stripe' AND (t.reconciliation_note IS DISTINCT FROM
+		   'Stripe received a payment outside the active fulfillment attempt' OR o.reconciliation_note=$4)) AS original
 	)
 	SELECT CASE WHEN EXISTS(SELECT 1 FROM amounts) THEN
 	  COALESCE((SELECT bool_and(refunded>=gross) FROM amounts),false)
 	  ELSE original AND COALESCE((SELECT sum(amount_minor)>=$3 FROM payment_stripe_refund_items WHERE receipt_id=$2),false)
-	END FROM deferred`, orderID, receiptID, gross).Scan(&covered)
+	END FROM deferred`, orderID, receiptID, gross, additionalWholeBookPaymentNote).Scan(&covered)
 	if err != nil {
 		return err
 	}

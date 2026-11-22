@@ -1,12 +1,14 @@
 # StarNovel 支付域代码 Review
 
-日期 2026-11-22。范围为 `codex/payment-domain` 在 `ed87492` 上的本地工作区，包含尚未纳入 Git 的实现文件和迁移 `2026111916` 至 `2026111926`。对照支付架构第 4 至 7 节和全项目开发规范。 [支付域架构与开发实施方案](payment-domain-architecture-and-implementation.md) · [全项目开发规范](../development_guidelines.md)
+日期 2026-11-22。最新复审基于 `codex/payment-domain` 的 `ac1c6e1` 与当前工作区，数据库版本为 `2026111927`。按 USD 收款、退款、结算与银行对账范围，核对支付架构第 3 至 7 节和全项目开发规范。 [支付域架构与开发实施方案](payment-domain-architecture-and-implementation.md) · [全项目开发规范](../development_guidelines.md)
 
-**当前结论（Schema `2026111927`）。** 原 9 项 USD 缺陷中，8 项通过代码复查及适用的本地验证，R04 的旧退款迁移分支仍有缺口。另复现 1 项新的 P1（R11），沙箱整本权益可被正式环境读取。两项均需关闭后再通过代码放行门槛。当前结果见[第 6 节复审](#6-复审结果schema-2026111927)。
+**当前结论。** 22 个工作包均已有实现入口。19 项未发现新增功能缺口，3 项 (`PAY-01`、`PAY-02`、`FE-02`) 涉及同一处已复现的历史订单恢复缺陷 R15。当前代码仍有必做事项，实际渠道及生产切换验收继续单独跟踪。 [全流程复评](#15-usd-范围全流程复评)
 
 **首轮评审基线（Schema `2026111926`）。** 22 个工作包均有实现，6 项核心代码已到位，16 项有缺口。首版 USD 范围内发现 9 项缺陷，其中 4 项在隔离库复现。以下保留首轮清单，供复审对照。R02 属于非 USD 范围。
 
 ## 1. 逐模块完成度
+
+本节及第 1.1 节保留首轮评审记录。当前 22 项的完成度见第 15 节。
 
 「已实现」表示本次核对的核心代码及入口已具备。「部分完成」表示已有主路径，仍需补齐子功能或修复缺陷。第 1.1 节逐项列出 16 个工作包的剩余开发内容，第 1.2 节列出待联调和验收的事项。
 
@@ -196,3 +198,165 @@ VIP 的环境过滤已进入阅读分支，但整本权益查询仅检查用户�
 | R04 | 缺首次发送时间的迁移命令可由财务凭同一原收款、环境、金额、币种及未关联的退款编号结案。已入账退款保留一笔，原命令预留释放。回归覆盖同额编号防串单、重复结案、审计及可退金额。 [财务结案](../cms-backend/internal/billing/refund_command.go) · [CMS 回归](../cms-backend/internal/billing/refund_test.go) |
 
 本轮复用 Schema `2026111927`，迁移版本门禁沿用现有配置。真实渠道和放行验收继续按第 1.2 节跟踪。
+
+## 8. ac1c6e1 复审结果
+
+| 缺陷 | 本轮结果 | 验证依据 |
+| --- | --- | --- |
+| R11 · 沙箱整本权益串用 | 原缺陷通过 | 重跑原探针，正式环境读取同库沙箱整本订单返回未购。仓库测试覆盖正式、沙箱、历史有凭证与历史来源未知，核对拥有状态、结账占位和钱包解锁。阅读快照已接入同一环境谓词。仍可扣款的无环境旧单另见 R12。 [原路径](../reader-backend/internal/novel/repository.go#L57) · [阅读快照](../reader-backend/internal/novel/read_snapshot.go#L29) · [回归](../reader-backend/internal/payment/application/whole_book_environment_test.go#L13) |
+| R04 · 旧 PayPal 退款结案 | 通过 | 重跑缺首次发送时间的原探针通过。迁移命令在有同一原款及渠道退款证据时可由 Finance 结案。仓库回归验证已被占用的同额退款编号无法再次关联，可退额仅释放一次原预留，两次结案仅写一条审计，且首次发送时间仍为空。 [结案代码](../cms-backend/internal/billing/refund_command.go#L179) · [迁移退款回归](../cms-backend/internal/billing/refund_test.go#L503) |
+
+### R12 · P1 · 等待扣款的旧整本订单失去购买互斥（已复现）
+
+具有 PayPal 订单引用及整本购买凭证的旧 `Pending` 订单可能没有环境快照，也没有已核实收款。新结账用整本权益的环境谓词筛选旧订单，这类订单因此无法占位。与此同时，Reader 补查仍会认领该旧 PayPal 订单，且无独立尝试记录的旧订单仍符合既有 Capture 认领条件。若买家继续完成新意向的结账，旧订单后续获批或被补查时仍可能扣款，产生同一小说的重复收款。
+
+**隔离库验证。** 设置 Reader 为 `production`，为同一用户和小说创建一笔无 `checkout_id`、无环境快照、已有 PayPal 引用及整本凭证的在途订单。实际调用 `preparePurchase` 返回新意向 `ready`。随后 `claimPayPalOrders` 认领原旧订单，`leaseCheckoutCapture` 对它返回 `true`。本轮验证了应用内可同时进入两个收款路径的状态，使用临时数据库。 [新意向占位](../reader-backend/internal/payment/application/checkout_intent.go#L174) · [旧订单补查](../reader-backend/internal/payment/application/reconciliation_repository.go#L23) · [Capture 认领](../reader-backend/internal/payment/application/checkout_intent.go#L364) · [实际扣款条件](../reader-backend/internal/payment/application/checkout_service.go#L353)
+
+**修复验收。** 整本权益授权继续要求可信环境。对仍可能收款的旧订单，在确认其环境和渠道状态前维持购买互斥，或由统一状态机阻止旧 Capture 并查清资金结果后再释放。分别验证同环境在途、跨环境已核实、环境未知、旧渠道已关闭和收款晚到。断言任一时点只有一个能继续收款的尝试。涉及 `PAY-02`、`CFG-01`。 [架构的购买互斥](payment-domain-architecture-and-implementation.md#跨渠道购买意向和互斥范围)
+
+### 本轮验证范围
+
+- 在本机临时 PostgreSQL 16 中复跑上轮两个原场景，并单独验证 R12。复验使用临时测试代码，未向任何真实渠道发起扣款或退款。
+- Reader 的支付、小说阅读、钱包和支付运维包，以及 CMS 的财务和迁移包，使用隔离库运行 `go test -p 2 -count=1` 均通过。变更涉及的 Reader 和 CMS 包通过 `go vet`。
+- 真实渠道、Link 售后、银行凭证及生产存量副本切换仍按第 1.2 节验收，首版币种范围为 USD。
+
+## 9. R12 修复记录
+
+- 缺环境的 PayPal 旧整本单仍可能收款时，保留该用户和小说的购买占位。已有意向在创建下一笔渠道尝试前也检查占位。已核实属于其他环境的旧单不参与当前环境的互斥，整本权益仍要求可信环境。 [占位规则](../reader-backend/internal/payment/application/whole_book_reservation.go) · [意向和扣款认领](../reader-backend/internal/payment/application/checkout_intent.go)
+- Worker 和买家回跳均可查询旧单。发现同环境的其他可收款尝试时，旧单停止提交 Capture。只有原 PayPal 订单的终态和购买凭证吻合，且没有收款记录，才释放旧单。已关闭旧单的晚到实收登记在原单供核对。两渠道在发放前按买家串行检查同一本书，额外款项保留收据，其退款不扣减已授予的金币或权益。 [完成与终态处理](../reader-backend/internal/payment/application/checkout_service.go) · [构造回归](../reader-backend/internal/payment/application/whole_book_environment_test.go)
+- 沿用 Schema `2026111927`。真实渠道和生产切换继续按第 1.2 节验收。
+
+## 10. R12 修复后复审
+
+| 模块 | 结果 | 验证证据 |
+| --- | --- | --- |
+| 购买意向和订单恢复 `PAY-02` | R12 原场景通过 | 无环境快照、带整本购买凭证的 `Pending` 旧单仍可被 Worker 认领，同时会拦截新意向。回归还覆盖终态关闭后放行，以及关闭后的晚到收据重复投递只保留一笔。 [占位代码](../reader-backend/internal/payment/application/checkout_intent.go#L174) · [回归](../reader-backend/internal/payment/application/whole_book_environment_test.go#L96) |
+| PayPal 和 Stripe 渠道执行 `PAY-02`、`ST-01` | R13 · P1 | 切换前已落库的尝试可以在旧单成功履约后继续走到渠道写入。PayPal 模拟适配器收到一次 Capture 调用，Stripe Worker 返回 `MayCreate=true`。 |
+| 旧单补查 `PAY-02`、`CFG-01` | R14 · P2 | 缺商品凭证的旧单占位后，Worker 在读渠道之前返回，已关闭的旧单仍挡住新购买。 |
+| 环境与售后 `CFG-01`、`PAY-04` | R11、R04 回归通过 | 正式环境无法读取沙箱整本权益。缺首次发送时间的历史 PayPal 退款命令可按凭证结案。额外旧单收款全退后，原有金币余额和已购权益保留。 [环境和退款回归](../reader-backend/internal/payment/application/whole_book_environment_test.go) · [CMS 退款回归](../cms-backend/internal/billing/refund_test.go#L503) |
+
+### R13 · P1 · 旧单已收款并履约，存量尝试仍可发起收款
+
+上轮缺陷可能留下同一用户、同一小说的旧 PayPal 订单和新渠道尝试。旧单此前已发出的扣款请求可能晚到。旧款凭证入账并完成履约后，应继续查询未决渠道结果，并阻止已被这笔购买替代的尝试发起新的渠道写入。当前 PayPal 的 Capture 认领只检查另一笔旧单是否仍为 `Pending`。旧单变为 `Success` 后，现有的 `buyer_action` 尝试重新具备 Capture 资格。Stripe 新尝试的预留会检查旧单和已购权益，Worker 恢复已落库的 `creating` 尝试时会跳过这一步。已有的重复履约检查只能在实收后保护权益，买家仍可能再付一次。 [PayPal Capture 认领](../reader-backend/internal/payment/application/checkout_intent.go#L370) · [提交 Capture](../reader-backend/internal/payment/application/checkout_service.go#L368) · [Stripe Worker 认领](../reader-backend/internal/payment/application/stripe_checkout_repository.go#L125) · [创建 Stripe Checkout](../reader-backend/internal/payment/application/stripe_checkout_service.go#L113)
+
+**复现。** 在正式环境的隔离库中分别种入旧 PayPal 订单及同一本书的存量尝试，用已验证的 USD Capture 完成旧单履约，并通过整本拥有查询确认权益。PayPal 尝试在旧单 `Pending` 时无法认领 Capture，旧单履约后，买家完成入口向模拟适配器提交了一次 Capture。Stripe 尝试处于 `creating` 且尚未发送，旧单履约后，后台认领仍返回 `MayCreate=true`。 [购买互斥验收](payment-domain-architecture-and-implementation.md#跨渠道购买意向和互斥范围)
+
+**修复验收。** 在渠道写入的认领处校验同一环境内的整本占位、已支付待履约和已购状态，覆盖 Reader 回跳、Webhook 与 Worker。复验旧单已支付、待确认、确认无收款三种状态。旧单已支付时，存量 PayPal 尝试不得再提交 Capture，Stripe 未发送的尝试不得再建 Checkout。已向渠道提交过的请求继续按原账户查证，对已打开的 Checkout 按渠道能力验明终态。晚到实收应保留原始收据，退款应只作用于对应的额外收款。
+
+### R14 · P2 · 缺整本购买凭证的旧单无法释放占位
+
+占位规则接受没有 `checkout_id` 和独立整本凭证、但保留 PayPal 订单号的旧 `Pending` 订单。补查可以认领这类订单，但 `completePayPalOrder` 在查 PayPal 前就以缺整本凭证退出，渠道关闭分支也复用同一凭证校验。即使原渠道已关闭且没有收款，Worker 再次扫到该订单也会退出，用户仍无法为同一本书发起新购买。 [占位条件](../reader-backend/internal/payment/application/whole_book_reservation.go#L13) · [补查入口](../reader-backend/internal/payment/application/reconciliation_repository.go#L23) · [完成入口](../reader-backend/internal/payment/application/checkout_service.go#L295) · [渠道关闭处理](../reader-backend/internal/payment/application/checkout_service.go#L347) · [凭证校验](../reader-backend/internal/payment/application/checkout.go#L430)
+
+**复现。** 种入一笔无 `checkout_id`、无整本凭证且有 PayPal 订单号的 USD 旧单，模拟原渠道查询返回同订单、同金额和同环境的 `VOIDED`，无 Capture。Worker 认领成功，完成入口返回 `ErrCheckoutUnavailable`，数据库仍为 `Pending`，新意向返回 `ErrCheckoutConflict`。
+
+**修复验收。** 独立核验旧单终态和履约资格。原账户、订单号、收款状态能够核实为已关闭且无收款时，可关闭订单并释放占位。账户不明、仍可能收款或查证失败时保留占位并提供可审计的核对入口。授权整本权益时仍要求独立商品凭证。补测确认无款、实收但缺凭证、查证未知三个分支。
+
+### 本轮验证范围
+
+- 使用本机临时 PostgreSQL 16、Schema `2026111927` 和模拟适配器，重跑 R12、R11、R04 原场景，并独立复现 R13 的 PayPal 与 Stripe 分支及 R14。
+- Reader 的支付域、小说、钱包、支付运维包通过 `go test -p 2 -count=1` 和 `go vet -p 2`。CMS 财务包通过 `go test -p 2 -count=1`。三项独立复现均观察到上述缺陷。
+- 本轮范围为 USD。真实渠道、银行凭证及生产存量切换仍按第 1.2 节验收。
+
+## 11. R13 与 R14 修复记录
+
+| 缺陷 | 修复与回归 |
+| --- | --- |
+| R13 | PayPal 建单及 Capture、Stripe Checkout 创建在认领与提交前核对同环境的旧单占位、已支付待发放及已购状态。Stripe 已发送的尝试继续查证，仍可支付且已被同一本书的实收替代时，走已有的关闭并查证流程。回归检查旧单待确认、已履约、已支付待发放及占位释放。 [写入保护](../reader-backend/internal/payment/application/whole_book_reservation.go) · [Worker 查证](../reader-backend/internal/payment/application/stripe_checkout_service.go) |
+| R14 | 旧单缺整本商品凭证时，仍可使用原 PayPal 账户按本地原订单号及金额查询。确认终态且无收款后释放占位。可信实收进入原订单收据并待核对，财务可据此追踪。查证失败保留原占位，发放权益仍需独立商品凭证。 [旧订单查询](../reader-backend/internal/payment/application/legacy_book_recovery.go) · [回归](../reader-backend/internal/payment/application/whole_book_environment_test.go) |
+
+沿用 Schema `2026111927`。真实 Stripe 与 PayPal Sandbox 及生产存量验收继续按第 1.2 节跟踪。
+
+## 12. Stripe Sandbox 联调（2026-11-22）
+
+使用 Stripe Sandbox `acct_1UdjRfBacqEepNtm`、API `2026-11-18.endive`、Stripe CLI `v1.55.14` 和隔离 PostgreSQL 16（Schema `2026111927`）。Stripe Balance 确认 `livemode=false`。
+
+| 验收项 | 实测结果 |
+| --- | --- |
+| Reader Checkout 适配器 | 直收单次和 VIP Checkout 均通过创建、USD Price 明细查询、相同幂等键返回同一会话及到期。 |
+| Stripe 测试卡收款与退款 | USD 1.99 扣款成功，分两次退回 USD 0.80 和 USD 1.19，额外 USD 0.01 被 Stripe 拒绝。拒绝测试卡返回 `card_declined`。 |
+| VIP 账单 | 测试时钟产出首付和续费账单，各实付 USD 3.99。另验证期末取消设置，以及账单和 InvoicePayment 查询。 |
+| Radar 与争议 | 测试卡生成 Early Fraud Warning，预警列表和详情可查。另一笔测试扣款生成争议，详情为 `needs_response`，存在资金划扣流水和划扣事件。 |
+| Webhook 转发 | Stripe CLI 将 `checkout.session.expired` 事件 `evt_1UeSLWBacqEepNtmAknJWg95` 实时转发至隔离 Reader 的 `18080` 端口，HTTP 200，Inbox 写入一条。原有本地服务的 `8080` Webhook 路径返回 404，原进程保留。 |
+| Webhook 重投 | 11 种真实 Sandbox 事件使用本地签名重放，正确签名与重复投递返回 200，每个事件只产生一条 Sandbox Inbox 记录，错误签名被拒绝。覆盖 Checkout 到期、订阅更新、两类账单已付、退款创建与更新、Charge 成功与失败、PaymentIntent 失败、争议创建和划扣。 |
+| USD 结算 | **未通过。** 买家扣款与两笔退款均为 USD，对应 Stripe Balance Transaction 的币种均为 HKD。USD 1.99 收款对应 HKD 15.60，USD 0.80 和 USD 1.19 退款分别对应 HKD −6.27 和 HKD −9.33。账号返回 `payouts_enabled=false`。需使用能够提供 USD 余额和划拨凭证的账户配置复验。 [首版币种范围](payment-domain-architecture-and-implementation.md#starnovel-支付域架构与开发实施方案) |
+
+本地 Reader 的 Stripe 适配器测试和隔离库中的 Checkout、VIP、结算及整本回归通过。浏览器支付回跳至 Reader 履约、Radar 人工审核、USD 划拨及银行匹配、Managed Payments 与 Link 仍待专项验收。
+
+## 13. Stripe 沙箱默认结算币种切换复验
+
+同一 Stripe Sandbox 改为默认 USD 后，用新的一笔 USD 1.99 扣款复验 `GET /v1/balance_transactions/{id}`。新收款流水 `txn_3UeSjiBacqEepNtm08CPSr4o` 为 USD 1.99，总手续费 USD 0.38，净额 USD 1.61。全额测试退款成功，流水 `txn_3UeSjiBacqEepNtm02JfobLH` 为 USD −1.99。两条新流水的 `exchange_rate` 均为空。原交易流水 `txn_3UeSJFBacqEepNtm1GHveCzt` 仍为 HKD 15.60。该沙箱 `payouts_enabled=false`，划拨与实际银行入账仍待验证。
+
+## 14. R13 与 R14 修复后复审
+
+| 模块 | 结果 | 验证证据 |
+| --- | --- | --- |
+| 整本收款与渠道恢复 `PAY-02`、`ST-01` | R13 原场景通过 | 旧 PayPal 在途、已购和实收待发放时，存量 PayPal Capture 的模拟调用次数为零。Stripe 尚未发送的尝试保持待命，已发送的尝试可以查证并关闭被替代的会话。旧单全退后，原有 PayPal 尝试可继续。 [渠道写入回归](../reader-backend/internal/payment/application/whole_book_environment_test.go#L235) |
+| 旧单补查与退款 `PAY-02`、`PAY-04`、`CFG-01` | R14 原场景通过 | 用原 Worker 认领入口复验缺商品凭证的 `VOIDED` 旧单，收款为空时关闭并放行新购买。真实收款的模拟凭证入原单并保留占位，超时维持原状态。额外探针重复投递这类待核对收款的全额退款，订单结案且已有金币未扣。 [旧单补查回归](../reader-backend/internal/payment/application/whole_book_environment_test.go#L316) · [退款分支](../reader-backend/internal/payment/application/refund_repository.go#L67) |
+| 结算对账 `FIN-02`、`FIN-03` | USD 本地回归通过 | USD 划拨与银行凭证匹配、重复匹配、划拨撤回后重新进入核对。CMS 财务查询通过。 [结算回归](../reader-backend/internal/payment/settlement/reconciliation_test.go#L18) · [CMS 财务回归](../cms-backend/internal/billing/reconciliation_test.go) |
+
+### 本轮验证范围
+
+- 收款、退款、结算和银行对账统一使用 USD。第 13 节记录 Stripe 默认结算币种调整后的复验结果。
+- 使用隔离 PostgreSQL 16 和模拟渠道复验。Reader 支付、小说、钱包及支付运维包，CMS 财务与数据库迁移测试包，以及转化服务本次受影响的包均通过测试。Reader 与 CMS 相关包通过 `go vet`，CMS 前端通过 lint 与构建。R11、R12 原独立探针也已重跑通过。
+- 撤回 HKD 结算改动后，以 Schema `2026111927` 在隔离 PostgreSQL 16 复跑三个后端的全量测试及 `go vet`，CMS 前端 lint 和构建通过。确认划拨和银行流水表均限制为 USD。
+- 本轮使用模拟渠道。真实 USD 划拨、银行凭证及生产存量切换继续按第 1.2 节验收。
+
+## 15. USD 范围全流程复评
+
+覆盖架构第 4 节的 20 个通用及前端工作包，以及第 5 节 `ST-01`、`ST-02` 两项 Stripe 工作包。Stripe 首版商品范围为获批的整本和 VIP，PayPal 保留原金币、整本与 VIP。直收与 MoR 按各自渠道证据验收。下表「已实现」表示本轮核对到业务入口、持久化或处置路径及现有验证依据。
+
+| 工作包 | 当前代码 | 实现与验证依据 |
+| --- | --- | --- |
+| `PAY-01` 公共底座 | 部分完成 | 账户化 Inbox、主动补拉、定向重跑和版本门禁已接入。历史订单主动查证与定向恢复仍有 R15。 [事件恢复](../reader-backend/internal/payment/application/event_recovery.go) · [迁移回归](../cms-backend/internal/db/migration_test.go#L484) |
+| `PAY-02` 一次性收款与履约 | 部分完成 | 购买意向、整本防重、切渠道、钱包和权益、原收款关联及事务 Outbox 已接入。R13、R14 原场景通过，超龄旧单仍可能锁住购买，见 R15。 [意向及防重回归](../reader-backend/internal/payment/application/checkout_intent_test.go) · [旧单回归](../reader-backend/internal/payment/application/whole_book_environment_test.go) |
+| `PAY-03` 订阅与计费 | 已实现 | PayPal 协议、版本、首付和续费、失败观察、取消补偿及多协议管理已接入，同类 VIP 共享 PayPal 和 Stripe 互斥规则。 [权益、续费及账户回归](../reader-backend/internal/payment/application/payment_recovery_integration_test.go#L236) · [跨渠道互斥](../reader-backend/internal/payment/application/checkout_intent_test.go#L224) |
+| `PAY-04` 退款 | 已实现 | CMS 按原收款提交持久命令，Reader 按渠道证据与重试窗口处理并核销预留。旧命令可由财务凭已入账退款结案。集成测试覆盖相同请求重放及同额独立退款。 [CMS 退款回归](../cms-backend/internal/billing/refund_test.go#L205) · [旧命令](../cms-backend/internal/billing/refund_test.go#L503) · [执行恢复](../reader-backend/internal/payment/application/refund_commands_test.go) |
+| `FIN-01` 资金账务 | 已实现 | 权威 USD 流水按账户及渠道标识去重，金额分项及与原收款的关联可重建。凭证不足时保留净额未知。 [证据合并回归](../reader-backend/internal/payment/ledger/repository_test.go#L16) · [PayPal 订阅资金证据](../cms-backend/internal/billing/refund_test.go#L173) |
+| `FIN-02` USD 结算 | 已实现 | PayPal 报告、Stripe 报表和划拨、银行 CSV、匹配及按账户调度均有入口。本地覆盖批次分配、重复匹配和撤回后重新核对。 [调度](../reader-backend/internal/payment/settlement/automatic.go) · [银行匹配回归](../reader-backend/internal/payment/settlement/reconciliation_test.go) |
+| `FIN-03` CMS 资金视图 | 已实现 | 订单、权威流水、批次、银行证据与差异可联查，税费分列，仪表盘分别统计退款和拒付划扣。 [查询](../cms-backend/internal/billing/reconciliation_repository.go) · [财务回归](../cms-backend/internal/billing/reconciliation_test.go) |
+| `CFG-01` 账户、凭证与环境 | 已实现 | 启动核对已注册账户和凭证，历史适配器按作用域继续处理。回归覆盖错环境和轮换后原账户事件。 [账户注册](../reader-backend/cmd/server/payment_accounts.go) · [原账户事件测试](../reader-backend/internal/payment/application/event_recovery_test.go#L40) |
+| `CFG-02` 渠道商品映射 | 已实现 | PayPal Plan 绑定套餐版本，Stripe Product 和 Price 按账户、商品、USD 价格及销售模式校验，历史订单及协议用原快照。 [PayPal 版本发布回归](../reader-backend/internal/payment/application/vip_offers_test.go#L52) · [Stripe 目录校验](../cms-backend/internal/billing/stripe_catalog.go) |
+| `CFG-03` 渠道启停与市场 | 已实现 | 按账户、商品、单次或订阅及销售模式控制入口。Stripe 保存市场、实际地区及税务依据，金额和地区差异进入复核。 [账户开关](../cms-backend/internal/billing/payment_queries.go#L58) · [市场复核](../reader-backend/internal/payment/application/stripe_market_review.go) |
+| `RSK-01` 公共结账决策 | 已实现 | 购买意向、尝试及 VIP 复用事务内决策，记录规则版本、原因与结果。CMS 可按订单查询。 [决策层](../reader-backend/internal/payment/application/checkout_decision.go) · [CMS 查询](../cms-backend/internal/billing/aftercare_repository.go#L92) |
+| `RSK-02` 渠道风险信号 | 已实现 | PayPal 拒绝或验证及 Stripe Radar 复核、预警等进入统一信号记录。保留渠道原因及来源。 [PayPal 信号](../reader-backend/internal/payment/paypal/aftercare.go) · [Stripe 信号回归](../reader-backend/internal/payment/stripe/aftercare_test.go) |
+| `RSK-03` 暂缓履约与复核 | 已实现 | 账户策略、按收款暂缓、复核决定、拒绝转退款或争议、超期升级及审计均有入口。 [暂缓回归](../reader-backend/internal/payment/aftercare/repository_test.go) · [CMS 处置](../cms-backend/internal/billing/aftercare_service.go) |
+| `DSP-01` 同步和补查 | 已实现 | PayPal 和 Stripe 案件、PayPal 独立冲回、时窗及定向补查已接入。补查后的资金影响以权威流水为准。 [补查入口](../reader-backend/cmd/payment-ops/main.go) · [PayPal 事件处理](../reader-backend/internal/payment/paypal/aftercare.go) |
+| `DSP-02` 案件与证据工作台 | 已实现 | 负责人、截止提醒、处置责任、原交易、账期和使用证据可查。PayPal 通过渠道案件列表和已展示的案件编号定位。 [案件工作台](../cms-front/src/pages/PaymentCases.tsx) · [权限与案件操作回归](../cms-backend/internal/billing/refund_test.go#L455) |
+| `DSP-03` 拒付与权益 | 已实现 | 按实际履约资金计入退款、拒付和返还。授权审核后可冲正、恢复，额外收款与履约资金独立处置。 [本金损失视图](../cms-backend/db/migrations/2026111927.sql#L52) · [权益生命周期回归](../reader-backend/internal/payment/aftercare/repository_test.go#L14) |
+| `FE-01` 支付中心及退役旧入口 | 已实现 | CMS 新路由、角色访问、旧地址跳转已接入，原 `PaymentTab` 已退役。 [新旧路由](../cms-front/src/App.tsx#L313) · [API 角色及字段回归](../cms-backend/internal/billing/refund_test.go#L290) |
+| `FE-02` H5 支付、回跳与订阅管理 | 部分完成 | 方式选择、服务端回跳、存储降级、购买历史及 VIP 管理已接入。R15 中旧单不可从原用户的购买历史找回。 [回跳及进度](../reader-front/src/pages/Recharge.tsx#L205) · [历史查询](../reader-backend/internal/payment/application/checkout_intent.go#L208) |
+| `FE-03` CMS 交易及配置 | 已实现 | 交易、订阅、退款命令恢复和渠道配置可查。旧 `/settings` 支付字段已收口。 [CMS 路由](../cms-backend/internal/billing/handler.go#L26) · [退款页面](../cms-front/src/pages/PaymentRefunds.tsx) · [旧配置入口](../cms-backend/internal/novel/handler.go#L897) |
+| `FE-04` CMS 售后与资金联查 | 已实现 | 风控、争议及对账页面与交易和退款联查，复用 CMS 布局、表格、状态及确认弹窗。 [案件联查](../cms-front/src/pages/PaymentCases.tsx#L161) · [对账页](../cms-front/src/pages/PaymentReconciliation.tsx) |
+| `ST-01` Stripe 单次收款 | 已实现 | USD 整本的 Checkout、签名 Inbox、查单核验、退款、争议及市场适配均有入口。模拟结算与先前直收 Sandbox 证据已记录。 [单次回归](../reader-backend/internal/payment/application/stripe_checkout_test.go) · [Sandbox 记录](#12-stripe-sandbox-联调2026-11-22) |
+| `ST-02` Stripe VIP | 已实现 | 核验 Invoice、Invoice Payment 及实际收款后履约。覆盖部分收款、零额或外部已付复核、同周期重新开票和取消。直收 Portal、MoR Link 管理入口已提供。 [VIP 账期回归](../reader-backend/internal/payment/application/stripe_vip_test.go) · [管理入口](../reader-front/src/pages/Recharge.tsx#L593) |
+
+### R15 · P2 · 超过补查窗口的 PayPal 旧整本订单持续占位
+
+旧订单已有 `checkout_id` 和 PayPal 订单号，但无环境快照及渠道尝试。购买意向将这种旧 `Pending` 单视为占位，与账龄无关。Worker 对有 `checkout_id` 的待付款订单只扫描最近 30 天，`payment-ops -kind order` 也拒绝对此类超龄订单安排补查。Reader 购买记录又要求当前环境快照，失去原回跳引用后的用户无法从历史继续处理。这时即使 PayPal 已关闭且无收款，也缺少能把本地占位释放的常规路径。 [占位规则](../reader-backend/internal/payment/application/whole_book_reservation.go#L16) · [Worker 范围](../reader-backend/internal/payment/application/reconciliation_repository.go#L23) · [运维恢复](../reader-backend/internal/payment/application/operations_repository.go#L109) · [购买历史](../reader-backend/internal/payment/application/checkout_intent.go#L208)
+
+**复现。** 在隔离库写入 31 天前的 USD 旧整本单。新购买得到 `ErrCheckoutConflict`，Worker 认领 0 条，定向重试得到 `ErrTaskNotRetryable`，购买历史返回 0 条。直接调用旧单处理并提供同账户、同订单号、同金额、无 Capture 的 `VOIDED` 模拟证据后，同一个新购买请求返回 `ready`。
+
+**修复验收。** 将仍占位的旧订单纳入可认领的只查证或可审计的定向恢复路径。无法确定归属或渠道结果时保留占位。核实关闭且无收款后允许新购买。已收款时按 R14 保留证据及复核，禁止因超时直接释放或发起扣款。验证 30 天边界、已知和未知环境、回跳丢失、查询超时、晚到实收及原账户隔离。向用户提供可执行的查进度或客服路径。
+
+### 真实渠道及上线验收
+
+| 待验收 | 关闭条件 |
+| --- | --- |
+| PayPal 与 Stripe 直收全流程 | 按拟放行账户、SKU 和市场，从实际 H5 结账和回跳跟踪到权益、续费、退款、风控与争议。第 12、13 节记录了部分 Stripe Sandbox 结果。 |
+| Stripe MoR 与 Link | 用获批账户和拟开启市场验证 USD 实收、税务责任、账单地区变化以及 Link 售后与 Reader 权益同步，单独批准开放。 |
+| USD 结算与银行 | 使用有划拨能力的商户、真实脱敏报告和独立 USD 银行入账凭证，从订单追到实际入账。 |
+| 应用交互与存量切换 | 浏览器验证移动回跳、无 Web Storage、重登换号、CMS 角色及跨页联查。用脱敏存量副本完成 Schema 升级、在途退款交接、维护期事件补拉和暂停新交易演练。 |
+
+### 本轮验证
+
+- 在同一临时 PostgreSQL 16 实例使用 `star_novel` 给三个后端分别建库。Reader、CMS、转化服务仓库全量 `go test -p 2 -count=1 ./...` 和 `go vet -p 2 ./...` 通过。通过带历史数据的 `2026111926` 到 `2026111927` 迁移回归，以及整本、订阅、支付命令、账务、风控与争议测试。
+- Reader H5 和 CMS 的 `npm run lint` 与 `npm run build` 通过。R15 使用独立探针复现并验证渠道终态解除占位的对照场景。
+- 本轮粒度为代码盘点、隔离库和模拟渠道，未发起真实支付写入、浏览器端到端联调或生产操作。
+
+## 16. R15 修复
+
+超过 30 天、已有 `checkout_id` 和 PayPal 订单号、无渠道尝试且仍为 `Pending` 的整本旧单进入 Reader 补查队列，也可通过 `payment-ops -kind order` 按本地订单 ID 定向安排重试。恢复按原 PayPal 账户读取渠道结果。原账户不明、环境不符、查询超时或结果仍为已批准时保留占位。确认原单已关闭且无收款后释放占位。迟到实收保留原订单凭证并进入复核，此类款项全退时可按原凭证结案。 [恢复代码](../reader-backend/internal/payment/application/legacy_book_recovery.go) · [Worker](../reader-backend/internal/payment/application/reconciliation_repository.go)
+
+H5 购买历史优先展示仍占位的旧单。买家可在原账户登录后从历史打开状态，使用现有「Check status」查看进展。状态页提供客服提示。已核实的迟到实收仅在所属环境展示。 [历史查询](../reader-backend/internal/payment/application/checkout_intent.go) · [专项回归](../reader-backend/internal/payment/application/aged_legacy_book_test.go)
+
+隔离 PostgreSQL 16 和模拟 PayPal 的专项测试通过，覆盖 30 天边界、未知和已知环境、跨用户访问、原账户与替换账户、查询超时、已批准但未收款、关闭后重新购买，以及迟到收款与退款。Reader 全量测试、`go vet` 和专项竞态检测通过。真实渠道与浏览器端到端联调仍按第 15 节验收。

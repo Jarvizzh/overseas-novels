@@ -117,7 +117,11 @@ func RetryPaymentTask(ctx context.Context, kind, id string, from *time.Time) err
 			return errors.New("order retry requires a positive local order ID")
 		}
 		args[0] = orderID
-		query = `UPDATE recharge_orders SET reconciliation_at=now()-interval '6 minutes' WHERE id=$1 AND payment_method='paypal' AND (status='Pending' OR (status IN ('Success','Paid') AND order_type='whole_book' AND fulfilled_at IS NULL)) AND COALESCE(reconciliation_at,created_at)<=now()-interval '5 minutes' AND external_ref_id IS NOT NULL AND external_ref_id NOT LIKE 'mock%' AND (status<>'Pending' OR created_at>now()-interval '30 days' OR checkout_id IS NULL)`
+		args = append(args, conversion.Environment())
+		query = `UPDATE recharge_orders SET reconciliation_at=now()-interval '6 minutes'
+			WHERE id=$1 AND ` + paypalOrder + ` AND ` + orderCheckAt + `<=now()-interval '5 minutes'
+			AND ((` + recentPayPalOrder + `) OR ` + retainedPayPalOrder +
+			` OR (` + agedLegacyBookRecovery("recharge_orders", "$2") + `))`
 	case "cancel":
 		query = `UPDATE user_subscriptions SET cancel_next_attempt_at=now() WHERE subscription_id=$1 AND payment_method='paypal' AND status='CANCEL_PENDING' AND payment_subscription_environment(user_subscriptions)=$2 AND COALESCE(cancel_next_attempt_at,updated_at)<=now()`
 		args = append(args, conversion.Environment())

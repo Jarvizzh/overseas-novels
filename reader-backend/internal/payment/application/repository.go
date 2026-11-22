@@ -53,7 +53,9 @@ type Repository interface {
 	finishPayPalAttempt(context.Context, *paypalCheckoutAttempt, string, string) error
 	matchPayPalAttempt(context.Context, string, payment.WebhookAccount) (bool, error)
 	leaseCheckoutCapture(context.Context, string) (bool, error)
+	wholeBookWriteAllowed(context.Context, int64) (bool, error)
 	closePayPalAttempt(context.Context, string) error
+	closeLegacyWholeBookOrder(context.Context, int64, payment.WebhookAccount) error
 	isCheckoutOrigin(context.Context, string) (bool, error)
 	holdCheckoutCreate(context.Context, string) error
 	holdCheckoutCapture(context.Context, string) error

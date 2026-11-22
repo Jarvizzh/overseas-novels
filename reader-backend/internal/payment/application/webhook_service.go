@@ -144,11 +144,20 @@ func (s *service) applyPayPalEvent(ctx context.Context, provider payment.Subscri
 			return errors.New("missing PayPal order ID")
 		}
 		if event.Account.AccountKey != "" && s.adapters.HasRegisteredAccounts(payment.ProviderPayPal) {
-			client, lookupErr := s.payPalForOrder(ctx, event.ExternalRefID)
-			if lookupErr != nil {
-				return lookupErr
+			order, err := s.repo.findCheckout(ctx, event.ExternalRefID)
+			if err != nil {
+				return err
 			}
-			account, err := client.CheckoutAccount(ctx)
+			var account payment.WebhookAccount
+			if order.agedLegacyBook {
+				account, err = agedLegacyBookAccount(ctx, order.id)
+			} else {
+				client, lookupErr := s.payPalForOrder(ctx, event.ExternalRefID)
+				if lookupErr != nil {
+					return lookupErr
+				}
+				account, err = client.CheckoutAccount(ctx)
+			}
 			if err != nil || account != event.Account {
 				return ErrCheckoutUnavailable
 			}

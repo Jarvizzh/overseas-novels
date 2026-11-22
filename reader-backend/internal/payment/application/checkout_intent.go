@@ -53,12 +53,13 @@ type purchaseRequest struct {
 	nonVIPOnly bool
 }
 
-const purchaseProjection = `
+var purchaseProjection = `
 	COALESCE(o.checkout_id::text,''),COALESCE(o.recharge_slot_id,0),COALESCE(o.novel_id,0),o.order_type,o.amount_cents,o.currency,
 	COALESCE(o.coins,0)+COALESCE(o.bonus_coins_credited,0),
 	CASE
 		WHEN o.status='Refunded' THEN 'refunded'
 		WHEN o.fulfilled_at IS NOT NULL THEN 'completed'
+		WHEN o.status='Pending' AND (` + agedLegacyBook("o") + `) THEN 'review'
 		WHEN o.reconciliation_note IS NOT NULL OR EXISTS(SELECT 1 FROM payment_deferred_fulfillment d WHERE d.order_id=o.id AND d.resolved_at IS NULL) THEN 'review'
 		WHEN o.paid_at IS NOT NULL OR o.status IN ('Success','Paid') THEN 'confirming'
 		WHEN o.status='Failed' OR a.status='closed' THEN 'retryable'
@@ -73,7 +74,8 @@ const purchaseProjection = `
 	END,o.checkout_return_path,COALESCE(a.approval_url,''),COALESCE(a.provider_order_id,o.external_ref_id,''),
     COALESCE(CASE WHEN a.status IN ('creating','buyer_action','capturing','settled') THEN a.provider
         WHEN o.paid_at IS NOT NULL THEN o.payment_method END,''),
-    CASE WHEN a.paypal_switch_token IS NOT NULL AND o.status='Pending' THEN 'payment_switch_pending'
+    CASE WHEN o.status='Pending' AND (` + agedLegacyBook("o") + `) THEN '` + string(captureLegacyBookReview) + `'
+      WHEN a.paypal_switch_token IS NOT NULL AND o.status='Pending' THEN 'payment_switch_pending'
       WHEN o.status IN ('Pending','Failed') AND a.status IN ('buyer_action','capturing','closed')
         THEN COALESCE(a.capture_outcome,'') ELSE '' END,
     COALESCE(o.product_id,0), COALESCE(o.product_snapshot,'{}'::jsonb)`
@@ -214,12 +216,13 @@ func reserveWholeBook(ctx context.Context, tx pgx.Tx, env string, userID, novelI
 	var resumable bool
 	err := tx.QueryRow(ctx, `SELECT id,COALESCE(status='Pending' AND checkout_environment=$3
 		AND (COALESCE(product_id,0)=$4 OR ($5>0 AND product_id IS NULL AND COALESCE(recharge_slot_id,0)=$5))
-		AND ($5=0 OR COALESCE(recharge_slot_id,0)=$5),false)
+		AND ($5=0 OR COALESCE(recharge_slot_id,0)=$5)
+		AND NOT (`+legacyWholeBookReservation("$3")+`),false)
 		FROM recharge_orders
 		WHERE user_id=$1 AND novel_id=$2 AND order_type='whole_book'
-		  AND (`+novel.WholeBookEnvironmentPredicate("$3")+` AND (`+novel.WholeBookEntitlementPredicate+`
+		  AND ((`+legacyWholeBookReservation("$3")+`) OR (`+novel.WholeBookEnvironmentPredicate("$3")+` AND (`+novel.WholeBookEntitlementPredicate+`
 		       OR (status IN ('Success','Paid','RefundPending') AND fulfilled_at IS NULL)
-		       OR (status='Pending' AND (checkout_environment=$3 OR external_ref_id IS NOT NULL))))
+		       OR (status='Pending' AND (checkout_environment=$3 OR external_ref_id IS NOT NULL)))))
 		ORDER BY 2,id
 		LIMIT 1 FOR UPDATE`, userID, novelID, env, productID, slotID).Scan(&id, &resumable)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -237,7 +240,9 @@ func reserveWholeBook(ctx context.Context, tx pgx.Tx, env string, userID, novelI
 func (r *dbRepository) purchaseByReference(ctx context.Context, userID int64, intentID, paypalOrderID string) (*PurchaseIntent, error) {
 	intent, err := scanPurchase(db.Pool(ctx).QueryRow(ctx, `SELECT `+purchaseProjection+` FROM recharge_orders o `+
 		purchaseAttemptJoin+` WHERE o.user_id=$1 AND o.order_type IN ('single','whole_book') AND o.payment_method IN ('paypal','stripe')
-			AND (o.checkout_environment=$2 OR (o.checkout_environment IS NULL AND $4<>'' AND o.external_ref_id=$4))
+			AND CASE WHEN (`+agedLegacyBookLookupOnly("o")+`) AND o.status IN ('Pending','Paid')
+				THEN (`+agedLegacyBookVisible("o", "$2")+`)
+				ELSE (o.checkout_environment=$2 OR (o.checkout_environment IS NULL AND $4<>'' AND o.external_ref_id=$4)) END
 			AND ($3='' OR o.checkout_id=NULLIF($3,'')::uuid)
 			AND ($4='' OR (o.payment_method='paypal' AND o.external_ref_id=$4) OR EXISTS (SELECT 1 FROM payment_checkout_attempts p
 				WHERE p.order_id=o.id AND p.provider='paypal' AND p.provider_order_id=$4))`,
@@ -253,8 +258,10 @@ func (r *dbRepository) purchaseByReference(ctx context.Context, userID int64, in
 
 func (r *dbRepository) recentPurchases(ctx context.Context, userID int64) ([]PurchaseIntent, error) {
 	rows, err := db.Pool(ctx).Query(ctx, `SELECT `+purchaseProjection+` FROM recharge_orders o `+
-		purchaseAttemptJoin+` WHERE o.user_id=$1 AND o.checkout_environment=$2 AND o.checkout_id IS NOT NULL
-			ORDER BY o.id DESC LIMIT 20`, userID, conversion.Environment())
+		purchaseAttemptJoin+` WHERE o.user_id=$1 AND o.checkout_id IS NOT NULL
+			AND CASE WHEN (`+agedLegacyBookLookupOnly("o")+`) AND o.status IN ('Pending','Paid')
+				THEN (`+agedLegacyBookVisible("o", "$2")+`) ELSE o.checkout_environment=$2 END
+			ORDER BY (`+agedLegacyBookRecovery("o", "$2")+`) DESC,o.id DESC LIMIT 20`, userID, conversion.Environment())
 	if err != nil {
 		return nil, err
 	}
@@ -323,6 +330,11 @@ func (r *dbRepository) reservePayPalAttemptTx(ctx context.Context, tx pgx.Tx, ev
 	}
 
 	evaluation.accountID, evaluation.orderID, evaluation.checkoutID = accountID, attempt.orderID, attempt.intentID
+	if attempt.orderType == "whole_book" {
+		if err := checkOtherWholeBookReservation(ctx, tx, attempt.orderID, conversion.Environment()); err != nil {
+			return nil, err
+		}
+	}
 	var currentAccount int64
 	var currentStatus string
 	var needsReview bool
@@ -382,8 +394,10 @@ func leaseCheckoutCreate(ctx context.Context, tx pgx.Tx, attemptID string) (bool
 		    retry_until=COALESCE(retry_until,now()+interval '1 second'*$2::int),
 		    next_create_at=now()+interval '1 minute'
 		WHERE id=$1 AND status='creating' AND NOT create_lookup_only
-		AND next_create_at<=now() AND (retry_until IS NULL OR retry_until>now())`,
-		attemptID, int(paypal.OrderWriteWindow/time.Second))
+		AND next_create_at<=now() AND (retry_until IS NULL OR retry_until>now())
+		AND EXISTS (SELECT 1 FROM recharge_orders o WHERE o.id=payment_checkout_attempts.order_id AND o.status='Pending'
+			AND (o.order_type<>'whole_book' OR NOT `+wholeBookWriteBlocked("o", "$3")+`))`,
+		attemptID, int(paypal.OrderWriteWindow/time.Second), conversion.Environment())
 	return tag.RowsAffected() == 1, err
 }
 
@@ -433,12 +447,26 @@ func (r *dbRepository) leaseCheckoutCapture(ctx context.Context, providerOrderID
 		WHERE provider='paypal' AND provider_order_id=$1 AND status IN ('buyer_action','capturing')
 		  AND NOT capture_lookup_only AND paypal_switch_token IS NULL AND (next_capture_at IS NULL OR next_capture_at<=now())
 		  AND (capture_retry_until IS NULL OR capture_retry_until>now())
-		  AND EXISTS (SELECT 1 FROM recharge_orders o WHERE o.id=payment_checkout_attempts.order_id AND o.status='Pending')
+		  AND EXISTS (SELECT 1 FROM recharge_orders o WHERE o.id=payment_checkout_attempts.order_id AND o.status='Pending'
+			AND (o.order_type<>'whole_book' OR NOT `+wholeBookWriteBlocked("o", "$4")+`))
 		RETURNING id
 	)
-	SELECT EXISTS(SELECT 1 FROM claimed) OR NOT EXISTS(
-		SELECT 1 FROM payment_checkout_attempts WHERE provider='paypal' AND provider_order_id=$1
-	)`, providerOrderID, int(paypal.OrderWriteWindow/time.Second)).Scan(&allow)
+	SELECT EXISTS(SELECT 1 FROM claimed) OR (
+		NOT EXISTS(SELECT 1 FROM payment_checkout_attempts WHERE provider='paypal' AND provider_order_id=$1)
+		AND EXISTS(SELECT 1 FROM recharge_orders legacy WHERE legacy.external_ref_id=$1
+			AND legacy.payment_method='paypal' AND legacy.status='Pending' AND NOT (`+agedLegacyBook("legacy")+`) AND (
+				legacy.order_type<>'whole_book' OR (
+					COALESCE(payment_order_environment(legacy),$3)=$3
+					AND NOT EXISTS(SELECT 1 FROM recharge_orders other
+						WHERE other.id<>legacy.id AND other.user_id=legacy.user_id AND other.novel_id=legacy.novel_id
+						AND other.order_type='whole_book' AND COALESCE(payment_order_environment(other),$3)=$3
+						AND (other.status IN ('Success','Paid','RefundPending') OR (other.status='Pending' AND
+							(other.external_ref_id IS NOT NULL OR EXISTS(SELECT 1 FROM payment_checkout_attempts p
+								WHERE p.order_id=other.id AND p.status IN ('creating','buyer_action','capturing')))))
+					)
+				)
+			))
+	)`, providerOrderID, int(paypal.OrderWriteWindow/time.Second), currentPaymentLedgerEnvironment(), conversion.Environment()).Scan(&allow)
 	return allow, err
 }
 
@@ -471,6 +499,7 @@ func claimCheckoutCreate(ctx context.Context, account payment.WebhookAccount) ([
 		WHERE p.provider='paypal' AND p.status='creating' AND NOT p.create_lookup_only
 		  AND p.retry_until>now()+interval '3 minutes' AND p.next_create_at<=now() AND o.status='Pending'
 		  AND a.account_key=$1 AND a.environment=$2 AND o.checkout_environment=$3
+		  AND (o.order_type<>'whole_book' OR NOT `+wholeBookWriteBlocked("o", "$3")+`)
 		ORDER BY p.next_create_at,p.id LIMIT 5 FOR UPDATE OF p SKIP LOCKED
 	)
 	UPDATE payment_checkout_attempts p SET next_create_at=now()+interval '1 minute'

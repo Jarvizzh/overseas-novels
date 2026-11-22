@@ -126,6 +126,13 @@ func (s *service) syncStripeAttempt(ctx context.Context, provider payment.Single
 		sessionID = a.SessionID
 	}
 	if sessionID == "" && a.MayCreate {
+		allowed, err := s.repo.wholeBookWriteAllowed(ctx, a.OrderID)
+		if err != nil {
+			return err
+		}
+		if !allowed {
+			return nil
+		}
 		proof, err := provider.CreateSingleCheckout(ctx, payment.SingleCheckoutRequest{
 			AttemptID: a.ID, SuccessURL: a.ReturnURL, CancelURL: a.CancelURL, Offer: a.Offer,
 		})
@@ -146,6 +153,20 @@ func (s *service) syncStripeAttempt(ctx context.Context, provider payment.Single
 	proof, err := provider.ReadSingleCheckout(ctx, sessionID, a.ID, a.Offer)
 	if err != nil {
 		return err
+	}
+	if proof.AwaitingBuyer && proof.Receipt == nil {
+		superseded, err := anotherWholeBookPaid(ctx, db.Pool(ctx), a.OrderID)
+		if err != nil {
+			return err
+		}
+		if closer, ok := provider.(interface {
+			CloseSingleCheckout(context.Context, string, string, payment.SingleCheckoutOffer) (payment.SingleCheckoutProof, error)
+		}); superseded && ok {
+			proof, err = closer.CloseSingleCheckout(ctx, sessionID, a.ID, a.Offer)
+			if err != nil {
+				return err
+			}
+		}
 	}
 	var movement *payment.LedgerEvidence
 	if proof.Receipt != nil && proof.Receipt.Currency == "USD" && proof.Receipt.MovementID != "" {
