@@ -11,13 +11,15 @@ import (
 )
 
 var (
-	ErrOrderNotFound            = errors.New("Order not found")
-	ErrOrderAlreadyRefunded     = errors.New("Order has already been refunded")
-	ErrOrderNotRefundable       = errors.New("Only successfully completed orders can be refunded")
-	ErrTemplateSlotCountInvalid = errors.New("Each recharge template slot count must be between 4 and 8")
-	ErrTemplateSlotBonusTooHigh = errors.New("Bonus coins cannot exceed 1.5 times of standard coins for single slots")
-	ErrTemplateNotFound         = errors.New("Recharge template not found")
-	ErrDefaultTemplateNotDelete = errors.New("Default recharge template cannot be deleted, please set another template as default first")
+	ErrOrderNotFound               = errors.New("Order not found")
+	ErrOrderAlreadyRefunded        = errors.New("Order has already been refunded")
+	ErrOrderNotRefundable          = errors.New("Only successfully completed orders can be refunded")
+	ErrTemplateSlotCountInvalid    = errors.New("Each recharge template slot count must be between 4 and 8")
+	ErrTemplateSlotBonusTooHigh    = errors.New("Bonus coins cannot exceed 1.5 times of standard coins for single slots")
+	ErrTemplateSlotInvalid         = errors.New("Each template slot must reference a distinct published product with slot_index 1..8")
+	ErrTemplateProductNotPublished = errors.New("All template slots must reference products that are published and dual-channel ready")
+	ErrTemplateNotFound            = errors.New("Recharge template not found")
+	ErrDefaultTemplateNotDelete    = errors.New("Default recharge template cannot be deleted, please set another template as default first")
 )
 
 type BillingService interface {
@@ -157,15 +159,45 @@ func (s *billingService) ListRechargeTemplates(ctx context.Context) ([]RechargeT
 	return templates, nil
 }
 
+func validateTemplateSlotsTx(ctx context.Context, tx pgx.Tx, slots []RechargeSlot) error {
+	if len(slots) < 4 || len(slots) > 8 {
+		return ErrTemplateSlotCountInvalid
+	}
+	seenIdx := make(map[int]bool, len(slots))
+	seenProd := make(map[int64]bool, len(slots))
+	productIDs := make([]int64, 0, len(slots))
+	for i := range slots {
+		s := &slots[i]
+		s.Badge = strings.TrimSpace(s.Badge)
+		s.DisplayAlias = strings.TrimSpace(s.DisplayAlias)
+		if s.SlotIndex < 1 || s.SlotIndex > 8 || s.ProductID <= 0 || len(s.Badge) > 32 || len(s.DisplayAlias) > 64 {
+			return ErrTemplateSlotInvalid
+		}
+		if seenIdx[s.SlotIndex] || seenProd[s.ProductID] {
+			return ErrTemplateSlotInvalid
+		}
+		seenIdx[s.SlotIndex] = true
+		seenProd[s.ProductID] = true
+		productIDs = append(productIDs, s.ProductID)
+	}
+	var publishedCount int
+	err := tx.QueryRow(ctx, `
+		SELECT count(DISTINCT p.id)
+		FROM products p
+		JOIN product_publications pub ON pub.product_id = p.id
+		WHERE p.id = ANY($1::bigint[]) AND pub.status = 'published'`, productIDs).Scan(&publishedCount)
+	if err != nil {
+		return err
+	}
+	if publishedCount != len(productIDs) {
+		return ErrTemplateProductNotPublished
+	}
+	return nil
+}
+
 func (s *billingService) CreateRechargeTemplate(ctx context.Context, adminID string, name string, isDefault bool, slots []RechargeSlot) (int, error) {
 	if len(slots) < 4 || len(slots) > 8 {
 		return 0, ErrTemplateSlotCountInvalid
-	}
-
-	for _, slot := range slots {
-		if slot.Type == "single" && float64(slot.Bonus) > float64(slot.Coins)*1.5 {
-			return 0, ErrTemplateSlotBonusTooHigh
-		}
 	}
 
 	tx, err := s.beginTemplateChange(ctx, adminID)
@@ -173,6 +205,10 @@ func (s *billingService) CreateRechargeTemplate(ctx context.Context, adminID str
 		return 0, err
 	}
 	defer tx.Rollback(context.WithoutCancel(ctx))
+
+	if err := validateTemplateSlotsTx(ctx, tx, slots); err != nil {
+		return 0, err
+	}
 
 	before, err := templateSnapshot(ctx, tx, 0)
 	if err != nil {
@@ -192,7 +228,7 @@ func (s *billingService) CreateRechargeTemplate(ctx context.Context, adminID str
 	}
 
 	for _, slot := range slots {
-		err = s.repo.CreateRechargeSlotTx(ctx, tx, templateID, slot.SlotIndex, slot.Type, slot.Coins, slot.Bonus, slot.VipDuration, slot.SubscriptionCycle, slot.VipName, slot.VipDesc, slot.Price, slot.PriceCents)
+		err = s.repo.CreateRechargeSlotTx(ctx, tx, templateID, slot.SlotIndex, slot.ProductID, slot.Badge, slot.IsHighlighted, slot.DisplayAlias)
 		if err != nil {
 			return 0, err
 		}
@@ -214,17 +250,15 @@ func (s *billingService) UpdateRechargeTemplate(ctx context.Context, adminID str
 		return ErrTemplateSlotCountInvalid
 	}
 
-	for _, slot := range slots {
-		if slot.Type == "single" && float64(slot.Bonus) > float64(slot.Coins)*1.5 {
-			return ErrTemplateSlotBonusTooHigh
-		}
-	}
-
 	tx, err := s.beginTemplateChange(ctx, adminID)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(context.WithoutCancel(ctx))
+
+	if err := validateTemplateSlotsTx(ctx, tx, slots); err != nil {
+		return err
+	}
 
 	before, err := templateSnapshot(ctx, tx, id)
 	if err != nil {
@@ -252,7 +286,7 @@ func (s *billingService) UpdateRechargeTemplate(ctx context.Context, adminID str
 	}
 
 	for _, slot := range slots {
-		err = s.repo.CreateRechargeSlotTx(ctx, tx, id, slot.SlotIndex, slot.Type, slot.Coins, slot.Bonus, slot.VipDuration, slot.SubscriptionCycle, slot.VipName, slot.VipDesc, slot.Price, slot.PriceCents)
+		err = s.repo.CreateRechargeSlotTx(ctx, tx, id, slot.SlotIndex, slot.ProductID, slot.Badge, slot.IsHighlighted, slot.DisplayAlias)
 		if err != nil {
 			return err
 		}

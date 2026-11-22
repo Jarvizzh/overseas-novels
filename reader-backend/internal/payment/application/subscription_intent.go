@@ -21,24 +21,26 @@ var ErrSubscriptionReview = errors.New("PayPal checkout requires reconciliation 
 var ErrSubscriptionPending = errors.New("PayPal checkout is still being prepared. Retry the same package shortly.")
 
 type subscriptionIntent struct {
-	id             string
-	userID         int64
-	slotID         int
-	templateID     int
-	priceCents     int
-	cycle          string
-	returnURL      string
-	cancelURL      string
-	returnPath     string
-	planID         string
-	offerVersionID *int
-	subscriptionID string
-	approvalURL    string
-	leaseActive    bool
-	needsReview    bool
-	account        payment.WebhookAccount
-	accountID      *int64
-	attribution    checkoutAttribution
+	id              string
+	userID          int64
+	productID       int64
+	productSnapshot []byte
+	slotID          int
+	templateID      int
+	priceCents      int
+	cycle           string
+	returnURL       string
+	cancelURL       string
+	returnPath      string
+	planID          string
+	offerVersionID  *int
+	subscriptionID  string
+	approvalURL     string
+	leaseActive     bool
+	needsReview     bool
+	account         payment.WebhookAccount
+	accountID       *int64
+	attribution     checkoutAttribution
 }
 
 func (r *dbRepository) reserveSubscriptionIntent(ctx context.Context, proposed subscriptionIntent) (*subscriptionIntent, error) {
@@ -92,12 +94,35 @@ func (r *dbRepository) reservePayPalSubscriptionTx(ctx context.Context, tx pgx.T
 	if current.id == "" {
 		current = proposed
 		if current.accountID != nil {
-			err := tx.QueryRow(ctx, `SELECT v.slot_id, v.cycle, v.amount_minor, p.plan_id
-				FROM recharge_slots s JOIN payment_vip_offer_versions v ON v.slot_id=s.vip_offer_version_id
-				JOIN payment_paypal_vip_plans p ON p.slot_id=v.slot_id
-				WHERE s.id=$1 AND s.template_id=$2 AND s.price_cents=v.amount_minor
-				  AND s.type IN ('vip','subscription') AND p.account_id=$3 AND p.plan_id IS NOT NULL FOR SHARE OF s`,
-				current.slotID, current.templateID, current.accountID).Scan(&current.offerVersionID, &current.cycle, &current.priceCents, &current.planID)
+			ledgerEnv := proposed.account.Environment
+			if ledgerEnv == "" {
+				ledgerEnv = currentPaymentLedgerEnvironment()
+			}
+			err := tx.QueryRow(ctx, `SELECT p.id, COALESCE(p.vip_cycle, ''), p.price_cents, b.external_price_ref,
+				jsonb_build_object(
+					'product_id', p.id, 'code', p.code, 'product_type', p.product_type,
+					'name', p.name, 'description', p.description, 'price_cents', p.price_cents,
+					'currency', p.currency, 'coins', p.coins, 'bonus', p.bonus,
+					'vip_cycle', COALESCE(p.vip_cycle, ''), 'slot_id', s.id,
+					'badge', s.badge, 'display_alias', s.display_alias
+				)
+				FROM recharge_slots s
+				JOIN products p ON p.id=s.product_id
+				JOIN product_publications pub ON pub.product_id=p.id AND pub.environment=$4 AND pub.status='published'
+				JOIN product_channel_bindings b ON b.product_id=p.id AND b.account_id=$3 AND b.provider='paypal' AND b.environment=$4
+				WHERE s.id=$1 AND s.template_id=$2 AND p.product_type='vip'
+				  AND b.enabled=true AND b.validation_status='verified' AND b.external_price_ref<>''
+				FOR SHARE OF s`,
+				current.slotID, current.templateID, current.accountID, ledgerEnv).
+				Scan(&current.productID, &current.cycle, &current.priceCents, &current.planID, &current.productSnapshot)
+			if errors.Is(err, pgx.ErrNoRows) {
+				err = tx.QueryRow(ctx, `SELECT v.slot_id, v.cycle, v.amount_minor, p.plan_id
+					FROM recharge_slots s JOIN payment_vip_offer_versions v ON v.slot_id=s.vip_offer_version_id
+					JOIN payment_paypal_vip_plans p ON p.slot_id=v.slot_id
+					WHERE s.id=$1 AND ($2=0 OR s.template_id=$2) AND s.vip_offer_version_id IS NOT NULL
+					  AND p.account_id=$3 AND p.plan_id IS NOT NULL FOR SHARE OF s`,
+					current.slotID, current.templateID, current.accountID).Scan(&current.offerVersionID, &current.cycle, &current.priceCents, &current.planID)
+			}
 			if errors.Is(err, pgx.ErrNoRows) {
 				return nil, ErrCheckoutUnavailable
 			}
@@ -112,12 +137,17 @@ func (r *dbRepository) reservePayPalSubscriptionTx(ctx context.Context, tx pgx.T
 		if err != nil {
 			return nil, err
 		}
+		var snapArg *string
+		if len(current.productSnapshot) > 0 {
+			s := string(current.productSnapshot)
+			snapArg = &s
+		}
 		_, err = tx.Exec(ctx, `INSERT INTO paypal_subscription_intents
-			(user_id,intent_id,slot_id,template_id,cycle,price_cents,return_url,cancel_url,attribution,checkout_account_id,checkout_return_path,plan_id,vip_offer_version_id,checkout_environment)
- SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb || jsonb_build_object('pixel_id',fp.pixel_id,'promotion_link_id',p.id,'novel_id',p.novel_id,'utm_source',u.utm_source,'utm_campaign',u.utm_campaign)
+			(user_id,intent_id,product_id,product_snapshot,slot_id,template_id,cycle,price_cents,return_url,cancel_url,attribution,checkout_account_id,checkout_return_path,plan_id,vip_offer_version_id,checkout_environment)
+ SELECT $1,$2,NULLIF($15,0),COALESCE($16::jsonb,'{}'::jsonb),$3,$4,$5,$6,$7,$8,$9::jsonb || jsonb_build_object('pixel_id',fp.pixel_id,'promotion_link_id',p.id,'novel_id',p.novel_id,'utm_source',u.utm_source,'utm_campaign',u.utm_campaign)
 	 ,$10,$11,NULLIF($12,''),$13,$14
  FROM users u LEFT JOIN LATERAL reader_promotion_for_user(u.id) p ON true LEFT JOIN fb_pixels fp ON fp.id=p.fb_pixel_id WHERE u.id=$1`, current.userID, current.id, current.slotID, current.templateID,
-			current.cycle, current.priceCents, current.returnURL, current.cancelURL, metadata, current.accountID, current.returnPath, current.planID, current.offerVersionID, conversion.Environment())
+			current.cycle, current.priceCents, current.returnURL, current.cancelURL, metadata, current.accountID, current.returnPath, current.planID, current.offerVersionID, conversion.Environment(), current.productID, snapArg)
 		if err != nil {
 			return nil, err
 		}
@@ -207,7 +237,9 @@ func (r *dbRepository) getVIPPurchase(ctx context.Context, userID int64, intentI
 
 func (r *dbRepository) recentPayPalVIPPurchases(ctx context.Context, userID int64) ([]PurchaseIntent, error) {
 	rows, err := db.Pool(ctx).Query(ctx, `SELECT `+paypalVIPPurchaseFields+` FROM (`+paypalVIPPurchaseRows+`) purchases
-		WHERE intent_id<>'' ORDER BY created_at DESC LIMIT 20`, userID, conversion.Environment())
+		WHERE intent_id<>''
+		  AND NOT EXISTS (SELECT 1 FROM payment_vip_checkout_intents vc WHERE vc.paypal_intent_id::text=purchases.intent_id)
+		ORDER BY created_at DESC LIMIT 20`, userID, conversion.Environment())
 	if err != nil {
 		return nil, err
 	}
@@ -273,8 +305,8 @@ func (r *dbRepository) finishSubscriptionIntent(ctx context.Context, intent *sub
 	sub := model.UserSubscription{UserID: intent.userID, SubscriptionID: result.SubscriptionID, PlanID: intent.planID,
 		SlotID: intent.slotID, TemplateID: intent.templateID, Status: "PENDING", Cycle: intent.cycle,
 		PriceCents: intent.priceCents, Currency: "USD", PaymentMethod: "paypal", CurrentPeriodStart: &now}
-	tag, err = tx.Exec(ctx, `INSERT INTO user_subscriptions(user_id,subscription_id,plan_id,slot_id,template_id,status,cycle,price_cents,currency,payment_method,current_period_start,attribution,capi_subscribe_state,checkout_account_id,checkout_intent_id,checkout_return_path,vip_offer_version_id)
-	 SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,attribution,'eligible',checkout_account_id,intent_id,checkout_return_path,vip_offer_version_id FROM paypal_subscription_intents WHERE intent_id=$12
+	tag, err = tx.Exec(ctx, `INSERT INTO user_subscriptions(user_id,subscription_id,plan_id,slot_id,template_id,status,cycle,price_cents,currency,payment_method,current_period_start,attribution,capi_subscribe_state,checkout_account_id,checkout_intent_id,checkout_return_path,vip_offer_version_id,product_id,product_snapshot)
+	 SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,attribution,'eligible',checkout_account_id,intent_id,checkout_return_path,vip_offer_version_id,product_id,product_snapshot FROM paypal_subscription_intents WHERE intent_id=$12
 	 ON CONFLICT(subscription_id) DO UPDATE SET updated_at=user_subscriptions.updated_at
 		WHERE user_subscriptions.user_id=EXCLUDED.user_id AND user_subscriptions.plan_id=EXCLUDED.plan_id`,
 		sub.UserID, sub.SubscriptionID, sub.PlanID, sub.SlotID, sub.TemplateID, sub.Status, sub.Cycle, sub.PriceCents, sub.Currency, sub.PaymentMethod, sub.CurrentPeriodStart, intent.id)
@@ -283,6 +315,10 @@ func (r *dbRepository) finishSubscriptionIntent(ctx context.Context, intent *sub
 	}
 	if tag.RowsAffected() != 1 {
 		return ErrSubscriptionConflict
+	}
+	if _, err := tx.Exec(ctx, `UPDATE payment_vip_checkout_intents SET subscription_id=$2,updated_at=now() WHERE paypal_intent_id=$1::uuid`,
+		intent.id, result.SubscriptionID); err != nil {
+		return err
 	}
 	if firstApproval {
 		_, err = tx.Exec(ctx, `

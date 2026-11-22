@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"reader-backend/internal/novel"
 	"reader-backend/internal/payment"
 	"reader-backend/internal/testdb"
 	"reader-backend/internal/wallet"
@@ -34,14 +35,15 @@ func TestStripeSandboxCheckoutSettlementAndRefund(t *testing.T) {
 	}
 	exec(`INSERT INTO users(id) VALUES(523),(524);
 		INSERT INTO novels(id,title,author,publish_status) VALUES (523,'Stripe book','Author','published');
-		INSERT INTO recharge_templates(id,name,is_default) VALUES(523,'Stripe',true);
-		INSERT INTO recharge_slots(id,template_id,slot_index,type,price,price_cents,coins,bonus)
-		VALUES(523,523,1,'whole_book','9.99',999,0,5);
 		SELECT assert_paypal_identity('stripe-test-paypal','sandbox');
 		INSERT INTO payment_channel_accounts(provider,account_key,environment,credentials_ref,webhook_ref)
-		VALUES('stripe','acct_Sandbox','sandbox','test','test');
-		INSERT INTO payment_stripe_one_time_offers(account_id,slot_id,product_ref,price_ref,amount_minor,allowed_countries,enabled)
-		SELECT id,523,'prod_Book','price_Book',999,ARRAY['US'],true FROM payment_channel_accounts WHERE account_key='acct_Sandbox';`)
+		VALUES('stripe','acct_Sandbox','sandbox','test','test')`)
+	seedTestProductAndSlot(t, pool, testCatalogSpec{
+		SlotID: 523, TemplateID: 523, TemplateName: "Stripe", IsDefault: true, SlotIndex: 1,
+		Code: "TEST_STRIPE_523", ProductType: "whole_book", PriceCents: 999,
+		Environment: "sandbox", PayPalAccountKey: "stripe-test-paypal",
+		StripeAccountKey: "acct_Sandbox", StripeProductRef: "prod_Book", StripePriceRef: "price_Book",
+	})
 	repo := NewDBRepository(wallet.NewDBRepository())
 	account := payment.WebhookAccount{AccountKey: "acct_Sandbox", Environment: "sandbox"}
 	url := "https://reader.example.invalid/recharge"
@@ -95,7 +97,7 @@ func TestStripeSandboxCheckoutSettlementAndRefund(t *testing.T) {
 	if err != nil || len(due) != 1 || !due[0].MayCreate {
 		t.Fatalf("initial Stripe lease: %+v %v", due, err)
 	}
-	exec(`UPDATE payment_stripe_one_time_offers SET price_ref='price_Changed',enabled=false`)
+	exec(`UPDATE product_channel_bindings SET external_price_ref='price_Changed',enabled=false WHERE provider='stripe'`)
 	resumed, err := repo.reserveStripePurchase(ctx, 523, intent.ID, url+"?new=1", url, account)
 	if err != nil || resumed.ID != pinned.ID || resumed.Offer.PriceID != "price_Book" || resumed.ReturnURL != url {
 		t.Fatalf("Stripe snapshot was changed: %+v %v", resumed, err)
@@ -144,11 +146,14 @@ func TestStripeSandboxCheckoutSettlementAndRefund(t *testing.T) {
 	if status, err = repo.purchaseByReference(ctx, 523, intent.ID, late.OrderID); err != nil || status.Status != "completed" {
 		t.Fatalf("PayPal refund changed Stripe-funded access: %+v %v", status, err)
 	}
-	var debit, funding, outbox int
-	if err := pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM transactions WHERE user_id=523 AND biz_type='recharge'),
+	var funding, outbox int
+	if err := pool.QueryRow(ctx, `SELECT
 		(SELECT count(*) FROM payment_fulfillment_funding WHERE order_id=$1),
-		(SELECT count(*) FROM reader_conversion_outbox WHERE order_id=$1 AND event_name='Purchase')`, pinned.OrderID).Scan(&debit, &funding, &outbox); err != nil || debit != 1 || funding != 1 || outbox != 1 {
-		t.Fatalf("replayed fulfillment ledger=%d funding=%d outbox=%d err=%v", debit, funding, outbox, err)
+		(SELECT count(*) FROM reader_conversion_outbox WHERE order_id=$1 AND event_name='Purchase')`, pinned.OrderID).Scan(&funding, &outbox); err != nil || funding != 1 || outbox != 1 {
+		t.Fatalf("replayed fulfillment funding=%d outbox=%d err=%v", funding, outbox, err)
+	}
+	if owned, err := novel.NewDBRepository().HasWholeBook(ctx, 523, 523); err != nil || !owned {
+		t.Fatalf("Stripe whole book access=%v err=%v", owned, err)
 	}
 	for range 2 {
 		tx, err := pool.Begin(ctx)
@@ -167,7 +172,7 @@ func TestStripeSandboxCheckoutSettlementAndRefund(t *testing.T) {
 	if err != nil || status.Status != "refunded" {
 		t.Fatalf("refunded Stripe return: %+v %v", status, err)
 	}
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM transactions WHERE user_id=523 AND biz_type='refund'`).Scan(&debit); err != nil || debit != 1 {
-		t.Fatalf("replayed refund changed wallet twice: %d %v", debit, err)
+	if owned, err := novel.NewDBRepository().HasWholeBook(ctx, 523, 523); err != nil || owned {
+		t.Fatalf("refunded Stripe whole book still accessible: %v %v", owned, err)
 	}
 }

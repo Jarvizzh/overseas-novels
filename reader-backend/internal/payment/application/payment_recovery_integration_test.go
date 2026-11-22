@@ -38,12 +38,20 @@ func TestPayPalRejectsEnvironmentMismatchAndResumesOldAccount(t *testing.T) {
 	pool := testdb.Open(t)
 	ctx := t.Context()
 	_, err := pool.Exec(ctx, `INSERT INTO users(id) VALUES(716);
-		INSERT INTO recharge_templates(id,name,is_default) VALUES(716,'Payments',true);
-		INSERT INTO recharge_slots(id,template_id,slot_index,type,price,price_cents,coins,bonus) VALUES(716,716,1,'single','9.99',999,50,0);
 		SELECT assert_paypal_identity('original','sandbox');
-		INSERT INTO payment_channel_accounts(provider,account_key,environment,credentials_ref,webhook_ref,new_orders_enabled)
-		VALUES('paypal','next','sandbox','test','test',true),('paypal','live-merchant','live','test','test',true)`)
+		UPDATE payment_channel_accounts SET status='published',is_primary=true,new_orders_enabled=true,new_subscriptions_enabled=true WHERE account_key='original';
+		INSERT INTO payment_channel_accounts(provider,account_key,environment,credentials_ref,webhook_ref,status,new_orders_enabled)
+		VALUES('paypal','next','sandbox','test','test','published',true),('paypal','live-merchant','live','test','test','published',true)`)
 	if err != nil {
+		t.Fatal(err)
+	}
+	recProdID := seedTestProductAndSlot(t, pool, testCatalogSpec{
+		SlotID: 716, TemplateID: 716, TemplateName: "Payments", IsDefault: true, SlotIndex: 1,
+		Code: "TEST_RECOVERY_716", ProductType: "single", PriceCents: 999, Coins: 50,
+		Environment: "sandbox", PayPalAccountKey: "original",
+	})
+	if _, err := pool.Exec(ctx, `INSERT INTO product_channel_bindings(product_id,account_id,provider,environment,enabled,validation_status,validated_at)
+		SELECT $1,id,'paypal','sandbox',true,'verified',now() FROM payment_channel_accounts WHERE account_key='next'`, recProdID); err != nil {
 		t.Fatal(err)
 	}
 	makeAdapter := func(id, env string) *paymentAccountFixture {
@@ -143,14 +151,13 @@ func TestStripeVIPLookupOnlyReplacementAndRefundBeforeFulfillment(t *testing.T) 
 		}
 	}
 	exec(`INSERT INTO users(id) VALUES(817);
-		INSERT INTO recharge_templates(id,name,is_default) VALUES(817,'Stripe VIP',true);
-		INSERT INTO recharge_slots(id,template_id,slot_index,type,price,price_cents,coins,bonus,subscription_cycle)
-		VALUES(817,817,1,'vip','10',1000,0,0,'month');
-		UPDATE recharge_slots s SET vip_offer_version_id=snapshot_vip_offer(s) WHERE s.id=817;
-		INSERT INTO payment_channel_accounts(provider,account_key,environment,credentials_ref,webhook_ref,new_subscriptions_enabled)
-		VALUES('stripe','acct_Audit','sandbox','test','test',true),('stripe','acct_New','sandbox','test','test',false);
-		INSERT INTO payment_stripe_vip_offers(account_id,offer_version_id,product_ref,price_ref,sales_mode,allowed_countries,enabled)
-		SELECT id,817,'prod_VIP','price_VIP','direct',ARRAY['US'],true FROM payment_channel_accounts WHERE account_key='acct_Audit'`)
+		INSERT INTO payment_channel_accounts(provider,account_key,environment,credentials_ref,webhook_ref,status,is_primary,new_subscriptions_enabled)
+		VALUES('stripe','acct_Audit','sandbox','test','test','published',true,true),('stripe','acct_New','sandbox','test','test','draft',false,false)`)
+	seedTestProductAndSlot(t, pool, testCatalogSpec{
+		SlotID: 817, TemplateID: 817, TemplateName: "Stripe VIP", IsDefault: true, SlotIndex: 1,
+		Code: "TEST_STRIPE_VIP_817", ProductType: "vip", VipCycle: "month", PriceCents: 1000,
+		Environment: "sandbox", StripeAccountKey: "acct_Audit", StripeProductRef: "prod_VIP", StripePriceRef: "price_VIP",
+	})
 	account := payment.WebhookAccount{AccountKey: "acct_Audit", Environment: "sandbox"}
 	intent, err := reserveStripeVIP(ctx, stripeVIPRequest{userID: 817, slotID: 817, account: account,
 		returnURL: "https://reader.example/recharge", cancelURL: "https://reader.example/recharge"}, true)

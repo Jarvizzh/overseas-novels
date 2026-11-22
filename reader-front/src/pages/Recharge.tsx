@@ -27,13 +27,27 @@ function initialPurchaseLocator() {
   const query = new URLSearchParams(window.location.search);
   const stripeVIP = query.get('stripe_vip');
   if (stripeVIP) return { intent: stripeVIP, token: '', vip: true, stripeVIP: true };
+  const intentParam = query.get('purchase') || '';
   const vipIntent = query.get('vip_purchase') || '';
   const token = query.get('subscription_id') || query.get('token') || '';
   if (vipIntent || query.has('subscription_id') || token.startsWith('I-')) {
-    return { intent: vipIntent, token, vip: true, stripeVIP: false };
+    return { intent: vipIntent || intentParam, token, vip: true, stripeVIP: false };
   }
-  const intent = query.get('purchase') || '';
-  return { intent, token, vip: false, stripeVIP: false };
+  return { intent: intentParam, token, vip: false, stripeVIP: false };
+}
+
+function vipCycleLabel(cycle?: string): string {
+  switch ((cycle || '').toLowerCase()) {
+    case 'day':
+      return 'VIP Daily Pass';
+    case 'week':
+      return 'VIP Weekly Pass';
+    case 'year':
+      return 'VIP Annual Pass';
+    case 'month':
+    default:
+      return 'VIP Monthly Pass';
+  }
 }
 
 function readingReturnPath(value: unknown): string {
@@ -58,8 +72,53 @@ const purchaseStatusLabels: Record<PurchaseIntent['status'], string> = {
   closed: 'This subscription checkout has ended.',
 };
 
-const purchaseRequestStorageKey = (userId: number, slot: number, novel: number) =>
-  `pending-purchase:${userId}:${slot}:${novel}`;
+const purchaseRequestStorageKey = (userId: number, slot: number, productId: number, novel: number) =>
+  `pending-purchase:${userId}:${slot}:${productId}:${novel}`;
+
+type RechargeSlotItem = {
+  id: number;
+  template_id: number;
+  slot_index: number;
+  product_id?: number;
+  product_code?: string;
+  product_type?: 'single' | 'whole_book' | 'vip';
+  type: 'single' | 'subscription' | 'vip' | 'whole_book';
+  coins: number;
+  bonus: number;
+  vip_duration: string;
+  subscription_cycle?: string;
+  vip_name: string;
+  vip_desc: string;
+  badge?: string;
+  is_highlighted?: boolean;
+  display_alias?: string;
+  novel_scope_type?: string;
+  paypal_ready?: boolean;
+  stripe_ready?: boolean;
+  price: string;
+  price_cents: number;
+};
+
+type PaymentMethodsState = {
+  paypal_single: boolean;
+  paypal_vip: boolean;
+  stripe_single: boolean;
+  stripe_vip: boolean;
+  environment?: string;
+  stripe_slots: number[];
+  stripe_vip_slots: number[];
+  stripe_sandbox: boolean;
+};
+
+const emptyPaymentMethods: PaymentMethodsState = {
+  paypal_single: false,
+  paypal_vip: false,
+  stripe_single: false,
+  stripe_vip: false,
+  stripe_slots: [],
+  stripe_vip_slots: [],
+  stripe_sandbox: false,
+};
 
 export const Recharge: React.FC<RechargeProps> = ({
   authReady = true,
@@ -74,6 +133,7 @@ export const Recharge: React.FC<RechargeProps> = ({
   const [selectedPack, setSelectedPack] = useState<number | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
   const [paymentStep, setPaymentStep] = useState(0);
+  const [activeCheckoutProvider, setActiveCheckoutProvider] = useState<PaymentProvider>('paypal');
   const [showSuccess, setShowSuccess] = useState(false);
   const [successAmount, setSuccessAmount] = useState(0);
   const [isWholeBookSuccess, setIsWholeBookSuccess] = useState(false);
@@ -99,22 +159,9 @@ export const Recharge: React.FC<RechargeProps> = ({
   const [userSubscriptions, setUserSubscriptions] = useState<SubscriptionInfo[]>([]);
   const [cancellingSubscriptions, setCancellingSubscriptions] = useState<Set<string>>(new Set());
 
-  const [slots, setSlots] = useState<Array<{
-    id: number;
-    template_id: number;
-    slot_index: number;
-    type: 'single' | 'subscription' | 'vip' | 'whole_book';
-    coins: number;
-    bonus: number;
-    vip_duration: string;
-    subscription_cycle?: string;
-    vip_name: string;
-    vip_desc: string;
-    price: string;
-    price_cents: number;
-  }>>([]);
+  const [slots, setSlots] = useState<RechargeSlotItem[]>([]);
   const [loadingTemplates, setLoadingTemplates] = useState(true);
-  const [paymentMethods, setPaymentMethods] = useState({ paypal_single: false, paypal_vip: false, stripe_slots: [] as number[], stripe_vip_slots: [] as number[], stripe_sandbox: true });
+  const [paymentMethods, setPaymentMethods] = useState<PaymentMethodsState>(emptyPaymentMethods);
   const [offersNovelId, setOffersNovelId] = useState<number | undefined | null>(null);
   const offersRequestRef = useRef<AbortController | null>(null);
 
@@ -141,14 +188,23 @@ export const Recharge: React.FC<RechargeProps> = ({
       const [templateData, subData, methods] = await Promise.all([
         api.getRechargeTemplates(novelId, controller.signal),
         api.getSubscriptionStatus(controller.signal).catch(() => null),
-        api.getPaymentMethods(controller.signal).catch(() => ({ paypal_single: false, paypal_vip: false, stripe_slots: [], stripe_vip_slots: [], stripe_sandbox: true })),
+        api.getPaymentMethods(controller.signal).catch(() => emptyPaymentMethods),
       ]);
 
       if (controller.signal.aborted) return;
       const slotList = templateData.slots || [];
       setOffersNovelId(novelId);
       setSlots(slotList);
-      setPaymentMethods({ ...methods, stripe_slots: methods.stripe_slots ?? [], stripe_vip_slots: methods.stripe_vip_slots ?? [], stripe_sandbox: methods.stripe_sandbox ?? true });
+      setPaymentMethods({
+        paypal_single: Boolean(methods.paypal_single),
+        paypal_vip: Boolean(methods.paypal_vip),
+        stripe_single: Boolean(methods.stripe_single),
+        stripe_vip: Boolean(methods.stripe_vip),
+        environment: methods.environment,
+        stripe_slots: methods.stripe_slots ?? [],
+        stripe_vip_slots: methods.stripe_vip_slots ?? [],
+        stripe_sandbox: methods.stripe_sandbox ?? false,
+      });
 
       setUserSubscriptions(subData?.subscriptions ?? (subData?.subscription ? [subData.subscription] : []));
       if (subData?.is_vip) {
@@ -161,8 +217,11 @@ export const Recharge: React.FC<RechargeProps> = ({
 
       if (slotList.length === 0) setSelectedPack(null);
       if (slotList.length > 0) {
+        const highlightedSlot = slotList.find((s) => s.is_highlighted);
         const subSlot = slotList.find((s) => s.type === 'subscription' || s.type === 'vip');
-        setSelectedPack((prev) => slotList.some((slot) => slot.id === prev) ? prev : (subSlot || slotList[0]).id);
+        setSelectedPack((prev) =>
+          slotList.some((slot) => slot.id === prev) ? prev : (highlightedSlot || subSlot || slotList[0]).id,
+        );
       }
     } catch (err) {
       if (controller.signal.aborted) return;
@@ -226,7 +285,7 @@ export const Recharge: React.FC<RechargeProps> = ({
         hasReturnedFromPaymentRef.current = true;
         pendingReturnPathRef.current = intent.return_path || '';
         if (intent.status === 'completed' || intent.status === 'refunded') {
-          const storageKey = purchaseRequestStorageKey(userId, intent.slot_id, intent.novel_id || 0);
+          const storageKey = purchaseRequestStorageKey(userId, intent.slot_id, intent.product_id || 0, intent.novel_id || 0);
           try {
             const saved = JSON.parse(sessionStorage.getItem(storageKey) || 'null');
             if (saved?.intentId === intent.intent_id) sessionStorage.removeItem(storageKey);
@@ -274,40 +333,46 @@ export const Recharge: React.FC<RechargeProps> = ({
   }, [authReady, userId, purchaseLocator, purchaseRefresh, fetchStatusAndTemplates]);
 
   const subscriptionPacks = slots
-    .filter((s) => s.type === 'subscription' || s.type === 'vip')
-    .map((s) => ({
-      id: s.id,
-      name:
-        s.vip_name ||
-        (s.subscription_cycle === 'day'
-          ? 'VIP Daily Pass'
-          : s.subscription_cycle === 'week'
-            ? 'VIP Weekly Pass'
-            : 'VIP Monthly Pass'),
-      price: s.price,
-      priceCents: s.price_cents,
-      desc: s.vip_desc || 'Unlimited reading across all titles. Auto-renews, cancel anytime.',
-      cycle: s.subscription_cycle || s.vip_duration || 'month',
-      type: s.type,
-    }));
+    .filter((s) => s.type === 'subscription' || s.type === 'vip' || s.product_type === 'vip')
+    .map((s) => {
+      const cycle = s.subscription_cycle || s.vip_duration || 'month';
+      return {
+        id: s.id,
+        productId: s.product_id,
+        name: s.display_alias || s.vip_name || vipCycleLabel(cycle),
+        badge: s.badge || (s.is_highlighted ? 'Popular' : ''),
+        isHighlighted: Boolean(s.is_highlighted),
+        price: s.price,
+        priceCents: s.price_cents,
+        desc: s.vip_desc || 'Unlimited reading across all titles. Auto-renews, cancel anytime.',
+        cycle,
+        type: s.type,
+      };
+    });
 
   const coinPacks = slots
     .filter((s) => s.type === 'single' || (s.type === 'whole_book' && novelId))
-    .map((s) => ({
-      id: s.id,
-      coins: s.coins,
-      bonus: s.bonus,
-      price: s.price,
-      priceCents: s.price_cents,
-      total: s.coins + s.bonus,
-      name: s.vip_name,
-      type: s.type,
-    }));
+    .map((s) => {
+      const bonus = s.type === 'single' ? s.bonus : 0;
+      return {
+        id: s.id,
+        productId: s.product_id,
+        coins: s.coins,
+        bonus,
+        price: s.price,
+        priceCents: s.price_cents,
+        total: s.coins + bonus,
+        name: s.display_alias || s.vip_name,
+        badge: s.badge || '',
+        isHighlighted: Boolean(s.is_highlighted),
+        type: s.type,
+      };
+    });
 
-  const startSinglePurchase = async (slotId: number, book: number, returnPath: string, provider: PaymentProvider) => {
+  const startUnifiedPurchase = async (tSlot: RechargeSlotItem, book: number, returnPath: string, provider: PaymentProvider) => {
     if (!userId) return;
     const signal = purchaseScope.current?.signal;
-    const storageKey = purchaseRequestStorageKey(userId, slotId, book);
+    const storageKey = purchaseRequestStorageKey(userId, tSlot.id, tSlot.product_id || 0, book);
     let draft = requestDraft.current?.storageKey === storageKey ? requestDraft.current : null;
     try {
       const saved = JSON.parse(sessionStorage.getItem(storageKey) || 'null');
@@ -327,16 +392,39 @@ export const Recharge: React.FC<RechargeProps> = ({
       }
     };
     saveDraft();
-    const intent = await api.preparePurchase(slotId, book, draft.requestKey, draft.returnPath, signal);
+    let intent = await api.preparePurchase(tSlot.id, book, draft.requestKey, draft.returnPath, signal, tSlot.product_id);
     if (signal?.aborted) return;
+
+    const repeatablePurchase = tSlot.type !== 'whole_book';
+    if (repeatablePurchase && ['completed', 'refunded', 'closed'].includes(intent.status)) {
+      draft = { storageKey, requestKey: crypto.randomUUID(), returnPath };
+      requestDraft.current = draft;
+      saveDraft();
+      intent = await api.preparePurchase(tSlot.id, book, draft.requestKey, draft.returnPath, signal, tSlot.product_id);
+      if (signal?.aborted) return;
+    }
+
     draft.intentId = intent.intent_id;
     saveDraft();
     showPurchase(intent.intent_id);
-    if (['ready', 'retryable', 'awaiting_approval'].includes(intent.status)) {
-      const checkout = await startCheckout(intent.provider ?? provider, intent.intent_id, signal);
+    if (['ready', 'retryable', 'awaiting_approval', 'confirming'].includes(intent.status)) {
+      if (tSlot.type === 'subscription' || tSlot.type === 'vip') {
+        try {
+          sessionStorage.setItem('pending_paypal_recharge', JSON.stringify({ returnContentPath: returnPath }));
+        } catch {
+          // Server-persisted return_path remains available on redirect.
+        }
+      }
+      const checkout = await startCheckout(provider, intent.intent_id, signal);
       if (signal?.aborted) return;
       setPurchaseStatus(checkout);
-      if (checkout.approve_url) window.location.assign(checkout.approve_url);
+      if (checkout.approve_url) {
+        window.location.assign(checkout.approve_url);
+      } else {
+        setPurchaseRefresh((value) => value + 1);
+      }
+    } else {
+      setPurchaseStatus(intent);
     }
   };
 
@@ -355,11 +443,12 @@ export const Recharge: React.FC<RechargeProps> = ({
 
   const continuePurchase = async (purchase: PurchaseIntent, provider: PaymentProvider) => {
     if (purchaseStarting.current) return;
-    if (purchase.order_type === 'subscription' && purchase.provider === provider && purchase.approve_url) {
+    if (purchase.order_type === 'subscription' && purchase.provider === provider && purchase.approve_url && ['awaiting_approval', 'confirming'].includes(purchase.status)) {
       window.location.assign(purchase.approve_url);
       return;
     }
     purchaseStarting.current = true;
+    setActiveCheckoutProvider(provider);
     setIsProcessing(true);
     const signal = purchaseScope.current?.signal;
     try {
@@ -383,47 +472,14 @@ export const Recharge: React.FC<RechargeProps> = ({
     if (!tSlot) return;
 
     purchaseStarting.current = true;
+    setActiveCheckoutProvider(provider);
     setIsProcessing(true);
     setPaymentStep(1);
 
     try {
-      const isSub = tSlot.type === 'subscription' || tSlot.type === 'vip';
       const returnPath = readingReturnPath(readerStorage.getItem('last_read_content_path')) || (novelId ? `/content?novel_id=${novelId}` : '');
-      if (!isSub) {
-        await startSinglePurchase(tSlot.id, tSlot.type === 'whole_book' ? novelId || 0 : 0, returnPath, provider);
-        return;
-      }
-
-      if (provider === 'stripe') {
-        const signal = purchaseScope.current?.signal;
-        const checkout = await api.startStripeVIP(tSlot.id, returnPath, signal);
-        if (signal?.aborted) return;
-        showPurchase(checkout.intent_id, 'stripe');
-        setPurchaseStatus(checkout);
-        if (checkout.approve_url) window.location.assign(checkout.approve_url);
-        return;
-      }
-
-      try {
-        sessionStorage.setItem('pending_paypal_recharge', JSON.stringify({ returnContentPath: returnPath }));
-      } catch {
-        // The server persists the return path with the subscription intent.
-      }
-
-      const currentUrl = new URL(window.location.href);
-      ['token', 'subscription_id', 'ba_token', 'PayerID', 'payment', 'purchase'].forEach((k) => currentUrl.searchParams.delete(k));
-      const returnURL = new URL(currentUrl);
-      returnURL.searchParams.set('payment', 'success');
-      currentUrl.searchParams.set('payment', 'cancel');
-      const returnUrl = returnURL.href;
-      const cancelUrl = currentUrl.href;
-
-      const resp = await api.createSubscription(tSlot.id, 'paypal', returnUrl, cancelUrl, returnPath);
-      if (resp?.approve_url) {
-        window.location.href = resp.approve_url;
-      } else {
-        throw new Error('No PayPal subscription URL received');
-      }
+      const book = tSlot.type === 'whole_book' ? novelId || 0 : 0;
+      await startUnifiedPurchase(tSlot, book, returnPath, provider);
     } catch (err) {
       setIsProcessing(false);
       setPaymentStep(0);
@@ -440,25 +496,39 @@ export const Recharge: React.FC<RechargeProps> = ({
   };
 
   const selectedSlot = slots.find((p) => p.id === selectedPack);
-  const selectedPayPalAvailable = selectedSlot?.type === 'subscription' || selectedSlot?.type === 'vip'
-    ? paymentMethods.paypal_vip : paymentMethods.paypal_single;
   const selectedSubscription = selectedSlot?.type === 'subscription' || selectedSlot?.type === 'vip';
-  const selectedStripeAvailable = selectedSlot && (selectedSubscription
-    ? paymentMethods.stripe_vip_slots.includes(selectedSlot.id)
-    : selectedSlot.type === 'whole_book' && paymentMethods.stripe_slots.includes(selectedSlot.id));
+  const selectedPayPalAvailable = Boolean(
+    selectedSlot &&
+    (selectedSlot.paypal_ready ?? true) &&
+    (selectedSubscription ? paymentMethods.paypal_vip : paymentMethods.paypal_single),
+  );
+  const selectedStripeAvailable = Boolean(
+    selectedSlot &&
+    (selectedSlot.stripe_ready ?? true) &&
+    (selectedSubscription
+      ? paymentMethods.stripe_vip || paymentMethods.stripe_vip_slots.includes(selectedSlot.id)
+      : paymentMethods.stripe_single || paymentMethods.stripe_slots.includes(selectedSlot.id)),
+  );
   const stripeName = paymentMethods.stripe_sandbox ? 'Stripe (test)' : 'Stripe';
-  const availableProviders: PaymentProvider[] = [
-    ...(paymentMethods.paypal_single ? ['paypal' as const] : []),
-    ...(purchaseStatus && paymentMethods.stripe_slots.includes(purchaseStatus.slot_id) ? ['stripe' as const] : []),
-  ];
+  const availableProviders: PaymentProvider[] = !purchaseStatus
+    ? []
+    : purchaseStatus.available_channels && purchaseStatus.available_channels.length > 0
+      ? purchaseStatus.available_channels
+      : purchaseStatus.order_type === 'subscription'
+        ? [
+            ...(paymentMethods.paypal_vip ? ['paypal' as const] : []),
+            ...(paymentMethods.stripe_vip || paymentMethods.stripe_vip_slots.includes(purchaseStatus.slot_id) ? ['stripe' as const] : []),
+          ]
+        : [
+            ...(paymentMethods.paypal_single ? ['paypal' as const] : []),
+            ...(paymentMethods.stripe_single || paymentMethods.stripe_slots.includes(purchaseStatus.slot_id) ? ['stripe' as const] : []),
+          ];
   const resumeProviders: PaymentProvider[] = !purchaseStatus?.intent_id ? []
-    : purchaseStatus.order_type === 'subscription'
-      ? (purchaseStatus.approve_url && purchaseStatus.provider ? [purchaseStatus.provider] : [])
-      : ['ready', 'retryable', 'awaiting_approval', 'confirming'].includes(purchaseStatus.status)
-        ? [...new Set([...(purchaseStatus.approve_url && purchaseStatus.provider ? [purchaseStatus.provider] : []),
-            ...(purchaseStatus.confirmation_code === 'payment_switch_pending' ? ['paypal' as const] : []),
-            ...availableProviders.filter((provider) => purchaseStatus.status !== 'confirming' || provider !== purchaseStatus.provider)])]
-        : [];
+    : ['ready', 'retryable', 'awaiting_approval', 'confirming'].includes(purchaseStatus.status)
+      ? [...new Set([...(purchaseStatus.approve_url && purchaseStatus.provider ? [purchaseStatus.provider] : []),
+          ...(purchaseStatus.confirmation_code === 'payment_switch_pending' ? ['paypal' as const] : []),
+          ...availableProviders.filter((provider) => purchaseStatus.status !== 'confirming' || provider !== purchaseStatus.provider)])]
+      : [];
 
   const handleReturnToContent = () => {
     let returnPath = readingReturnPath(pendingReturnPathRef.current);
@@ -533,44 +603,55 @@ export const Recharge: React.FC<RechargeProps> = ({
         </div>
       </header>
 
-      <div className="scroll-container" style={{ flex: 1, minHeight: 0 }}>
+      <main className="scroll-container" style={{ flex: 1, minHeight: 0 }}>
         <div className="sn-narrow-container" style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
           {(purchaseLocator.intent || purchaseLocator.token) && (
-            <section className="card" style={{ padding: 16 }} aria-label="Purchase status">
+            <div className="card" style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: '10px' }}>
+              <h2 className="hot-tags-title" style={{ margin: 0 }}>Purchase Status</h2>
               {!purchaseStatus && !purchaseStatusError && <p>Checking your purchase…</p>}
-              <div role="status">
+              <div role="status" aria-live="polite">
                 {purchaseStatusError || (purchaseStatus && (purchaseStatus.confirmation_message || purchaseStatusLabels[purchaseStatus.status]))}
               </div>
-              {purchaseStatus && resumeProviders.map((provider) => (
-                <button key={provider} type="button" className="btn-cta-secondary" disabled={isProcessing}
-                  onClick={() => void continuePurchase(purchaseStatus, provider)}>
-                  {(purchaseStatus.provider && purchaseStatus.provider !== provider ? 'Switch to ' : 'Continue with ') +
-                    (provider === 'stripe' ? stripeName : 'PayPal')}
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+                {purchaseStatus && resumeProviders.map((provider) => (
+                  <button key={provider} type="button" className="btn-cta-secondary" style={{ minBlockSize: '44px' }} disabled={isProcessing}
+                    onClick={() => void continuePurchase(purchaseStatus, provider)}>
+                    {(purchaseStatus.provider && purchaseStatus.provider !== provider ? 'Switch to ' : 'Continue with ') +
+                      (provider === 'stripe' ? stripeName : 'PayPal')}
+                  </button>
+                ))}
+                <button type="button" className="btn-cta-secondary" style={{ minBlockSize: '44px' }} onClick={() => setPurchaseRefresh((value) => value + 1)}>
+                  Check status
                 </button>
-              ))}
-              <button type="button" className="btn-cta-secondary" onClick={() => setPurchaseRefresh((value) => value + 1)}>
-                Check status
-              </button>
-            </section>
+              </div>
+            </div>
           )}
-          <section className="card" style={{ padding: 16 }} aria-label="Purchase history">
-            <button type="button" className="btn-cta-secondary" disabled={loadingPurchases}
-              onClick={() => void loadPurchaseHistory()}>
-              {loadingPurchases ? 'Loading purchases…' : 'View purchase history'}
-            </button>
+          <div className="card" style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: '10px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
+              <h2 className="hot-tags-title" style={{ margin: 0 }}>Recent Purchases</h2>
+              <button type="button" className="btn-cta-secondary" style={{ minBlockSize: '44px' }} disabled={loadingPurchases}
+                onClick={() => void loadPurchaseHistory()}>
+                {loadingPurchases ? 'Loading purchases…' : 'View purchase history'}
+              </button>
+            </div>
             {recentPurchases?.length === 0 && <p role="status">No recent purchases.</p>}
             {recentPurchases && recentPurchases.length > 0 && (
-              <ul>
+              <ul style={{ display: 'flex', flexDirection: 'column', gap: '8px', listStyle: 'none', padding: 0, margin: 0 }}>
                 {recentPurchases.map((purchase) => (
                   <li key={purchase.intent_id}>
-                    <button type="button" className="btn-cta-secondary" onClick={() => showPurchase(purchase.intent_id, purchase.order_type === 'subscription' ? purchase.provider : undefined)}>
-                      {purchase.order_type === 'whole_book' ? 'Full book' : purchase.order_type === 'subscription' ? 'VIP' : 'Coins'} · {purchase.currency} {(purchase.amount_minor / 100).toFixed(2)} · {purchaseStatusLabels[purchase.status]}
+                    <button type="button" className="btn-cta-secondary" style={{ width: '100%', justifyContent: 'space-between', minBlockSize: '44px' }} onClick={() => showPurchase(purchase.intent_id)}>
+                      <span>
+                        {purchase.display_alias || (purchase.order_type === 'whole_book' ? 'Full book' : purchase.order_type === 'subscription' ? `VIP (${purchase.cycle || 'plan'})` : 'Coins')}
+                        {' · '}
+                        {purchase.currency} {(purchase.amount_minor / 100).toFixed(2)}
+                      </span>
+                      <span style={{ opacity: 0.8 }}>{purchaseStatusLabels[purchase.status]}</span>
                     </button>
                   </li>
                 ))}
               </ul>
             )}
-          </section>
+          </div>
           {userSubscriptions.map((agreement) => {
             const canCancel =
               ['paypal', 'stripe'].includes(agreement.payment_method) &&
@@ -782,6 +863,21 @@ export const Recharge: React.FC<RechargeProps> = ({
                           >
                             {pack.cycle}
                           </span>
+                          {pack.badge && (
+                            <span
+                              style={{
+                                fontSize: '0.625rem',
+                                backgroundColor: isSelected ? 'rgba(226, 187, 107, 0.28)' : 'var(--bg-tertiary)',
+                                color: isSelected ? '#FAF8F5' : 'var(--text-primary)',
+                                border: isSelected ? '1px solid rgba(226, 187, 107, 0.45)' : '1px solid var(--border-color)',
+                                fontWeight: 700,
+                                padding: '2px 8px',
+                                borderRadius: '999px',
+                              }}
+                            >
+                              {pack.badge}
+                            </span>
+                          )}
                         </div>
                         <p
                           style={{
@@ -854,7 +950,20 @@ export const Recharge: React.FC<RechargeProps> = ({
                               borderRadius: '999px',
                             }}
                           >
-                            Full Book
+                            {pack.badge || 'Full Book'}
+                          </span>
+                        ) : pack.badge ? (
+                          <span
+                            style={{
+                              backgroundColor: 'var(--accent-light)',
+                              color: 'var(--accent-text)',
+                              fontSize: '0.625rem',
+                              fontWeight: 600,
+                              padding: '2px 7px',
+                              borderRadius: '999px',
+                            }}
+                          >
+                            {pack.badge}
                           </span>
                         ) : pack.bonus > 0 ? (
                           <span
@@ -912,7 +1021,7 @@ export const Recharge: React.FC<RechargeProps> = ({
                               whiteSpace: 'nowrap',
                             }}
                           >
-                            {novelTitle || 'Current Novel'}
+                            {novelTitle ? `${novelTitle} · Forever access` : 'One-time unlock · Forever access'}
                           </span>
                         </div>
                       ) : (
@@ -924,7 +1033,11 @@ export const Recharge: React.FC<RechargeProps> = ({
                             </span>
                           </div>
                           <span className="tabular-nums" style={{ fontSize: '0.6875rem', color: 'var(--text-tertiary)', display: 'block', marginTop: '2px' }}>
-                            Total: {pack.total.toLocaleString()} Coins
+                            {pack.name
+                              ? pack.bonus > 0
+                                ? `${pack.name} · +${pack.bonus} bonus`
+                                : pack.name
+                              : `Total: ${pack.total.toLocaleString()} Coins`}
                           </span>
                         </div>
                       )}
@@ -967,50 +1080,66 @@ export const Recharge: React.FC<RechargeProps> = ({
             </div>
           )}
 
-          {/* PayPal Checkout Button */}
+          {/* Payment Method Checkout Actions */}
           {selectedSlot && (
-            <button
-              type="button"
-              onClick={() => void handlePurchase('paypal')}
-              disabled={isProcessing || !selectedPayPalAvailable}
-              style={{
-                width: '100%',
-                minHeight: '50px',
-                backgroundColor: '#F5C344',
-                color: '#0F265C',
-                border: 'none',
-                borderRadius: '999px',
-                fontSize: '0.9375rem',
-                fontWeight: 700,
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                gap: '8px',
-                cursor: isProcessing || !selectedPayPalAvailable ? 'not-allowed' : 'pointer',
-              }}
-            >
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true" style={{ flexShrink: 0 }}>
-                <path d="M7.076 21.337H2.47a.64.64 0 0 1-.633-.74L4.931 2.378A.853.853 0 0 1 5.774 1.7h7.24c3.483 0 5.69 1.642 5.093 5.372-.44 2.75-2.228 4.316-4.945 4.316h-2.14l-1.07 6.776-.026.173a.853.853 0 0 1-.85.8z" fill="#003087" />
-                <path d="M8.766 18.066l1.24-7.852h2.64c2.717 0 4.505-1.566 4.945-4.316.597-3.73-1.61-5.372-5.093-5.372H5.258a.853.853 0 0 0-.843.678L1.321 19.723a.64.64 0 0 0 .633.74h4.606l1.07-6.776.026-.173a.853.853 0 0 1 .85-.8z" fill="#0079C1" />
-                <path d="M9.13 14.77l1.07-6.776h2.14c2.717 0 4.505-1.566 4.945-4.316.14-.876.105-1.614-.078-2.217C16.89 2.532 15.65 2 13.904 2H8.354a.853.853 0 0 0-.843.678L4.417 21.2a.64.64 0 0 0 .633.74h4.606l1.07-6.776.026-.173a.853.853 0 0 1 .85-.8z" fill="#00457C" />
-              </svg>
-              <span>
-                {!selectedPayPalAvailable
-                  ? 'PayPal is unavailable for new purchases'
-                  : isProcessing
-                  ? 'Connecting to PayPal...'
-                  : selectedSlot.type === 'subscription' || selectedSlot.type === 'vip'
-                    ? `Subscribe with PayPal · ${selectedSlot.price}`
-                    : `Pay with PayPal · ${selectedSlot.price}`}
-              </span>
-            </button>
-          )}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+              <button
+                type="button"
+                onClick={() => void handlePurchase('paypal')}
+                disabled={isProcessing || !selectedPayPalAvailable}
+                style={{
+                  width: '100%',
+                  minBlockSize: '50px',
+                  backgroundColor: '#F5C344',
+                  color: '#0F265C',
+                  border: 'none',
+                  borderRadius: '999px',
+                  fontSize: '0.9375rem',
+                  fontWeight: 700,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: '8px',
+                  opacity: isProcessing || !selectedPayPalAvailable ? 0.55 : 1,
+                  cursor: isProcessing || !selectedPayPalAvailable ? 'not-allowed' : 'pointer',
+                }}
+              >
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true" style={{ flexShrink: 0 }}>
+                  <path d="M7.076 21.337H2.47a.64.64 0 0 1-.633-.74L4.931 2.378A.853.853 0 0 1 5.774 1.7h7.24c3.483 0 5.69 1.642 5.093 5.372-.44 2.75-2.228 4.316-4.945 4.316h-2.14l-1.07 6.776-.026.173a.853.853 0 0 1-.85.8z" fill="#003087" />
+                  <path d="M8.766 18.066l1.24-7.852h2.64c2.717 0 4.505-1.566 4.945-4.316.597-3.73-1.61-5.372-5.093-5.372H5.258a.853.853 0 0 0-.843.678L1.321 19.723a.64.64 0 0 0 .633.74h4.606l1.07-6.776.026-.173a.853.853 0 0 1 .85-.8z" fill="#0079C1" />
+                  <path d="M9.13 14.77l1.07-6.776h2.14c2.717 0 4.505-1.566 4.945-4.316.14-.876.105-1.614-.078-2.217C16.89 2.532 15.65 2 13.904 2H8.354a.853.853 0 0 0-.843.678L4.417 21.2a.64.64 0 0 0 .633.74h4.606l1.07-6.776.026-.173a.853.853 0 0 1 .85-.8z" fill="#00457C" />
+                </svg>
+                <span>
+                  {!selectedPayPalAvailable
+                    ? 'PayPal is unavailable for this item'
+                    : isProcessing && activeCheckoutProvider === 'paypal'
+                      ? 'Connecting to PayPal...'
+                      : selectedSubscription
+                        ? `Subscribe with PayPal · ${selectedSlot.price}`
+                        : `Pay with PayPal · ${selectedSlot.price}`}
+                </span>
+              </button>
 
-          {selectedStripeAvailable && (
-            <button type="button" className="btn-cta-secondary" disabled={isProcessing}
-              onClick={() => void handlePurchase('stripe')}>
-              {isProcessing ? 'Opening checkout…' : `${selectedSubscription ? 'Subscribe with' : 'Pay with'} ${stripeName} · ${selectedSlot.price}`}
-            </button>
+              {selectedStripeAvailable ? (
+                <button
+                  type="button"
+                  className="btn-cta-secondary"
+                  style={{ width: '100%', minBlockSize: '50px', borderRadius: '999px', fontSize: '0.9375rem' }}
+                  disabled={isProcessing}
+                  onClick={() => void handlePurchase('stripe')}
+                >
+                  {isProcessing && activeCheckoutProvider === 'stripe'
+                    ? `Connecting to ${stripeName}...`
+                    : `${selectedSubscription ? 'Subscribe with' : 'Pay with'} ${stripeName} · ${selectedSlot.price}`}
+                </button>
+              ) : (
+                !selectedPayPalAvailable && (
+                  <p role="status" style={{ textAlign: 'center', fontSize: '0.8125rem', color: 'var(--text-secondary)', margin: 0 }}>
+                    No payment channel is currently active for the selected item.
+                  </p>
+                )
+              )}
+            </div>
           )}
 
           {/* Notes */}
@@ -1069,13 +1198,12 @@ export const Recharge: React.FC<RechargeProps> = ({
             </button>
           </div>
         </div>
-      </div>
+      </main>
 
       {/* Payment Processing Loading Overlay */}
       {isProcessing && (
         <div
-          role="status"
-          aria-live="polite"
+          aria-busy="true"
           style={{
             position: 'fixed',
             inset: 0,
@@ -1094,7 +1222,13 @@ export const Recharge: React.FC<RechargeProps> = ({
         >
           <div className="sn-spinner" />
           <p style={{ fontSize: '1rem', fontWeight: 600 }}>
-            {paymentStep === 1 ? 'Redirecting to PayPal Checkout...' : 'Completing PayPal transaction...'}
+            {activeCheckoutProvider === 'stripe'
+              ? paymentStep === 1
+                ? `Redirecting to ${stripeName} Checkout...`
+                : `Completing ${stripeName} transaction...`
+              : paymentStep === 1
+                ? 'Redirecting to PayPal Checkout...'
+                : 'Completing PayPal transaction...'}
           </p>
           <p style={{ fontSize: '0.8125rem', color: 'rgba(250, 248, 245, 0.72)' }}>Please keep this window open</p>
         </div>

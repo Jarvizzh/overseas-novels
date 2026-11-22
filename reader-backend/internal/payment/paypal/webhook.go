@@ -244,15 +244,21 @@ func (p *Client) verifyWebhook(ctx context.Context, payload []byte, headers map[
 	if err != nil {
 		return account, err
 	}
-	webhookID := cfg.WebhookID
-	if webhookID == "" {
+	webhookIDs := make([]string, 0, 2)
+	if cfg.WebhookID != "" {
+		webhookIDs = append(webhookIDs, cfg.WebhookID)
+	}
+	if cfg.PreviousWebhookID != "" && cfg.PreviousWebhookID != cfg.WebhookID {
+		webhookIDs = append(webhookIDs, cfg.PreviousWebhookID)
+	}
+	if len(webhookIDs) == 0 {
 		return account, errors.New("PayPal webhook ID unavailable")
 	}
 	h := make(http.Header, len(headers))
 	for key, value := range headers {
 		h.Set(key, value)
 	}
-	request := map[string]any{"webhook_id": webhookID, "webhook_event": json.RawMessage(payload)}
+	baseReq := map[string]any{"webhook_event": json.RawMessage(payload)}
 	for field, header := range map[string]string{
 		"auth_algo": "Paypal-Auth-Algo", "cert_url": "Paypal-Cert-Url",
 		"transmission_id": "Paypal-Transmission-Id", "transmission_sig": "Paypal-Transmission-Sig",
@@ -262,17 +268,26 @@ func (p *Client) verifyWebhook(ctx context.Context, payload []byte, headers map[
 		if value == "" {
 			return account, errors.New("incomplete PayPal signature")
 		}
-		request[field] = value
+		baseReq[field] = value
 	}
-	var result struct {
-		Status string `json:"verification_status"`
+	for _, webhookID := range webhookIDs {
+		req := make(map[string]any, len(baseReq)+1)
+		for k, v := range baseReq {
+			req[k] = v
+		}
+		req["webhook_id"] = webhookID
+		var result struct {
+			Status string `json:"verification_status"`
+		}
+		if err := p.send(ctx, cfg, http.MethodPost, "/v1/notifications/verify-webhook-signature", "", req, &result); err != nil {
+			if len(webhookIDs) == 1 {
+				return account, err
+			}
+			continue
+		}
+		if result.Status == "SUCCESS" {
+			return cfg.account(), nil
+		}
 	}
-
-	if err := p.send(ctx, cfg, http.MethodPost, "/v1/notifications/verify-webhook-signature", "", request, &result); err != nil {
-		return account, err
-	}
-	if result.Status != "SUCCESS" {
-		return account, errors.New("invalid PayPal signature")
-	}
-	return cfg.account(), nil
+	return account, errors.New("invalid PayPal signature")
 }

@@ -73,13 +73,19 @@ func setEntitlementAdjustmentTx(ctx context.Context, tx pgx.Tx, orderID, userID 
 	if blocked == wasBlocked {
 		return nil
 	}
+	orderCharged, orderBonus := charged, bonus
+	var shortfallCharged, shortfallBonus int
 	kind := "debit"
 	if blocked && charged+bonus > 0 {
 		err = tx.QueryRow(ctx, `SELECT least(charged_coins,$2),least(bonus_coins,$3)
 			FROM wallets WHERE user_id=$1 FOR UPDATE`, userID, charged, bonus).Scan(&charged, &bonus)
-		if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			charged, bonus = 0, 0
+		} else if err != nil {
 			return err
 		}
+		shortfallCharged = max(0, orderCharged-charged)
+		shortfallBonus = max(0, orderBonus-bonus)
 	} else if !blocked {
 		kind = "credit"
 		charged, bonus = priorCharged, priorBonus
@@ -101,11 +107,14 @@ func setEntitlementAdjustmentTx(ctx context.Context, tx pgx.Tx, orderID, userID 
 	}
 	if !blocked {
 		charged, bonus = 0, 0
+		shortfallCharged, shortfallBonus = 0, 0
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO payment_entitlement_adjustments(order_id,blocked,charged_coins,bonus_coins,policy_evidence)
-		VALUES($1,$2,$3,$4,$5) ON CONFLICT(order_id) DO UPDATE SET blocked=EXCLUDED.blocked,
-		charged_coins=EXCLUDED.charged_coins,bonus_coins=EXCLUDED.bonus_coins,policy_evidence=EXCLUDED.policy_evidence,updated_at=now()`,
-		orderID, blocked, charged, bonus, key)
+	_, err = tx.Exec(ctx, `INSERT INTO payment_entitlement_adjustments(order_id,blocked,charged_coins,bonus_coins,charged_coin_shortfall,bonus_coin_shortfall,policy_evidence)
+		VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(order_id) DO UPDATE SET blocked=EXCLUDED.blocked,
+		charged_coins=EXCLUDED.charged_coins,bonus_coins=EXCLUDED.bonus_coins,
+		charged_coin_shortfall=EXCLUDED.charged_coin_shortfall,bonus_coin_shortfall=EXCLUDED.bonus_coin_shortfall,
+		policy_evidence=EXCLUDED.policy_evidence,updated_at=now()`,
+		orderID, blocked, charged, bonus, shortfallCharged, shortfallBonus, key)
 	return err
 }
 

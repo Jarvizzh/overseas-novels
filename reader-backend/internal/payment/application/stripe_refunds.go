@@ -58,12 +58,14 @@ func applyStripeRefundTx(ctx context.Context, tx pgx.Tx, account payment.Webhook
 	}
 
 	var accountID, receiptID, orderID, gross int64
-	err := tx.QueryRow(ctx, `SELECT a.id,t.id,t.order_id,(gross_amount*100)::bigint
+	var wasFulfilled bool
+	var orderType string
+	err := tx.QueryRow(ctx, `SELECT a.id,t.id,t.order_id,(gross_amount*100)::bigint,o.fulfilled_at IS NOT NULL,o.order_type
 		FROM third_party_payment_orders t JOIN payment_channel_accounts a ON a.id=t.account_id
 		JOIN recharge_orders o ON o.id=t.order_id
 		WHERE a.provider='stripe' AND a.account_key=$1 AND a.environment=$2 AND t.capture_id=$3
 		 AND t.object_type='charge' AND t.currency='USD' AND t.status='VERIFIED' AND o.checkout_environment=$4
-		FOR UPDATE OF o`, account.AccountKey, account.Environment, proof.ChargeID, conversion.Environment()).Scan(&accountID, &receiptID, &orderID, &gross)
+		FOR UPDATE OF o`, account.AccountKey, account.Environment, proof.ChargeID, conversion.Environment()).Scan(&accountID, &receiptID, &orderID, &gross, &wasFulfilled, &orderType)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return errRefundUnmatched
 	}
@@ -100,7 +102,16 @@ func applyStripeRefundTx(ctx context.Context, tx pgx.Tx, account payment.Webhook
 		return err
 	}
 	if covered {
-		return aftercare.FinalizeStripeRefund(ctx, tx, orderID, proof.ID)
+		if err := aftercare.FinalizeStripeRefund(ctx, tx, orderID, proof.ID); err != nil {
+			return err
+		}
+		if !wasFulfilled {
+			if orderType == "subscription" {
+				return conversion.RecordSubscriptionPaymentTx(ctx, tx, orderID, time.Now().UTC(), "stripe_pre_fulfillment_refund", conversion.Environment(), nil, false, false)
+			}
+			return conversion.RecordPaymentTx(ctx, tx, orderID, time.Now().UTC(), "stripe_pre_fulfillment_refund", false, false)
+		}
+		return nil
 	}
 	return finalizeUnfulfilledStripeVIPRefund(ctx, tx, orderID)
 }
@@ -128,7 +139,10 @@ func finalizeUnfulfilledStripeVIPRefund(ctx context.Context, tx pgx.Tx, orderID 
 	if err != nil {
 		return err
 	}
-	return aftercare.FinalizeStripeRefund(ctx, tx, orderID, ref)
+	if err := aftercare.FinalizeStripeRefund(ctx, tx, orderID, ref); err != nil {
+		return err
+	}
+	return conversion.RecordSubscriptionPaymentTx(ctx, tx, orderID, time.Now().UTC(), "stripe_pre_fulfillment_refund", conversion.Environment(), nil, false, false)
 }
 
 func stripeRefundStatus(proof *payment.StripeRefundProof, lookup error) (string, string, *time.Time) {

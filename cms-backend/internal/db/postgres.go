@@ -83,7 +83,8 @@ const (
 	stripeVIPCheckoutVersion          int64 = 2026111924
 	paymentCompletionVersion          int64 = 2026111925
 	paymentRecoveryVersion            int64 = 2026111926
-	RequiredSchemaVersion             int64 = 2026111927
+	paymentReviewFixesVersion         int64 = 2026111927
+	RequiredSchemaVersion             int64 = 2026111928
 )
 
 func autoMigrate(ctx context.Context, pool *pgxpool.Pool) error {
@@ -268,7 +269,12 @@ func autoMigrate(ctx context.Context, pool *pgxpool.Pool) error {
 			return fmt.Errorf("schema migration %d: %w", paymentRecoveryVersion, err)
 		}
 	}
-	if _, err := tx.Exec(ctx, dbassets.PaymentReviewFixesSQL); err != nil {
+	if version < paymentReviewFixesVersion {
+		if _, err := tx.Exec(ctx, dbassets.PaymentReviewFixesSQL); err != nil {
+			return fmt.Errorf("schema migration %d: %w", paymentReviewFixesVersion, err)
+		}
+	}
+	if _, err := tx.Exec(ctx, dbassets.PaymentCatalogAndChannelSQL); err != nil {
 		return fmt.Errorf("schema migration %d: %w", RequiredSchemaVersion, err)
 	}
 	return tx.Commit(ctx)

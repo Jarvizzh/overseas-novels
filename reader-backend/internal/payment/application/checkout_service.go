@@ -5,12 +5,14 @@ import (
 	"errors"
 	"log"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	"reader-backend/internal/config"
+	"reader-backend/internal/conversion"
 	"reader-backend/internal/db"
 	"reader-backend/internal/model"
 	"reader-backend/internal/payment"
@@ -18,13 +20,15 @@ import (
 	"reader-backend/internal/payment/paypal"
 )
 
-func (s *service) PreparePurchase(ctx context.Context, userID int64, slotID int, novelID int64, requestKey, returnPath string, attribution checkoutAttribution) (*PurchaseIntent, error) {
+func (s *service) PreparePurchase(ctx context.Context, userID, productID int64, slotID int, novelID int64, requestKey, returnPath string, attribution checkoutAttribution) (*PurchaseIntent, error) {
 	key, err := uuid.Parse(requestKey)
-	if err != nil || key == uuid.Nil {
+	if err != nil || key == uuid.Nil || (productID <= 0 && slotID <= 0) {
 		return nil, ErrCheckoutUnavailable
 	}
 	returnPath = checkoutReadingPath(returnPath, novelID)
-	return s.repo.preparePurchase(ctx, userID, purchaseRequest{key: key, slotID: slotID, novelID: novelID, returnPath: returnPath}, attribution)
+	return s.repo.preparePurchase(ctx, userID, purchaseRequest{
+		key: key, productID: productID, slotID: slotID, novelID: novelID, returnPath: returnPath,
+	}, attribution)
 }
 
 func checkoutReadingPath(raw string, novelID int64) string {
@@ -56,6 +60,9 @@ func (s *service) GetPurchase(ctx context.Context, userID int64, intentID, paypa
 	} else if paypalOrderID == "" {
 		return nil, ErrCheckoutUnavailable
 	}
+	if vipIntent, found, err := s.tryGetVIPPurchaseIntent(ctx, userID, intentID, paypalOrderID); found {
+		return vipIntent, err
+	}
 	return s.repo.purchaseByReference(ctx, userID, intentID, paypalOrderID)
 }
 
@@ -64,6 +71,11 @@ func (s *service) ListRecentPurchases(ctx context.Context, userID int64) ([]Purc
 	if err != nil {
 		return nil, err
 	}
+	unifiedVIP, err := s.recentUnifiedVIPPurchases(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	purchases = append(purchases, unifiedVIP...)
 	paypalVIP, err := s.repo.recentPayPalVIPPurchases(ctx, userID)
 	if err != nil {
 		return nil, err
@@ -86,14 +98,35 @@ func (s *service) ListRecentPurchases(ctx context.Context, userID int64) ([]Purc
 }
 
 func (s *service) GetPaymentMethods(ctx context.Context) (PaymentMethods, error) {
-	if s.paypalClient == nil || !s.paypalClient.WebhookConfigured(ctx) {
-		return PaymentMethods{}, nil
+	methods := PaymentMethods{Environment: conversion.Environment()}
+	if client := s.primaryPayPalClient(); client != nil && client.WebhookConfigured(ctx) {
+		if account, err := client.CheckoutAccount(ctx); err == nil && paymentEnvironmentMatches(account) {
+			m, err := s.repo.payPalAvailability(ctx, account)
+			if err != nil {
+				return PaymentMethods{}, err
+			}
+			methods.PayPalSingle = m.PayPalSingle
+			methods.PayPalVIP = m.PayPalVIP
+		}
 	}
-	account, err := s.paypalClient.CheckoutAccount(ctx)
-	if err != nil || !paymentEnvironmentMatches(account) {
-		return PaymentMethods{}, nil
+	if adapter, ok := s.stripeCheckoutAdapter(); ok && db.Pool(ctx) != nil {
+		var ordersOK, subsOK bool
+		var credRef string
+		scope := adapter.AccountScope()
+		err := db.Pool(ctx).QueryRow(ctx, `SELECT new_orders_enabled, new_subscriptions_enabled, credentials_ref
+			FROM payment_channel_accounts WHERE provider='stripe' AND account_key=$1 AND environment=$2`,
+			scope.AccountKey, scope.Environment).Scan(&ordersOK, &subsOK, &credRef)
+		if err == nil {
+			if credRef == "db:encrypted" {
+				methods.StripeSingle = ordersOK
+				methods.StripeVIP = subsOK
+			} else {
+				methods.StripeSingle = ordersOK && stripeSingleCheckoutEnabled(ctx)
+				methods.StripeVIP = subsOK && stripeVIPCheckoutEnabled(ctx)
+			}
+		}
 	}
-	return s.repo.payPalAvailability(ctx, account)
+	return methods, nil
 }
 
 func (s *service) GetVIPPurchase(ctx context.Context, userID int64, intentID, externalID string) (*PurchaseIntent, error) {
@@ -106,6 +139,9 @@ func (s *service) GetVIPPurchase(ctx context.Context, userID int64, intentID, ex
 	} else if externalID == "" {
 		return nil, ErrCheckoutUnavailable
 	}
+	if vipIntent, found, err := s.tryGetVIPPurchaseIntent(ctx, userID, intentID, externalID); found {
+		return vipIntent, err
+	}
 	return s.repo.getVIPPurchase(ctx, userID, intentID, externalID)
 }
 
@@ -113,6 +149,9 @@ func (s *service) StartPayPalCheckout(ctx context.Context, userID int64, intentI
 	intent, err := s.GetPurchase(ctx, userID, intentID, "")
 	if err != nil {
 		return nil, err
+	}
+	if intent.OrderType == "subscription" {
+		return s.startVIPPayPalCheckout(ctx, userID, intentID, origin)
 	}
 	if intent.Status != "ready" && intent.Status != "retryable" && intent.Status != "confirming" && intent.Status != "awaiting_approval" {
 		return intent, nil
@@ -126,7 +165,7 @@ func (s *service) StartPayPalCheckout(ctx context.Context, userID int64, intentI
 		if err != nil {
 			return nil, err
 		}
-		if !methods.PayPalSingle {
+		if !methods.PayPalSingle || (intent.ProductID > 0 && len(intent.AvailableChannels) > 0 && !slices.Contains(intent.AvailableChannels, payment.ProviderPayPal)) {
 			return nil, ErrCheckoutPaused
 		}
 		if err := s.closeStripeForCheckoutSwitch(ctx, userID, intent); err != nil {
@@ -185,7 +224,7 @@ func (s *service) createLegacyPayPalOrder(ctx context.Context, userID int64, slo
 	if err := s.validateCheckoutRedirects(ctx, returnURL, cancelURL); err != nil {
 		return "", "", err
 	}
-	intent, err := s.repo.preparePurchase(ctx, userID, purchaseRequest{key: uuid.New(), slotID: slotID, novelID: novelID}, attribution)
+	intent, err := s.repo.preparePurchase(ctx, userID, purchaseRequest{key: uuid.New(), slotID: slotID, novelID: novelID, nonVIPOnly: true}, attribution)
 	if err != nil {
 		return "", "", err
 	}
@@ -241,13 +280,16 @@ func (s *service) sendPayPalCheckout(ctx context.Context, attempt *paypalCheckou
 	if !paymentEnvironmentMatches(attempt.account) {
 		return "", "", ErrCheckoutPaused
 	}
-	client := s.paypalClient
+	client := s.primaryPayPalClient()
 	if s.adapters.HasRegisteredAccounts(payment.ProviderPayPal) {
 		var err error
 		client, err = s.payPalForScope(ctx, attempt.account)
 		if err != nil {
 			return "", "", err
 		}
+	}
+	if client == nil {
+		return "", "", ErrCheckoutPaused
 	}
 	id, approval, err := client.CreateOrder(ctx, attempt.account, attempt.amount, attempt.intentID, attempt.id,
 		"Star Novel "+attempt.orderType, attempt.returnURL, attempt.cancelURL)
@@ -437,15 +479,18 @@ func (s *service) GetRechargeTemplates(ctx context.Context, userID int64, novelI
 	if err != nil {
 		return nil, err
 	}
-	canBuyBook, err := s.repo.WholeBookAvailable(ctx, userID, templateID, novelID)
-	if err != nil {
-		return nil, err
-	}
 	t.Slots = make([]model.RechargeSlot, 0, len(slots))
 	for _, slot := range slots {
-		if slot.Type != "whole_book" || canBuyBook {
-			t.Slots = append(t.Slots, slot)
+		if slot.Type == "whole_book" {
+			ok, err := wholeBookProductAvailable(ctx, db.Pool(ctx), userID, t.ID, novelID, slot.NovelScopeType, slot.NovelScopeIDs)
+			if err != nil {
+				return nil, err
+			}
+			if !ok {
+				continue
+			}
 		}
+		t.Slots = append(t.Slots, slot)
 	}
 
 	return t, nil

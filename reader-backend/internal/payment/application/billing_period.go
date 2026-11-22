@@ -55,6 +55,14 @@ func regularPayPalPeriodEnd(sub *model.UserSubscription, anchor, paidAt time.Tim
 			}
 		}
 		return time.Time{}
+	case payment.CycleYear:
+		years := paidAt.Year() - anchor.Year()
+		for _, offset := range []int{years, years - 1, years + 1} {
+			if offset >= 0 && anchoredMonth(anchor, offset*12).Sub(paidAt).Abs() <= time.Minute {
+				return anchoredMonth(anchor, (offset+1)*12)
+			}
+		}
+		return time.Time{}
 	default:
 		return time.Time{}
 	}

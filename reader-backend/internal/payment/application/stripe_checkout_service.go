@@ -6,7 +6,6 @@ import (
 	"errors"
 	"log"
 	"net/url"
-	"slices"
 	"time"
 
 	"github.com/google/uuid"
@@ -21,7 +20,16 @@ import (
 
 const stripeCheckoutInterval = 15 * time.Second
 
-func stripeSingleCheckoutEnabled() bool {
+func stripeSingleCheckoutEnabled(ctx context.Context) bool {
+	if pool := db.Pool(ctx); pool != nil {
+		var dbManaged bool
+		err := pool.QueryRow(ctx, `SELECT credentials_ref = 'db:encrypted' AND status = 'published' AND is_primary AND new_orders_enabled
+			FROM payment_channel_accounts WHERE provider = 'stripe' AND environment = $1 AND status = 'published' AND is_primary = true
+			LIMIT 1`, currentPaymentLedgerEnvironment()).Scan(&dbManaged)
+		if err == nil && dbManaged {
+			return true
+		}
+	}
 	return config.AppConfig != nil && config.AppConfig.StripeSingleCheckoutEnabled
 }
 
@@ -46,7 +54,7 @@ func paymentEnvironmentMatches(account payment.WebhookAccount) bool {
 
 func (s *service) GetStripeOfferSlots(ctx context.Context, userID int64) ([]int, error) {
 	provider, available := s.stripeCheckoutAdapter()
-	if !available || !stripeSingleCheckoutEnabled() {
+	if !available || !stripeSingleCheckoutEnabled(ctx) {
 		return []int{}, nil
 	}
 	return s.repo.stripeOfferSlots(ctx, provider.AccountScope(), userID)
@@ -56,6 +64,9 @@ func (s *service) StartStripeCheckout(ctx context.Context, userID int64, intentI
 	intent, err := s.GetPurchase(ctx, userID, intentID, "")
 	if err != nil {
 		return nil, err
+	}
+	if intent.OrderType == "subscription" {
+		return s.startVIPStripeCheckout(ctx, userID, intentID, origin)
 	}
 	provider, available := s.stripeCheckoutAdapter()
 	if !available {
@@ -69,11 +80,11 @@ func (s *service) StartStripeCheckout(ctx context.Context, userID int64, intentI
 		return nil, err
 	}
 	if intent.Provider == payment.ProviderPayPal && (intent.Status == "confirming" || intent.Status == "awaiting_approval") {
-		slots, err := s.GetStripeOfferSlots(ctx, userID)
+		allowed, err := s.canSwitchPayPalOrderToStripe(ctx, userID, intent)
 		if err != nil {
 			return nil, err
 		}
-		if !slices.Contains(slots, intent.SlotID) {
+		if !allowed {
 			return nil, ErrCheckoutPaused
 		}
 		if err := s.closePayPalForCheckoutSwitch(ctx, userID, intent); err != nil {
@@ -87,7 +98,7 @@ func (s *service) StartStripeCheckout(ctx context.Context, userID int64, intentI
 	if intent.Status != "ready" && intent.Status != "retryable" {
 		return intent, nil
 	}
-	if !stripeSingleCheckoutEnabled() {
+	if !stripeSingleCheckoutEnabled(ctx) {
 		return nil, ErrCheckoutPaused
 	}
 	site.Path = "/recharge"
@@ -98,7 +109,7 @@ func (s *service) StartStripeCheckout(ctx context.Context, userID int64, intentI
 	if err != nil {
 		return nil, err
 	}
-	due, err := s.repo.claimStripeAttempts(ctx, provider.AccountScope(), attempt.ID, stripeSingleCheckoutEnabled())
+	due, err := s.repo.claimStripeAttempts(ctx, provider.AccountScope(), attempt.ID, stripeSingleCheckoutEnabled(ctx))
 	if err != nil {
 		return nil, err
 	}
@@ -195,7 +206,7 @@ func (s *service) reconcileStripeCheckouts(ctx context.Context) {
 	if !paymentEnvironmentMatches(account) {
 		return
 	}
-	due, err := s.repo.claimStripeAttempts(ctx, account, "", !s.historicalStripe && stripeSingleCheckoutEnabled())
+	due, err := s.repo.claimStripeAttempts(ctx, account, "", !s.historicalStripe && stripeSingleCheckoutEnabled(ctx))
 	if err != nil {
 		log.Printf("task=stripe_checkout action=claim_attempts error=%v", err)
 		return

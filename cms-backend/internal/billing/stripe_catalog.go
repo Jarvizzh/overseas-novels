@@ -7,12 +7,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"strings"
 	"time"
-
-	"github.com/jackc/pgx/v5"
-	"star-novel-cms/internal/db"
 )
 
 const stripeCatalogAPIVersion = "2026-11-18.endive"
@@ -43,7 +39,7 @@ type stripeCatalogPrice struct {
 }
 
 func getStripeCatalogObject(ctx context.Context, path, key string, output any) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.stripe.com/v1/"+path, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, stripeAPIBaseURL+"/v1/"+path, nil)
 	if err != nil {
 		return err
 	}
@@ -67,26 +63,23 @@ func verifyStripeOffer(ctx context.Context, accountID int64, actor string, input
 	if !*input.Enabled {
 		return nil, nil
 	}
-	var account, environment string
-	err := db.DB.QueryRow(ctx, `SELECT account_key,environment FROM payment_channel_accounts
-		WHERE id=$1 AND provider='stripe' AND EXISTS(SELECT 1 FROM admins WHERE id=$2 AND role='SuperAdmin' AND status=1)`,
-		accountID, actor).Scan(&account, &environment)
-	if errors.Is(err, pgx.ErrNoRows) {
+	key, account, environment, credRef, kErr := loadChannelStripeKey(ctx, accountID, 0)
+	if credRef == "" {
 		return nil, errCaseForbidden
 	}
-	if err != nil {
-		return nil, err
-	}
 	live := environment == "live"
-	key, prefix := os.Getenv("STRIPE_CATALOG_SANDBOX_API_KEY"), "test_"
+	prefix := "test_"
 	if live {
-		key, prefix = os.Getenv("STRIPE_CATALOG_LIVE_API_KEY"), "live_"
+		prefix = "live_"
 		if strings.TrimSpace(input.ReleaseEvidence) == "" || strings.TrimSpace(input.MarketPolicy) == "" {
 			return nil, fmt.Errorf("%w: Live offers require approval evidence and a market policy", errStripeCatalog)
 		}
 	}
-	if !live && key == "" {
+	if !live && credRef != credRefDBEncrypted && key == "" {
 		return nil, nil
+	}
+	if kErr != nil {
+		return nil, kErr
 	}
 	if !strings.HasPrefix(key, "rk_"+prefix) && !strings.HasPrefix(key, "sk_"+prefix) {
 		return nil, fmt.Errorf("%w: the catalog credential does not match the environment", errStripeCatalog)

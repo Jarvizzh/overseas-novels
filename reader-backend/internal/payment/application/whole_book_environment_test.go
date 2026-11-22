@@ -49,7 +49,7 @@ func TestWholeBookEnvironmentScope(t *testing.T) {
 			t.Fatalf("%s user %d ownership=%v: %v", environment, user, actual, err)
 		}
 		err = pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
-			_, err := reserveWholeBook(ctx, tx, environment, user, 1, 1)
+			_, err := reserveWholeBook(ctx, tx, environment, user, 1, 0, 1)
 			return err
 		})
 		if (owned && !errors.Is(err, ErrCheckoutConflict)) || (!owned && err != nil) {

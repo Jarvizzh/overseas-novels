@@ -55,6 +55,51 @@ func (s *service) ProcessSubscriptionWebhook(ctx context.Context, providerName s
 	return errors.New("PayPal event could not be verified for a configured account")
 }
 
+// ProcessChannelWebhook verifies an incoming webhook targeted to a dedicated channel webhook URL token.
+func (s *service) ProcessChannelWebhook(ctx context.Context, token string, payload []byte, headers map[string]string) error {
+	resolver, ok := s.adapters.TokenResolver()
+	if !ok {
+		return errors.New("channel webhook resolver unavailable")
+	}
+	_, providerName, scope, adapter, err := resolver.ResolveWebhookToken(ctx, token)
+	if err != nil || !paymentEnvironmentMatches(scope) {
+		return ErrCheckoutUnavailable
+	}
+	switch providerName {
+	case payment.ProviderStripe:
+		checkout, ok := adapter.(interface {
+			AccountScope() payment.WebhookAccount
+			VerifySingleCheckoutEvent([]byte, string) (*payment.SingleCheckoutNotice, error)
+		})
+		if !ok {
+			return ErrCheckoutUnavailable
+		}
+		notice, err := checkout.VerifySingleCheckoutEvent(payload, providerHeader(headers, "Stripe-Signature"))
+		if err != nil {
+			return err
+		}
+		if notice != nil && notice.Account != scope {
+			return errors.New("Stripe channel webhook account mismatch")
+		}
+		return queueStripeNotice(ctx, notice, payload)
+	case payment.ProviderPayPal:
+		whProvider, ok := adapter.(payment.WebhookProvider)
+		if !ok {
+			return ErrCheckoutUnavailable
+		}
+		event, err := whProvider.ParseWebhook(ctx, payload, headers)
+		if err != nil || event == nil || event.EventID == "" || event.Account != scope {
+			if err != nil {
+				return err
+			}
+			return errors.New("PayPal channel webhook verification failed")
+		}
+		return s.repo.enqueuePayPalEvent(ctx, event, true)
+	default:
+		return ErrCheckoutUnavailable
+	}
+}
+
 func (s *service) applyPayPalEvent(ctx context.Context, provider payment.SubscriptionProvider, event *payment.WebhookEventResult) error {
 	switch event.EventType {
 	case "dispute_updated":
@@ -68,13 +113,17 @@ func (s *service) applyPayPalEvent(ctx context.Context, provider payment.Subscri
 		if lookupErr != nil || !enabled {
 			return lookupErr
 		}
-		adapter, err := payment.Capability[interface {
-			GetDispute(context.Context, string) (paypal.Dispute, error)
-		}](s.adapters, payment.ProviderPayPal)
+		adapter, err := s.payPalForScope(ctx, event.Account)
 		if err != nil {
 			return err
 		}
-		dispute, err := adapter.GetDispute(ctx, event.ExternalRefID)
+		disputeReader, ok := adapter.(interface {
+			GetDispute(context.Context, string) (paypal.Dispute, error)
+		})
+		if !ok {
+			return ErrCheckoutUnavailable
+		}
+		dispute, err := disputeReader.GetDispute(ctx, event.ExternalRefID)
 		if err != nil {
 			return err
 		}
@@ -95,9 +144,9 @@ func (s *service) applyPayPalEvent(ctx context.Context, provider payment.Subscri
 			return errors.New("missing PayPal order ID")
 		}
 		if event.Account.AccountKey != "" && s.adapters.HasRegisteredAccounts(payment.ProviderPayPal) {
-			client, err := s.payPalForOrder(ctx, event.ExternalRefID)
-			if err != nil {
-				return err
+			client, lookupErr := s.payPalForOrder(ctx, event.ExternalRefID)
+			if lookupErr != nil {
+				return lookupErr
 			}
 			account, err := client.CheckoutAccount(ctx)
 			if err != nil || account != event.Account {
@@ -183,7 +232,14 @@ func (s *service) applyPayPalEvent(ctx context.Context, provider payment.Subscri
 	if after := event.PaidAt.Add(24 * time.Hour); after.Before(end) {
 		end = after
 	}
-	transactions, err := s.paypalClient.ListSubscriptionTransactions(ctx, sub.SubscriptionID, event.PaidAt.Add(-24*time.Hour), end)
+	client, ok := provider.(paypalCheckout)
+	if !ok {
+		client = s.primaryPayPalClient()
+	}
+	if client == nil {
+		return ErrCheckoutUnavailable
+	}
+	transactions, err := client.ListSubscriptionTransactions(ctx, sub.SubscriptionID, event.PaidAt.Add(-24*time.Hour), end)
 	if err != nil {
 		return err
 	}

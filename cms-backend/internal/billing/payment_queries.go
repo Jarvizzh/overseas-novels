@@ -10,39 +10,6 @@ import (
 	"star-novel-cms/internal/db"
 )
 
-type paymentChannel struct {
-	ID                      int64  `json:"id"`
-	Provider                string `json:"provider"`
-	Environment             string `json:"environment"`
-	AccountLabel            string `json:"account_label"`
-	CredentialsRef          string `json:"credentials_ref"`
-	WebhookRef              string `json:"webhook_ref"`
-	NewOrdersEnabled        bool   `json:"new_orders_enabled"`
-	NewSubscriptionsEnabled bool   `json:"new_subscriptions_enabled"`
-}
-
-func (h *Handler) ListPaymentChannels(c *gin.Context) {
-	rows, err := db.DB.Query(c.Request.Context(), `SELECT id,provider,environment,
-		CASE WHEN length(account_key)>4 THEN '••••'||right(account_key,4) ELSE '••••' END,
-		credentials_ref,webhook_ref,new_orders_enabled,new_subscriptions_enabled
-		FROM payment_channel_accounts ORDER BY provider,environment,id`)
-	if err != nil {
-		writeRefundCommandError(c, err)
-		return
-	}
-	channels, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (paymentChannel, error) {
-		var channel paymentChannel
-		err := row.Scan(&channel.ID, &channel.Provider, &channel.Environment, &channel.AccountLabel,
-			&channel.CredentialsRef, &channel.WebhookRef, &channel.NewOrdersEnabled, &channel.NewSubscriptionsEnabled)
-		return channel, err
-	})
-	if err != nil {
-		writeRefundCommandError(c, err)
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{"channels": channels})
-}
-
 func (h *Handler) ListVIPOfferPublications(c *gin.Context) {
 	offers, err := h.service.ListVIPOfferPublications(c.Request.Context())
 	if err != nil {
@@ -79,17 +46,21 @@ func (h *Handler) UpdatePaymentChannel(c *gin.Context) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "Payment configuration permission is required"})
 		return
 	}
-	var account, provider, environment, oldSource string
+	var account, provider, environment, oldSource, status string
 	var oldOrders, oldSubscriptions bool
-	err = tx.QueryRow(ctx, `SELECT account_key,provider,environment,credentials_ref,new_orders_enabled,new_subscriptions_enabled
+	err = tx.QueryRow(ctx, `SELECT account_key,provider,environment,credentials_ref,status,new_orders_enabled,new_subscriptions_enabled
 		FROM payment_channel_accounts WHERE id=$1 AND provider IN ('paypal','stripe') FOR UPDATE`, id).
-		Scan(&account, &provider, &environment, &oldSource, &oldOrders, &oldSubscriptions)
+		Scan(&account, &provider, &environment, &oldSource, &status, &oldOrders, &oldSubscriptions)
 	if err != nil {
 		writeRefundCommandError(c, err)
 		return
 	}
+	if (*input.NewOrders || *input.NewSubscriptions) && status != channelStatusPublished {
+		c.JSON(http.StatusConflict, gin.H{"error": "Channel account must be verified and published before enabling checkout switches"})
+		return
+	}
 	if (provider == "stripe" && input.CredentialsRef != oldSource) ||
-		(provider == "paypal" && input.CredentialsRef != "legacy:paypal" && input.CredentialsRef != "env:paypal") {
+		(provider == "paypal" && input.CredentialsRef != oldSource && input.CredentialsRef != "legacy:paypal" && input.CredentialsRef != "env:paypal") {
 		c.JSON(http.StatusConflict, gin.H{"error": "The credential reference does not match the registered payment channel"})
 		return
 	}
@@ -98,7 +69,7 @@ func (h *Handler) UpdatePaymentChannel(c *gin.Context) {
 		c.JSON(http.StatusConflict, gin.H{"error": "Verify that the environment credentials use the same PayPal application"})
 		return
 	}
-	_, err = tx.Exec(ctx, `UPDATE payment_channel_accounts SET credentials_ref=$2,new_orders_enabled=$3,new_subscriptions_enabled=$4 WHERE id=$1`,
+	_, err = tx.Exec(ctx, `UPDATE payment_channel_accounts SET credentials_ref=$2,new_orders_enabled=$3,new_subscriptions_enabled=$4,updated_at=now() WHERE id=$1`,
 		id, input.CredentialsRef, *input.NewOrders, *input.NewSubscriptions)
 	if err == nil {
 		_, err = tx.Exec(ctx, `INSERT INTO admin_audit_logs(admin_id,action,target_id,before_data,after_data)

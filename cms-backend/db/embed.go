@@ -157,3 +157,8 @@ var PaymentRecoverySQL string
 
 //go:embed migrations/2026111927.sql
 var PaymentReviewFixesSQL string
+
+// PaymentCatalogAndChannelSQL adds CFG-04 encrypted channel lifecycle and CAT-01..04 unified product catalog.
+//
+//go:embed migrations/2026111928.sql
+var PaymentCatalogAndChannelSQL string

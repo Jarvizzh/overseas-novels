@@ -22,6 +22,7 @@ import (
 	"reader-backend/internal/novel"
 	"reader-backend/internal/payment"
 	paymentapp "reader-backend/internal/payment/application"
+	"reader-backend/internal/payment/directory"
 	"reader-backend/internal/payment/paypal"
 	"reader-backend/internal/payment/paypal/credentialstore"
 	"reader-backend/internal/payment/stripe"
@@ -148,6 +149,8 @@ func main() {
 		if err := registerPaymentAccounts(configured); err != nil {
 			log.Fatal(err)
 		}
+		dir := directory.New(db.Pool(context.Background()), configured)
+		configured = configured.WithDynamicSource(dir)
 		paymentService := paymentapp.NewService(paymentRepo, novelRepo, configured)
 		go func() { defer close(reconciliationDone); paymentService.RunReconciliation(reconcileCtx) }()
 		paymentapp.NewHandler(paymentService).RegisterRoutes(api)

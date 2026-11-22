@@ -109,9 +109,24 @@ func TestInheritedAndExplicitOffersKeepPromotionIdentity(t *testing.T) {
 						t.Fatal(err)
 					}
 				}
-				exec(`INSERT INTO novels(id,title,author) VALUES(1,'Book','Author'),(2,'Other','Author');INSERT INTO recharge_templates(id,name,is_default) VALUES(1,'Default',true),(2,'Explicit',false);
-    INSERT INTO recharge_slots(id,template_id,slot_index,type,coins,price,price_cents) VALUES(1,1,1,'single',100,'$9.99',999),(2,2,1,'single',100,'$9.99',999),(3,1,2,'whole_book',0,'$9.99',999),(4,2,2,'whole_book',0,'$9.99',999);
+				exec(`INSERT INTO novels(id,title,author) VALUES(1,'Book','Author'),(2,'Other','Author');
     INSERT INTO fb_pixels(id,name,pixel_id,access_token) VALUES(1,'Pixel','configured-pixel','fake');`)
+				seedTestProductAndSlot(t, p, testCatalogSpec{
+					SlotID: 1, TemplateID: 1, TemplateName: "Default", IsDefault: true, SlotIndex: 1,
+					Code: "TEST_FIX_SINGLE", ProductType: "single", PriceCents: 999, Coins: 100,
+				})
+				seedTestProductAndSlot(t, p, testCatalogSpec{
+					SlotID: 2, TemplateID: 2, TemplateName: "Explicit", IsDefault: false, SlotIndex: 1,
+					Code: "TEST_FIX_SINGLE", ProductType: "single", PriceCents: 999, Coins: 100,
+				})
+				seedTestProductAndSlot(t, p, testCatalogSpec{
+					SlotID: 3, TemplateID: 1, TemplateName: "Default", IsDefault: true, SlotIndex: 2,
+					Code: "TEST_FIX_BOOK", ProductType: "whole_book", PriceCents: 999, NovelScopeType: "promoted_novel",
+				})
+				seedTestProductAndSlot(t, p, testCatalogSpec{
+					SlotID: 4, TemplateID: 2, TemplateName: "Explicit", IsDefault: false, SlotIndex: 2,
+					Code: "TEST_FIX_BOOK", ProductType: "whole_book", PriceCents: 999, NovelScopeType: "promoted_novel",
+				})
 				var template, pixel any
 				templateID := 1
 				if explicit {

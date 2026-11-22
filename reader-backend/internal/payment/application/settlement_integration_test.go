@@ -27,9 +27,11 @@ func TestPaymentSettlementIntegration(t *testing.T) {
 	}
 	exec(`INSERT INTO users(id,utm_source,utm_campaign) VALUES (101,'source','campaign'),(102,'','')`)
 	exec(`INSERT INTO novels(id,title,author,publish_status) VALUES(101,'Test novel','Test author','published')`)
-	exec(`INSERT INTO recharge_templates(id,name,is_default) VALUES (101,'Test',true)`)
-	exec(`INSERT INTO recharge_slots(id,template_id,slot_index,type,coins,bonus,price,price_cents)
-		VALUES(101,101,1,'whole_book',0,7,'$9.99',999)`)
+	seedTestProductAndSlot(t, pool, testCatalogSpec{
+		SlotID: 101, TemplateID: 101, TemplateName: "Test", IsDefault: true, SlotIndex: 1,
+		Code: "TEST_SETTLE_101", ProductType: "whole_book", PriceCents: 999,
+		NovelScopeType: "all_published",
+	})
 	r := NewDBRepository(wallet.NewDBRepository())
 	ctxTemplate, err := r.GetCheckoutTemplate(ctx, 101)
 	if err != nil || ctxTemplate != 101 {
@@ -46,7 +48,11 @@ func TestPaymentSettlementIntegration(t *testing.T) {
 	if err = r.BindCheckout(ctx, id, "integration-order"); err != nil {
 		t.Fatal(err)
 	}
-	exec(`UPDATE recharge_slots SET price_cents=1999,bonus=90 WHERE id=101`)
+	seedTestProductAndSlot(t, pool, testCatalogSpec{
+		SlotID: 101, TemplateID: 101, TemplateName: "Test", IsDefault: true, SlotIndex: 1,
+		Code: "TEST_SETTLE_101_REPRICE", ProductType: "whole_book", PriceCents: 1999,
+		NovelScopeType: "all_published",
+	})
 	capture := &payment.OrderCapture{
 		OrderID: "integration-order", CaptureID: "integration-capture", CustomID: id, CurrencyCode: "USD",
 		GrossAmount: "9.99", FeeAmount: "0.50", NetAmount: "9.49", Status: "COMPLETED", RawPayload: "{}",
@@ -60,14 +66,76 @@ func TestPaymentSettlementIntegration(t *testing.T) {
 	if _, err := checkoutService.CapturePayPalPayment(ctx, 102, capture.OrderID); err == nil {
 		t.Fatal("another account reached capture")
 	}
+	var group sync.WaitGroup
+	for range 4 {
+		group.Go(func() {
+			result, err := r.settleCheckout(ctx, capture.OrderID, capture)
+			if err != nil || result.Coins != 0 {
+				t.Errorf("settlement: %+v %v", result, err)
+			}
+		})
+	}
+	group.Wait()
+	n := novel.NewDBRepository()
+	book, err := n.HasWholeBook(ctx, 101, 101)
+	if err != nil || !book {
+		t.Fatalf("whole-book entitlement: %t, %v", book, err)
+	}
+	exec(`INSERT INTO chapters(id,novel_id,chapter_index,title,content) VALUES('purchased',101,2,'Chapter','Body');
+		INSERT INTO unlock_records(user_id,novel_id,chapter_index,chapter_id,identity_evidence,identity_resolved_at)
+		VALUES(101,101,2,'purchased','fixture',now())`)
+	exec(`INSERT INTO payment_refunds(order_id,request_id)
+		SELECT id,gen_random_uuid() FROM recharge_orders WHERE external_ref_id=$1`, capture.OrderID)
+	exec(`UPDATE recharge_orders SET status='RefundPending' WHERE external_ref_id=$1`, capture.OrderID)
+	for range 2 {
+		if err := r.CompletePayPalRefund(ctx, "integration-refund", capture.CaptureID, 999, "USD"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := r.settleCheckout(ctx, capture.OrderID, capture); err == nil {
+		t.Fatal("payment replay moved refunded order")
+	}
+	book, err = n.HasWholeBook(ctx, 101, 101)
+	if err != nil || book {
+		t.Fatalf("refunded entitlement: %t, %v", book, err)
+	}
+	indices, err := n.GetUnlockedChapterIndices(ctx, 101, 101)
+	if err != nil || len(indices) != 1 || indices[0] != 2 {
+		t.Fatalf("chapter entitlement: %v, %v", indices, err)
+	}
+	// Restore slot 101 back to 999 whole_book for subsequent subtests and verify single coin refund shortfall cleanly.
+	seedTestProductAndSlot(t, pool, testCatalogSpec{
+		SlotID: 101, TemplateID: 101, TemplateName: "Test", IsDefault: true, SlotIndex: 1,
+		Code: "TEST_SETTLE_101", ProductType: "whole_book", PriceCents: 999,
+		NovelScopeType: "all_published",
+	})
+	coinProdID := seedTestProductAndSlot(t, pool, testCatalogSpec{
+		SlotID: 102, TemplateID: 101, TemplateName: "Test", IsDefault: true, SlotIndex: 2,
+		Code: "TEST_SETTLE_102_COIN", ProductType: "single", PriceCents: 999, Coins: 7, Bonus: 0,
+	})
+	coinSlot, err := r.GetRechargeSlotByID(ctx, 102)
+	if err != nil || coinSlot == nil {
+		t.Fatalf("coin slot = %v, %v", coinSlot, err)
+	}
+	coinCheckout, err := r.CreateCheckout(ctx, 101, coinSlot, 0, checkoutAttribution{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = r.BindCheckout(ctx, coinCheckout, "integration-coin-order"); err != nil {
+		t.Fatal(err)
+	}
+	coinCapture := &payment.OrderCapture{
+		OrderID: "integration-coin-order", CaptureID: "integration-coin-capture", CustomID: coinCheckout, CurrencyCode: "USD",
+		GrossAmount: "9.99", FeeAmount: "0.50", NetAmount: "9.49", Status: "COMPLETED", RawPayload: "{}",
+	}
 	t.Run("wallet fulfillment failure rolls back payment and credit", func(t *testing.T) {
 		walletRepo := wallet.NewDBRepository()
 		failure := errors.New("injected failure after wallet credit")
 		failingPayments := NewDBRepository(failingCredit{wallet: walletRepo, failure: failure})
-		if _, err := failingPayments.settleCheckout(ctx, capture.OrderID, capture); !errors.Is(err, failure) {
+		if _, err := failingPayments.settleCheckout(ctx, coinCapture.OrderID, coinCapture); !errors.Is(err, failure) {
 			t.Fatalf("settlement error = %v, want %v", err, failure)
 		}
-		order, err := failingPayments.findCheckout(ctx, capture.OrderID)
+		order, err := failingPayments.findCheckout(ctx, coinCapture.OrderID)
 		if err != nil || order.status != "Pending" || order.fulfilled {
 			t.Fatalf("order survived failed settlement: %+v, %v", order, err)
 		}
@@ -80,60 +148,36 @@ func TestPaymentSettlementIntegration(t *testing.T) {
 			(SELECT count(*) FROM third_party_payment_orders WHERE capture_id=$1),
 			(SELECT count(*) FROM payment_fulfillment_funding WHERE order_id=$2),
 			(SELECT count(*) FROM transactions WHERE user_id=101 AND biz_type='recharge')`,
-			capture.CaptureID, order.id).Scan(&receipts, &funding, &credits)
+			coinCapture.CaptureID, order.id).Scan(&receipts, &funding, &credits)
 		if err != nil || receipts != 0 || funding != 0 || credits != 0 {
 			t.Fatalf("rollback left receipts=%d funding=%d credits=%d: %v", receipts, funding, credits, err)
 		}
 	})
-	var group sync.WaitGroup
-	for range 4 {
-		group.Go(func() {
-			result, err := r.settleCheckout(ctx, capture.OrderID, capture)
-			if err != nil || result.Coins != 7 {
-				t.Errorf("settlement: %+v %v", result, err)
-			}
-		})
-	}
-	group.Wait()
-	n := novel.NewDBRepository()
-	book, err := n.HasWholeBook(ctx, 101, 101)
-	if err != nil || !book {
-		t.Fatalf("whole-book entitlement: %t, %v", book, err)
+	coinResult, err := r.settleCheckout(ctx, coinCapture.OrderID, coinCapture)
+	if err != nil || coinResult.Coins != 7 {
+		t.Fatalf("coin settlement: %+v %v", coinResult, err)
 	}
 	w, err := wallet.NewDBRepository().GetWallet(ctx, 101)
-	if err != nil || w.BonusCoins != 7 {
+	if err != nil || w.ChargedCoins != 7 {
 		t.Fatalf("credited wallet: %+v, %v", w, err)
 	}
-	exec(`INSERT INTO chapters(id,novel_id,chapter_index,title,content) VALUES('purchased',101,2,'Chapter','Body');
-		INSERT INTO unlock_records(user_id,novel_id,chapter_index,chapter_id,identity_evidence,identity_resolved_at)
-		VALUES(101,101,2,'purchased','fixture',now())`)
-	exec(`UPDATE wallets SET bonus_coins=3 WHERE user_id=101`)
+	exec(`UPDATE wallets SET charged_coins=3 WHERE user_id=101`)
 	exec(`INSERT INTO payment_refunds(order_id,request_id)
-		SELECT id,gen_random_uuid() FROM recharge_orders WHERE external_ref_id=$1`, capture.OrderID)
-	exec(`UPDATE recharge_orders SET status='RefundPending' WHERE external_ref_id=$1`, capture.OrderID)
+		SELECT id,gen_random_uuid() FROM recharge_orders WHERE external_ref_id=$1`, coinCapture.OrderID)
+	exec(`UPDATE recharge_orders SET status='RefundPending' WHERE external_ref_id=$1`, coinCapture.OrderID)
 	for range 2 {
-		if err := r.CompletePayPalRefund(ctx, "integration-refund", capture.CaptureID, 999, "USD"); err != nil {
+		if err := r.CompletePayPalRefund(ctx, "integration-coin-refund", coinCapture.CaptureID, 999, "USD"); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if _, err := r.settleCheckout(ctx, capture.OrderID, capture); err == nil {
-		t.Fatal("payment replay moved refunded order")
-	}
 	var shortfall, debit int
-	err = pool.QueryRow(ctx, `SELECT bonus_coin_shortfall,
+	err = pool.QueryRow(ctx, `SELECT charged_coin_shortfall,
 		(SELECT SUM(amount) FROM transactions WHERE user_id=101 AND biz_type='refund')
-		FROM payment_refunds WHERE provider_refund_id='integration-refund'`).Scan(&shortfall, &debit)
+		FROM payment_refunds WHERE provider_refund_id='integration-coin-refund'`).Scan(&shortfall, &debit)
 	if err != nil || debit != 3 || shortfall != 4 {
 		t.Fatalf("refund debit %d, shortfall %d: %v", debit, shortfall, err)
 	}
-	book, err = n.HasWholeBook(ctx, 101, 101)
-	if err != nil || book {
-		t.Fatalf("refunded entitlement: %t, %v", book, err)
-	}
-	indices, err := n.GetUnlockedChapterIndices(ctx, 101, 101)
-	if err != nil || len(indices) != 1 || indices[0] != 2 {
-		t.Fatalf("chapter entitlement: %v, %v", indices, err)
-	}
+	exec(`UPDATE product_publications SET status='paused' WHERE product_id=$1`, coinProdID)
 
 	sub := &model.UserSubscription{UserID: 101, SubscriptionID: "I-TEST", PlanID: "P-TEST", SlotID: 101, TemplateID: 101,
 		Status: "PENDING", Cycle: "week", PriceCents: 999, Currency: "USD", PaymentMethod: "paypal"}
@@ -292,6 +336,11 @@ func TestPaymentSettlementIntegration(t *testing.T) {
 		exec(`INSERT INTO novels(id,title,author,publish_status) VALUES(102,'Other novel','Test author','published')`)
 		exec(`INSERT INTO promotion_links(novel_id,novel_title,generated_url,utm_source,utm_campaign,recharge_template_id)
 			VALUES(101,'Test novel','https://example.invalid','source','campaign',101)`)
+		seedTestProductAndSlot(t, pool, testCatalogSpec{
+			SlotID: 101, TemplateID: 101, TemplateName: "Test", IsDefault: true, SlotIndex: 1,
+			Code: "TEST_SETTLE_101_PROMO", ProductType: "whole_book", PriceCents: 999,
+			NovelScopeType: "promoted_novel",
+		})
 		slot, err := r.GetRechargeSlotByID(ctx, 101)
 		if err != nil {
 			t.Fatal(err)

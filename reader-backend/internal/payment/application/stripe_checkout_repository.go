@@ -44,14 +44,16 @@ func (r *dbRepository) reserveStripePurchase(ctx context.Context, userID int64, 
 
 func reserveStripeAttemptTx(ctx context.Context, tx pgx.Tx, e *checkoutEvaluation, intent, returnURL, cancelURL string, account payment.WebhookAccount) (*stripePurchaseAttempt, error) {
 	var slot int
-	var orderID, accountID, expected int64
+	var orderID, productID, accountID, expected int64
+	var orderType string
 	var enabled bool
-	err := tx.QueryRow(ctx, `SELECT o.id,o.recharge_slot_id,a.id,a.new_orders_enabled,o.amount_cents
+	err := tx.QueryRow(ctx, `SELECT o.id,COALESCE(o.recharge_slot_id,0),COALESCE(o.product_id,0),o.order_type,a.id,a.new_orders_enabled,o.amount_cents
 		FROM recharge_orders o CROSS JOIN payment_channel_accounts a
 		WHERE o.user_id=$1 AND o.checkout_id=$2 AND o.checkout_environment=$3
-		 AND o.status='Pending' AND o.order_type='whole_book' AND o.currency='USD'
+		 AND o.status='Pending' AND o.order_type IN ('single','whole_book') AND o.currency='USD'
 		 AND a.provider='stripe' AND a.environment=$5 AND a.account_key=$4
-		FOR UPDATE OF o`, e.userID, intent, conversion.Environment(), account.AccountKey, account.Environment).Scan(&orderID, &slot, &accountID, &enabled, &expected)
+		FOR UPDATE OF o`, e.userID, intent, conversion.Environment(), account.AccountKey, account.Environment).
+		Scan(&orderID, &slot, &productID, &orderType, &accountID, &enabled, &expected)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrCheckoutUnavailable
 	}
@@ -76,18 +78,25 @@ func reserveStripeAttemptTx(ctx context.Context, tx pgx.Tx, e *checkoutEvaluatio
 	case !enabled:
 		return nil, ErrCheckoutPaused
 	}
+	if productID <= 0 {
+		return nil, ErrCheckoutUnavailable
+	}
 	var offer payment.SingleCheckoutOffer
 	var verifiedCatalog []byte
 	var releaseEvidence, marketPolicy, expectedCountry *string
-	err = tx.QueryRow(ctx, `SELECT m.product_ref,m.price_ref,m.amount_minor,m.allowed_countries,m.sales_mode,COALESCE(m.tax_liability_account,''),
-		m.validated_catalog,m.release_evidence,m.market_policy,expected.country
-		FROM payment_stripe_one_time_offers m JOIN recharge_slots s ON s.id=m.slot_id
+	err = tx.QueryRow(ctx, `SELECT b.external_product_ref,b.external_price_ref,p.price_cents,b.allowed_countries,b.sales_mode,COALESCE(b.tax_liability_account,''),
+		b.validated_catalog,b.release_evidence,b.market_policy,expected.country
+		FROM product_channel_bindings b
+		JOIN products p ON p.id=b.product_id
+		JOIN product_publications pub ON pub.product_id=p.id AND pub.environment=$4 AND pub.status='published'
 		CROSS JOIN LATERAL (SELECT payment_last_stripe_billing_country($1,$5) AS country) expected
-		WHERE m.account_id=$1 AND m.slot_id=$2 AND m.amount_minor=$3 AND m.enabled
-		 AND ($4='sandbox' OR (m.validated_catalog IS NOT NULL AND m.release_evidence IS NOT NULL AND m.market_policy IS NOT NULL
-		   AND (expected.country IS NULL OR expected.country=ANY(m.allowed_countries))))
-		 AND s.type='whole_book' AND s.price_cents=m.amount_minor FOR SHARE OF m,s`,
-		accountID, slot, expected, account.Environment, e.userID).Scan(&offer.ProductID, &offer.PriceID, &offer.AmountMinor, &offer.Countries, &offer.SalesMode, &offer.TaxLiabilityAccount, &verifiedCatalog, &releaseEvidence, &marketPolicy, &expectedCountry)
+		WHERE b.account_id=$1 AND b.product_id=$2 AND b.provider='stripe' AND b.environment=$4
+		 AND b.enabled=true AND b.validation_status='verified'
+		 AND b.external_product_ref<>'' AND b.external_price_ref<>''
+		 AND ($4='sandbox' OR (b.validated_catalog IS NOT NULL AND b.release_evidence IS NOT NULL AND b.market_policy IS NOT NULL
+		   AND (expected.country IS NULL OR expected.country=ANY(b.allowed_countries))))
+		 AND p.product_type IN ('single','whole_book') AND p.price_cents=$3 FOR SHARE OF b,p`,
+		accountID, productID, expected, account.Environment, e.userID).Scan(&offer.ProductID, &offer.PriceID, &offer.AmountMinor, &offer.Countries, &offer.SalesMode, &offer.TaxLiabilityAccount, &verifiedCatalog, &releaseEvidence, &marketPolicy, &expectedCountry)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrCheckoutUnavailable
 	}
@@ -157,17 +166,36 @@ func (r *dbRepository) claimStripeAttempts(ctx context.Context, account payment.
 }
 
 func (r *dbRepository) stripeOfferSlots(ctx context.Context, account payment.WebhookAccount, userID int64) ([]int, error) {
-	rows, err := db.Pool(ctx).Query(ctx, `SELECT m.slot_id FROM payment_stripe_one_time_offers m
-		JOIN payment_channel_accounts a ON a.id=m.account_id JOIN recharge_slots s ON s.id=m.slot_id
-		WHERE a.provider='stripe' AND a.account_key=$1 AND a.environment=$2 AND a.new_orders_enabled
-		  AND m.enabled AND s.type='whole_book' AND s.price_cents=m.amount_minor
-		  AND (a.environment='sandbox' OR (m.validated_catalog IS NOT NULL AND m.release_evidence IS NOT NULL AND m.market_policy IS NOT NULL
-		   AND COALESCE(payment_last_stripe_billing_country(a.id,$3)=ANY(m.allowed_countries),true)))
+	rows, err := db.Pool(ctx).Query(ctx, `SELECT s.id FROM recharge_slots s
+		JOIN products p ON p.id=s.product_id
+		JOIN product_publications pub ON pub.product_id=p.id AND pub.environment=$2 AND pub.status='published'
+		JOIN product_channel_bindings b ON b.product_id=p.id AND b.provider='stripe' AND b.environment=$2
+		JOIN payment_channel_accounts a ON a.id=b.account_id
+		WHERE a.provider='stripe' AND a.account_key=$1 AND a.environment=$2 AND a.status='published' AND a.is_primary=true AND a.new_orders_enabled
+		  AND b.enabled=true AND b.validation_status='verified' AND b.external_product_ref<>'' AND b.external_price_ref<>''
+		  AND p.product_type IN ('single','whole_book')
+		  AND (a.environment='sandbox' OR (b.validated_catalog IS NOT NULL AND b.release_evidence IS NOT NULL AND b.market_policy IS NOT NULL
+		   AND COALESCE(payment_last_stripe_billing_country(a.id,$3)=ANY(b.allowed_countries),true)))
 		  AND s.template_id=COALESCE((SELECT recharge_template_id FROM reader_promotion_for_user($3) WHERE recharge_template_id IS NOT NULL),
 			(SELECT id FROM recharge_templates ORDER BY is_default DESC NULLS LAST,id LIMIT 1))
-		ORDER BY m.slot_id`, account.AccountKey, account.Environment, userID)
+		ORDER BY s.id`, account.AccountKey, account.Environment, userID)
 	if err != nil {
 		return nil, err
 	}
 	return pgx.CollectRows(rows, func(row pgx.CollectableRow) (int, error) { var id int; err := row.Scan(&id); return id, err })
+}
+
+func (r *dbRepository) stripeProductAvailable(ctx context.Context, account payment.WebhookAccount, productID int64) (bool, error) {
+	var ok bool
+	err := db.Pool(ctx).QueryRow(ctx, `SELECT EXISTS (
+		SELECT 1 FROM products p
+		JOIN product_publications pub ON pub.product_id=p.id AND pub.environment=$2 AND pub.status='published'
+		JOIN product_channel_bindings b ON b.product_id=p.id AND b.provider='stripe' AND b.environment=$2
+		JOIN payment_channel_accounts a ON a.id=b.account_id
+		WHERE p.id=$3 AND p.product_type IN ('single','whole_book')
+		  AND a.provider='stripe' AND a.account_key=$1 AND a.environment=$2 AND a.status='published' AND a.is_primary=true AND a.new_orders_enabled
+		  AND b.enabled=true AND b.validation_status='verified' AND b.external_product_ref<>'' AND b.external_price_ref<>''
+		  AND ($2='sandbox' OR (b.validated_catalog IS NOT NULL AND b.release_evidence IS NOT NULL AND b.market_policy IS NOT NULL))
+	)`, account.AccountKey, account.Environment, productID).Scan(&ok)
+	return ok, err
 }

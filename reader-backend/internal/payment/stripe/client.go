@@ -37,16 +37,18 @@ type Scope struct {
 
 type Config struct {
 	Scope
-	APIKey        string
-	WebhookSecret string
+	APIKey                string
+	WebhookSecret         string
+	PreviousWebhookSecret string
 }
 
 type Client struct {
-	api           *stripego.Client
-	scope         Scope
-	webhookSecret string
-	apiKey        string
-	reportHTTP    *http.Client
+	api                   *stripego.Client
+	scope                 Scope
+	webhookSecret         string
+	previousWebhookSecret string
+	apiKey                string
+	reportHTTP            *http.Client
 }
 
 // NewClient checks that the credential belongs to the configured merchant account.
@@ -54,7 +56,16 @@ func NewClient(ctx context.Context, cfg Config) (*Client, error) {
 	return newClient(ctx, cfg, &http.Client{Timeout: 15 * time.Second})
 }
 
+// NewConfiguredClient initializes a dynamic DB-verified Stripe client without a blocking remote round-trip.
+func NewConfiguredClient(cfg Config) (*Client, error) {
+	return initClient(context.Background(), cfg, &http.Client{Timeout: 15 * time.Second}, false)
+}
+
 func newClient(ctx context.Context, cfg Config, httpClient *http.Client) (*Client, error) {
+	return initClient(ctx, cfg, httpClient, true)
+}
+
+func initClient(ctx context.Context, cfg Config, httpClient *http.Client, verifyRemote bool) (*Client, error) {
 	if !validID(cfg.AccountID, "acct_") {
 		return nil, errors.New("invalid Stripe account ID")
 	}
@@ -74,6 +85,9 @@ func newClient(ctx context.Context, cfg Config, httpClient *http.Client) (*Clien
 	if cfg.WebhookSecret != "" && !validID(cfg.WebhookSecret, "whsec_") {
 		return nil, errors.New("invalid Stripe webhook secret")
 	}
+	if cfg.PreviousWebhookSecret != "" && !validID(cfg.PreviousWebhookSecret, "whsec_") {
+		return nil, errors.New("invalid Stripe previous webhook secret")
+	}
 
 	backend := stripego.NewBackendsWithConfig(&stripego.BackendConfig{
 		HTTPClient:        httpClient,
@@ -81,12 +95,14 @@ func newClient(ctx context.Context, cfg Config, httpClient *http.Client) (*Clien
 		LeveledLogger:     &stripego.LeveledLogger{Level: stripego.LevelNull},
 	})
 	api := stripego.NewClient(cfg.APIKey, stripego.WithBackends(backend))
-	account, err := api.V1Accounts.Retrieve(ctx, nil)
-	if err != nil {
-		return nil, classify(err)
-	}
-	if account.ID != cfg.AccountID {
-		return nil, errors.New("Stripe API key belongs to a different account")
+	if verifyRemote {
+		account, err := api.V1Accounts.Retrieve(ctx, nil)
+		if err != nil {
+			return nil, classify(err)
+		}
+		if account.ID != cfg.AccountID {
+			return nil, errors.New("Stripe API key belongs to a different account")
+		}
 	}
 	reportHTTP := &http.Client{
 		Transport: httpClient.Transport,
@@ -97,7 +113,8 @@ func newClient(ctx context.Context, cfg Config, httpClient *http.Client) (*Clien
 	}
 	return &Client{
 		api: api, scope: cfg.Scope, webhookSecret: cfg.WebhookSecret,
-		apiKey: cfg.APIKey, reportHTTP: reportHTTP,
+		previousWebhookSecret: cfg.PreviousWebhookSecret,
+		apiKey:                cfg.APIKey, reportHTTP: reportHTTP,
 	}, nil
 }
 

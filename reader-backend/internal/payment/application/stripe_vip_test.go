@@ -21,14 +21,14 @@ func TestStripeVIPInvoiceLifecycle(t *testing.T) {
 		}
 	}
 	exec(`INSERT INTO users(id) VALUES(801),(802);
-		INSERT INTO recharge_templates(id,name,is_default) VALUES(801,'VIP Stripe',true);
-		INSERT INTO recharge_slots(id,template_id,slot_index,type,price,price_cents,coins,bonus,subscription_cycle)
-		VALUES(801,801,1,'vip','10',1000,0,0,'month');
-		UPDATE recharge_slots s SET vip_offer_version_id=snapshot_vip_offer(s) WHERE s.id=801;
-		INSERT INTO payment_channel_accounts(provider,account_key,environment,credentials_ref,webhook_ref,new_subscriptions_enabled)
-		VALUES('stripe','acct_StripeTest','sandbox','test','test',true);
-		INSERT INTO payment_stripe_vip_offers(account_id,offer_version_id,product_ref,price_ref,sales_mode,allowed_countries,enabled)
-		SELECT id,801,'prod_VIP','price_VIP','direct',ARRAY['US','CA'],true FROM payment_channel_accounts WHERE account_key='acct_StripeTest';`)
+		INSERT INTO payment_channel_accounts(provider,account_key,environment,credentials_ref,webhook_ref,status,is_primary,new_subscriptions_enabled)
+		VALUES('stripe','acct_StripeTest','sandbox','test','test','published',true,true)`)
+	seedTestProductAndSlot(t, pool, testCatalogSpec{
+		SlotID: 801, TemplateID: 801, TemplateName: "VIP Stripe", IsDefault: true, SlotIndex: 1,
+		Code: "TEST_STRIPE_VIP_801", ProductType: "vip", VipCycle: "month", PriceCents: 1000,
+		Environment: "sandbox", StripeAccountKey: "acct_StripeTest",
+		StripeProductRef: "prod_VIP", StripePriceRef: "price_VIP", AllowedCountries: []string{"US", "CA"},
+	})
 	account := payment.WebhookAccount{AccountKey: "acct_StripeTest", Environment: "sandbox"}
 	req := stripeVIPRequest{userID: 801, slotID: 801, account: account, returnURL: "https://reader.example/recharge?payment=return",
 		cancelURL: "https://reader.example/recharge?payment=cancel", attribution: checkoutAttribution{FBC: "fb.1.1740000000.fixture"}}
@@ -218,7 +218,7 @@ func TestStripeVIPInvoiceLifecycle(t *testing.T) {
 		t.Fatalf("confirmed cancellation should allow immediate re-enrollment: %+v %v", reopened, err)
 	}
 
-	exec(`UPDATE payment_stripe_vip_offers SET sales_mode='merchant_of_record',tax_liability_account='acct_Liability'`)
+	exec(`UPDATE product_channel_bindings SET sales_mode='merchant_of_record',tax_liability_account='acct_Liability' WHERE provider='stripe'`)
 	req.userID = 802
 	managed, err := reserveStripeVIP(ctx, req, true)
 	if err != nil {

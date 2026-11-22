@@ -101,20 +101,33 @@ type UnlockRecord struct {
 	CreatedAt    time.Time `json:"created_at" db:"created_at"`
 }
 
-// RechargeSlot represents recharge slot settings
+// RechargeSlot represents recharge slot settings hydrated from unified immutable products
 type RechargeSlot struct {
-	ID                int    `json:"id" db:"id"`
-	TemplateID        int    `json:"template_id" db:"template_id"`
-	SlotIndex         int    `json:"slot_index" db:"slot_index"`
-	Type              string `json:"type" db:"type"` // 'single', 'subscription', 'vip', 'whole_book'
-	Coins             int    `json:"coins" db:"coins"`
-	Bonus             int    `json:"bonus" db:"bonus"`
-	VipDuration       string `json:"vip_duration" db:"vip_duration"`
-	SubscriptionCycle string `json:"subscription_cycle" db:"subscription_cycle"` // 'day', 'week', 'month'
-	VipName           string `json:"vip_name" db:"vip_name"`
-	VipDesc           string `json:"vip_desc" db:"vip_desc"`
-	Price             string `json:"price" db:"price"`
-	PriceCents        int    `json:"price_cents" db:"price_cents"`
+	ID                int     `json:"id" db:"id"`
+	TemplateID        int     `json:"template_id" db:"template_id"`
+	SlotIndex         int     `json:"slot_index" db:"slot_index"`
+	ProductID         int64   `json:"product_id" db:"product_id"`
+	ProductCode       string  `json:"product_code,omitempty" db:"product_code"`
+	ProductType       string  `json:"product_type,omitempty" db:"product_type"` // 'single', 'whole_book', 'vip'
+	Type              string  `json:"type" db:"type"`                           // 'single', 'subscription', 'whole_book'
+	Name              string  `json:"name,omitempty" db:"name"`
+	Description       string  `json:"description,omitempty" db:"description"`
+	Coins             int     `json:"coins" db:"coins"`
+	Bonus             int     `json:"bonus" db:"bonus"`
+	VipDuration       string  `json:"vip_duration" db:"vip_duration"`
+	SubscriptionCycle string  `json:"subscription_cycle" db:"subscription_cycle"` // 'day', 'week', 'month', 'year'
+	VipName           string  `json:"vip_name" db:"vip_name"`
+	VipDesc           string  `json:"vip_desc" db:"vip_desc"`
+	Price             string  `json:"price" db:"price"`
+	Currency          string  `json:"currency,omitempty" db:"currency"`
+	PriceCents        int     `json:"price_cents" db:"price_cents"`
+	Badge             string  `json:"badge" db:"badge"`
+	IsHighlighted     bool    `json:"is_highlighted" db:"is_highlighted"`
+	DisplayAlias      string  `json:"display_alias" db:"display_alias"`
+	NovelScopeType    string  `json:"novel_scope_type,omitempty" db:"novel_scope_type"`
+	NovelScopeIDs     []int64 `json:"novel_scope_ids,omitempty" db:"novel_scope_ids"`
+	PayPalReady       bool    `json:"paypal_ready" db:"-"`
+	StripeReady       bool    `json:"stripe_ready" db:"-"`
 }
 
 // PaymentProviderPlan maps a recharge slot or pricing rule to a third-party payment provider plan ID (e.g. PayPal P-XXXXX, Stripe price_XXXXX)
@@ -145,6 +158,7 @@ type UserSubscription struct {
 	ID                 int64      `json:"id" db:"id"`
 	UserID             int64      `json:"user_id" db:"user_id"`
 	SubscriptionID     string     `json:"subscription_id" db:"subscription_id"` // Provider Sub ID (e.g. I-XXXXX)
+	ProductID          *int64     `json:"product_id,omitempty" db:"product_id"`
 	PlanID             string     `json:"plan_id" db:"plan_id"`
 	SlotID             int        `json:"slot_id" db:"slot_id"`
 	TemplateID         int        `json:"template_id" db:"template_id"`

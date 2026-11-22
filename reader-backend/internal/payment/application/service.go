@@ -12,7 +12,7 @@ import (
 type Service interface {
 	RunReconciliation(context.Context)
 	CreatePayPalOrder(context.Context, int64, int, int64, string, string, checkoutAttribution) (string, string, error)
-	PreparePurchase(context.Context, int64, int, int64, string, string, checkoutAttribution) (*PurchaseIntent, error)
+	PreparePurchase(context.Context, int64, int64, int, int64, string, string, checkoutAttribution) (*PurchaseIntent, error)
 	StartPayPalCheckout(context.Context, int64, string, string) (*PurchaseIntent, error)
 	StartStripeCheckout(context.Context, int64, string, string) (*PurchaseIntent, error)
 	GetStripeOfferSlots(context.Context, int64) ([]int, error)
@@ -32,6 +32,7 @@ type Service interface {
 	ListManagedSubscriptions(context.Context, int64) ([]model.UserSubscription, error)
 	CancelSubscription(ctx context.Context, userID int64, subscriptionID string, reason string) error
 	ProcessSubscriptionWebhook(ctx context.Context, providerName string, payload []byte, headers map[string]string) error
+	ProcessChannelWebhook(ctx context.Context, token string, payload []byte, headers map[string]string) error
 	GetRechargeTemplates(ctx context.Context, userID int64, novelID int64) (*model.RechargeTemplate, error)
 }
 
@@ -71,4 +72,11 @@ func NewService(repo Repository, readingAccess SubscriptionAccess, adapters paym
 		paypalClient:  paypalClient,
 		adapters:      adapters,
 	}
+}
+
+func (s *service) primaryPayPalClient() paypalCheckout {
+	if client, err := payment.Capability[paypalCheckout](s.adapters, payment.ProviderPayPal); err == nil && client != nil {
+		return client
+	}
+	return s.paypalClient
 }

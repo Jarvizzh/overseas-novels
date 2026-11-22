@@ -61,12 +61,20 @@ func TestVIPOfferPublicationAndVersionPinnedCheckout(t *testing.T) {
 	}
 	exec(`INSERT INTO users(id) VALUES(1),(2),(3);
 		INSERT INTO recharge_templates(id,name,is_default) VALUES(1,'Default',true);
-		SELECT assert_paypal_identity('vip-publish-test','sandbox')`)
+		SELECT assert_paypal_identity('vip-publish-test','sandbox');
+		UPDATE payment_channel_accounts SET status='published',is_primary=true,new_orders_enabled=true,new_subscriptions_enabled=true WHERE account_key='vip-publish-test'`)
 	saveOffer := func(id, price int) {
 		t.Helper()
 		exec(`DELETE FROM recharge_slots WHERE template_id=1`)
-		exec(`INSERT INTO recharge_slots(id,template_id,slot_index,type,price,price_cents,subscription_cycle)
-			VALUES($1,1,1,'subscription',$2::int::text,$2,'month')`, id, price)
+		var prodID int64
+		if err := p.QueryRow(ctx, `
+			INSERT INTO products(code,product_type,name,description,price_cents,currency,coins,bonus,vip_cycle,novel_scope_type)
+			VALUES($1,'vip',$1,'Legacy VIP test',$2,'USD',0,0,'month','none')
+			RETURNING id`, fmt.Sprintf("LEGACY_VIP_%d_%d", id, price), price).Scan(&prodID); err != nil {
+			t.Fatal(err)
+		}
+		exec(`INSERT INTO recharge_slots(id,template_id,slot_index,product_id,type,price,price_cents,subscription_cycle)
+			VALUES($1,1,1,$2,'subscription',$3::int::text,$3,'month')`, id, prodID, price)
 		exec(`UPDATE recharge_slots s SET vip_offer_version_id=snapshot_vip_offer(s) WHERE s.id=$1`, id)
 	}
 	adapter := &vipOfferAdapter{account: payment.WebhookAccount{AccountKey: "vip-publish-test", Environment: "sandbox"}}

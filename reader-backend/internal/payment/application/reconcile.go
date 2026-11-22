@@ -29,7 +29,7 @@ func (s *service) RunReconciliation(ctx context.Context) {
 		{func(ctx context.Context) { s.eachPayPalAccount(ctx, (*service).reconcilePayPalEvents) }, 15 * time.Second}, {s.reconcilePayPalOrders, 15 * time.Second},
 		{s.reconcilePayPalCancellations, 15 * time.Second}, {s.reconcilePayPalSubscriptions, 15 * time.Second},
 		{func(ctx context.Context) { s.eachPayPalAccount(ctx, (*service).reconcileRefundCommands) }, 15 * time.Second},
-		{s.reconcilePayPalVIPOffers, vipPlanPublishInterval},
+		{func(ctx context.Context) { s.eachPayPalAccount(ctx, (*service).reconcilePayPalVIPOffers) }, vipPlanPublishInterval},
 		{s.reconcileAftercare, aftercareInterval},
 		{func(ctx context.Context) { s.eachStripeAccount(ctx, (*service).reconcileStripeCheckouts) }, stripeCheckoutInterval},
 		{func(ctx context.Context) { s.eachPayPalAccount(ctx, (*service).recoverPayPalEventWindow) }, paymentEventRecoveryInterval},
@@ -88,10 +88,11 @@ func (s *service) reconcilePayPalOrders(ctx context.Context) {
 }
 
 func (s *service) reconcilePayPalCheckoutCreation(ctx context.Context) {
-	if !s.paypalClient.WebhookConfigured(ctx) {
+	client := s.primaryPayPalClient()
+	if client == nil || !client.WebhookConfigured(ctx) {
 		return
 	}
-	account, err := s.paypalClient.CheckoutAccount(ctx)
+	account, err := client.CheckoutAccount(ctx)
 	if err != nil {
 		return
 	}

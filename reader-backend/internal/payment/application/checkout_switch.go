@@ -107,27 +107,47 @@ func (s *service) verifyPayPalCheckoutSwitch(ctx context.Context, client paypalC
 	return err
 }
 
+func (s *service) canSwitchPayPalOrderToStripe(ctx context.Context, userID int64, intent *PurchaseIntent) (bool, error) {
+	provider, available := s.stripeCheckoutAdapter()
+	if !available || !stripeSingleCheckoutEnabled(ctx) {
+		return false, nil
+	}
+	if intent.SlotID > 0 {
+		slots, err := s.GetStripeOfferSlots(ctx, userID)
+		if err != nil {
+			return false, err
+		}
+		if !slices.Contains(slots, intent.SlotID) {
+			return false, nil
+		}
+	}
+	if intent.ProductID > 0 {
+		return s.repo.stripeProductAvailable(ctx, provider.AccountScope(), intent.ProductID)
+	}
+	return intent.SlotID > 0, nil
+}
+
 func (s *service) reconcilePayPalCheckoutSwitch(ctx context.Context, ref string) (bool, error) {
 	var intent PurchaseIntent
 	var userID int64
 	var account payment.WebhookAccount
 	var token uuid.UUID
-	err := db.Pool(ctx).QueryRow(ctx, `SELECT o.checkout_id::text,o.amount_cents,o.currency,COALESCE(o.recharge_slot_id,0),o.user_id,a.account_key,a.environment,p.paypal_switch_token
+	err := db.Pool(ctx).QueryRow(ctx, `SELECT o.checkout_id::text,o.amount_cents,o.currency,COALESCE(o.product_id,0),COALESCE(o.recharge_slot_id,0),o.user_id,a.account_key,a.environment,p.paypal_switch_token
 		FROM payment_checkout_attempts p JOIN recharge_orders o ON o.id=p.order_id JOIN payment_channel_accounts a ON a.id=p.account_id
 		WHERE p.provider='paypal' AND p.provider_order_id=$1 AND p.paypal_switch_token IS NOT NULL
 		AND p.status='buyer_action' AND o.checkout_environment=$2`, ref, conversion.Environment()).
-		Scan(&intent.ID, &intent.AmountMinor, &intent.Currency, &intent.SlotID, &userID, &account.AccountKey, &account.Environment, &token)
+		Scan(&intent.ID, &intent.AmountMinor, &intent.Currency, &intent.ProductID, &intent.SlotID, &userID, &account.AccountKey, &account.Environment, &token)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}
 	if err != nil {
 		return true, err
 	}
-	slots, err := s.GetStripeOfferSlots(ctx, userID)
+	allowed, err := s.canSwitchPayPalOrderToStripe(ctx, userID, &intent)
 	if err != nil {
 		return true, err
 	}
-	if !slices.Contains(slots, intent.SlotID) {
+	if !allowed {
 		return true, ErrCheckoutPaused
 	}
 	client, err := s.payPalForScope(ctx, account)

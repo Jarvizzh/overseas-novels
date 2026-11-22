@@ -13,6 +13,7 @@ const (
 	CycleDay   SubscriptionCycle = "day"   // Daily recurring billing
 	CycleWeek  SubscriptionCycle = "week"  // Weekly recurring billing
 	CycleMonth SubscriptionCycle = "month" // Monthly recurring billing
+	CycleYear  SubscriptionCycle = "year"  // Annual recurring billing
 )
 
 const (
@@ -114,11 +115,26 @@ type RefundProvider interface {
 	ResolveRefund(context.Context, RefundRequest) (*RefundResult, error)
 }
 
-// Adapters is the set of channels enabled by the application at startup.
+// DynamicSource resolves live and historical channel clients from database state.
+type DynamicSource interface {
+	PrimaryAdapter(provider string) (Adapter, bool)
+	AdapterForScope(provider string, scope WebhookAccount) (Adapter, bool)
+	AllAdapters(provider string) []Adapter
+	HasAccounts(provider string) bool
+}
+
+// WebhookTokenResolver resolves an opaque per-account webhook token to its channel client.
+type WebhookTokenResolver interface {
+	ResolveWebhookToken(ctx context.Context, token string) (accountID int64, provider string, scope WebhookAccount, adapter Adapter, err error)
+}
+
+// Adapters is the set of channels enabled by the application at startup and dynamically via DB.
 type Adapters struct {
-	channels map[string]Adapter
-	legacy   map[string]Adapter
-	accounts map[string]map[WebhookAccount]Adapter
+	channels  map[string]Adapter
+	legacy    map[string]Adapter
+	accounts  map[string]map[WebhookAccount]Adapter
+	preferred map[string]bool
+	dynamic   DynamicSource
 }
 
 func NewAdapters(adapters ...Adapter) Adapters {
@@ -126,7 +142,24 @@ func NewAdapters(adapters ...Adapter) Adapters {
 	for _, adapter := range adapters {
 		channels[adapter.Provider()] = adapter
 	}
-	return Adapters{channels: maps.Clone(channels), legacy: channels, accounts: make(map[string]map[WebhookAccount]Adapter)}
+	return Adapters{
+		channels:  maps.Clone(channels),
+		legacy:    channels,
+		accounts:  make(map[string]map[WebhookAccount]Adapter),
+		preferred: make(map[string]bool),
+	}
+}
+
+// WithDynamicSource attaches a DB-backed dynamic adapter directory to a shallow copy of Adapters.
+func (a Adapters) WithDynamicSource(source DynamicSource) Adapters {
+	a.dynamic = source
+	return a
+}
+
+// TokenResolver returns the dynamic webhook token resolver if configured.
+func (a Adapters) TokenResolver() (WebhookTokenResolver, bool) {
+	resolver, ok := a.dynamic.(WebhookTokenResolver)
+	return resolver, ok
 }
 
 // RegisterAccount binds a configured client to the scope it was verified for.
@@ -152,21 +185,46 @@ func LegacyCapability[T any](a Adapters, provider string) (T, bool) {
 }
 
 func AccountCapability[T any](a Adapters, provider string, scope WebhookAccount) (T, bool) {
+	if a.dynamic != nil {
+		if raw, ok := a.dynamic.AdapterForScope(provider, scope); ok {
+			if typed, match := raw.(T); match {
+				return typed, true
+			}
+		}
+	}
 	adapter, ok := a.accounts[provider][scope].(T)
 	return adapter, ok
 }
 
-func (a Adapters) HasRegisteredAccounts(provider string) bool { return len(a.accounts[provider]) != 0 }
+func (a Adapters) HasRegisteredAccounts(provider string) bool {
+	if len(a.accounts[provider]) != 0 {
+		return true
+	}
+	return a.dynamic != nil && a.dynamic.HasAccounts(provider)
+}
 
 func AccountCapabilities[T any](a Adapters, provider string) []T {
 	var result []T
-	if adapter, ok := LegacyCapability[T](a, provider); ok {
-		result = append(result, adapter)
+	seen := make(map[Adapter]bool)
+	appendUnique := func(candidate Adapter) {
+		if candidate == nil || seen[candidate] {
+			return
+		}
+		if typed, ok := candidate.(T); ok {
+			seen[candidate] = true
+			result = append(result, typed)
+		}
+	}
+	if adapter, ok := a.legacy[provider]; ok {
+		appendUnique(adapter)
+	}
+	if a.dynamic != nil {
+		for _, candidate := range a.dynamic.AllAdapters(provider) {
+			appendUnique(candidate)
+		}
 	}
 	for _, candidate := range a.accounts[provider] {
-		if adapter, ok := candidate.(T); ok {
-			result = append(result, adapter)
-		}
+		appendUnique(candidate)
 	}
 	return result
 }
@@ -174,12 +232,24 @@ func AccountCapabilities[T any](a Adapters, provider string) []T {
 // Prefer scopes a worker to one client without changing the runtime default.
 func (a Adapters) Prefer(adapter Adapter) Adapters {
 	a.channels = maps.Clone(a.channels)
+	a.preferred = maps.Clone(a.preferred)
+	if a.preferred == nil {
+		a.preferred = make(map[string]bool)
+	}
 	a.channels[adapter.Provider()] = adapter
+	a.preferred[adapter.Provider()] = true
 	return a
 }
 
 // Capability resolves an explicitly registered channel and operation.
 func Capability[T any](adapters Adapters, channel string) (T, error) {
+	if adapters.dynamic != nil && !adapters.preferred[channel] {
+		if raw, ok := adapters.dynamic.PrimaryAdapter(channel); ok {
+			if typed, match := raw.(T); match {
+				return typed, nil
+			}
+		}
+	}
 	adapter, ok := adapters.channels[channel].(T)
 	if !ok {
 		return adapter, fmt.Errorf("payment channel %q does not support the requested operation", channel)

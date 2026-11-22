@@ -45,6 +45,8 @@ func (p *Client) CreatePlan(ctx context.Context, param payment.CreateSubscriptio
 		intervalUnit = "WEEK"
 	case payment.CycleMonth:
 		intervalUnit = "MONTH"
+	case payment.CycleYear:
+		intervalUnit = "YEAR"
 	default:
 		return "", errors.New("invalid PayPal subscription interval")
 	}

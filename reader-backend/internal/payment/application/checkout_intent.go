@@ -2,6 +2,7 @@ package application
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"time"
 
@@ -9,7 +10,6 @@ import (
 	"github.com/jackc/pgx/v5"
 	"reader-backend/internal/conversion"
 	"reader-backend/internal/db"
-	"reader-backend/internal/model"
 	"reader-backend/internal/novel"
 	"reader-backend/internal/payment"
 	"reader-backend/internal/payment/paypal"
@@ -24,9 +24,11 @@ var (
 
 type PurchaseIntent struct {
 	ID                  string         `json:"intent_id"`
+	ProductID           int64          `json:"product_id,omitempty"`
 	SlotID              int            `json:"slot_id"`
 	NovelID             int64          `json:"novel_id,omitempty"`
 	OrderType           string         `json:"order_type"`
+	Cycle               string         `json:"cycle,omitempty"`
 	AmountMinor         int64          `json:"amount_minor"`
 	Currency            string         `json:"currency"`
 	Coins               int            `json:"coins"`
@@ -37,13 +39,18 @@ type PurchaseIntent struct {
 	ExternalOrderID     string         `json:"order_id,omitempty"`
 	ConfirmationCode    captureOutcome `json:"confirmation_code,omitempty"`
 	ConfirmationMessage string         `json:"confirmation_message,omitempty"`
+	AvailableChannels   []string       `json:"available_channels,omitempty"`
+	Badge               string         `json:"badge,omitempty"`
+	DisplayAlias        string         `json:"display_alias,omitempty"`
 }
 
 type purchaseRequest struct {
 	key        uuid.UUID
+	productID  int64
 	slotID     int
 	novelID    int64
 	returnPath string
+	nonVIPOnly bool
 }
 
 const purchaseProjection = `
@@ -68,7 +75,8 @@ const purchaseProjection = `
         WHEN o.paid_at IS NOT NULL THEN o.payment_method END,''),
     CASE WHEN a.paypal_switch_token IS NOT NULL AND o.status='Pending' THEN 'payment_switch_pending'
       WHEN o.status IN ('Pending','Failed') AND a.status IN ('buyer_action','capturing','closed')
-        THEN COALESCE(a.capture_outcome,'') ELSE '' END`
+        THEN COALESCE(a.capture_outcome,'') ELSE '' END,
+    COALESCE(o.product_id,0), COALESCE(o.product_snapshot,'{}'::jsonb)`
 
 const purchaseAttemptJoin = ` LEFT JOIN LATERAL (
 	SELECT p.status,p.provider,p.provider_order_id,p.approval_url,p.retry_until,p.capture_retry_until,p.create_lookup_only,p.capture_lookup_only,p.capture_outcome,p.paypal_switch_token,
@@ -80,12 +88,23 @@ const purchaseAttemptJoin = ` LEFT JOIN LATERAL (
 
 func scanPurchase(row pgx.Row) (*PurchaseIntent, error) {
 	var p PurchaseIntent
+	var snapJSON []byte
 	if err := row.Scan(&p.ID, &p.SlotID, &p.NovelID, &p.OrderType, &p.AmountMinor, &p.Currency, &p.Coins, &p.Status,
-		&p.ReturnPath, &p.ApprovalURL, &p.ExternalOrderID, &p.Provider, &p.ConfirmationCode); err != nil {
+		&p.ReturnPath, &p.ApprovalURL, &p.ExternalOrderID, &p.Provider, &p.ConfirmationCode, &p.ProductID, &snapJSON); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrCheckoutUnavailable
 		}
 		return nil, err
+	}
+	if len(snapJSON) > 0 {
+		var snap struct {
+			Badge        string `json:"badge"`
+			DisplayAlias string `json:"display_alias"`
+		}
+		if _ = json.Unmarshal(snapJSON, &snap); snap.Badge != "" || snap.DisplayAlias != "" {
+			p.Badge = snap.Badge
+			p.DisplayAlias = snap.DisplayAlias
+		}
 	}
 	if p.ConfirmationCode != "" {
 		p.ConfirmationMessage = p.ConfirmationCode.publicMessage()
@@ -106,21 +125,46 @@ func (r *dbRepository) preparePurchase(ctx context.Context, userID int64, reques
 func (r *dbRepository) reservePurchaseIntent(ctx context.Context, tx pgx.Tx, evaluation *checkoutEvaluation, request purchaseRequest, attribution checkoutAttribution) (*PurchaseIntent, error) {
 	userID := evaluation.userID
 	env := conversion.Environment()
-	var orderID, previousNovel int64
+	var orderID, previousProductID, previousNovel int64
+	var vipIntentID string
 	var previousSlot int
 	var previousPath string
-	err := tx.QueryRow(ctx, `SELECT order_id,slot_id,novel_id,return_path FROM payment_checkout_requests
+	err := tx.QueryRow(ctx, `SELECT COALESCE(order_id,0),COALESCE(vip_intent_id::text,''),COALESCE(product_id,0),slot_id,novel_id,return_path
+		FROM payment_checkout_requests
 		WHERE environment=$1 AND user_id=$2 AND request_key=$3`, env, userID, request.key).
-		Scan(&orderID, &previousSlot, &previousNovel, &previousPath)
+		Scan(&orderID, &vipIntentID, &previousProductID, &previousSlot, &previousNovel, &previousPath)
 	switch {
 	case err == nil:
-		evaluation.orderID = orderID
 		evaluation.resumed = true
-		if previousSlot != request.slotID || previousNovel != request.novelID || previousPath != request.returnPath {
+		mismatch := (request.productID > 0 && previousProductID != request.productID) ||
+			(request.slotID > 0 && previousSlot != request.slotID) ||
+			(request.slotID == 0 && previousSlot != 0) ||
+			previousNovel != request.novelID ||
+			previousPath != request.returnPath
+		if mismatch {
 			return nil, ErrCheckoutKeyConflict
 		}
+		if vipIntentID != "" {
+			evaluation.checkoutID = vipIntentID
+			row, loadErr := scanVIPCheckoutIntentRow(tx.QueryRow(ctx, vipCheckoutIntentSelect+` WHERE v.intent_id = $1::uuid`, vipIntentID))
+			if loadErr != nil {
+				return nil, loadErr
+			}
+			return buildVIPPurchaseIntentView(ctx, tx, row)
+		}
+		evaluation.orderID = orderID
 	case errors.Is(err, pgx.ErrNoRows):
-		orderID, err = r.reservePurchase(ctx, tx, env, evaluation, request, attribution)
+		prod, err := resolveProductForCheckoutTx(ctx, tx, userID, request.productID, request.slotID, currentPaymentLedgerEnvironment())
+		if err != nil {
+			return nil, err
+		}
+		if prod.OrderType == "subscription" {
+			if request.nonVIPOnly {
+				return nil, ErrCheckoutUnavailable
+			}
+			return reserveVIPCheckoutIntentTx(ctx, tx, evaluation, prod, request, attribution)
+		}
+		orderID, err = r.reservePurchase(ctx, tx, env, evaluation, prod, request, attribution)
 		if err != nil {
 			return nil, err
 		}
@@ -132,56 +176,52 @@ func (r *dbRepository) reservePurchaseIntent(ctx context.Context, tx pgx.Tx, eva
 	if err != nil {
 		return nil, err
 	}
+	if intent.ProductID > 0 && intent.Status != "completed" && intent.Status != "refunded" {
+		intent.AvailableChannels = loadAvailableProductChannels(ctx, intent.ProductID, intent.OrderType, currentPaymentLedgerEnvironment())
+	}
 	evaluation.orderID, evaluation.checkoutID = orderID, intent.ID
 	return intent, nil
 }
 
-func (r *dbRepository) reservePurchase(ctx context.Context, tx pgx.Tx, env string, evaluation *checkoutEvaluation, request purchaseRequest, attribution checkoutAttribution) (int64, error) {
+func (r *dbRepository) reservePurchase(ctx context.Context, tx pgx.Tx, env string, evaluation *checkoutEvaluation, prod resolvedProduct, request purchaseRequest, attribution checkoutAttribution) (int64, error) {
 	userID := evaluation.userID
-	var slot model.RechargeSlot
-	err := tx.QueryRow(ctx, `SELECT id,template_id,type,price_cents,coins,bonus FROM recharge_slots WHERE id=$1`, request.slotID).
-		Scan(&slot.ID, &slot.TemplateID, &slot.Type, &slot.PriceCents, &slot.Coins, &slot.Bonus)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return 0, ErrCheckoutUnavailable
-	}
-	if err != nil {
-		return 0, err
-	}
-	if slot.PriceCents <= 0 || slot.Coins < 0 || slot.Bonus < 0 || (slot.Type != "single" && slot.Type != "whole_book") {
+	if prod.PriceCents <= 0 || prod.Coins < 0 || prod.Bonus < 0 || (prod.OrderType != "single" && prod.OrderType != "whole_book") {
 		return 0, ErrCheckoutUnavailable
 	}
 	var orderID, novelID int64
-	if slot.Type == "whole_book" {
-		slot.Coins = 0
+	var err error
+	if prod.OrderType == "whole_book" {
 		novelID = request.novelID
-		orderID, err = reserveWholeBook(ctx, tx, env, userID, novelID, slot.ID)
+		orderID, err = reserveWholeBook(ctx, tx, env, userID, novelID, prod.ID, request.slotID)
 		if err != nil {
 			return 0, err
 		}
 	}
 	evaluation.resumed = orderID != 0
 	if orderID == 0 {
-		orderID, err = insertCheckout(ctx, tx, uuid.NewString(), userID, &slot, novelID, attribution, &env, request.returnPath)
+		orderID, err = insertCheckout(ctx, tx, uuid.NewString(), userID, prod, novelID, attribution, &env, request.returnPath)
 		if err != nil {
 			return 0, err
 		}
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO payment_checkout_requests(environment,user_id,request_key,slot_id,novel_id,return_path,order_id)
-		VALUES($1,$2,$3,$4,$5,$6,$7)`, env, userID, request.key, request.slotID, request.novelID, request.returnPath, orderID)
+	_, err = tx.Exec(ctx, `INSERT INTO payment_checkout_requests(environment,user_id,request_key,product_id,slot_id,novel_id,return_path,order_id)
+		VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, env, userID, request.key, prod.ID, request.slotID, request.novelID, request.returnPath, orderID)
 	return orderID, err
 }
 
-func reserveWholeBook(ctx context.Context, tx pgx.Tx, env string, userID, novelID int64, slotID int) (int64, error) {
+func reserveWholeBook(ctx context.Context, tx pgx.Tx, env string, userID, novelID int64, productID int64, slotID int) (int64, error) {
 	var id int64
 	var resumable bool
-	err := tx.QueryRow(ctx, `SELECT id,COALESCE(status='Pending' AND checkout_environment=$3 AND recharge_slot_id=$4,false)
+	err := tx.QueryRow(ctx, `SELECT id,COALESCE(status='Pending' AND checkout_environment=$3
+		AND (COALESCE(product_id,0)=$4 OR ($5>0 AND product_id IS NULL AND COALESCE(recharge_slot_id,0)=$5))
+		AND ($5=0 OR COALESCE(recharge_slot_id,0)=$5),false)
 		FROM recharge_orders
 		WHERE user_id=$1 AND novel_id=$2 AND order_type='whole_book'
 		  AND (`+novel.WholeBookEnvironmentPredicate("$3")+` AND (`+novel.WholeBookEntitlementPredicate+`
 		       OR (status IN ('Success','Paid','RefundPending') AND fulfilled_at IS NULL)
 		       OR (status='Pending' AND (checkout_environment=$3 OR external_ref_id IS NOT NULL))))
-		ORDER BY (status='Pending' AND checkout_environment=$3 AND recharge_slot_id=$4) IS TRUE,id
-		LIMIT 1 FOR UPDATE`, userID, novelID, env, slotID).Scan(&id, &resumable)
+		ORDER BY 2,id
+		LIMIT 1 FOR UPDATE`, userID, novelID, env, productID, slotID).Scan(&id, &resumable)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return 0, nil
 	}
@@ -195,13 +235,20 @@ func reserveWholeBook(ctx context.Context, tx pgx.Tx, env string, userID, novelI
 }
 
 func (r *dbRepository) purchaseByReference(ctx context.Context, userID int64, intentID, paypalOrderID string) (*PurchaseIntent, error) {
-	return scanPurchase(db.Pool(ctx).QueryRow(ctx, `SELECT `+purchaseProjection+` FROM recharge_orders o `+
+	intent, err := scanPurchase(db.Pool(ctx).QueryRow(ctx, `SELECT `+purchaseProjection+` FROM recharge_orders o `+
 		purchaseAttemptJoin+` WHERE o.user_id=$1 AND o.order_type IN ('single','whole_book') AND o.payment_method IN ('paypal','stripe')
 			AND (o.checkout_environment=$2 OR (o.checkout_environment IS NULL AND $4<>'' AND o.external_ref_id=$4))
 			AND ($3='' OR o.checkout_id=NULLIF($3,'')::uuid)
 			AND ($4='' OR (o.payment_method='paypal' AND o.external_ref_id=$4) OR EXISTS (SELECT 1 FROM payment_checkout_attempts p
 				WHERE p.order_id=o.id AND p.provider='paypal' AND p.provider_order_id=$4))`,
 		userID, conversion.Environment(), intentID, paypalOrderID))
+	if err != nil {
+		return nil, err
+	}
+	if intent.ProductID > 0 && intent.Status != "completed" && intent.Status != "refunded" {
+		intent.AvailableChannels = loadAvailableProductChannels(ctx, intent.ProductID, intent.OrderType, currentPaymentLedgerEnvironment())
+	}
+	return intent, nil
 }
 
 func (r *dbRepository) recentPurchases(ctx context.Context, userID int64) ([]PurchaseIntent, error) {
@@ -211,13 +258,23 @@ func (r *dbRepository) recentPurchases(ctx context.Context, userID int64) ([]Pur
 	if err != nil {
 		return nil, err
 	}
-	return pgx.CollectRows(rows, func(row pgx.CollectableRow) (PurchaseIntent, error) {
+	items, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (PurchaseIntent, error) {
 		intent, err := scanPurchase(row)
 		if err != nil {
 			return PurchaseIntent{}, err
 		}
 		return *intent, nil
 	})
+	if err != nil {
+		return nil, err
+	}
+	env := currentPaymentLedgerEnvironment()
+	for i := range items {
+		if items[i].ProductID > 0 && items[i].Status != "completed" && items[i].Status != "refunded" {
+			items[i].AvailableChannels = loadAvailableProductChannels(ctx, items[i].ProductID, items[i].OrderType, env)
+		}
+	}
+	return items, nil
 }
 
 type paypalCheckoutAttempt struct {
@@ -246,13 +303,18 @@ func (r *dbRepository) reservePayPalAttemptTx(ctx context.Context, tx pgx.Tx, ev
 	var attempt paypalCheckoutAttempt
 	attempt.intentID, attempt.account, attempt.userID = intentID, scope, evaluation.userID
 	var accountID int64
-	var newOrdersEnabled bool
-	err := tx.QueryRow(ctx, `SELECT o.id,o.amount_cents,o.order_type,a.id,a.new_orders_enabled FROM recharge_orders o
+	var newOrdersEnabled, productBindingOK bool
+	err := tx.QueryRow(ctx, `SELECT o.id,o.amount_cents,o.order_type,a.id,a.new_orders_enabled,
+		(o.product_id IS NULL OR (
+			EXISTS(SELECT 1 FROM product_publications pub WHERE pub.product_id=o.product_id AND pub.environment=a.environment AND pub.status='published')
+			AND EXISTS(SELECT 1 FROM product_channel_bindings b WHERE b.product_id=o.product_id AND b.account_id=a.id AND b.provider='paypal' AND b.environment=a.environment AND b.enabled=true AND b.validation_status='verified')
+		))
+		FROM recharge_orders o
 		CROSS JOIN payment_channel_accounts a
 		WHERE o.user_id=$1 AND o.checkout_environment=$2 AND o.checkout_id=$3 AND o.status='Pending'
 			AND a.provider='paypal' AND a.account_key=$4 AND a.environment=$5
 		FOR UPDATE OF o`, attempt.userID, conversion.Environment(), attempt.intentID, scope.AccountKey, scope.Environment).
-		Scan(&attempt.orderID, &attempt.amount, &attempt.orderType, &accountID, &newOrdersEnabled)
+		Scan(&attempt.orderID, &attempt.amount, &attempt.orderType, &accountID, &newOrdersEnabled, &productBindingOK)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrCheckoutUnavailable
 	}
@@ -274,7 +336,7 @@ func (r *dbRepository) reservePayPalAttemptTx(ctx context.Context, tx pgx.Tx, ev
 		Scan(&attempt.id, &currentAccount, &currentStatus, &attempt.externalID, &attempt.approvalURL, &attempt.returnURL, &attempt.cancelURL, &needsReview)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
-		if !newOrdersEnabled {
+		if !newOrdersEnabled || !productBindingOK {
 			return nil, ErrCheckoutPaused
 		}
 		attempt.id, attempt.returnURL, attempt.cancelURL, currentStatus = uuid.NewString(), returnURL, cancelURL, "creating"
@@ -438,12 +500,15 @@ func (r *dbRepository) isCheckoutOrigin(ctx context.Context, host string) (bool,
 }
 
 type PaymentMethods struct {
-	PayPalSingle bool `json:"paypal_single"`
-	PayPalVIP    bool `json:"paypal_vip"`
+	PayPalSingle bool   `json:"paypal_single"`
+	PayPalVIP    bool   `json:"paypal_vip"`
+	StripeSingle bool   `json:"stripe_single"`
+	StripeVIP    bool   `json:"stripe_vip"`
+	Environment  string `json:"environment,omitempty"`
 }
 
 func (r *dbRepository) payPalAvailability(ctx context.Context, account payment.WebhookAccount) (PaymentMethods, error) {
-	var methods PaymentMethods
+	methods := PaymentMethods{Environment: conversion.Environment()}
 	err := db.Pool(ctx).QueryRow(ctx, `SELECT new_orders_enabled,new_subscriptions_enabled FROM payment_channel_accounts
 		WHERE provider='paypal' AND account_key=$1 AND environment=$2`, account.AccountKey, account.Environment).
 		Scan(&methods.PayPalSingle, &methods.PayPalVIP)

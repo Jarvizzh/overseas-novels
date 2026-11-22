@@ -40,8 +40,7 @@ function getCookie(name: string): string {
   return '';
 }
 
-function buildHeaders(options: RequestInit, tokenOverride?: string | null): Headers {
-  const token = tokenOverride !== undefined ? tokenOverride : readerStorage.getItem('auth-token');
+function buildHeaders(options: RequestInit, token: string | null): Headers {
   const headers = new Headers(options.headers || {});
 
   if (token) {
@@ -78,9 +77,10 @@ function buildHeaders(options: RequestInit, tokenOverride?: string | null): Head
   return headers;
 }
 
-async function request<T>(endpoint: string, options: RequestInit & { authToken?: string } = {}, retried = false): Promise<T> {
+async function request<T>(endpoint: string, options: RequestInit & { authToken?: string | null } = {}, retried = false): Promise<T> {
   const { authToken, ...init } = options;
-  const headers = buildHeaders(init, authToken);
+  const requestToken = authToken === undefined ? readerStorage.getItem('auth-token') : authToken;
+  const headers = buildHeaders(init, requestToken);
   const response = await fetch(`${BASE_URL}${endpoint}`, {
     ...init,
     headers,
@@ -94,12 +94,15 @@ async function request<T>(endpoint: string, options: RequestInit & { authToken?:
     endpoint.startsWith('/auth/refresh');
 
   if (response.status === 401 && !isAuthCredentialEndpoint && !retried &&
-      (!authToken || authToken === readerStorage.getItem('auth-token'))) {
+      requestToken === readerStorage.getItem('auth-token')) {
     if (authToken) {
       // Scoped work waits for the app to verify the refreshed session's owner.
       void runSingleFlightRefresh().catch(() => {});
-    } else if (await runSingleFlightRefresh()) {
-      return request<T>(endpoint, options, true);
+    } else {
+      const refreshedToken = await runSingleFlightRefresh();
+      if (refreshedToken && refreshedToken === readerStorage.getItem('auth-token')) {
+        return request<T>(endpoint, options, true);
+      }
     }
   }
 
@@ -118,9 +121,14 @@ async function request<T>(endpoint: string, options: RequestInit & { authToken?:
 export interface PurchaseIntent {
   intent_id: string;
   slot_id: number;
+  product_id?: number;
   novel_id?: number;
   order_type: 'single' | 'whole_book' | 'subscription';
   provider?: 'paypal' | 'stripe';
+  cycle?: 'day' | 'week' | 'month' | 'year' | string;
+  available_channels?: ('paypal' | 'stripe')[];
+  badge?: string;
+  display_alias?: string;
   amount_minor: number;
   currency: string;
   coins: number;
@@ -294,9 +302,9 @@ async function sendShelfBatches<T>(
 
 export const api = {
   // === AUTH ===
-  refresh: () => request<{ token: string; user: User }>('/auth/refresh', { method: 'POST' }),
+  refresh: () => request<{ token: string; user: User }>('/auth/refresh', { method: 'POST', authToken: null }),
   logout: () => request<void>('/auth/logout', { method: 'POST' }),
-  guestLogin: () => request<{ token: string; user: User }>('/auth/guest', { method: 'POST' }),
+  guestLogin: () => request<{ token: string; user: User }>('/auth/guest', { method: 'POST', authToken: null }),
 
   register: (body: { email: string; password: string; nickname?: string }) =>
     request<{ token: string; user: User }>('/auth/register', {
@@ -445,13 +453,35 @@ export const api = {
     }),
 
   getPaymentMethods: (signal?: AbortSignal) =>
-    request<{ paypal_single: boolean; paypal_vip: boolean; stripe_slots?: number[]; stripe_vip_slots?: number[]; stripe_sandbox?: boolean }>('/wallet/purchase-methods', { signal, cache: 'no-store' }),
+    request<{
+      paypal_single: boolean;
+      paypal_vip: boolean;
+      stripe_single?: boolean;
+      stripe_vip?: boolean;
+      environment?: string;
+      stripe_slots?: number[];
+      stripe_vip_slots?: number[];
+      stripe_sandbox?: boolean;
+    }>('/wallet/purchase-methods', { signal, cache: 'no-store' }),
 
-  preparePurchase: (slotId: number, novelId: number, requestKey: string, returnPath: string, signal?: AbortSignal) =>
+  preparePurchase: (
+    slotId: number,
+    novelId: number,
+    requestKey: string,
+    returnPath: string,
+    signal?: AbortSignal,
+    productId?: number,
+  ) =>
     request<PurchaseIntent>('/wallet/purchase-intents', {
       method: 'POST',
       signal,
-      body: JSON.stringify({ slot_id: slotId, novel_id: novelId, request_key: requestKey, return_path: returnPath }),
+      body: JSON.stringify({
+        slot_id: slotId,
+        ...(productId ? { product_id: productId } : {}),
+        novel_id: novelId,
+        request_key: requestKey,
+        return_path: returnPath,
+      }),
     }),
 
   startPayPalCheckout: (intentId: string, signal?: AbortSignal) =>
@@ -496,6 +526,9 @@ export const api = {
         id: number;
         template_id: number;
         slot_index: number;
+        product_id?: number;
+        product_code?: string;
+        product_type?: 'single' | 'whole_book' | 'vip';
         type: 'single' | 'subscription' | 'vip' | 'whole_book';
         coins: number;
         bonus: number;
@@ -503,6 +536,12 @@ export const api = {
         subscription_cycle?: string;
         vip_name: string;
         vip_desc: string;
+        badge?: string;
+        is_highlighted?: boolean;
+        display_alias?: string;
+        novel_scope_type?: string;
+        paypal_ready?: boolean;
+        stripe_ready?: boolean;
         price: string;
         price_cents: number;
       }>;

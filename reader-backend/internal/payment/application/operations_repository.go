@@ -78,7 +78,12 @@ func PaymentTaskStatus(ctx context.Context) ([]TaskStatus, error) {
                             ('order_pending',pending_count,pending_oldest,pending_attempts),
                             ('manual_review',review_count,review_oldest,review_attempts))
                    AS summary(kind,task_count,oldest_at,max_attempts)
- UNION ALL SELECT 'refund_shortfall',count(*),min(updated_at),0 FROM payment_refunds WHERE charged_coin_shortfall>0 OR bonus_coin_shortfall>0
+ UNION ALL SELECT 'refund_shortfall',
+   (SELECT count(*) FROM payment_refunds WHERE charged_coin_shortfall>0 OR bonus_coin_shortfall>0) +
+   (SELECT count(*) FROM payment_entitlement_adjustments WHERE blocked AND (charged_coin_shortfall>0 OR bonus_coin_shortfall>0)),
+   LEAST((SELECT min(updated_at) FROM payment_refunds WHERE charged_coin_shortfall>0 OR bonus_coin_shortfall>0),
+         (SELECT min(updated_at) FROM payment_entitlement_adjustments WHERE blocked AND (charged_coin_shortfall>0 OR bonus_coin_shortfall>0))),
+   0
  UNION ALL SELECT 'subscription_intent_uncertain',count(*),min(submitted_at),0 FROM paypal_subscription_intents WHERE checkout_environment=$1 AND submitted_at IS NOT NULL AND subscription_id IS NULL
  UNION ALL SELECT 'subscription_scope_unknown',count(*),min(created_at),0 FROM user_subscriptions
  WHERE payment_method IN ('paypal','stripe') AND subscription_id NOT LIKE 'I-MOCK%' AND payment_subscription_environment(user_subscriptions) IS NULL`, conversion.Environment())

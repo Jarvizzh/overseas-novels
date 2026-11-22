@@ -29,11 +29,16 @@ func TestSubscriptionRecoveryAndManagement(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	exec(`INSERT INTO users(id,utm_source,utm_campaign) VALUES(1,'s','c'),(2,'',''); INSERT INTO novels(id,title,author) VALUES(1,'Book','Author'); INSERT INTO recharge_templates(id,name,is_default) VALUES(1,'Default',true); INSERT INTO recharge_slots(id,template_id,slot_index,type,price,price_cents) VALUES(1,1,1,'vip','$9.99',999)`)
-	exec(`INSERT INTO user_subscriptions(user_id,subscription_id,plan_id,slot_id,template_id,status,cycle,price_cents,currency,payment_method) VALUES(1,'I-RECOVER','P-REVIEW',1,1,'ACTIVE','month',999,'USD','paypal')`)
+	exec(`INSERT INTO users(id,utm_source,utm_campaign) VALUES(1,'s','c'),(2,'',''); INSERT INTO novels(id,title,author) VALUES(1,'Book','Author')`)
 	exec(`INSERT INTO system_configs(key,value) VALUES('paypal_client_id','review-client'),('paypal_secret_key','review-secret'),('paypal_mode','sandbox')`)
-	exec(`SELECT assert_paypal_identity('review-client','sandbox');
-		UPDATE user_subscriptions SET checkout_account_id=(SELECT id FROM payment_channel_accounts
+	exec(`SELECT assert_paypal_identity('review-client','sandbox')`)
+	seedTestProductAndSlot(t, p, testCatalogSpec{
+		SlotID: 1, TemplateID: 1, TemplateName: "Default", IsDefault: true, SlotIndex: 1,
+		Code: "TEST_AVAIL_VIP", ProductType: "vip", VipCycle: "month", PriceCents: 999,
+		Environment: "sandbox", PayPalAccountKey: "review-client", PayPalPlanID: "P-REVIEW",
+	})
+	exec(`INSERT INTO user_subscriptions(user_id,subscription_id,plan_id,slot_id,template_id,status,cycle,price_cents,currency,payment_method) VALUES(1,'I-RECOVER','P-REVIEW',1,1,'ACTIVE','month',999,'USD','paypal')`)
+	exec(`UPDATE user_subscriptions SET checkout_account_id=(SELECT id FROM payment_channel_accounts
 		WHERE provider='paypal' AND account_key='review-client' AND environment='sandbox') WHERE subscription_id='I-RECOVER'`)
 	repo := NewDBRepository(wallet.NewDBRepository())
 	svc := &service{repo: repo, readingAccess: novel.NewDBRepository(), paypalClient: paypal.NewClient(credentialstore.Load)}
@@ -102,7 +107,10 @@ func TestLongAttributionDoesNotBlockSettlement(t *testing.T) {
 		}
 	}
 	exec(`INSERT INTO users(id,utm_source,utm_campaign) VALUES(1,'source',$1)`, long)
-	exec(`INSERT INTO recharge_templates(id,name,is_default) VALUES(1,'Default',true); INSERT INTO recharge_slots(id,template_id,slot_index,type,coins,price,price_cents) VALUES(1,1,1,'single',100,'$9.99',999)`)
+	seedTestProductAndSlot(t, p, testCatalogSpec{
+		SlotID: 1, TemplateID: 1, TemplateName: "Default", IsDefault: true, SlotIndex: 1,
+		Code: "TEST_LONG_UTM_1", ProductType: "single", PriceCents: 999, Coins: 100,
+	})
 	r := NewDBRepository(wallet.NewDBRepository())
 	slot, err := r.GetRechargeSlotByID(ctx, 1)
 	if err != nil {

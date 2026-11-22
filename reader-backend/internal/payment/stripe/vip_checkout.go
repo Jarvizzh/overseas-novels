@@ -64,6 +64,28 @@ func (c *Client) ReadStripeVIPCheckout(ctx context.Context, id, intent, mode str
 	return c.vipCheckoutSnapshot(session, id, intent, mode)
 }
 
+func (c *Client) CloseStripeVIPCheckout(ctx context.Context, id, intent, mode string) (payment.StripeVIPCheckout, error) {
+	session, err := c.GetCheckout(ctx, id)
+	if err != nil {
+		return payment.StripeVIPCheckout{}, err
+	}
+	if _, err := c.vipCheckoutSnapshot(session, id, intent, mode); err != nil {
+		return payment.StripeVIPCheckout{}, err
+	}
+	if session.Status == stripego.CheckoutSessionStatusOpen && session.Subscription == nil {
+		_, closeErr := c.ExpireCheckout(ctx, id, "vip-switch-"+intent)
+		proof, readErr := c.ReadStripeVIPCheckout(ctx, id, intent, mode)
+		if readErr != nil {
+			return proof, readErr
+		}
+		if !proof.Expired && proof.SubscriptionID == "" && closeErr != nil {
+			return proof, closeErr
+		}
+		return proof, nil
+	}
+	return c.ReadStripeVIPCheckout(ctx, id, intent, mode)
+}
+
 func (c *Client) FindStripeVIPCheckout(ctx context.Context, intent string, from, through time.Time) (string, error) {
 	return c.findCheckoutByReference(ctx, intent, from, through, stripego.CheckoutSessionModeSubscription)
 }

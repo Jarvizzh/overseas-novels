@@ -41,18 +41,31 @@ type Order struct {
 }
 
 type RechargeSlot struct {
-	ID                int    `json:"id"`
-	TemplateID        int    `json:"template_id"`
-	SlotIndex         int    `json:"slot_index"` // 1 to 8
-	Type              string `json:"type"`       // 'single', 'subscription', 'vip', 'whole_book'
-	Coins             int    `json:"coins"`
-	Bonus             int    `json:"bonus"`
-	VipDuration       string `json:"vip_duration"`
-	SubscriptionCycle string `json:"subscription_cycle"` // 'day', 'week', 'month'
-	VipName           string `json:"vip_name"`
-	VipDesc           string `json:"vip_desc"`
-	Price             string `json:"price"`
-	PriceCents        int    `json:"price_cents"`
+	ID            int    `json:"id"`
+	TemplateID    int    `json:"template_id"`
+	SlotIndex     int    `json:"slot_index"` // 1 to 8
+	ProductID     int64  `json:"product_id"`
+	Badge         string `json:"badge"`
+	IsHighlighted bool   `json:"is_highlighted"`
+	DisplayAlias  string `json:"display_alias"`
+
+	// Hydrated read-only product attributes (authoritative source: products table)
+	ProductCode       string   `json:"product_code,omitempty"`
+	ProductType       string   `json:"product_type,omitempty"` // 'single', 'whole_book', 'vip'
+	Type              string   `json:"type"`                   // 'single', 'whole_book', 'subscription'
+	Name              string   `json:"name,omitempty"`
+	Description       string   `json:"description,omitempty"`
+	Coins             int      `json:"coins"`
+	Bonus             int      `json:"bonus"`
+	VipDuration       string   `json:"vip_duration"`
+	SubscriptionCycle string   `json:"subscription_cycle"` // 'day', 'week', 'month', 'year'
+	VipName           string   `json:"vip_name"`
+	VipDesc           string   `json:"vip_desc"`
+	Price             string   `json:"price"`
+	PriceCents        int      `json:"price_cents"`
+	NovelScopeType    string   `json:"novel_scope_type,omitempty"`
+	NovelScopeIDs     []int64  `json:"novel_scope_ids,omitempty"`
+	PublishedEnvs     []string `json:"published_envs,omitempty"`
 }
 
 type RechargeTemplate struct {

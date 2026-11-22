@@ -57,13 +57,28 @@ func (r *dbRepository) GetCheckoutTemplate(ctx context.Context, userID int64) (i
 }
 
 func (r *dbRepository) CreateCheckout(ctx context.Context, userID int64, slot *model.RechargeSlot, novelID int64, attribution checkoutAttribution) (string, error) {
+	if slot == nil || slot.ID <= 0 {
+		return "", ErrCheckoutUnavailable
+	}
+	prod, err := resolveProductForCheckoutTx(ctx, db.Pool(ctx), userID, slot.ProductID, slot.ID, currentPaymentLedgerEnvironment())
+	if err != nil {
+		return "", err
+	}
+	if prod.OrderType == "subscription" ||
+		(slot.TemplateID > 0 && slot.TemplateID != prod.TemplateID) ||
+		(slot.PriceCents > 0 && slot.PriceCents != prod.PriceCents) ||
+		(slot.Type != "" && slot.Type != prod.OrderType) ||
+		slot.Bonus != prod.Bonus ||
+		(prod.OrderType != "whole_book" && slot.Coins != prod.Coins) {
+		return "", ErrCheckoutUnavailable
+	}
 	key := uuid.NewString()
 	var environment *string
-	if slot != nil && slot.Type == "whole_book" {
+	if prod.OrderType == "whole_book" {
 		scope := conversion.Environment()
 		environment = &scope
 	}
-	_, err := insertCheckout(ctx, db.Pool(ctx), key, userID, slot, novelID, attribution, environment, "")
+	_, err = insertCheckout(ctx, db.Pool(ctx), key, userID, prod, novelID, attribution, environment, "")
 	return key, err
 }
 
@@ -71,28 +86,44 @@ type checkoutQueryer interface {
 	QueryRow(context.Context, string, ...any) pgx.Row
 }
 
-func insertCheckout(ctx context.Context, q checkoutQueryer, key string, userID int64, slot *model.RechargeSlot, novelID int64, attribution checkoutAttribution, environment *string, returnPath string) (int64, error) {
+func insertCheckout(ctx context.Context, q checkoutQueryer, key string, userID int64, prod resolvedProduct, novelID int64, attribution checkoutAttribution, environment *string, returnPath string) (int64, error) {
+	if prod.OrderType == "whole_book" {
+		allowed, err := wholeBookProductAvailable(ctx, q, userID, prod.TemplateID, novelID, prod.NovelScopeType, prod.NovelScopeIDs)
+		if err != nil {
+			return 0, err
+		}
+		if !allowed {
+			return 0, ErrCheckoutUnavailable
+		}
+	}
 	attributionJSON, err := json.Marshal(attribution)
 	if err != nil {
 		return 0, err
 	}
+	ledgerEnv := currentPaymentLedgerEnvironment()
 	var id int64
 	err = q.QueryRow(ctx, `
 		INSERT INTO recharge_orders (checkout_id, user_id, amount_cents, currency, coins, bonus_coins_credited,
-			payment_method, status, order_type, recharge_slot_id, recharge_template_id, novel_id, utm_source, utm_campaign, promotion_link_id,fb_lead_metadata,
-			checkout_environment, checkout_return_path)
-		SELECT $1, u.id, $2, 'USD', $3, $4, 'paypal', 'Pending', $5::varchar, $6, $7, NULLIF($8, 0),
-			u.utm_source, u.utm_campaign, p.id,$10::jsonb || jsonb_build_object('pixel_id',(SELECT fp.pixel_id FROM promotion_links l JOIN fb_pixels fp ON fp.id=l.fb_pixel_id WHERE l.id=p.id)),
-			$11,$12
+			payment_method, status, order_type, recharge_slot_id, recharge_template_id, product_id, product_snapshot, novel_id,
+			utm_source, utm_campaign, promotion_link_id, fb_lead_metadata, checkout_environment, checkout_return_path)
+		SELECT $1, u.id, $2, 'USD', $3, $4, 'paypal', 'Pending', $5::varchar, NULLIF($6, 0), NULLIF($7, 0), $8, $9::jsonb, NULLIF($10, 0),
+			u.utm_source, u.utm_campaign, p.id, $12::jsonb || jsonb_build_object('pixel_id',(SELECT fp.pixel_id FROM promotion_links l JOIN fb_pixels fp ON fp.id=l.fb_pixel_id WHERE l.id=p.id)),
+			$13, $14
 		FROM users u
 		LEFT JOIN LATERAL (SELECT id,novel_id,recharge_template_id FROM reader_promotion_for_user(u.id)) p ON TRUE
-		WHERE u.id = $9
-		AND $7 = COALESCE(p.recharge_template_id,(SELECT id FROM recharge_templates ORDER BY is_default DESC NULLS LAST,id LIMIT 1))
-		AND ($5::varchar <> 'whole_book' OR whole_book_offer_available(u.id,$7,$8))
-		AND EXISTS(SELECT 1 FROM recharge_slots WHERE id=$6 AND template_id=$7 AND type=$5::varchar
-			AND price_cents=$2 AND bonus=$4 AND ($5::varchar='whole_book' OR coins=$3))
+		WHERE u.id = $11
+		  AND ($6 = 0 OR $7 = COALESCE(p.recharge_template_id,(SELECT id FROM recharge_templates ORDER BY is_default DESC NULLS LAST,id LIMIT 1)))
+		  AND ($6 = 0 OR EXISTS(SELECT 1 FROM recharge_slots s WHERE s.id = $6 AND s.template_id = $7 AND s.product_id = $8))
+		  AND EXISTS (
+		      SELECT 1 FROM products pr
+		      JOIN product_publications pub ON pub.product_id = pr.id AND pub.environment = $15 AND pub.status = 'published'
+		      WHERE pr.id = $8 AND pr.product_type = $5::varchar AND pr.price_cents = $2 AND pr.bonus = $4
+		        AND ($5::varchar = 'whole_book' OR pr.coins = $3)
+		        `+dualChannelSellableSQL("pr", "$15")+`
+		  )
 		RETURNING id`,
-		key, slot.PriceCents, slot.Coins, slot.Bonus, slot.Type, slot.ID, slot.TemplateID, novelID, userID, attributionJSON, environment, returnPath).Scan(&id)
+		key, prod.PriceCents, prod.Coins, prod.Bonus, prod.OrderType, prod.SlotID, prod.TemplateID,
+		prod.ID, string(prod.SnapshotJSON), novelID, userID, attributionJSON, environment, returnPath, ledgerEnv).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return 0, ErrCheckoutUnavailable
 	}
@@ -204,7 +235,7 @@ func (r *dbRepository) settleCheckout(ctx context.Context, orderID string, captu
 		return nil, ErrCheckoutUnavailable
 	}
 	cents := o.amount
-	if historicalBook {
+	if historicalBook && !extra {
 		if !paymentEnvironmentMatches(capture.Account) {
 			return nil, ErrCheckoutUnavailable
 		}

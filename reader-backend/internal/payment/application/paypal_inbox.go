@@ -122,7 +122,11 @@ func applyRefundBeforeFulfillment(ctx context.Context, tx pgx.Tx, orderID int64,
 }
 
 func (s *service) reconcilePayPalEvents(ctx context.Context) {
-	account, err := s.paypalClient.CheckoutAccount(ctx)
+	client := s.primaryPayPalClient()
+	if client == nil {
+		return
+	}
+	account, err := client.CheckoutAccount(ctx)
 	if err != nil || !paymentEnvironmentMatches(account) {
 		return
 	}
@@ -139,7 +143,7 @@ func (s *service) reconcilePayPalEvents(ctx context.Context) {
 		job := events[i]
 		event := &job.event
 		requestCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
-		err := s.applyPayPalEvent(requestCtx, s.paypalClient, event)
+		err := s.applyPayPalEvent(requestCtx, client, event)
 		cancel()
 		if err != nil {
 			log.Printf("task=inbox id=%s attempt=%d error=%v", event.EventID, job.attempt, err)

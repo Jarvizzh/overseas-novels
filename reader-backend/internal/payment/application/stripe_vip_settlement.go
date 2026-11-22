@@ -108,9 +108,9 @@ func lockStripeVIPOrder(ctx context.Context, tx pgx.Tx, v stripeVIPIntent, proof
 		return 0, false, err
 	}
 	err = tx.QueryRow(ctx, `INSERT INTO recharge_orders(user_id,external_ref_id,amount_cents,currency,coins,bonus_coins_credited,
-		payment_method,status,order_type,subscription_id,recharge_slot_id,recharge_template_id,checkout_environment,
+		payment_method,status,order_type,subscription_id,recharge_slot_id,recharge_template_id,product_id,product_snapshot,checkout_environment,
 		utm_source,utm_campaign,promotion_link_id,novel_id,fb_lead_metadata)
-		SELECT v.user_id,$2,$3,'USD',0,0,'stripe','Pending','subscription',$4,v.slot_id,t.id,v.checkout_environment,
+		SELECT v.user_id,$2,$3,'USD',0,0,'stripe','Pending','subscription',$4,v.slot_id,t.id,v.product_id,v.product_snapshot,v.checkout_environment,
 		   COALESCE(v.attribution->>'utm_source',u.utm_source),COALESCE(v.attribution->>'utm_campaign',u.utm_campaign),
 		   p.id,p.novel_id,v.attribution
 		FROM payment_stripe_subscription_intents v JOIN users u ON u.id=v.user_id
@@ -398,6 +398,14 @@ func grantStripeVIPPeriod(ctx context.Context, tx pgx.Tx, proof payment.StripeVI
 	}
 	if tag.RowsAffected() != 1 {
 		return fmt.Errorf("Stripe VIP invoice %s cannot fulfill order %d from its current state", proof.ID, orderID)
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE payment_vip_checkout_intents
+		SET status='Completed',subscription_id=COALESCE(NULLIF(subscription_id,''),$1),updated_at=now()
+		WHERE status='Pending'
+		  AND stripe_intent_id=(SELECT checkout_intent_id FROM user_subscriptions WHERE subscription_id=$1 AND payment_method='stripe' LIMIT 1)`,
+		proof.Subscription.ID); err != nil {
+		return err
 	}
 	first := proof.BillingReason == "subscription_create"
 	subscribe := false

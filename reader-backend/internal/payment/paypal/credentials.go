@@ -22,11 +22,12 @@ const (
 var ErrCredentials = errors.New("PayPal credentials unavailable")
 
 type Config struct {
-	ClientID    string
-	Secret      string
-	Environment string
-	WebhookID   string
-	MerchantID  string
+	ClientID          string
+	Secret            string
+	Environment       string
+	WebhookID         string
+	PreviousWebhookID string
+	MerchantID        string
 }
 
 type CredentialsSource func(context.Context) (Config, error)
@@ -84,6 +85,7 @@ func (p *Client) credentials(ctx context.Context) (Config, error) {
 		cfg.Environment = EnvironmentLive
 	}
 	cfg.WebhookID = strings.TrimSpace(cfg.WebhookID)
+	cfg.PreviousWebhookID = strings.TrimSpace(cfg.PreviousWebhookID)
 	p.config = cfg
 	p.configUntil = time.Now().Add(credentialCacheTTL)
 	return cfg, nil

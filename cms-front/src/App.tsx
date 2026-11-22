@@ -39,6 +39,7 @@ const SupportPayments = lazy(() => import('./pages/PaymentCenter').then((page) =
 const PaymentSubscriptions = lazy(() => import('./pages/PaymentCenter').then((page) => ({ default: page.PaymentSubscriptions })));
 const PaymentChannels = lazy(() => import('./pages/PaymentCenter').then((page) => ({ default: page.PaymentChannels })));
 const PaymentRefunds = lazy(() => import('./pages/PaymentRefunds').then((page) => ({ default: page.PaymentRefunds })));
+const ProductsPage = lazy(() => import('./pages/ProductsPage'));
 
 function LegacyAdLogsRedirect() {
   const { search } = useLocation();
@@ -327,6 +328,9 @@ function AppContent() {
                 <PaymentReconciliation /> : <Navigate to="/" replace />} />
               <Route path="/payments/channels" element={admin.role === 'SuperAdmin' ? <PaymentChannels /> : <Navigate to="/" replace />} />
             </Route>
+            <Route path="/products" element={PAYMENT_SUMMARY_ROLES.includes(admin.role) ?
+              <Suspense fallback={<p role="status">正在加载商品中心…</p>}><ProductsPage canWrite={PAYMENT_FINANCE_ROLES.includes(admin.role)} /></Suspense> :
+              <Navigate to="/" replace />} />
             <Route path="/feedback" element={<FeedbackTab />} />
             <Route path="/promotions" element={<PromotionsTab />} />
             <Route path="/recharge-templates" element={<TemplatesTab />} />

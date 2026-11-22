@@ -46,6 +46,11 @@ func (h *Handler) RegisterRoutes(rg *gin.RouterGroup) {
 		payments.GET("/orders/:id/stripe-market-review", financeRoles, h.getStripeMarketReview)
 		payments.POST("/orders/:id/stripe-market-review", financeRoles, h.approveStripeMarketReview)
 		payments.GET("/channels", paymentRoles("SuperAdmin"), h.ListPaymentChannels)
+		payments.POST("/channels", paymentRoles("SuperAdmin"), h.CreatePaymentChannel)
+		payments.PATCH("/channels/:id", paymentRoles("SuperAdmin"), h.EditPaymentChannel)
+		payments.POST("/channels/:id/validate", paymentRoles("SuperAdmin"), h.ValidatePaymentChannel)
+		payments.POST("/channels/:id/publish", paymentRoles("SuperAdmin"), h.PublishPaymentChannel)
+		payments.POST("/channels/:id/deactivate", paymentRoles("SuperAdmin"), h.DeactivatePaymentChannel)
 		payments.GET("/channels/vip-offers", paymentRoles("SuperAdmin"), h.ListVIPOfferPublications)
 		payments.PUT("/channels/:id", paymentRoles("SuperAdmin"), h.UpdatePaymentChannel)
 		payments.GET("/channels/:id/stripe-one-time", paymentRoles("SuperAdmin"), h.listStripeOneTimeOffers)
@@ -58,6 +63,19 @@ func (h *Handler) RegisterRoutes(rg *gin.RouterGroup) {
 		payments.GET("/refunds/request/:key", financeRoles, h.GetRefundCommand)
 		payments.GET("/refunds/:id", financeRoles, h.GetRefundCommand)
 		payments.POST("/refunds/:id/reconcile-paypal", financeRoles, h.ReconcilePayPalRefund)
+	}
+
+	products := rg.Group("/products", auth.AuthMiddleware())
+	{
+		products.GET("", summaryRoles, h.ListProducts)
+		products.GET("/:id", summaryRoles, h.GetProduct)
+		products.POST("", financeRoles, h.CreateProduct)
+		products.POST("/:id/copy", financeRoles, h.CopyProduct)
+		products.PUT("/:id/bindings/paypal", financeRoles, h.UpsertProductPayPalBinding)
+		products.PUT("/:id/bindings/stripe", financeRoles, h.UpsertProductStripeBinding)
+		products.POST("/:id/publish", financeRoles, h.PublishProduct)
+		products.POST("/:id/pause", financeRoles, h.PauseProduct)
+		products.POST("/:id/retire", financeRoles, h.RetireProduct)
 	}
 
 	templates := rg.Group("/recharge-templates", auth.AuthMiddleware())
@@ -100,6 +118,10 @@ func (h *Handler) ListOrders(c *gin.Context) {
 	paidStart := c.Query("paid_start")
 	paidEnd := c.Query("paid_end")
 	orderID := c.Query("order_id")
+	if page < 1 || page > 1000000 || pageSize < 1 || pageSize > 100 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid payment order filters"})
+		return
+	}
 	support := c.GetString("payment_role") == "Support"
 	if support && orderID == "" && userID == "" {
 		c.JSON(http.StatusForbidden, gin.H{"error": "Provide an order number or user number for a support lookup"})
@@ -284,22 +306,68 @@ func (h *Handler) ListRechargeTemplates(c *gin.Context) {
 }
 
 type SlotReq struct {
-	SlotIndex         int    `json:"slot_index" binding:"gte=0"`
-	Type              string `json:"type" binding:"required"`
-	Coins             int    `json:"coins"`
-	Bonus             int    `json:"bonus"`
-	VipDuration       string `json:"vip_duration"`
-	SubscriptionCycle string `json:"subscription_cycle"`
-	VipName           string `json:"vip_name"`
-	VipDesc           string `json:"vip_desc"`
-	Price             string `json:"price" binding:"required"`
-	PriceCents        int    `json:"price_cents" binding:"required"`
+	SlotIndex     int    `json:"slot_index" binding:"gte=1,lte=8"`
+	ProductID     int64  `json:"product_id" binding:"gt=0"`
+	Badge         string `json:"badge" binding:"max=32"`
+	IsHighlighted bool   `json:"is_highlighted"`
+	DisplayAlias  string `json:"display_alias" binding:"max=64"`
+
+	// Explicit commercial override fields are forbidden in templates (CAT-03).
+	Type              *string `json:"type"`
+	Coins             *int    `json:"coins"`
+	Bonus             *int    `json:"bonus"`
+	VipDuration       *string `json:"vip_duration"`
+	SubscriptionCycle *string `json:"subscription_cycle"`
+	VipCycle          *string `json:"vip_cycle"`
+	VipName           *string `json:"vip_name"`
+	VipDesc           *string `json:"vip_desc"`
+	Price             *string `json:"price"`
+	PriceCents        *int    `json:"price_cents"`
+	Currency          *string `json:"currency"`
+}
+
+func (s SlotReq) hasCommercialOverride() bool {
+	return s.Type != nil || s.Coins != nil || s.Bonus != nil || s.VipDuration != nil ||
+		s.SubscriptionCycle != nil || s.VipCycle != nil || s.VipName != nil || s.VipDesc != nil ||
+		s.Price != nil || s.PriceCents != nil || s.Currency != nil
 }
 
 type SaveTemplateReq struct {
 	Name      string    `json:"name" binding:"required"`
 	IsDefault bool      `json:"is_default"`
 	Slots     []SlotReq `json:"slots" binding:"required"`
+}
+
+func buildTemplateSlots(reqs []SlotReq) ([]RechargeSlot, bool) {
+	slots := make([]RechargeSlot, len(reqs))
+	for i, s := range reqs {
+		if s.hasCommercialOverride() {
+			return nil, true
+		}
+		slots[i] = RechargeSlot{
+			SlotIndex:     s.SlotIndex,
+			ProductID:     s.ProductID,
+			Badge:         s.Badge,
+			IsHighlighted: s.IsHighlighted,
+			DisplayAlias:  s.DisplayAlias,
+		}
+	}
+	return slots, false
+}
+
+func writeTemplateSaveError(c *gin.Context, err error) {
+	switch {
+	case errors.Is(err, ErrRefundForbidden):
+		c.JSON(http.StatusForbidden, gin.H{"error": "Financial permission required"})
+	case errors.Is(err, ErrTemplateSlotCountInvalid), errors.Is(err, ErrTemplateSlotBonusTooHigh), errors.Is(err, ErrTemplateSlotInvalid):
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+	case errors.Is(err, ErrTemplateProductNotPublished):
+		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+	case errors.Is(err, ErrTemplateNotFound):
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+	default:
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+	}
 }
 
 func (h *Handler) CreateRechargeTemplate(c *gin.Context) {
@@ -309,34 +377,16 @@ func (h *Handler) CreateRechargeTemplate(c *gin.Context) {
 		return
 	}
 
-	slots := make([]RechargeSlot, len(req.Slots))
-	for i, s := range req.Slots {
-		slots[i] = RechargeSlot{
-			SlotIndex:         s.SlotIndex,
-			Type:              s.Type,
-			Coins:             s.Coins,
-			Bonus:             s.Bonus,
-			VipDuration:       s.VipDuration,
-			SubscriptionCycle: s.SubscriptionCycle,
-			VipName:           s.VipName,
-			VipDesc:           s.VipDesc,
-			Price:             s.Price,
-			PriceCents:        s.PriceCents,
-		}
+	slots, forbiddenOverride := buildTemplateSlots(req.Slots)
+	if forbiddenOverride {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Templates cannot store or override product commercial fields (price, coins, bonus, cycle, type); create or copy a product instead"})
+		return
 	}
 
 	ctx := c.Request.Context()
 	templateID, err := h.service.CreateRechargeTemplate(ctx, c.GetString("admin_id"), req.Name, req.IsDefault, slots)
 	if err != nil {
-		if errors.Is(err, ErrRefundForbidden) {
-			c.JSON(http.StatusForbidden, gin.H{"error": "Financial permission required"})
-			return
-		}
-		if errors.Is(err, ErrTemplateSlotCountInvalid) || errors.Is(err, ErrTemplateSlotBonusTooHigh) {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-			return
-		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		writeTemplateSaveError(c, err)
 		return
 	}
 
@@ -356,38 +406,16 @@ func (h *Handler) UpdateRechargeTemplate(c *gin.Context) {
 		return
 	}
 
-	slots := make([]RechargeSlot, len(req.Slots))
-	for i, s := range req.Slots {
-		slots[i] = RechargeSlot{
-			SlotIndex:         s.SlotIndex,
-			Type:              s.Type,
-			Coins:             s.Coins,
-			Bonus:             s.Bonus,
-			VipDuration:       s.VipDuration,
-			SubscriptionCycle: s.SubscriptionCycle,
-			VipName:           s.VipName,
-			VipDesc:           s.VipDesc,
-			Price:             s.Price,
-			PriceCents:        s.PriceCents,
-		}
+	slots, forbiddenOverride := buildTemplateSlots(req.Slots)
+	if forbiddenOverride {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Templates cannot store or override product commercial fields (price, coins, bonus, cycle, type); create or copy a product instead"})
+		return
 	}
 
 	ctx := c.Request.Context()
 	err = h.service.UpdateRechargeTemplate(ctx, c.GetString("admin_id"), id, req.Name, req.IsDefault, slots)
 	if err != nil {
-		if errors.Is(err, ErrRefundForbidden) {
-			c.JSON(http.StatusForbidden, gin.H{"error": "Financial permission required"})
-			return
-		}
-		if errors.Is(err, ErrTemplateSlotCountInvalid) || errors.Is(err, ErrTemplateSlotBonusTooHigh) {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-			return
-		}
-		if errors.Is(err, ErrTemplateNotFound) {
-			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
-			return
-		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		writeTemplateSaveError(c, err)
 		return
 	}
 

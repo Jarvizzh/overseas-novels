@@ -36,10 +36,17 @@ type Event struct {
 type VerifiedEvent = Event
 
 func (c *Client) VerifyWebhook(body []byte, signature string) (VerifiedEvent, error) {
-	if c.webhookSecret == "" {
+	if c.webhookSecret == "" && c.previousWebhookSecret == "" {
 		return VerifiedEvent{}, errors.New("Stripe webhook signing secret is unconfigured")
 	}
-	event, err := webhook.ConstructEvent(body, signature, c.webhookSecret)
+	var event stripego.Event
+	var err error
+	if c.webhookSecret != "" {
+		event, err = webhook.ConstructEvent(body, signature, c.webhookSecret)
+	}
+	if (err != nil || c.webhookSecret == "") && c.previousWebhookSecret != "" && c.previousWebhookSecret != c.webhookSecret {
+		event, err = webhook.ConstructEvent(body, signature, c.previousWebhookSecret)
+	}
 	if err != nil {
 		return VerifiedEvent{}, errors.New("invalid Stripe webhook signature or payload")
 	}

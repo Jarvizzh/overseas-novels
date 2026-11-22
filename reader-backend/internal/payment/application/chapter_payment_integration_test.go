@@ -25,13 +25,14 @@ func TestChapterPurchasesConcurrentWithPaymentLifecycle(t *testing.T) {
 		INSERT INTO chapters(id,novel_id,chapter_index,title,content,word_count)
 		    SELECT 'c'||i,1,i,'Chapter','body',1000 FROM generate_series(0,20) i;
 		INSERT INTO users(id) VALUES(11),(12),(13);
-		INSERT INTO wallets(user_id,charged_coins,bonus_coins) VALUES(11,0,450),(12,0,2000),(13,0,2000);
-		INSERT INTO recharge_templates(id,name,is_default) VALUES(7,'test',true);
-		INSERT INTO recharge_slots(id,template_id,slot_index,type,coins,bonus,price,price_cents)
-		    VALUES(9,7,1,'single',100,0,'$9.99',999)`)
+		INSERT INTO wallets(user_id,charged_coins,bonus_coins) VALUES(11,0,450),(12,0,2000),(13,0,2000)`)
 	if err != nil {
 		t.Fatal(err)
 	}
+	seedTestProductAndSlot(t, pool, testCatalogSpec{
+		SlotID: 9, TemplateID: 7, TemplateName: "test", IsDefault: true, SlotIndex: 1,
+		Code: "TEST_CH_PAY_9", ProductType: "single", PriceCents: 999, Coins: 100, Bonus: 0,
+	})
 	nr := novel.NewDBRepository()
 	version, err := nr.GetContentVersion(ctx, 1)
 	if err != nil {

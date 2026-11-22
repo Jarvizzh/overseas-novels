@@ -30,7 +30,7 @@ type BillingRepository interface {
 
 	ClearDefaultTemplatesTx(ctx context.Context, tx pgx.Tx) error
 	CreateRechargeTemplateTx(ctx context.Context, tx pgx.Tx, name string, isDefault bool) (int, error)
-	CreateRechargeSlotTx(ctx context.Context, tx pgx.Tx, templateID, index int, slotType string, coins, bonus int, duration, cycle, vipName, vipDesc, price string, priceCents int) error
+	CreateRechargeSlotTx(ctx context.Context, tx pgx.Tx, templateID, index int, productID int64, badge string, isHighlighted bool, displayAlias string) error
 
 	UpdateRechargeTemplateTx(ctx context.Context, tx pgx.Tx, id int, name string, isDefault bool) (int64, error)
 	SetDefaultTemplateOnlyTx(ctx context.Context, tx pgx.Tx, id int) (int64, error)
@@ -216,10 +216,20 @@ func (r *dbBillingRepository) ListRechargeTemplates(ctx context.Context) ([]Rech
 
 func (r *dbBillingRepository) GetRechargeSlots(ctx context.Context, templateID int) ([]RechargeSlot, error) {
 	rows, err := db.DB.Query(ctx, `
-		SELECT id, template_id, slot_index, type, coins, bonus, COALESCE(vip_duration, ''), COALESCE(subscription_cycle, ''), COALESCE(vip_name, ''), COALESCE(vip_desc, ''), price, price_cents
-		FROM recharge_slots
-		WHERE template_id = $1
-		ORDER BY slot_index ASC
+		SELECT s.id, s.template_id, s.slot_index, s.product_id, s.badge, s.is_highlighted, s.display_alias,
+		       p.code, p.product_type,
+		       CASE WHEN p.product_type = 'vip' THEN 'subscription' ELSE p.product_type END,
+		       p.name, p.description, p.coins, p.bonus, COALESCE(p.vip_cycle, ''),
+		       p.price_cents, p.novel_scope_type, p.novel_scope_ids,
+		       COALESCE(ARRAY(
+		           SELECT pub.environment FROM product_publications pub
+		           WHERE pub.product_id = p.id AND pub.status = 'published'
+		           ORDER BY pub.environment
+		       ), '{}'::text[])
+		FROM recharge_slots s
+		JOIN products p ON p.id = s.product_id
+		WHERE s.template_id = $1
+		ORDER BY s.slot_index ASC, s.id ASC
 	`, templateID)
 	if err != nil {
 		return nil, err
@@ -229,9 +239,23 @@ func (r *dbBillingRepository) GetRechargeSlots(ctx context.Context, templateID i
 	var slots []RechargeSlot
 	for rows.Next() {
 		var s RechargeSlot
-		err := rows.Scan(&s.ID, &s.TemplateID, &s.SlotIndex, &s.Type, &s.Coins, &s.Bonus, &s.VipDuration, &s.SubscriptionCycle, &s.VipName, &s.VipDesc, &s.Price, &s.PriceCents)
+		err := rows.Scan(
+			&s.ID, &s.TemplateID, &s.SlotIndex, &s.ProductID, &s.Badge, &s.IsHighlighted, &s.DisplayAlias,
+			&s.ProductCode, &s.ProductType, &s.Type,
+			&s.Name, &s.Description, &s.Coins, &s.Bonus, &s.SubscriptionCycle,
+			&s.PriceCents, &s.NovelScopeType, &s.NovelScopeIDs, &s.PublishedEnvs,
+		)
 		if err != nil {
 			return nil, err
+		}
+		s.Price = formatUSDCents(s.PriceCents)
+		if s.ProductType == productTypeVIP {
+			s.VipDuration = s.SubscriptionCycle
+			s.VipName = s.Name
+			s.VipDesc = s.Description
+		}
+		if s.NovelScopeIDs == nil {
+			s.NovelScopeIDs = []int64{}
 		}
 		slots = append(slots, s)
 	}
@@ -253,17 +277,11 @@ func (r *dbBillingRepository) CreateRechargeTemplateTx(ctx context.Context, tx p
 	return templateID, err
 }
 
-func (r *dbBillingRepository) CreateRechargeSlotTx(ctx context.Context, tx pgx.Tx, templateID, index int, slotType string, coins, bonus int, duration, cycle, vipName, vipDesc, price string, priceCents int) error {
-	query := `
-		INSERT INTO recharge_slots (template_id, slot_index, type, coins, bonus, vip_duration, subscription_cycle, vip_name, vip_desc, price, price_cents)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-		RETURNING id`
-	var slotID int
-	err := tx.QueryRow(ctx, query, templateID, index, slotType, coins, bonus, duration, cycle, vipName, vipDesc, price, priceCents).Scan(&slotID)
-	if err != nil || (slotType != "vip" && slotType != "subscription") {
-		return err
-	}
-	_, err = tx.Exec(ctx, `UPDATE recharge_slots s SET vip_offer_version_id=snapshot_vip_offer(s) WHERE s.id=$1`, slotID)
+func (r *dbBillingRepository) CreateRechargeSlotTx(ctx context.Context, tx pgx.Tx, templateID, index int, productID int64, badge string, isHighlighted bool, displayAlias string) error {
+	_, err := tx.Exec(ctx, `
+		INSERT INTO recharge_slots (template_id, slot_index, product_id, badge, is_highlighted, display_alias)
+		VALUES ($1, $2, $3, $4, $5, $6)`,
+		templateID, index, productID, badge, isHighlighted, displayAlias)
 	return err
 }
 

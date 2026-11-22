@@ -13,10 +13,11 @@ import (
 const vipPlanPublishTimeout = 45 * time.Second
 
 func (s *service) reconcilePayPalVIPOffers(ctx context.Context) {
-	if s.paypalClient == nil {
+	client := s.primaryPayPalClient()
+	if client == nil {
 		return
 	}
-	account, err := s.paypalClient.CheckoutAccount(ctx)
+	account, err := client.CheckoutAccount(ctx)
 	if err != nil || !paymentEnvironmentMatches(account) {
 		return
 	}
@@ -34,7 +35,7 @@ func (s *service) reconcilePayPalVIPOffers(ctx context.Context) {
 			return
 		}
 		req, cancel := context.WithTimeout(ctx, vipPlanPublishTimeout)
-		planID, err := s.paypalClient.CreatePlan(req, job)
+		planID, err := client.CreatePlan(req, job)
 		cancel()
 		if err != nil {
 			log.Printf("task=vip_plan request=%s action=publish error=%v", job.RequestID, err)

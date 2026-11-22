@@ -70,6 +70,7 @@ func TestPaymentCenterRefundAuthorizationIntegration(t *testing.T) {
 	exec(dbassets.PaymentCompletionSQL)
 	exec(dbassets.PaymentRecoverySQL)
 	exec(dbassets.PaymentReviewFixesSQL)
+	exec(dbassets.PaymentCatalogAndChannelSQL)
 	exec(`INSERT INTO admins(id,username,password_hash,role,status)
 		VALUES('test-editor','test-editor','none','Editor',1),
 		('test-disabled','test-disabled','none','Finance',2),
@@ -107,10 +108,24 @@ func TestPaymentCenterRefundAuthorizationIntegration(t *testing.T) {
 	}
 	finance := "test-finance"
 	t.Run("template writes require live financial permission and atomic audit", func(t *testing.T) {
-		slots := []RechargeSlot{{SlotIndex: 1, Type: "single", Coins: 100, Price: "$9.99", PriceCents: 999},
-			{SlotIndex: 2, Type: "single", Coins: 200, Price: "$19.99", PriceCents: 1999},
-			{SlotIndex: 3, Type: "subscription", SubscriptionCycle: "month", Price: "$9.99", PriceCents: 999},
-			{SlotIndex: 4, Type: "whole_book", Price: "$9.99", PriceCents: 999}}
+		exec(`
+			INSERT INTO products(id,code,product_type,name,price_cents,currency,coins,bonus,vip_cycle,novel_scope_type)
+			OVERRIDING SYSTEM VALUE VALUES
+			(9001,'TEST_COIN_999','single','Test Coin 999',999,'USD',100,0,NULL,'none'),
+			(9002,'TEST_COIN_1999','single','Test Coin 1999',1999,'USD',200,0,NULL,'none'),
+			(9003,'TEST_VIP_MONTH_999','vip','Test VIP Month',999,'USD',0,0,'month','none'),
+			(9004,'TEST_BOOK_999','whole_book','Test Whole Book',999,'USD',0,0,NULL,'all_published'),
+			(9005,'TEST_COIN_1299','single','Test Coin 1299',1299,'USD',150,0,NULL,'none');
+			INSERT INTO product_publications(product_id,environment,status,published_at)
+			VALUES(9001,'sandbox','published',now()),(9002,'sandbox','published',now()),
+			      (9003,'sandbox','published',now()),(9004,'sandbox','published',now()),
+			      (9005,'sandbox','published',now());`)
+		slots := []RechargeSlot{
+			{SlotIndex: 1, ProductID: 9001, DisplayAlias: "Starter"},
+			{SlotIndex: 2, ProductID: 9002},
+			{SlotIndex: 3, ProductID: 9003, Badge: "POPULAR"},
+			{SlotIndex: 4, ProductID: 9004},
+		}
 		for _, actor := range []string{"", "test-editor", "test-disabled", "test-missing"} {
 			if _, err := s.CreateRechargeTemplate(ctx, actor, "unauthorized", false, slots); !errors.Is(err, ErrRefundForbidden) {
 				t.Fatalf("create %s: %v", actor, err)
@@ -129,22 +144,18 @@ func TestPaymentCenterRefundAuthorizationIntegration(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		slots[0].PriceCents = 1299
-		slots[0].Price = "$12.99"
-		slots[2].PriceCents = 1499
-		slots[2].Price = "$14.99"
+		slots[0].ProductID = 9005
+		slots[0].Badge = "HOT"
+		slots[0].IsHighlighted = true
 		if err := s.UpdateRechargeTemplate(ctx, finance, id, "audited edit", false, slots); err != nil {
 			t.Fatal(err)
 		}
-		var before, after int
-		if err := pool.QueryRow(ctx, `SELECT (before_data->'slots'->0->>'price_cents')::int,(after_data->'slots'->0->>'price_cents')::int
-   FROM admin_audit_logs WHERE action='update_recharge_template' AND target_id=$1`, fmt.Sprint(id)).Scan(&before, &after); err != nil || before != 999 || after != 1299 {
-			t.Fatalf("price audit: %d %d %v", before, after, err)
-		}
-		var versions string
-		if err := pool.QueryRow(ctx, `SELECT string_agg(v.amount_minor::text, ',' ORDER BY v.slot_id)
-			FROM payment_vip_offer_versions v WHERE v.template_id=$1`, id).Scan(&versions); err != nil || versions != "999,1499" {
-			t.Fatalf("VIP terms were not versioned in the template transaction: %q %v", versions, err)
+		var beforeProd, afterProd int64
+		var afterBadge string
+		if err := pool.QueryRow(ctx, `SELECT (before_data->'slots'->0->>'product_id')::bigint,(after_data->'slots'->0->>'product_id')::bigint,
+			COALESCE(after_data->'slots'->0->>'badge','')
+   FROM admin_audit_logs WHERE action='update_recharge_template' AND target_id=$1`, fmt.Sprint(id)).Scan(&beforeProd, &afterProd, &afterBadge); err != nil || beforeProd != 9001 || afterProd != 9005 || afterBadge != "HOT" {
+			t.Fatalf("slot product audit: %d -> %d badge=%q %v", beforeProd, afterProd, afterBadge, err)
 		}
 		if err := s.SetDefaultRechargeTemplate(ctx, finance, id); err != nil {
 			t.Fatal(err)
@@ -264,6 +275,10 @@ func TestPaymentCenterRefundAuthorizationIntegration(t *testing.T) {
 		if _, err := submitRefundCommand(ctx, finance, req, 0); !errors.Is(err, ErrOrderNotRefundable) {
 			t.Fatalf("mismatched PayPal receipt became refundable: %v", err)
 		}
+		exec(`INSERT INTO recharge_templates(id,name) VALUES(955,'PayPal VIP Fixture');
+			INSERT INTO recharge_slots(id,template_id,slot_index,product_id,type,price,price_cents,coins,bonus,subscription_cycle)
+			VALUES(955,955,1,(SELECT id FROM products WHERE code='VIP_MONTH_1499'),'vip','9.99',999,0,0,'month');
+			UPDATE recharge_slots s SET vip_offer_version_id=snapshot_vip_offer(s) WHERE s.id=955;`)
 		offers, err := s.repo.ListVIPOfferPublications(ctx)
 		if err != nil {
 			t.Fatal(err)
@@ -336,8 +351,9 @@ func TestPaymentCenterRefundAuthorizationIntegration(t *testing.T) {
 		exec(`INSERT INTO payment_channel_accounts(id,provider,account_key,environment,credentials_ref,webhook_ref) OVERRIDING SYSTEM VALUE
 			VALUES(777,'stripe','acct_Stripe','sandbox','env:stripe','env:stripe');
 			INSERT INTO recharge_templates(id,name) VALUES(777,'Stripe catalog');
-			INSERT INTO recharge_slots(id,template_id,slot_index,type,price,price_cents,coins,bonus,subscription_cycle)
-			VALUES(777,777,1,'vip','9.99',999,0,0,'month'),(778,777,2,'whole_book','9.99',999,0,0,NULL);
+			INSERT INTO recharge_slots(id,template_id,slot_index,product_id,type,price,price_cents,coins,bonus,subscription_cycle)
+			VALUES(777,777,1,(SELECT id FROM products WHERE code='VIP_MONTH_1499'),'vip','9.99',999,0,0,'month'),
+			      (778,777,2,(SELECT id FROM products WHERE code='WHOLE_BOOK_999'),'whole_book','9.99',999,0,0,NULL);
 			UPDATE recharge_slots s SET vip_offer_version_id=snapshot_vip_offer(s) WHERE s.id=777`)
 		handler := NewHandler(s)
 		router := gin.New()

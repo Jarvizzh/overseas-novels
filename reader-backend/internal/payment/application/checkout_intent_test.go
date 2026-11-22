@@ -13,6 +13,7 @@ import (
 )
 
 func TestPurchaseIntentReservationAndFunding(t *testing.T) {
+	t.Setenv("CONVERSION_ENVIRONMENT", "sandbox")
 	ctx := t.Context()
 	pool := testdb.Open(t)
 	exec := func(query string, args ...any) {
@@ -23,10 +24,17 @@ func TestPurchaseIntentReservationAndFunding(t *testing.T) {
 	}
 	exec(`INSERT INTO users(id) VALUES (742),(743);
 		INSERT INTO novels(id,title,author,publish_status) VALUES (742,'Checkout Book','Author','published');
-		INSERT INTO recharge_templates(id,name,is_default) VALUES (742,'Purchase Fixture',true);
-		INSERT INTO recharge_slots(id,template_id,slot_index,type,price,price_cents,coins,bonus)
-		VALUES (742,742,1,'whole_book','9.99',999,0,5),(743,742,2,'single','6.99',699,60,10);
 		SELECT assert_paypal_identity('purchase-mock','sandbox');`)
+	seedTestProductAndSlot(t, pool, testCatalogSpec{
+		SlotID: 742, TemplateID: 742, TemplateName: "Purchase Fixture", IsDefault: true, SlotIndex: 1,
+		Code: "TEST_INTENT_742", ProductType: "whole_book", PriceCents: 999,
+		Environment: "sandbox", PayPalAccountKey: "purchase-mock",
+	})
+	seedTestProductAndSlot(t, pool, testCatalogSpec{
+		SlotID: 743, TemplateID: 742, TemplateName: "Purchase Fixture", IsDefault: true, SlotIndex: 2,
+		Code: "TEST_INTENT_743", ProductType: "single", PriceCents: 699, Coins: 60, Bonus: 10,
+		Environment: "sandbox", PayPalAccountKey: "purchase-mock",
+	})
 
 	repo := NewDBRepository(wallet.NewDBRepository())
 	book := purchaseRequest{slotID: 742, novelID: 742, returnPath: "/content?novel_id=742"}
@@ -64,7 +72,11 @@ func TestPurchaseIntentReservationAndFunding(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	exec(`UPDATE recharge_slots SET price_cents=799 WHERE id=743`)
+	seedTestProductAndSlot(t, pool, testCatalogSpec{
+		SlotID: 743, TemplateID: 742, TemplateName: "Purchase Fixture", IsDefault: true, SlotIndex: 2,
+		Code: "TEST_INTENT_743_REPRICE", ProductType: "single", PriceCents: 799, Coins: 60, Bonus: 10,
+		Environment: "sandbox", PayPalAccountKey: "purchase-mock",
+	})
 	replayedCoins, err := repo.preparePurchase(ctx, 742, coins, checkoutAttribution{})
 	if err != nil || replayedCoins.ID != firstCoins.ID || replayedCoins.AmountMinor != 699 {
 		t.Fatalf("original checkout snapshot was lost: %+v %v", replayedCoins, err)
@@ -213,9 +225,9 @@ func TestPurchaseIntentReservationAndFunding(t *testing.T) {
 		(SELECT count(*) FROM third_party_payment_orders p WHERE p.order_id=o.id AND p.reconciliation_note IS NOT NULL),
 		(SELECT count(*) FROM payment_fulfillment_funding f JOIN third_party_payment_orders p ON p.id=f.receipt_id
 		  WHERE f.order_id=o.id AND p.capture_id='CAPTURE-SECOND' AND f.principal_minor=999),
-		(SELECT bonus_coins FROM wallets WHERE user_id=o.user_id)
+		(SELECT COALESCE(MAX(bonus_coins), 0) FROM wallets WHERE user_id=o.user_id)
 		FROM recharge_orders o WHERE o.checkout_id=$1`, bookIntent).Scan(&status, &receipts, &reviewNotes, &grants, &bonus)
-	if err != nil || status != "Success" || receipts != 2 || reviewNotes != 1 || grants != 1 || bonus != 5 {
+	if err != nil || status != "Success" || receipts != 2 || reviewNotes != 1 || grants != 1 || bonus != 0 {
 		t.Fatalf("extra refund affected the original grant: status=%s receipts=%d review=%d grants=%d bonus=%d err=%v",
 			status, receipts, reviewNotes, grants, bonus, err)
 	}
@@ -230,14 +242,14 @@ func TestVIPReopenKeepsPaidPeriodAndHonorsOtherChannel(t *testing.T) {
 		INSERT INTO user_subscriptions(user_id,subscription_id,plan_id,status,payment_method,current_period_end,last_payment_time)
 		VALUES (745,'I-PAID-CANCELLED','P-ORIGINAL','CANCELLED','paypal',now()+interval '10 days',now()-interval '3 days'),
 		       (745,'STRIPE-ACTIVE-MOCK','P-OTHER','ACTIVE','stripe',NULL,NULL);
-		SELECT assert_paypal_identity('vip-checkout-test','sandbox');
-		INSERT INTO recharge_templates(id,name,is_default) VALUES(1,'Default',true);
-		INSERT INTO recharge_slots(id,template_id,slot_index,type,price,price_cents) VALUES(7,1,1,'vip','$9.99',999);
-		UPDATE recharge_slots s SET vip_offer_version_id=snapshot_vip_offer(s) WHERE s.id=7;
-		INSERT INTO payment_paypal_vip_plans(slot_id,account_id,plan_id)
-		SELECT 7,id,'P-NEW' FROM payment_channel_accounts WHERE account_key='vip-checkout-test'`); err != nil {
+		SELECT assert_paypal_identity('vip-checkout-test','sandbox');`); err != nil {
 		t.Fatal(err)
 	}
+	seedTestProductAndSlot(t, pool, testCatalogSpec{
+		SlotID: 7, TemplateID: 1, TemplateName: "Default", IsDefault: true, SlotIndex: 1,
+		Code: "TEST_VIP_745", ProductType: "vip", VipCycle: "month", PriceCents: 999,
+		Environment: "sandbox", PayPalAccountKey: "vip-checkout-test", PayPalPlanID: "P-NEW",
+	})
 	repo := NewDBRepository(wallet.NewDBRepository())
 	testdb.ScopeSubscriptions(t, pool, "paypal", "sandbox", "I-PAID-CANCELLED")
 	testdb.ScopeSubscriptions(t, pool, "stripe", "sandbox", "STRIPE-ACTIVE-MOCK")
@@ -295,6 +307,7 @@ func TestVIPReopenKeepsPaidPeriodAndHonorsOtherChannel(t *testing.T) {
 }
 
 func TestRiskReviewDefersPayPalCheckoutUntilApproved(t *testing.T) {
+	t.Setenv("CONVERSION_ENVIRONMENT", "sandbox")
 	ctx := t.Context()
 	pool := testdb.Open(t)
 	exec := func(sql string, args ...any) {
@@ -304,9 +317,12 @@ func TestRiskReviewDefersPayPalCheckoutUntilApproved(t *testing.T) {
 		}
 	}
 	exec(`INSERT INTO users(id) VALUES(746);
-		INSERT INTO recharge_templates(id,name,is_default) VALUES(746,'Held payment',true);
-		INSERT INTO recharge_slots(id,template_id,slot_index,type,price,price_cents,coins,bonus) VALUES(746,746,1,'single','9.99',999,20,4);
 		SELECT assert_paypal_identity('held-payment','sandbox');`)
+	seedTestProductAndSlot(t, pool, testCatalogSpec{
+		SlotID: 746, TemplateID: 746, TemplateName: "Held payment", IsDefault: true, SlotIndex: 1,
+		Code: "TEST_HELD_746", ProductType: "single", PriceCents: 999, Coins: 20, Bonus: 4,
+		Environment: "sandbox", PayPalAccountKey: "held-payment",
+	})
 	repo := NewDBRepository(wallet.NewDBRepository())
 	intent, err := repo.preparePurchase(ctx, 746, purchaseRequest{key: uuid.New(), slotID: 746}, checkoutAttribution{})
 	if err != nil {

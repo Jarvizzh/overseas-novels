@@ -53,6 +53,7 @@ func (h *Handler) RegisterRoutes(r *gin.RouterGroup) {
 	r.POST("/wallet/webhook/paypal", h.SubscriptionWebhook)
 	r.POST("/wallet/webhook/stripe", h.StripeAftercareWebhook)
 	r.POST("/wallet/webhook/subscription/:provider", h.SubscriptionWebhook)
+	r.POST("/wallet/webhook/channel/:token", h.ChannelTokenWebhook)
 }
 
 type InitiateCheckoutRequest struct {
@@ -105,7 +106,8 @@ func purchaseAttribution(c *gin.Context) checkoutAttribution {
 }
 
 type preparePurchaseRequest struct {
-	SlotID     int    `json:"slot_id" binding:"gt=0"`
+	ProductID  int64  `json:"product_id" binding:"gte=0"`
+	SlotID     int    `json:"slot_id" binding:"gte=0"`
 	NovelID    int64  `json:"novel_id" binding:"gte=0"`
 	RequestKey string `json:"request_key" binding:"required,uuid"`
 	ReturnPath string `json:"return_path" binding:"max=1024"`
@@ -113,11 +115,11 @@ type preparePurchaseRequest struct {
 
 func (h *Handler) PreparePurchase(c *gin.Context) {
 	var req preparePurchaseRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
+	if err := c.ShouldBindJSON(&req); err != nil || (req.ProductID <= 0 && req.SlotID <= 0) {
 		httpx.Fail(c, http.StatusBadRequest, "invalid_request", "Invalid checkout details", nil)
 		return
 	}
-	intent, err := h.service.PreparePurchase(c.Request.Context(), c.GetInt64("user_id"), req.SlotID, req.NovelID, req.RequestKey, req.ReturnPath, purchaseAttribution(c))
+	intent, err := h.service.PreparePurchase(c.Request.Context(), c.GetInt64("user_id"), req.ProductID, req.SlotID, req.NovelID, req.RequestKey, req.ReturnPath, purchaseAttribution(c))
 	writePurchase(c, intent, err)
 }
 
@@ -174,8 +176,14 @@ func (h *Handler) GetPaymentMethods(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{
-		"paypal_single": methods.PayPalSingle, "paypal_vip": methods.PayPalVIP,
-		"stripe_slots": stripeSlots, "stripe_vip_slots": vipSlots, "stripe_sandbox": conversion.Environment() == "sandbox",
+		"paypal_single":    methods.PayPalSingle,
+		"paypal_vip":       methods.PayPalVIP,
+		"stripe_single":    methods.StripeSingle,
+		"stripe_vip":       methods.StripeVIP,
+		"environment":      methods.Environment,
+		"stripe_slots":     stripeSlots,
+		"stripe_vip_slots": vipSlots,
+		"stripe_sandbox":   conversion.Environment() == "sandbox",
 	})
 }
 
@@ -406,6 +414,25 @@ func (h *Handler) SubscriptionWebhook(c *gin.Context) {
 
 func (h *Handler) StripeAftercareWebhook(c *gin.Context) {
 	h.handleProviderWebhook(c, payment.ProviderStripe)
+}
+
+func (h *Handler) ChannelTokenWebhook(c *gin.Context) {
+	payload, err := io.ReadAll(http.MaxBytesReader(c.Writer, c.Request.Body, 1<<20))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Failed to read body"})
+		return
+	}
+	headers := make(map[string]string, len(c.Request.Header))
+	for k, v := range c.Request.Header {
+		if len(v) > 0 {
+			headers[k] = v[0]
+		}
+	}
+	if err := h.service.ProcessChannelWebhook(c.Request.Context(), c.Param("token"), payload, headers); err != nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Payment event could not be processed"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"received": true})
 }
 
 func (h *Handler) handleProviderWebhook(c *gin.Context, provider string) {

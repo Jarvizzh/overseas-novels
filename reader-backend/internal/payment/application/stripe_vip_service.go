@@ -24,7 +24,16 @@ func (s *service) stripeVIPAdapter() (payment.StripeVIPAdapter, bool) {
 	return adapter, true
 }
 
-func stripeVIPCheckoutEnabled() bool {
+func stripeVIPCheckoutEnabled(ctx context.Context) bool {
+	if pool := db.Pool(ctx); pool != nil {
+		var dbManaged bool
+		err := pool.QueryRow(ctx, `SELECT credentials_ref = 'db:encrypted' AND status = 'published' AND is_primary AND new_subscriptions_enabled
+			FROM payment_channel_accounts WHERE provider = 'stripe' AND environment = $1 AND status = 'published' AND is_primary = true
+			LIMIT 1`, currentPaymentLedgerEnvironment()).Scan(&dbManaged)
+		if err == nil && dbManaged {
+			return true
+		}
+	}
 	return config.AppConfig != nil && config.AppConfig.StripeVIPCheckoutEnabled
 }
 
@@ -41,7 +50,7 @@ func appendStripeVIPReturn(rawURL, intentID string) string {
 
 func (s *service) GetStripeVIPOfferSlots(ctx context.Context, userID int64) ([]int, error) {
 	adapter, available := s.stripeVIPAdapter()
-	if !available || !stripeVIPCheckoutEnabled() {
+	if !available || !stripeVIPCheckoutEnabled(ctx) {
 		return []int{}, nil
 	}
 	return stripeVIPSlots(ctx, adapter.AccountScope(), userID)
@@ -63,7 +72,7 @@ func (s *service) StartStripeVIP(ctx context.Context, userID int64, slot int, or
 	v, err := reserveStripeVIP(ctx, stripeVIPRequest{
 		userID: userID, slotID: slot, returnURL: returnURL, cancelURL: site.String(),
 		returnPath: checkoutReadingPath(returnPath, 0), attribution: attribution, account: adapter.AccountScope(),
-	}, stripeVIPCheckoutEnabled())
+	}, stripeVIPCheckoutEnabled(ctx))
 	if err != nil {
 		return nil, err
 	}
@@ -74,7 +83,7 @@ func (s *service) StartStripeVIP(ctx context.Context, userID int64, slot int, or
 			return nil, ErrSubscriptionConflict
 		}
 	}
-	due, err := claimStripeVIP(ctx, v.Account, v.ID, primary && stripeVIPCheckoutEnabled())
+	due, err := claimStripeVIP(ctx, v.Account, v.ID, primary && stripeVIPCheckoutEnabled(ctx))
 	if err != nil {
 		return nil, err
 	}
@@ -292,7 +301,7 @@ func (s *service) reconcileStripeVIP(ctx context.Context) {
 			log.Printf("task=stripe_vip action=cancel intent=%s error=%v", job.intentID, err)
 		}
 	}
-	due, err := claimStripeVIP(ctx, adapter.AccountScope(), "", !s.historicalStripe && stripeVIPCheckoutEnabled())
+	due, err := claimStripeVIP(ctx, adapter.AccountScope(), "", !s.historicalStripe && stripeVIPCheckoutEnabled(ctx))
 	if err != nil {
 		log.Printf("task=stripe_vip action=claim error=%v", err)
 	}

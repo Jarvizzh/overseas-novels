@@ -32,9 +32,10 @@ func (r *dbRepository) applyStripeProof(ctx context.Context, a stripePurchaseAtt
 	var state string
 	var fulfilled bool
 	var charged, bonus int
-	err = tx.QueryRow(ctx, `SELECT user_id,status,fulfilled_at IS NOT NULL,coins,bonus_coins_credited
-		FROM recharge_orders WHERE id=$1 AND checkout_environment=$2 AND order_type='whole_book' FOR UPDATE`,
-		a.OrderID, conversion.Environment()).Scan(&userID, &state, &fulfilled, &charged, &bonus)
+	var orderType string
+	err = tx.QueryRow(ctx, `SELECT user_id,status,fulfilled_at IS NOT NULL,coins,bonus_coins_credited,order_type
+		FROM recharge_orders WHERE id=$1 AND checkout_environment=$2 AND order_type IN ('single','whole_book') FOR UPDATE`,
+		a.OrderID, conversion.Environment()).Scan(&userID, &state, &fulfilled, &charged, &bonus, &orderType)
 	if err != nil {
 		return err
 	}
@@ -202,6 +203,20 @@ func (r *dbRepository) applyStripeProof(ctx context.Context, a stripePurchaseAtt
 	if err := recordCheckoutInitiatedTx(ctx, tx, a.IntentID, proof.ID); err != nil {
 		return err
 	}
+	if receipt.RefundedMinor >= receipt.AmountMinor && receipt.RefundedMinor > 0 {
+		if _, err := tx.Exec(ctx, `UPDATE recharge_orders SET payment_method='stripe',external_ref_id=COALESCE(external_ref_id,$2),
+			paid_at=COALESCE(paid_at,$3),status='Refunded',reconciliation_note=NULL,updated_at=now() WHERE id=$1`,
+			a.OrderID, proof.ID, receipt.PaidAt); err != nil {
+			return err
+		}
+		if err := aftercare.FinishFulfillment(ctx, tx, a.OrderID); err != nil {
+			return err
+		}
+		if err := conversion.RecordPaymentTx(ctx, tx, a.OrderID, receipt.PaidAt, "stripe_pre_fulfillment_refund", false, false); err != nil {
+			return err
+		}
+		return tx.Commit(ctx)
+	}
 	_, err = tx.Exec(ctx, `UPDATE recharge_orders SET payment_method='stripe',external_ref_id=COALESCE(external_ref_id,$2),
 		paid_at=COALESCE(paid_at,$3),status='Paid',reconciliation_note=$4,updated_at=now() WHERE id=$1`,
 		a.OrderID, proof.ID, receipt.PaidAt, note)
@@ -222,7 +237,11 @@ func (r *dbRepository) applyStripeProof(ctx context.Context, a stripePurchaseAtt
 		return err
 	}
 	if charged+bonus > 0 {
-		if err := r.fulfillment.CreditRechargeTx(ctx, tx, userID, charged, bonus, "Stripe whole book purchase"); err != nil {
+		creditDesc := "Stripe whole book purchase"
+		if orderType == "single" {
+			creditDesc = "Stripe coins recharge"
+		}
+		if err := r.fulfillment.CreditRechargeTx(ctx, tx, userID, charged, bonus, creditDesc); err != nil {
 			return err
 		}
 	}

@@ -117,22 +117,32 @@ func reserveStripeVIPTx(ctx context.Context, tx pgx.Tx, e *checkoutEvaluation, r
 		return nil, err
 	}
 	tag, err := tx.Exec(ctx, `INSERT INTO payment_stripe_subscription_intents
-		(id,user_id,account_id,checkout_environment,offer_version_id,slot_id,template_id,product_ref,price_ref,amount_minor,cycle,
+		(id,user_id,account_id,checkout_environment,offer_version_id,product_id,product_snapshot,slot_id,template_id,product_ref,price_ref,amount_minor,cycle,
 		 sales_mode,allowed_countries,tax_liability_account,return_url,cancel_url,return_path,attribution,
 		 validated_catalog,release_evidence,market_policy,expected_country,market_basis)
-		SELECT $1,$2,$3,$4,vo.slot_id,s.id,s.template_id,m.product_ref,m.price_ref,vo.amount_minor,vo.cycle,
-		 m.sales_mode,m.allowed_countries,m.tax_liability_account,$6,$7,$8,$9::jsonb ||
+		SELECT $1,$2,$3,$4,NULL,prod.id,
+		 jsonb_build_object(
+			'product_id',prod.id,'code',prod.code,'product_type',prod.product_type,
+			'name',prod.name,'description',prod.description,'price_cents',prod.price_cents,
+			'currency',prod.currency,'coins',prod.coins,'bonus',prod.bonus,
+			'vip_cycle',COALESCE(prod.vip_cycle,''),'slot_id',s.id,
+			'badge',s.badge,'display_alias',s.display_alias
+		 ),
+		 s.id,s.template_id,b.external_product_ref,b.external_price_ref,prod.price_cents,prod.vip_cycle,
+		 b.sales_mode,b.allowed_countries,b.tax_liability_account,$6,$7,$8,$9::jsonb ||
 		    jsonb_build_object('pixel_id',fp.pixel_id,'promotion_link_id',p.id,'novel_id',p.novel_id,'utm_source',u.utm_source,'utm_campaign',u.utm_campaign),
-		    m.validated_catalog,m.release_evidence,m.market_policy,expected.country,
+		    b.validated_catalog,b.release_evidence,b.market_policy,expected.country,
 		    CASE WHEN expected.country IS NULL THEN 'stripe_confirmation_required' ELSE 'prior_verified_payment' END
-		FROM recharge_slots s JOIN payment_vip_offer_versions vo ON vo.slot_id=s.vip_offer_version_id
-		JOIN payment_stripe_vip_offers m ON m.offer_version_id=vo.slot_id AND m.account_id=$3 AND m.enabled
+		FROM recharge_slots s JOIN products prod ON prod.id=s.product_id
+		JOIN product_publications pub ON pub.product_id=prod.id AND pub.environment=$10 AND pub.status='published'
+		JOIN product_channel_bindings b ON b.product_id=prod.id AND b.account_id=$3 AND b.provider='stripe' AND b.environment=$10
 		JOIN users u ON u.id=$2
 		CROSS JOIN LATERAL (SELECT payment_last_stripe_billing_country($3,$2) AS country) expected
 		LEFT JOIN LATERAL reader_promotion_for_user(u.id) p ON true LEFT JOIN fb_pixels fp ON fp.id=p.fb_pixel_id
-		WHERE s.id=$5 AND s.type IN ('vip','subscription') AND s.price_cents=vo.amount_minor
-		  AND ($10='sandbox' OR (m.validated_catalog IS NOT NULL AND m.release_evidence IS NOT NULL AND m.market_policy IS NOT NULL
-		   AND (expected.country IS NULL OR expected.country=ANY(m.allowed_countries))))
+		WHERE s.id=$5 AND prod.product_type='vip'
+		  AND b.enabled=true AND b.validation_status='verified' AND b.external_product_ref<>'' AND b.external_price_ref<>''
+		  AND ($10='sandbox' OR (b.validated_catalog IS NOT NULL AND b.release_evidence IS NOT NULL AND b.market_policy IS NOT NULL
+		   AND (expected.country IS NULL OR expected.country=ANY(b.allowed_countries))))
 		  AND s.template_id=COALESCE((SELECT recharge_template_id FROM reader_promotion_for_user($2) WHERE recharge_template_id IS NOT NULL),
 			(SELECT id FROM recharge_templates ORDER BY is_default DESC NULLS LAST,id LIMIT 1))`, id, req.userID, e.accountID,
 		conversion.Environment(), req.slotID, returnURL, cancelURL, req.returnPath, metadata, req.account.Environment)
@@ -149,13 +159,14 @@ func reserveStripeVIPTx(ctx context.Context, tx pgx.Tx, e *checkoutEvaluation, r
 
 func stripeVIPSlots(ctx context.Context, account payment.WebhookAccount, user int64) ([]int, error) {
 	rows, err := db.Pool(ctx).Query(ctx, `SELECT s.id FROM recharge_slots s
-		JOIN payment_vip_offer_versions version ON version.slot_id=s.vip_offer_version_id AND version.amount_minor=s.price_cents
-		JOIN payment_stripe_vip_offers m ON m.offer_version_id=version.slot_id AND m.enabled
-		JOIN payment_channel_accounts a ON a.id=m.account_id
-		WHERE a.provider='stripe' AND a.account_key=$1 AND a.environment=$2 AND a.new_subscriptions_enabled
-		 AND s.type IN ('vip','subscription')
-		 AND (a.environment='sandbox' OR (m.validated_catalog IS NOT NULL AND m.release_evidence IS NOT NULL AND m.market_policy IS NOT NULL
-		  AND COALESCE(payment_last_stripe_billing_country(a.id,$3)=ANY(m.allowed_countries),true)))
+		JOIN products p ON p.id=s.product_id
+		JOIN product_publications pub ON pub.product_id=p.id AND pub.environment=$2 AND pub.status='published'
+		JOIN product_channel_bindings b ON b.product_id=p.id AND b.provider='stripe' AND b.environment=$2
+		JOIN payment_channel_accounts a ON a.id=b.account_id
+		WHERE a.provider='stripe' AND a.account_key=$1 AND a.environment=$2 AND a.status='published' AND a.is_primary=true AND a.new_subscriptions_enabled
+		 AND p.product_type='vip' AND b.enabled=true AND b.validation_status='verified' AND b.external_product_ref<>'' AND b.external_price_ref<>''
+		 AND (a.environment='sandbox' OR (b.validated_catalog IS NOT NULL AND b.release_evidence IS NOT NULL AND b.market_policy IS NOT NULL
+		  AND COALESCE(payment_last_stripe_billing_country(a.id,$3)=ANY(b.allowed_countries),true)))
 		 AND s.template_id=COALESCE((SELECT recharge_template_id FROM reader_promotion_for_user($3) WHERE recharge_template_id IS NOT NULL),
 			(SELECT id FROM recharge_templates ORDER BY is_default DESC NULLS LAST,id LIMIT 1))
 		ORDER BY s.id`, account.AccountKey, account.Environment, user)
@@ -256,9 +267,9 @@ func bindStripeVIPTx(ctx context.Context, tx pgx.Tx, v stripeVIPIntent, proof pa
 		return nil
 	}
 	tag, err := tx.Exec(ctx, `INSERT INTO user_subscriptions(user_id,subscription_id,plan_id,slot_id,template_id,status,cycle,price_cents,currency,
-		payment_method,checkout_account_id,checkout_intent_id,checkout_return_path,attribution,capi_subscribe_state,vip_offer_version_id,cancelled_at)
+		payment_method,checkout_account_id,checkout_intent_id,checkout_return_path,attribution,capi_subscribe_state,vip_offer_version_id,product_id,product_snapshot,cancelled_at)
 		SELECT v.user_id,$2,v.price_ref,v.slot_id,v.template_id,$3::varchar(30),v.cycle,v.amount_minor,'USD','stripe',
-		  v.account_id,v.id,v.return_path,v.attribution,'eligible',v.offer_version_id,CASE WHEN $3::varchar(30)='CANCELLED' THEN now() END FROM payment_stripe_subscription_intents v WHERE v.id=$1
+		  v.account_id,v.id,v.return_path,v.attribution,'eligible',v.offer_version_id,v.product_id,v.product_snapshot,CASE WHEN $3::varchar(30)='CANCELLED' THEN now() END FROM payment_stripe_subscription_intents v WHERE v.id=$1
 		ON CONFLICT(subscription_id) DO UPDATE SET status=CASE
 		  WHEN EXCLUDED.status='CANCELLED' THEN 'CANCELLED'
 		  WHEN user_subscriptions.status='CANCEL_PENDING' THEN 'CANCEL_PENDING'
@@ -273,6 +284,11 @@ func bindStripeVIPTx(ctx context.Context, tx pgx.Tx, v stripeVIPIntent, proof pa
 	}
 	if tag.RowsAffected() != 1 {
 		return ErrCheckoutUnavailable
+	}
+	if _, err := tx.Exec(ctx, `UPDATE payment_vip_checkout_intents
+		SET subscription_id=$2,status=CASE WHEN $3='CANCELLED' AND status='Pending' THEN 'Canceled' ELSE status END,updated_at=now()
+		WHERE stripe_intent_id=$1::uuid`, v.ID, proof.ID, status); err != nil {
+		return err
 	}
 	_, err = tx.Exec(ctx, `UPDATE payment_stripe_subscription_intents SET status='bound',subscription_ref=$2,customer_ref=$3,
 		approval_url=NULL,cancelled_at=CASE WHEN $4='CANCELLED' THEN COALESCE(cancelled_at,now()) ELSE NULL END,
@@ -335,7 +351,9 @@ func stripeVIPPurchase(ctx context.Context, user int64, account payment.WebhookA
 }
 
 func recentStripeVIPPurchases(ctx context.Context, user int64, account payment.WebhookAccount) ([]PurchaseIntent, error) {
-	rows, err := db.Pool(ctx).Query(ctx, stripeVIPPurchaseProjection+` ORDER BY v.created_at DESC,v.id LIMIT 20`,
+	rows, err := db.Pool(ctx).Query(ctx, stripeVIPPurchaseProjection+`
+		AND NOT EXISTS (SELECT 1 FROM payment_vip_checkout_intents vc WHERE vc.stripe_intent_id=v.id)
+		ORDER BY v.created_at DESC,v.id LIMIT 20`,
 		user, account.AccountKey, account.Environment, conversion.Environment())
 	if err != nil {
 		return nil, err

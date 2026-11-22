@@ -99,13 +99,14 @@ func (s *service) payPalForSubscription(ctx context.Context, subscription string
 	if err != nil {
 		return nil, err
 	}
-	if !s.adapters.HasRegisteredAccounts(payment.ProviderPayPal) && s.paypalClient != nil {
-		actual, err := s.paypalClient.CheckoutAccount(ctx)
+	primary := s.primaryPayPalClient()
+	if !s.adapters.HasRegisteredAccounts(payment.ProviderPayPal) && primary != nil {
+		actual, err := primary.CheckoutAccount(ctx)
 		if err != nil {
 			return nil, err
 		}
 		if paymentEnvironmentMatches(actual) && (scope.AccountKey == "" || scope == actual) {
-			return s.paypalClient, nil
+			return primary, nil
 		}
 		return nil, ErrCheckoutUnavailable
 	}
@@ -114,7 +115,7 @@ func (s *service) payPalForSubscription(ctx context.Context, subscription string
 
 func (s *service) payPalForOrder(ctx context.Context, externalID string) (paypalCheckout, error) {
 	if !s.adapters.HasRegisteredAccounts(payment.ProviderPayPal) {
-		return s.paypalClient, nil
+		return s.primaryPayPalClient(), nil
 	}
 	var scope payment.WebhookAccount
 	err := db.Pool(ctx).QueryRow(ctx, `SELECT a.account_key,a.environment FROM payment_checkout_attempts p
@@ -128,7 +129,7 @@ func (s *service) payPalForOrder(ctx context.Context, externalID string) (paypal
 
 func (s *service) payPalForNewCheckout(ctx context.Context, userID int64, intentID string, slotID int) (paypalCheckout, error) {
 	if !s.adapters.HasRegisteredAccounts(payment.ProviderPayPal) {
-		return s.paypalClient, nil
+		return s.primaryPayPalClient(), nil
 	}
 	var scope payment.WebhookAccount
 	err := db.Pool(ctx).QueryRow(ctx, `SELECT a.account_key,a.environment FROM payment_channel_accounts a
@@ -141,7 +142,10 @@ func (s *service) payPalForNewCheckout(ctx context.Context, userID int64, intent
 				SELECT 1 FROM user_subscriptions u WHERE u.subscription_id=i.subscription_id AND u.status NOT IN ('CANCELLED','EXPIRED')))
 		)`, userID, intentID, slotID, conversion.Environment()).Scan(&scope.AccountKey, &scope.Environment)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return s.paypalClient, nil
+		if client := s.primaryPayPalClient(); client != nil {
+			return client, nil
+		}
+		return nil, ErrCheckoutUnavailable
 	}
 	if err != nil {
 		return nil, err

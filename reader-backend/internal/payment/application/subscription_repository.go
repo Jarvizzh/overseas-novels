@@ -70,7 +70,7 @@ func (r *dbRepository) GetManagedSubscriptionByUserID(ctx context.Context, userI
 }
 func (r *dbRepository) ListManagedSubscriptions(ctx context.Context, userID int64) ([]model.UserSubscription, error) {
 	query := `
-		SELECT id, user_id, subscription_id, COALESCE(plan_id, ''), COALESCE(slot_id, 0), COALESCE(template_id, 0),
+		SELECT id, user_id, subscription_id, COALESCE(plan_id, ''), COALESCE(product_id, 0), COALESCE(slot_id, 0), COALESCE(template_id, 0),
 		       status, cycle, price_cents, currency, payment_method, current_period_start, current_period_end,
 		       next_billing_time, last_payment_time, cancelled_at, COALESCE(raw_payload::text, '{}'), created_at, updated_at,
 		       COALESCE((SELECT CASE v.sales_mode WHEN 'direct' THEN 'stripe_portal' ELSE 'stripe_link' END
@@ -90,7 +90,7 @@ func (r *dbRepository) ListManagedSubscriptions(ctx context.Context, userID int6
 
 		var s model.UserSubscription
 		err := row.Scan(
-			&s.ID, &s.UserID, &s.SubscriptionID, &s.PlanID, &s.SlotID, &s.TemplateID,
+			&s.ID, &s.UserID, &s.SubscriptionID, &s.PlanID, &s.ProductID, &s.SlotID, &s.TemplateID,
 			&s.Status, &s.Cycle, &s.PriceCents, &s.Currency, &s.PaymentMethod, &s.CurrentPeriodStart, &s.CurrentPeriodEnd,
 			&s.NextBillingTime, &s.LastPaymentTime, &s.CancelledAt, &s.RawPayload, &s.CreatedAt, &s.UpdatedAt, &s.Management, &s.RenewalFailedAt,
 		)
@@ -104,7 +104,7 @@ func (r *dbRepository) ListManagedSubscriptions(ctx context.Context, userID int6
 
 func (r *dbRepository) GetSubscriptionByID(ctx context.Context, subID string) (*model.UserSubscription, error) {
 	query := `
-		SELECT id, user_id, subscription_id, COALESCE(plan_id, ''), COALESCE(slot_id, 0), COALESCE(template_id, 0),
+		SELECT id, user_id, subscription_id, COALESCE(plan_id, ''), COALESCE(product_id, 0), COALESCE(slot_id, 0), COALESCE(template_id, 0),
 		       status, cycle, price_cents, currency, payment_method, current_period_start, current_period_end,
 		       next_billing_time, last_payment_time, cancelled_at, COALESCE(raw_payload::text, '{}'), created_at, updated_at,COALESCE(payment_subscription_environment(user_subscriptions),'')
 		FROM user_subscriptions
@@ -113,7 +113,7 @@ func (r *dbRepository) GetSubscriptionByID(ctx context.Context, subID string) (*
 		LIMIT 1`
 	var s model.UserSubscription
 	err := db.Pool(ctx).QueryRow(ctx, query, subID).Scan(
-		&s.ID, &s.UserID, &s.SubscriptionID, &s.PlanID, &s.SlotID, &s.TemplateID,
+		&s.ID, &s.UserID, &s.SubscriptionID, &s.PlanID, &s.ProductID, &s.SlotID, &s.TemplateID,
 		&s.Status, &s.Cycle, &s.PriceCents, &s.Currency, &s.PaymentMethod, &s.CurrentPeriodStart, &s.CurrentPeriodEnd,
 		&s.NextBillingTime, &s.LastPaymentTime, &s.CancelledAt, &s.RawPayload, &s.CreatedAt, &s.UpdatedAt, &s.Environment,
 	)
@@ -160,10 +160,13 @@ func (r *dbRepository) RecordSubscriptionRenewalOrderTx(
 	var orderID int64
 	err = tx.QueryRow(ctx, `INSERT INTO recharge_orders
 		(user_id, external_ref_id, amount_cents,currency,coins,bonus_coins_credited,payment_method,status,
-		paid_at, order_type, subscription_id, recharge_slot_id, recharge_template_id, paid_period_start, paid_period_end,
+		paid_at, order_type, subscription_id, recharge_slot_id, recharge_template_id, product_id, product_snapshot, paid_period_start, paid_period_end,
 		utm_source, utm_campaign, promotion_link_id, novel_id, reconciliation_note, paypal_refund_reported,fb_lead_metadata,checkout_environment)
 		SELECT u.id,$2,$3,$4,0,0,$5,'Success',$6,'subscription',$7::text,$8,
-			(SELECT id FROM recharge_templates WHERE id=$9),CASE WHEN $10::timestamptz IS NOT NULL THEN $6::timestamptz END,$10,COALESCE((SELECT attribution->>'utm_source' FROM user_subscriptions WHERE subscription_id=$7::text),u.utm_source),COALESCE((SELECT attribution->>'utm_campaign' FROM user_subscriptions WHERE subscription_id=$7::text),u.utm_campaign),p.id,p.novel_id,
+			(SELECT id FROM recharge_templates WHERE id=$9),
+			(SELECT product_id FROM user_subscriptions WHERE subscription_id=$7::text),
+			(SELECT product_snapshot FROM user_subscriptions WHERE subscription_id=$7::text),
+			CASE WHEN $10::timestamptz IS NOT NULL THEN $6::timestamptz END,$10,COALESCE((SELECT attribution->>'utm_source' FROM user_subscriptions WHERE subscription_id=$7::text),u.utm_source),COALESCE((SELECT attribution->>'utm_campaign' FROM user_subscriptions WHERE subscription_id=$7::text),u.utm_campaign),p.id,p.novel_id,
  CASE WHEN $11 THEN 'PayPal reports refunded sale; match refund ID'
  WHEN $10::timestamptz IS NULL THEN 'PayPal settled amount verified; billing period needs review' END,$11,(SELECT attribution FROM user_subscriptions WHERE subscription_id=$7::text) || jsonb_build_object('payer_email',$12::text),NULLIF($13,'')
 		FROM users u LEFT JOIN LATERAL (
@@ -287,6 +290,14 @@ func (r *dbRepository) RecordSubscriptionRenewalOrderTx(
 	// entitlement is written. The fulfillment trigger then locks the
 	// user/promotion pair in the same order as one-time settlements.
 	if _, err := tx.Exec(ctx, `UPDATE recharge_orders SET fulfilled_at=clock_timestamp() WHERE id=$1 AND fulfilled_at IS NULL`, orderID); err != nil {
+		return false, err
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE payment_vip_checkout_intents
+		SET status='Completed',subscription_id=COALESCE(NULLIF(subscription_id,''),$1),updated_at=now()
+		WHERE status='Pending'
+		  AND (paypal_intent_id=(SELECT checkout_intent_id FROM user_subscriptions WHERE subscription_id=$1 AND payment_method='paypal' LIMIT 1)
+		    OR subscription_id=$1)`, sub.SubscriptionID); err != nil {
 		return false, err
 	}
 	var paymentKind *string
