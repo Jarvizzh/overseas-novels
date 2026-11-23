@@ -146,7 +146,7 @@ func reserveStripeVIPTx(ctx context.Context, tx pgx.Tx, e *checkoutEvaluation, r
 		  AND ($10='sandbox' OR (b.validated_catalog IS NOT NULL AND b.release_evidence IS NOT NULL AND b.market_policy IS NOT NULL
 		   AND (expected.country IS NULL OR expected.country=ANY(b.allowed_countries))))
 		  AND s.template_id=COALESCE((SELECT recharge_template_id FROM reader_promotion_for_user($2) WHERE recharge_template_id IS NOT NULL),
-			(SELECT id FROM recharge_templates ORDER BY is_default DESC NULLS LAST,id LIMIT 1))`, id, req.userID, e.accountID,
+			`+defaultLiveTemplateIDSQL+`)`, id, req.userID, e.accountID,
 		conversion.Environment(), req.slotID, returnURL, cancelURL, req.returnPath, metadata, req.account.Environment)
 	if err != nil {
 		return nil, err
@@ -170,13 +170,25 @@ func stripeVIPSlots(ctx context.Context, account payment.WebhookAccount, user in
 		 AND (a.environment='sandbox' OR (b.validated_catalog IS NOT NULL AND b.release_evidence IS NOT NULL AND b.market_policy IS NOT NULL
 		  AND COALESCE(payment_last_stripe_billing_country(a.id,$3)=ANY(b.allowed_countries),true)))
 		 AND s.template_id=COALESCE((SELECT recharge_template_id FROM reader_promotion_for_user($3) WHERE recharge_template_id IS NOT NULL),
-			(SELECT id FROM recharge_templates ORDER BY is_default DESC NULLS LAST,id LIMIT 1))
+			`+defaultLiveTemplateIDSQL+`)
 		ORDER BY s.id`, account.AccountKey, account.Environment, user)
 	if err != nil {
 		return nil, err
 	}
 	return pgx.CollectRows(rows, func(row pgx.CollectableRow) (int, error) { var id int; err := row.Scan(&id); return id, err })
 }
+
+// The statement that sets first_sent_at holds a shared lock on the exact binding.
+const stripeVIPBindingMatchSQL = `
+	SELECT 1 FROM product_channel_bindings b
+	WHERE b.product_id=v.product_id AND b.account_id=v.account_id
+	  AND b.provider='stripe' AND b.environment=a.environment
+	  AND b.enabled AND b.validation_status='verified'
+	  AND b.external_product_ref=v.product_ref AND b.external_price_ref=v.price_ref
+	  AND b.sales_mode=v.sales_mode AND b.tax_liability_account IS NOT DISTINCT FROM v.tax_liability_account
+	  AND (v.expected_country IS NULL OR v.expected_country=ANY(b.allowed_countries))
+	  AND (b.environment='sandbox' OR (b.validated_catalog IS NOT NULL AND b.release_evidence IS NOT NULL AND b.market_policy IS NOT NULL))
+`
 
 func claimStripeVIP(ctx context.Context, account payment.WebhookAccount, id string, allowNew bool) ([]stripeVIPIntent, error) {
 	rows, err := db.Pool(ctx).Query(ctx, `WITH due AS (
@@ -187,6 +199,7 @@ func claimStripeVIP(ctx context.Context, account payment.WebhookAccount, id stri
 		  AND (v.cancelled_at IS NULL OR v.cancelled_at>now()-interval '7 days')
 		  AND (v.status<>'creating' OR v.first_sent_at IS NOT NULL
 		       OR v.checkout_ref IS NOT NULL OR ($6 AND a.new_subscriptions_enabled AND a.status='published' AND a.is_primary
+		          AND (v.product_id IS NULL OR EXISTS (`+stripeVIPBindingMatchSQL+` FOR SHARE OF b))
 		          AND NOT EXISTS(
 		              SELECT 1 FROM payment_vip_checkout_intents u WHERE u.stripe_intent_id=v.id
 		                AND NOT EXISTS (
@@ -196,7 +209,8 @@ func claimStripeVIP(ctx context.Context, account payment.WebhookAccount, id stri
 		                      AND p.product_type='vip' AND p.currency=u.currency AND p.price_cents=u.price_cents AND p.vip_cycle=u.cycle
 		                      AND s.template_id=COALESCE(
 		                          (SELECT recharge_template_id FROM reader_promotion_for_user(u.user_id) WHERE recharge_template_id IS NOT NULL),
-		                          (SELECT id FROM recharge_templates ORDER BY is_default DESC NULLS LAST,id LIMIT 1))
+		                          `+defaultLiveTemplateIDSQL+`)
+		                    FOR SHARE OF s,p,pub
 		                ))))
 		  AND (v.checkout_ref IS NOT NULL OR v.subscription_ref IS NOT NULL OR NOT EXISTS (
 		      SELECT 1 FROM payment_vip_checkout_intents u

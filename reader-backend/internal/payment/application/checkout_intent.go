@@ -148,9 +148,12 @@ func (r *dbRepository) reservePurchaseIntent(ctx context.Context, tx pgx.Tx, eva
 		}
 		if vipIntentID != "" {
 			evaluation.checkoutID = vipIntentID
-			row, loadErr := scanVIPCheckoutIntentRow(tx.QueryRow(ctx, vipCheckoutIntentSelect+` WHERE v.intent_id = $1::uuid`, vipIntentID))
+			row, loadErr := lockVIPCheckoutIntent(ctx, tx, userID, vipIntentID)
 			if loadErr != nil {
 				return nil, loadErr
+			}
+			if err := expireStaleStripeVIPQuoteTx(ctx, tx, &row); err != nil {
+				return nil, err
 			}
 			return buildVIPPurchaseIntentView(ctx, tx, row)
 		}

@@ -118,7 +118,6 @@ export function validateAndBuildPromotionPayload(
 
   const targetPixel = pixels.find((p) => p.id === parseInt(input.fbPixelId, 10));
   if (targetPixel) params.set('pixel_id', targetPixel.pixel_id);
-  if (input.rechargeTemplateId) params.set('template_id', input.rechargeTemplateId);
   if (costRaw !== '') params.set('cost', costRaw);
   if (payChRaw !== '') params.set('pay_ch', payChRaw);
   if (input.linkId !== undefined) params.set('link_id', String(input.linkId));

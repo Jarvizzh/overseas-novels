@@ -58,7 +58,6 @@ function buildHeaders(options: RequestInit, token: string | null): Headers {
   const utmSource = readerStorage.getItem('utm_source');
   const utmCampaign = readerStorage.getItem('utm_campaign');
   const pixelId = readerStorage.getItem('fb_pixel_id');
-  const templateId = readerStorage.getItem('recharge_template_id');
   const promoId = readerStorage.getItem('promo_id');
 
   if (fbp) headers.set('X-FB-FBP', fbp);
@@ -66,7 +65,6 @@ function buildHeaders(options: RequestInit, token: string | null): Headers {
   if (utmSource && /^[\x20-\x7e]{1,100}$/.test(utmSource)) headers.set('X-UTM-Source', utmSource);
   if (utmCampaign && /^[\x20-\x7e]{1,100}$/.test(utmCampaign)) headers.set('X-UTM-Campaign', utmCampaign);
   if (pixelId) headers.set('X-FB-Pixel-ID', pixelId);
-  if (templateId) headers.set('X-Recharge-Template-ID', templateId);
   if (promoId) headers.set('X-Promo-ID', promoId);
   const source = new URL(window.location.href);
   for (const key of ['purchase', 'vip_purchase', 'stripe_vip', 'token', 'subscription_id', 'PayerID', 'ba_token']) {

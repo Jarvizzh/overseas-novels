@@ -551,13 +551,26 @@ func (h *Handler) CreateProduct(c *gin.Context) {
 	c.JSON(http.StatusCreated, gin.H{"id": id, "code": code, "status": pubStatusDraft})
 }
 
+type copyProductReq struct {
+	Code           string  `json:"code"`
+	ProductType    string  `json:"product_type"`
+	Name           string  `json:"name"`
+	Description    *string `json:"description"`
+	PriceCents     *int    `json:"price_cents"`
+	Coins          *int    `json:"coins"`
+	Bonus          *int    `json:"bonus"`
+	VipCycle       *string `json:"vip_cycle"`
+	NovelScopeType *string `json:"novel_scope_type"`
+	NovelScopeIDs  []int64 `json:"novel_scope_ids"`
+}
+
 func (h *Handler) CopyProduct(c *gin.Context) {
 	sourceID, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil || sourceID <= 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid source product ID"})
 		return
 	}
-	var req productSpecInput
+	var req copyProductReq
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
@@ -575,31 +588,62 @@ func (h *Handler) CopyProduct(c *gin.Context) {
 		writeProductError(c, err)
 		return
 	}
-	// Apply overrides from copy request while enforcing target product rules.
-	if req.ProductType == "" {
-		req.ProductType = src.ProductType
+
+	target := productSpecInput{
+		Code:        req.Code,
+		ProductType: req.ProductType,
+		Name:        req.Name,
 	}
-	if req.Name == "" {
-		req.Name = src.Name + " (Copy)"
+	if target.ProductType == "" {
+		target.ProductType = src.ProductType
 	}
-	if req.Description == "" {
-		req.Description = src.Description
+	if target.Name == "" {
+		target.Name = src.Name + " (Copy)"
 	}
-	if req.PriceCents == 0 {
-		req.PriceCents = src.PriceCents
+	if req.Description != nil {
+		target.Description = *req.Description
+	} else {
+		target.Description = src.Description
 	}
-	if req.ProductType == productTypeSingle && req.Coins == 0 {
-		req.Coins = src.Coins
+	if req.PriceCents != nil {
+		target.PriceCents = *req.PriceCents
+	} else {
+		target.PriceCents = src.PriceCents
 	}
-	if req.ProductType == productTypeVIP && req.VipCycle == "" {
-		req.VipCycle = src.VipCycle
+	if target.ProductType == productTypeSingle {
+		if req.Coins != nil {
+			target.Coins = *req.Coins
+		} else {
+			target.Coins = src.Coins
+		}
+		if req.Bonus != nil {
+			target.Bonus = *req.Bonus
+		} else {
+			target.Bonus = src.Bonus
+		}
 	}
-	if req.ProductType == productTypeWholeBook && req.NovelScopeType == "" {
-		req.NovelScopeType = src.NovelScopeType
-		req.NovelScopeIDs = src.NovelScopeIDs
+	if target.ProductType == productTypeVIP {
+		if req.VipCycle != nil && strings.TrimSpace(*req.VipCycle) != "" {
+			target.VipCycle = *req.VipCycle
+		} else {
+			target.VipCycle = src.VipCycle
+		}
+	}
+	if target.ProductType == productTypeWholeBook {
+		if req.NovelScopeType != nil && strings.TrimSpace(*req.NovelScopeType) != "" {
+			target.NovelScopeType = *req.NovelScopeType
+			target.NovelScopeIDs = req.NovelScopeIDs
+		} else {
+			target.NovelScopeType = src.NovelScopeType
+			if req.NovelScopeIDs != nil {
+				target.NovelScopeIDs = req.NovelScopeIDs
+			} else {
+				target.NovelScopeIDs = src.NovelScopeIDs
+			}
+		}
 	}
 
-	id, code, err := createProductRecord(c.Request.Context(), c.GetString("admin_id"), &sourceID, req)
+	id, code, err := createProductRecord(c.Request.Context(), c.GetString("admin_id"), &sourceID, target)
 	if err != nil {
 		writeProductError(c, err)
 		return
@@ -716,6 +760,17 @@ func (h *Handler) UpsertProductPayPalBinding(c *gin.Context) {
 		return
 	}
 
+	var pubStatus string
+	err = db.DB.QueryRow(ctx, `SELECT status FROM product_publications WHERE product_id = $1 AND environment = $2`, productID, req.Environment).Scan(&pubStatus)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		writeProductError(c, err)
+		return
+	}
+	if pubStatus == pubStatusRetired {
+		c.JSON(http.StatusConflict, gin.H{"error": "Retired products cannot be bound to payment channels"})
+		return
+	}
+
 	accountID := req.AccountID
 	if accountID == 0 {
 		err = db.DB.QueryRow(ctx, `
@@ -728,6 +783,26 @@ func (h *Handler) UpsertProductPayPalBinding(c *gin.Context) {
 		}
 		if err != nil {
 			writeProductError(c, err)
+			return
+		}
+	} else {
+		var acctProvider, acctEnv, acctStatus string
+		err = db.DB.QueryRow(ctx, `SELECT provider, environment, status FROM payment_channel_accounts WHERE id = $1`, accountID).
+			Scan(&acctProvider, &acctEnv, &acctStatus)
+		if errors.Is(err, pgx.ErrNoRows) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "PayPal channel account not found"})
+			return
+		}
+		if err != nil {
+			writeProductError(c, err)
+			return
+		}
+		if acctProvider != "paypal" || acctEnv != req.Environment {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "PayPal channel account provider or environment does not match request"})
+			return
+		}
+		if acctStatus != channelStatusPublished {
+			c.JSON(http.StatusConflict, gin.H{"error": "PayPal channel account must be published before binding products"})
 			return
 		}
 	}
@@ -850,6 +925,30 @@ func preparePayPalBindingWriteTx(ctx context.Context, productID, accountID int64
 	return reqKey, reviewRequired, existingPlan, existingProd, tx.Commit(ctx)
 }
 
+type payPalHTTPError struct {
+	statusCode int
+	err        error
+}
+
+func (e *payPalHTTPError) Error() string {
+	return e.err.Error()
+}
+
+func (e *payPalHTTPError) Unwrap() error {
+	return e.err
+}
+
+func isPayPalUncertainError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var httpErr *payPalHTTPError
+	if errors.As(err, &httpErr) {
+		return httpErr.statusCode == 0 || httpErr.statusCode >= 500
+	}
+	return true
+}
+
 func ensureAndVerifyPayPalVIPPlan(
 	ctx context.Context, creds PayPalChannelCreds, code, name, desc, cycle string, priceCents int,
 	reqKey, prodRef, planRef string,
@@ -883,12 +982,12 @@ func ensureAndVerifyPayPalVIPPlan(
 			"type":        "DIGITAL",
 			"category":    "BOOKS_PERIODICALS_AND_NEWSPAPERS",
 		})
-		prodIdem := uuid.NewSHA1(uuid.NameSpaceOID, []byte("paypal:catalog-product:"+code)).String()
+		prodIdem := uuid.NewSHA1(uuid.NameSpaceOID, []byte("paypal:catalog-product:"+reqKey)).String()
 		var prodResp struct {
 			ID string `json:"id"`
 		}
 		if err := sendPayPalJSON(ctx, baseURL+"/v1/catalogs/products", token, prodIdem, prodPayload, &prodResp); err != nil {
-			return prodRef, planRef, nil, true, err
+			return prodRef, planRef, nil, isPayPalUncertainError(err), err
 		}
 		if prodResp.ID == "" {
 			return prodRef, planRef, nil, true, errors.New("PayPal did not return a catalog product ID")
@@ -928,7 +1027,7 @@ func ensureAndVerifyPayPalVIPPlan(
 		ID string `json:"id"`
 	}
 	if err := sendPayPalJSON(ctx, baseURL+"/v1/billing/plans", token, planIdem, planPayload, &planResp); err != nil {
-		return prodRef, planRef, nil, true, err
+		return prodRef, planRef, nil, isPayPalUncertainError(err), err
 	}
 	if planResp.ID == "" {
 		return prodRef, planRef, nil, true, errors.New("PayPal did not return a billing plan ID")
@@ -950,7 +1049,7 @@ func sendPayPalJSON(ctx context.Context, endpoint, token, idemKey string, body [
 	}
 	req, err := http.NewRequestWithContext(ctx, method, endpoint, reader)
 	if err != nil {
-		return err
+		return &payPalHTTPError{statusCode: 0, err: err}
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	if body != nil {
@@ -961,13 +1060,16 @@ func sendPayPalJSON(ctx context.Context, endpoint, token, idemKey string, body [
 	}
 	resp, err := channelHTTPClient.Do(req)
 	if err != nil {
-		return err
+		return &payPalHTTPError{statusCode: 0, err: err}
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("PayPal API returned status %d", resp.StatusCode)
+		return &payPalHTTPError{statusCode: resp.StatusCode, err: fmt.Errorf("PayPal API returned status %d", resp.StatusCode)}
 	}
-	return json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(out)
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(out); err != nil {
+		return &payPalHTTPError{statusCode: 0, err: err}
+	}
+	return nil
 }
 
 func verifyPayPalPlanRemote(ctx context.Context, baseURL, token, planID, expectedCycle string, expectedCents int) ([]byte, string, error) {
@@ -1093,6 +1195,7 @@ type bindStripeProductReq struct {
 	AllowedCountries    []string `json:"countries" binding:"max=250"`
 	ReleaseEvidence     string   `json:"release_evidence" binding:"max=500"`
 	MarketPolicy        string   `json:"market_policy" binding:"max=500"`
+	Reprovision         bool     `json:"reprovision"`
 	Enabled             *bool    `json:"enabled"`
 	Reason              string   `json:"reason" binding:"max=500"`
 }
@@ -1184,6 +1287,21 @@ func (h *Handler) UpsertProductStripeBinding(c *gin.Context) {
 		return
 	}
 
+	var pubStatus string
+	err = db.DB.QueryRow(ctx, `SELECT status FROM product_publications WHERE product_id = $1 AND environment = $2`, productID, req.Environment).Scan(&pubStatus)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		writeProductError(c, err)
+		return
+	}
+	if pubStatus == pubStatusRetired {
+		c.JSON(http.StatusConflict, gin.H{"error": "Retired products cannot be bound to payment channels"})
+		return
+	}
+	if req.Reprovision && strings.TrimSpace(req.Reason) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "reason is required when reprovision=true"})
+		return
+	}
+
 	accountID := req.AccountID
 	if accountID == 0 {
 		err = db.DB.QueryRow(ctx, `
@@ -1198,6 +1316,26 @@ func (h *Handler) UpsertProductStripeBinding(c *gin.Context) {
 			writeProductError(c, err)
 			return
 		}
+	} else {
+		var acctProvider, acctEnv, acctStatus string
+		err = db.DB.QueryRow(ctx, `SELECT provider, environment, status FROM payment_channel_accounts WHERE id = $1`, accountID).
+			Scan(&acctProvider, &acctEnv, &acctStatus)
+		if errors.Is(err, pgx.ErrNoRows) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Stripe channel account not found"})
+			return
+		}
+		if err != nil {
+			writeProductError(c, err)
+			return
+		}
+		if acctProvider != "stripe" || acctEnv != req.Environment {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Stripe channel account provider or environment does not match request"})
+			return
+		}
+		if acctStatus != channelStatusPublished {
+			c.JSON(http.StatusConflict, gin.H{"error": "Stripe channel account must be published before binding products"})
+			return
+		}
 	}
 
 	key, accountKey, acctEnv, _, err := loadChannelStripeKey(ctx, accountID, 0)
@@ -1210,14 +1348,15 @@ func (h *Handler) UpsertProductStripeBinding(c *gin.Context) {
 		return
 	}
 
-	reqKey, existingProd, existingPrice, err := prepareStripeBindingWriteTx(ctx, productID, accountID, actor, req)
+	reqKey, catalogRevision, prevValStatus, existingProd, existingPrice, err := prepareStripeBindingWriteTx(ctx, productID, accountID, actor, req)
 	if err != nil {
 		writeProductError(c, err)
 		return
 	}
 
 	prodRef, priceRef, catalogBytes, verifyErr := ensureAndVerifyStripeCatalog(
-		ctx, accountKey, key, req, productID, pType, pCode, pName, pDesc, pCycle, priceCents, reqKey, existingProd, existingPrice,
+		ctx, accountKey, key, req, productID, accountID, actor, pType, pCode, pName, pDesc, pCycle, priceCents,
+		reqKey, catalogRevision, prevValStatus, existingProd, existingPrice,
 	)
 	valState := validationVerified
 	valErr := ""
@@ -1244,16 +1383,29 @@ func (h *Handler) UpsertProductStripeBinding(c *gin.Context) {
 	})
 }
 
+var (
+	errStripeResourceInactive = errors.New("Stripe Price or Product is inactive (archived); pass reprovision=true with reason to recreate")
+	errStripeTaxMismatch      = errors.New("Stripe Managed Payments tax_code or tax_behavior mismatch")
+)
+
 func prepareStripeBindingWriteTx(
 	ctx context.Context, productID, accountID int64, actor string, req bindStripeProductReq,
-) (reqKey, existingProd, existingPrice string, err error) {
+) (reqKey string, catalogRevision int, prevValidationStatus, existingProd, existingPrice string, err error) {
 	tx, err := db.DB.Begin(ctx)
 	if err != nil {
-		return "", "", "", err
+		return "", 0, "", "", "", err
 	}
 	defer tx.Rollback(context.WithoutCancel(ctx))
 	if err := requireSuperAdminTx(ctx, tx, actor); err != nil {
-		return "", "", "", err
+		return "", 0, "", "", "", err
+	}
+	err = tx.QueryRow(ctx, `
+		SELECT validation_status FROM product_channel_bindings
+		WHERE product_id = $1 AND account_id = $2 FOR UPDATE`, productID, accountID).Scan(&prevValidationStatus)
+	if errors.Is(err, pgx.ErrNoRows) {
+		prevValidationStatus = ""
+	} else if err != nil {
+		return "", 0, "", "", "", err
 	}
 	err = tx.QueryRow(ctx, `
 		INSERT INTO product_channel_bindings (
@@ -1265,15 +1417,79 @@ func prepareStripeBindingWriteTx(
 		)
 		ON CONFLICT (product_id, account_id) DO UPDATE SET
 			first_sent_at = COALESCE(product_channel_bindings.first_sent_at, now()),
+			validation_status = 'pending',
 			updated_by = EXCLUDED.updated_by,
 			updated_at = now()
-		RETURNING request_key::text, external_product_ref, external_price_ref`,
+		RETURNING request_key::text, catalog_revision, external_product_ref, external_price_ref`,
 		productID, accountID, req.Environment, req.SalesMode, req.AllowedCountries, req.TaxLiabilityAccount,
-		req.ReleaseEvidence, req.MarketPolicy, actor).Scan(&reqKey, &existingProd, &existingPrice)
+		req.ReleaseEvidence, req.MarketPolicy, actor).Scan(&reqKey, &catalogRevision, &existingProd, &existingPrice)
 	if err != nil {
-		return "", "", "", err
+		return "", 0, "", "", "", err
 	}
-	return reqKey, existingProd, existingPrice, tx.Commit(ctx)
+	return reqKey, catalogRevision, prevValidationStatus, existingProd, existingPrice, tx.Commit(ctx)
+}
+
+func advanceStripePriceRevisionTx(ctx context.Context, productID, accountID int64, actor, currentPriceRef string) (int, error) {
+	tx, err := db.DB.Begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback(context.WithoutCancel(ctx))
+	if err := requireSuperAdminTx(ctx, tx, actor); err != nil {
+		return 0, err
+	}
+	var rev int
+	err = tx.QueryRow(ctx, `
+		UPDATE product_channel_bindings
+		SET catalog_revision = catalog_revision + 1,
+		    updated_by = $4,
+		    updated_at = now()
+		WHERE product_id = $1 AND account_id = $2 AND external_price_ref = $3
+		RETURNING catalog_revision`, productID, accountID, currentPriceRef, actor).Scan(&rev)
+	if err != nil {
+		return 0, err
+	}
+	return rev, tx.Commit(ctx)
+}
+
+func reprovisionStripeRefsTx(ctx context.Context, productID, accountID int64, actor, reason string, resetProd, resetPrice bool) (string, int, error) {
+	tx, err := db.DB.Begin(ctx)
+	if err != nil {
+		return "", 0, err
+	}
+	defer tx.Rollback(context.WithoutCancel(ctx))
+	if err := requireSuperAdminTx(ctx, tx, actor); err != nil {
+		return "", 0, err
+	}
+	var oldProd, oldPrice string
+	if err := tx.QueryRow(ctx, `
+		SELECT external_product_ref, external_price_ref
+		FROM product_channel_bindings WHERE product_id = $1 AND account_id = $2 FOR UPDATE`, productID, accountID).
+		Scan(&oldProd, &oldPrice); err != nil {
+		return "", 0, err
+	}
+	var newReqKey string
+	var newRev int
+	err = tx.QueryRow(ctx, `
+		UPDATE product_channel_bindings
+		SET external_product_ref = CASE WHEN $3 THEN '' ELSE external_product_ref END,
+		    external_price_ref = CASE WHEN $4 THEN '' ELSE external_price_ref END,
+		    request_key = gen_random_uuid(),
+		    catalog_revision = 1,
+		    updated_by = $5,
+		    updated_at = now()
+		WHERE product_id = $1 AND account_id = $2
+		RETURNING request_key::text, catalog_revision`, productID, accountID, resetProd, resetPrice, actor).
+		Scan(&newReqKey, &newRev)
+	if err != nil {
+		return "", 0, err
+	}
+	beforeJSON, _ := json.Marshal(map[string]any{"account_id": accountID, "external_product_ref": oldProd, "external_price_ref": oldPrice})
+	afterJSON, _ := json.Marshal(map[string]any{"account_id": accountID, "reset_product": resetProd, "reset_price": resetPrice, "new_request_key": newReqKey, "reason": strings.TrimSpace(reason)})
+	if err := billingAuditLogTx(ctx, tx, actor, "reprovision_stripe_refs", strconv.FormatInt(productID, 10), string(beforeJSON), string(afterJSON)); err != nil {
+		return "", 0, err
+	}
+	return newReqKey, newRev, tx.Commit(ctx)
 }
 
 func saveStripeBindingResultTx(
@@ -1327,8 +1543,8 @@ func saveStripeBindingResultTx(
 
 func ensureAndVerifyStripeCatalog(
 	ctx context.Context, accountKey, key string, req bindStripeProductReq,
-	productID int64, productType, code, name, desc, vipCycle string, priceCents int,
-	reqKey, prodRef, priceRef string,
+	productID, accountID int64, actor, productType, code, name, desc, vipCycle string, priceCents int,
+	reqKey string, catalogRevision int, prevValStatus, prodRef, priceRef string,
 ) (string, string, []byte, error) {
 	if key == "" {
 		return prodRef, priceRef, nil, errors.New("Stripe account API key is not configured or cannot be decrypted")
@@ -1346,19 +1562,57 @@ func ensureAndVerifyStripeCatalog(
 		return prodRef, priceRef, nil, fmt.Errorf("Stripe API key belongs to %s instead of %s", merchant.ID, accountKey)
 	}
 
-	// Reuse previously provisioned Stripe Product & Price when already valid for the target mode.
+	// Reuse or selectively update existing Stripe Product & Price.
 	if prodRef != "" && priceRef != "" {
-		if catalogBytes, err := verifyStripeCatalogPair(ctx, req.Environment, key, prodRef, priceRef, req.SalesMode, productType, vipCycle, priceCents); err == nil {
-			return prodRef, priceRef, catalogBytes, nil
-		} else if req.SalesMode == stripeManagedPayments {
-			// When upgrading an existing direct binding to MoR, set tax_code and issue a Price with tax_behavior.
-			if err := updateStripeCatalogProductTaxCode(ctx, key, prodRef, req.TaxCode); err != nil {
-				return prodRef, priceRef, nil, err
+		price, catalogBytes, err := verifyStripeCatalogPairDetailed(
+			ctx, req.Environment, key, prodRef, priceRef, req.SalesMode, req.TaxCode, req.TaxBehavior, productType, vipCycle, priceCents,
+		)
+		if req.Reprovision {
+			if !errors.Is(err, errStripeResourceInactive) {
+				if err != nil {
+					return prodRef, priceRef, nil, err
+				}
+				return prodRef, priceRef, nil, errors.New("reprovision is only allowed when the existing Stripe Product or Price is inactive")
 			}
-			priceRef = ""
+			resetProd := price == nil || !price.Product.Active
+			resetPrice := price == nil || !price.Active || resetProd
+			newReqKey, newRev, repErr := reprovisionStripeRefsTx(ctx, productID, accountID, actor, req.Reason, resetProd, resetPrice)
+			if repErr != nil {
+				return prodRef, priceRef, nil, repErr
+			}
+			reqKey = newReqKey
+			catalogRevision = newRev
+			if resetProd {
+				prodRef = ""
+			}
+			if resetPrice {
+				priceRef = ""
+			}
+		} else if err == nil {
+			return prodRef, priceRef, catalogBytes, nil
+		} else if errors.Is(err, errStripeTaxMismatch) && req.SalesMode == stripeManagedPayments {
+			needTaxCodeUpdate := price.Product.TaxCode != req.TaxCode
+			needNewPrice := price.TaxBehavior != req.TaxBehavior || (price.TaxBehavior != "inclusive" && price.TaxBehavior != "exclusive")
+			if needTaxCodeUpdate {
+				if updErr := updateStripeCatalogProductTaxCode(ctx, key, prodRef, req.TaxCode); updErr != nil {
+					return prodRef, priceRef, nil, updErr
+				}
+			}
+			if needNewPrice {
+				if prevValStatus == validationVerified {
+					newRev, revErr := advanceStripePriceRevisionTx(ctx, productID, accountID, actor, priceRef)
+					if revErr != nil {
+						return prodRef, priceRef, nil, revErr
+					}
+					catalogRevision = newRev
+				}
+				priceRef = ""
+			}
 		} else {
 			return prodRef, priceRef, nil, err
 		}
+	} else if req.Reprovision && prodRef == "" && priceRef == "" && prevValStatus != validationFailed {
+		return prodRef, priceRef, nil, errors.New("reprovision requires an existing Stripe Product/Price reference")
 	}
 
 	if prodRef == "" {
@@ -1368,14 +1622,14 @@ func ensureAndVerifyStripeCatalog(
 			return prodRef, priceRef, nil, err
 		}
 		prodRef = createdProd
-	} else if req.SalesMode == stripeManagedPayments && req.TaxCode != "" {
+	} else if req.SalesMode == stripeManagedPayments && req.TaxCode != "" && priceRef == "" {
 		if err := updateStripeCatalogProductTaxCode(ctx, key, prodRef, req.TaxCode); err != nil {
 			return prodRef, priceRef, nil, err
 		}
 	}
 
 	if priceRef == "" {
-		priceIdem := uuid.NewSHA1(uuid.NameSpaceOID, []byte("stripe:price:"+reqKey+":"+req.SalesMode+":"+req.TaxBehavior)).String()
+		priceIdem := uuid.NewSHA1(uuid.NameSpaceOID, []byte("stripe:price:"+reqKey+":v"+strconv.Itoa(catalogRevision)+":"+req.SalesMode+":"+req.TaxBehavior)).String()
 		createdPrice, err := createStripeCatalogPrice(ctx, key, priceIdem, prodRef, priceCents, productType, vipCycle, req.Environment, code, productID, req.TaxBehavior)
 		if err != nil {
 			return prodRef, priceRef, nil, err
@@ -1383,39 +1637,55 @@ func ensureAndVerifyStripeCatalog(
 		priceRef = createdPrice
 	}
 
-	catalogBytes, err := verifyStripeCatalogPair(ctx, req.Environment, key, prodRef, priceRef, req.SalesMode, productType, vipCycle, priceCents)
+	_, catalogBytes, err := verifyStripeCatalogPairDetailed(
+		ctx, req.Environment, key, prodRef, priceRef, req.SalesMode, req.TaxCode, req.TaxBehavior, productType, vipCycle, priceCents,
+	)
 	return prodRef, priceRef, catalogBytes, err
 }
 
-func verifyStripeCatalogPair(ctx context.Context, environment, key, prodRef, priceRef, salesMode, productType, vipCycle string, expectedCents int) ([]byte, error) {
+func verifyStripeCatalogPairDetailed(
+	ctx context.Context, environment, key, prodRef, priceRef, salesMode, expectedTaxCode, expectedTaxBehavior, productType, vipCycle string, expectedCents int,
+) (*stripeCatalogPrice, []byte, error) {
 	var price stripeCatalogPrice
 	if err := getStripeCatalogObject(ctx, "prices/"+url.PathEscape(priceRef)+"?expand%5B%5D=product", key, &price); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	live := environment == "live"
-	if price.ID != priceRef || price.Product.ID != prodRef || !price.Active || !price.Product.Active ||
-		price.Live != live || price.Product.Live != live || !strings.EqualFold(price.Currency, "usd") {
-		return nil, errors.New("Stripe Price/Product must be active, USD and match this environment")
+	if price.ID != priceRef || price.Product.ID != prodRef {
+		return &price, nil, errors.New("Stripe Price/Product reference does not match binding")
+	}
+	if !price.Active || !price.Product.Active {
+		return &price, nil, errStripeResourceInactive
+	}
+	if price.Live != live || price.Product.Live != live || !strings.EqualFold(price.Currency, "usd") {
+		return &price, nil, errors.New("Stripe Price/Product must be active, USD and match this environment")
 	}
 	if int(price.UnitAmount) != expectedCents {
-		return nil, fmt.Errorf("Stripe Price unit_amount (%d) differs from product price_cents (%d)", price.UnitAmount, expectedCents)
+		return &price, nil, fmt.Errorf("Stripe Price unit_amount (%d) differs from product price_cents (%d)", price.UnitAmount, expectedCents)
 	}
 	if productType == productTypeVIP {
 		if price.Kind != "recurring" || price.Recurring == nil || price.Recurring.IntervalCount != 1 || price.Recurring.Interval != vipCycle {
-			return nil, fmt.Errorf("Stripe Price must be recurring every 1 %s", vipCycle)
+			return &price, nil, fmt.Errorf("Stripe Price must be recurring every 1 %s", vipCycle)
 		}
 	} else if price.Kind != "one_time" {
-		return nil, errors.New("Stripe Price for single/whole_book products must have type=one_time")
+		return &price, nil, errors.New("Stripe Price for single/whole_book products must have type=one_time")
 	}
-	if salesMode == stripeManagedPayments && (price.Product.TaxCode == "" || (live && price.TaxBehavior != "inclusive" && price.TaxBehavior != "exclusive")) {
-		return nil, errors.New("Managed Payments requires a Stripe product tax_code and explicit tax_behavior")
+	if salesMode == stripeManagedPayments {
+		if price.Product.TaxCode == "" || price.Product.TaxCode != expectedTaxCode ||
+			(price.TaxBehavior != "inclusive" && price.TaxBehavior != "exclusive") ||
+			price.TaxBehavior != expectedTaxBehavior {
+			return &price, nil, fmt.Errorf("%w: product tax_code=%q (want %q), price tax_behavior=%q (want %q)",
+				errStripeTaxMismatch, price.Product.TaxCode, expectedTaxCode, price.TaxBehavior, expectedTaxBehavior)
+		}
 	}
-	return json.Marshal(price)
+	raw, err := json.Marshal(price)
+	return &price, raw, err
 }
 
 type productStatusReq struct {
 	Environment string `json:"environment" binding:"required,oneof=sandbox live"`
 	Reason      string `json:"reason" binding:"max=500"`
+	Force       bool   `json:"force"`
 }
 
 func (h *Handler) PublishProduct(c *gin.Context) {
@@ -1579,13 +1849,21 @@ func (h *Handler) transitionProductStatus(c *gin.Context, targetStatus, auditAct
 	}
 	ctx := c.Request.Context()
 	actor := c.GetString("admin_id")
+	if req.Environment == "live" && strings.TrimSpace(req.Reason) == "" {
+		writeProductError(c, fmt.Errorf("%w: a reason is required for live status transitions", errProductInvalid))
+		return
+	}
 	tx, err := db.DB.Begin(ctx)
 	if err != nil {
 		writeProductError(c, err)
 		return
 	}
 	defer tx.Rollback(context.WithoutCancel(ctx))
-	if err := requireFinancialAdmin(ctx, tx, actor); err != nil {
+	authorize := requireFinancialAdmin
+	if req.Environment == "live" {
+		authorize = requireSuperAdminTx
+	}
+	if err := authorize(ctx, tx, actor); err != nil {
 		writeProductError(c, err)
 		return
 	}
@@ -1605,6 +1883,62 @@ func (h *Handler) transitionProductStatus(c *gin.Context, targetStatus, auditAct
 		c.JSON(http.StatusConflict, gin.H{"error": "Only published products can be paused"})
 		return
 	}
+	if targetStatus == pubStatusRetired && currentStatus == pubStatusRetired {
+		c.JSON(http.StatusConflict, gin.H{"error": "Product is already retired"})
+		return
+	}
+
+	if req.Environment == "live" && !req.Force && (targetStatus == pubStatusPaused || targetStatus == pubStatusRetired) {
+		type affectedTemplate struct {
+			ID            int    `json:"id"`
+			Name          string `json:"name"`
+			IsDefault     bool   `json:"is_default"`
+			HasPromo      bool   `json:"has_promo"`
+			RemainingSlot int    `json:"remaining_published_slots"`
+		}
+		tRows, err := tx.Query(ctx, `
+			SELECT t.id, t.name, t.is_default,
+			       EXISTS(SELECT 1 FROM promotion_links pl WHERE pl.recharge_template_id = t.id) AS has_promo,
+			       (SELECT count(*)
+			        FROM recharge_slots s2
+			        JOIN product_publications pub2 ON pub2.product_id = s2.product_id
+			         AND pub2.environment = $2 AND pub2.status = 'published'
+			        WHERE s2.template_id = t.id AND s2.product_id <> $1) AS remaining_published_slots
+			FROM recharge_templates t
+			WHERE t.environment = $2
+			  AND EXISTS (SELECT 1 FROM recharge_slots s WHERE s.template_id = t.id AND s.product_id = $1)
+			ORDER BY t.id ASC`, id, req.Environment)
+		if err != nil {
+			writeProductError(c, err)
+			return
+		}
+		var affected []affectedTemplate
+		for tRows.Next() {
+			var item affectedTemplate
+			if err := tRows.Scan(&item.ID, &item.Name, &item.IsDefault, &item.HasPromo, &item.RemainingSlot); err != nil {
+				tRows.Close()
+				writeProductError(c, err)
+				return
+			}
+			if (item.IsDefault || item.HasPromo) && item.RemainingSlot < 4 {
+				affected = append(affected, item)
+			}
+		}
+		if err := tRows.Err(); err != nil {
+			tRows.Close()
+			writeProductError(c, err)
+			return
+		}
+		tRows.Close()
+		if len(affected) > 0 {
+			c.JSON(http.StatusConflict, gin.H{
+				"error":              "Cannot pause or retire this live product because affected active templates would fall below 4 published slots",
+				"affected_templates": affected,
+			})
+			return
+		}
+	}
+
 	_, err = tx.Exec(ctx, `
 		UPDATE product_publications
 		SET status = $3,

@@ -781,10 +781,11 @@ func (h *Handler) ValidatePaymentChannel(c *gin.Context) {
 }
 
 type publishChannelReq struct {
-	SetPrimary       *bool `json:"set_primary"`
-	NewOrders        *bool `json:"new_orders_enabled"`
-	NewSubscriptions *bool `json:"new_subscriptions_enabled"`
-	ExpectedVersion  int   `json:"expected_version"`
+	SetPrimary                     *bool `json:"set_primary"`
+	NewOrders                      *bool `json:"new_orders_enabled"`
+	NewSubscriptions               *bool `json:"new_subscriptions_enabled"`
+	ExpectedVersion                int   `json:"expected_version"`
+	ForceSwitchWhenProductsUnready bool  `json:"force_switch_when_products_unready"`
 }
 
 func (h *Handler) PublishPaymentChannel(c *gin.Context) {
@@ -859,6 +860,78 @@ func (h *Handler) PublishPaymentChannel(c *gin.Context) {
 	}
 
 	if setPrimary {
+		if !req.ForceSwitchWhenProductsUnready {
+			type unreadyProduct struct {
+				ID   int64  `json:"id"`
+				Code string `json:"code"`
+				Name string `json:"name"`
+			}
+			var unreadyQuery string
+			if provider == "paypal" {
+				unreadyQuery = `
+					SELECT p.id, p.code, p.name
+					FROM product_publications pub
+					JOIN products p ON p.id = pub.product_id
+					WHERE pub.environment = $2 AND pub.status = 'published'
+					  AND NOT (
+					      CASE WHEN p.product_type = 'vip' THEN $4::bool ELSE $3::bool END
+					      AND EXISTS (
+					          SELECT 1 FROM product_channel_bindings b
+					          WHERE b.product_id = p.id AND b.account_id = $1
+					            AND b.provider = 'paypal' AND b.environment = $2
+					            AND b.enabled = true AND b.validation_status = 'verified'
+					            AND (p.product_type <> 'vip' OR b.external_price_ref <> '')
+					      )
+					  )
+					ORDER BY p.id ASC`
+			} else {
+				unreadyQuery = `
+					SELECT p.id, p.code, p.name
+					FROM product_publications pub
+					JOIN products p ON p.id = pub.product_id
+					WHERE pub.environment = $2 AND pub.status = 'published'
+					  AND NOT (
+					      CASE WHEN p.product_type = 'vip' THEN $4::bool ELSE $3::bool END
+					      AND EXISTS (
+					          SELECT 1 FROM product_channel_bindings b
+					          WHERE b.product_id = p.id AND b.account_id = $1
+					            AND b.provider = 'stripe' AND b.environment = $2
+					            AND b.enabled = true AND b.validation_status = 'verified'
+					            AND b.external_product_ref <> '' AND b.external_price_ref <> ''
+					            AND ($2 = 'sandbox' OR (b.validated_catalog IS NOT NULL AND b.release_evidence IS NOT NULL AND b.market_policy IS NOT NULL))
+					      )
+					  )
+					ORDER BY p.id ASC`
+			}
+			uRows, err := tx.Query(ctx, unreadyQuery, id, environment, newOrders, newSubs)
+			if err != nil {
+				writeChannelError(c, err)
+				return
+			}
+			var unready []unreadyProduct
+			for uRows.Next() {
+				var item unreadyProduct
+				if err := uRows.Scan(&item.ID, &item.Code, &item.Name); err != nil {
+					uRows.Close()
+					writeChannelError(c, err)
+					return
+				}
+				unready = append(unready, item)
+			}
+			if err := uRows.Err(); err != nil {
+				uRows.Close()
+				writeChannelError(c, err)
+				return
+			}
+			uRows.Close()
+			if len(unready) > 0 {
+				c.JSON(http.StatusConflict, gin.H{
+					"error":                     "Target account is missing verified bindings for published products; pre-bind products before switching primary or pass force_switch_when_products_unready=true",
+					"unready_published_products": unready,
+				})
+				return
+			}
+		}
 		if _, err := tx.Exec(ctx, `
 			UPDATE payment_channel_accounts
 			SET is_primary = false, updated_at = now()

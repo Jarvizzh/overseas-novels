@@ -92,6 +92,7 @@ interface FBPixel {
 interface RechargeTemplate {
   id: number;
   name: string;
+  environment?: string;
   is_default: boolean;
 }
 

@@ -8,18 +8,22 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 var (
 	ErrOrderNotFound               = errors.New("Order not found")
 	ErrOrderAlreadyRefunded        = errors.New("Order has already been refunded")
 	ErrOrderNotRefundable          = errors.New("Only successfully completed orders can be refunded")
-	ErrTemplateSlotCountInvalid    = errors.New("Each recharge template slot count must be between 4 and 8")
-	ErrTemplateSlotBonusTooHigh    = errors.New("Bonus coins cannot exceed 1.5 times of standard coins for single slots")
-	ErrTemplateSlotInvalid         = errors.New("Each template slot must reference a distinct published product with slot_index 1..8")
-	ErrTemplateProductNotPublished = errors.New("All template slots must reference products that are published and dual-channel ready")
-	ErrTemplateNotFound            = errors.New("Recharge template not found")
-	ErrDefaultTemplateNotDelete    = errors.New("Default recharge template cannot be deleted, please set another template as default first")
+	ErrTemplateSlotCountInvalid       = errors.New("Each recharge template slot count must be between 4 and 8")
+	ErrTemplateSlotBonusTooHigh       = errors.New("Bonus coins cannot exceed 1.5 times of standard coins for single slots")
+	ErrTemplateSlotInvalid            = errors.New("Each template slot must reference a distinct published product with slot_index 1..8")
+	ErrTemplateProductNotPublished    = errors.New("All template slots must reference products that are published and dual-channel ready")
+	ErrTemplateNotFound               = errors.New("Recharge template not found")
+	ErrDefaultTemplateNotDelete       = errors.New("Default recharge template cannot be deleted, please set another template as default first")
+	ErrCannotUnsetLastDefaultTemplate = errors.New("Cannot unset the only default recharge template; set another template as default first")
+	ErrTemplateReferenced             = errors.New("Recharge template is referenced by promotion links and cannot be deleted")
+	ErrTemplateEnvPolicy              = errors.New("Only live recharge templates can be default or switched while active/referenced")
 )
 
 type BillingService interface {
@@ -33,8 +37,8 @@ type BillingService interface {
 
 	ListRechargeTemplates(ctx context.Context) ([]RechargeTemplate, error)
 	ListVIPOfferPublications(ctx context.Context) ([]VIPOfferPublication, error)
-	CreateRechargeTemplate(ctx context.Context, adminID string, name string, isDefault bool, slots []RechargeSlot) (int, error)
-	UpdateRechargeTemplate(ctx context.Context, adminID string, id int, name string, isDefault bool, slots []RechargeSlot) error
+	CreateRechargeTemplate(ctx context.Context, adminID string, name string, environment string, isDefault bool, slots []RechargeSlot) (int, error)
+	UpdateRechargeTemplate(ctx context.Context, adminID string, id int, name string, environment string, isDefault bool, slots []RechargeSlot) error
 	DeleteRechargeTemplate(ctx context.Context, adminID string, id int) error
 	SetDefaultRechargeTemplate(ctx context.Context, adminID string, id int) error
 }
@@ -187,7 +191,18 @@ func (s *billingService) ListRechargeTemplates(ctx context.Context) ([]RechargeT
 	return templates, nil
 }
 
-func validateTemplateSlotsTx(ctx context.Context, tx pgx.Tx, slots []RechargeSlot) error {
+func normalizeTemplateEnvironment(env string) (string, error) {
+	env = strings.TrimSpace(env)
+	if env == "" {
+		return "live", nil
+	}
+	if env != "sandbox" && env != "live" {
+		return "", ErrTemplateSlotInvalid
+	}
+	return env, nil
+}
+
+func validateTemplateSlotsTx(ctx context.Context, tx pgx.Tx, env string, slots []RechargeSlot) error {
 	if len(slots) < 4 || len(slots) > 8 {
 		return ErrTemplateSlotCountInvalid
 	}
@@ -208,24 +223,83 @@ func validateTemplateSlotsTx(ctx context.Context, tx pgx.Tx, slots []RechargeSlo
 		seenProd[s.ProductID] = true
 		productIDs = append(productIDs, s.ProductID)
 	}
-	var publishedCount int
-	err := tx.QueryRow(ctx, `
-		SELECT count(DISTINCT p.id)
+
+	rows, err := tx.Query(ctx, `
+		SELECT p.id, p.code,
+		       COALESCE(pub.status, '') = 'published' AS env_published,
+		       EXISTS (
+		           SELECT 1 FROM product_channel_bindings bp
+		           JOIN payment_channel_accounts ap ON ap.id = bp.account_id
+		           WHERE bp.product_id = p.id AND bp.provider = 'paypal' AND bp.environment = $2
+		             AND ap.provider = 'paypal' AND ap.environment = $2 AND ap.status = 'published' AND ap.is_primary = true
+		             AND bp.enabled = true AND bp.validation_status = 'verified'
+		             AND ((p.product_type = 'vip' AND ap.new_subscriptions_enabled AND bp.external_price_ref <> '')
+		               OR (p.product_type <> 'vip' AND ap.new_orders_enabled))
+		       ) AS pp_ready,
+		       EXISTS (
+		           SELECT 1 FROM product_channel_bindings bs
+		           JOIN payment_channel_accounts ast ON ast.id = bs.account_id
+		           WHERE bs.product_id = p.id AND bs.provider = 'stripe' AND bs.environment = $2
+		             AND ast.provider = 'stripe' AND ast.environment = $2 AND ast.status = 'published' AND ast.is_primary = true
+		             AND bs.enabled = true AND bs.validation_status = 'verified'
+		             AND bs.external_product_ref <> '' AND bs.external_price_ref <> ''
+		             AND ($2 = 'sandbox' OR (bs.validated_catalog IS NOT NULL AND bs.release_evidence IS NOT NULL AND bs.market_policy IS NOT NULL))
+		             AND ((p.product_type = 'vip' AND ast.new_subscriptions_enabled)
+		               OR (p.product_type <> 'vip' AND ast.new_orders_enabled))
+		       ) AS st_ready
 		FROM products p
-		JOIN product_publications pub ON pub.product_id = p.id
-		WHERE p.id = ANY($1::bigint[]) AND pub.status = 'published'`, productIDs).Scan(&publishedCount)
+		LEFT JOIN product_publications pub ON pub.product_id = p.id AND pub.environment = $2
+		WHERE p.id = ANY($1::bigint[])`, productIDs, env)
 	if err != nil {
 		return err
 	}
-	if publishedCount != len(productIDs) {
-		return ErrTemplateProductNotPublished
+	defer rows.Close()
+
+	found := 0
+	var problems []string
+	for rows.Next() {
+		var pid int64
+		var code string
+		var published, ppReady, stReady bool
+		if err := rows.Scan(&pid, &code, &published, &ppReady, &stReady); err != nil {
+			return err
+		}
+		found++
+		if !published {
+			problems = append(problems, fmt.Sprintf("%s(#%d) is not published in %s", code, pid, env))
+		} else if !ppReady || !stReady {
+			missing := []string{}
+			if !ppReady {
+				missing = append(missing, "PayPal")
+			}
+			if !stReady {
+				missing = append(missing, "Stripe")
+			}
+			problems = append(problems, fmt.Sprintf("%s(#%d) is not ready on %s (%s)", code, pid, strings.Join(missing, "/"), env))
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if found != len(productIDs) {
+		return fmt.Errorf("%w: one or more selected products do not exist", ErrTemplateProductNotPublished)
+	}
+	if len(problems) > 0 {
+		return fmt.Errorf("%w: %s", ErrTemplateProductNotPublished, strings.Join(problems, "; "))
 	}
 	return nil
 }
 
-func (s *billingService) CreateRechargeTemplate(ctx context.Context, adminID string, name string, isDefault bool, slots []RechargeSlot) (int, error) {
+func (s *billingService) CreateRechargeTemplate(ctx context.Context, adminID string, name string, environment string, isDefault bool, slots []RechargeSlot) (int, error) {
 	if len(slots) < 4 || len(slots) > 8 {
 		return 0, ErrTemplateSlotCountInvalid
+	}
+	env, err := normalizeTemplateEnvironment(environment)
+	if err != nil {
+		return 0, err
+	}
+	if isDefault && env != "live" {
+		return 0, fmt.Errorf("%w: sandbox templates cannot be set as the site default", ErrTemplateEnvPolicy)
 	}
 
 	tx, err := s.beginTemplateChange(ctx, adminID)
@@ -234,7 +308,7 @@ func (s *billingService) CreateRechargeTemplate(ctx context.Context, adminID str
 	}
 	defer tx.Rollback(context.WithoutCancel(ctx))
 
-	if err := validateTemplateSlotsTx(ctx, tx, slots); err != nil {
+	if err := validateTemplateSlotsTx(ctx, tx, env, slots); err != nil {
 		return 0, err
 	}
 
@@ -250,7 +324,7 @@ func (s *billingService) CreateRechargeTemplate(ctx context.Context, adminID str
 		}
 	}
 
-	templateID, err := s.repo.CreateRechargeTemplateTx(ctx, tx, name, isDefault)
+	templateID, err := s.repo.CreateRechargeTemplateTx(ctx, tx, name, env, isDefault)
 	if err != nil {
 		return 0, err
 	}
@@ -273,7 +347,7 @@ func (s *billingService) CreateRechargeTemplate(ctx context.Context, adminID str
 	return templateID, nil
 }
 
-func (s *billingService) UpdateRechargeTemplate(ctx context.Context, adminID string, id int, name string, isDefault bool, slots []RechargeSlot) error {
+func (s *billingService) UpdateRechargeTemplate(ctx context.Context, adminID string, id int, name string, environment string, isDefault bool, slots []RechargeSlot) error {
 	if len(slots) < 4 || len(slots) > 8 {
 		return ErrTemplateSlotCountInvalid
 	}
@@ -284,7 +358,47 @@ func (s *billingService) UpdateRechargeTemplate(ctx context.Context, adminID str
 	}
 	defer tx.Rollback(context.WithoutCancel(ctx))
 
-	if err := validateTemplateSlotsTx(ctx, tx, slots); err != nil {
+	var wasDefault bool
+	var existingEnv string
+	err = tx.QueryRow(ctx, `SELECT is_default, environment FROM recharge_templates WHERE id = $1 FOR UPDATE`, id).Scan(&wasDefault, &existingEnv)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrTemplateNotFound
+	}
+	if err != nil {
+		return err
+	}
+
+	env := strings.TrimSpace(environment)
+	if env == "" {
+		env = existingEnv
+	}
+	if env != "sandbox" && env != "live" {
+		return ErrTemplateSlotInvalid
+	}
+	if isDefault && env != "live" {
+		return fmt.Errorf("%w: sandbox templates cannot be set as the site default", ErrTemplateEnvPolicy)
+	}
+	if env != "live" {
+		var hasPromoRef bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM promotion_links WHERE recharge_template_id = $1 FOR SHARE)`, id).Scan(&hasPromoRef); err != nil {
+			return err
+		}
+		if wasDefault || hasPromoRef {
+			return fmt.Errorf("%w: default or promotion-linked templates must remain in live environment", ErrTemplateEnvPolicy)
+		}
+	}
+
+	if wasDefault && !isDefault {
+		var otherDefault bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM recharge_templates WHERE is_default = true AND id <> $1)`, id).Scan(&otherDefault); err != nil {
+			return err
+		}
+		if !otherDefault {
+			return ErrCannotUnsetLastDefaultTemplate
+		}
+	}
+
+	if err := validateTemplateSlotsTx(ctx, tx, env, slots); err != nil {
 		return err
 	}
 
@@ -300,7 +414,7 @@ func (s *billingService) UpdateRechargeTemplate(ctx context.Context, adminID str
 		}
 	}
 
-	affected, err := s.repo.UpdateRechargeTemplateTx(ctx, tx, id, name, isDefault)
+	affected, err := s.repo.UpdateRechargeTemplateTx(ctx, tx, id, name, env, isDefault)
 	if err != nil {
 		return err
 	}
@@ -308,16 +422,8 @@ func (s *billingService) UpdateRechargeTemplate(ctx context.Context, adminID str
 		return ErrTemplateNotFound
 	}
 
-	err = s.repo.DeleteRechargeSlotsTx(ctx, tx, id)
-	if err != nil {
+	if err := s.repo.SyncRechargeSlotsTx(ctx, tx, id, slots); err != nil {
 		return err
-	}
-
-	for _, slot := range slots {
-		err = s.repo.CreateRechargeSlotTx(ctx, tx, id, slot.SlotIndex, slot.ProductID, slot.Badge, slot.IsHighlighted, slot.DisplayAlias)
-		if err != nil {
-			return err
-		}
 	}
 
 	if err := s.auditTemplateChange(ctx, tx, adminID, "update_recharge_template", id, before); err != nil {
@@ -343,11 +449,41 @@ func (s *billingService) DeleteRechargeTemplate(ctx context.Context, adminID str
 	if isDefault {
 		return ErrDefaultTemplateNotDelete
 	}
+	rows, err := tx.Query(ctx, `
+		SELECT COALESCE(NULLIF(name, ''), '#' || id::text)
+		FROM promotion_links
+		WHERE recharge_template_id = $1
+		ORDER BY id FOR SHARE`, id)
+	if err != nil {
+		return err
+	}
+	var promoNames []string
+	for rows.Next() {
+		var pName string
+		if err := rows.Scan(&pName); err != nil {
+			rows.Close()
+			return err
+		}
+		promoNames = append(promoNames, pName)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	if len(promoNames) > 0 {
+		return fmt.Errorf("%w (%d promotion link(s): %s)", ErrTemplateReferenced, len(promoNames), strings.Join(promoNames, ", "))
+	}
+
 	before, err := templateSnapshot(ctx, tx, id)
 	if err != nil {
 		return err
 	}
 	if _, err := tx.Exec(ctx, "DELETE FROM recharge_templates WHERE id=$1", id); err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23503" {
+			return ErrTemplateReferenced
+		}
 		return err
 	}
 	if err := s.auditTemplateChange(ctx, tx, adminID, "delete_recharge_template", id, before); err != nil {
@@ -362,6 +498,18 @@ func (s *billingService) SetDefaultRechargeTemplate(ctx context.Context, adminID
 		return err
 	}
 	defer tx.Rollback(context.WithoutCancel(ctx))
+
+	var targetEnv string
+	err = tx.QueryRow(ctx, `SELECT environment FROM recharge_templates WHERE id = $1 FOR UPDATE`, id).Scan(&targetEnv)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrTemplateNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if targetEnv != "live" {
+		return fmt.Errorf("%w: sandbox templates cannot be set as the site default", ErrTemplateEnvPolicy)
+	}
 
 	before, err := templateSnapshot(ctx, tx, id)
 	if err != nil {

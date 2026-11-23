@@ -9,6 +9,8 @@ import (
 	"reader-backend/internal/model"
 )
 
+const defaultLiveTemplateIDSQL = `(SELECT id FROM recharge_templates WHERE environment = 'live' ORDER BY is_default DESC NULLS LAST, id LIMIT 1)`
+
 func formatUSDPrice(cents int) string {
 	return fmt.Sprintf("$%d.%02d", cents/100, cents%100)
 }
@@ -35,7 +37,7 @@ func (r *dbRepository) GetDefaultRechargeTemplate(ctx context.Context) (*model.R
 	query := `
 		SELECT id, name, is_default
 		FROM recharge_templates
-		WHERE is_default = TRUE
+		WHERE is_default = TRUE AND environment = 'live'
 		LIMIT 1`
 	err := db.Pool(ctx).QueryRow(ctx, query).Scan(&t.ID, &t.Name, &t.IsDefault)
 	if err != nil {
@@ -52,6 +54,7 @@ func (r *dbRepository) GetFirstRechargeTemplate(ctx context.Context) (*model.Rec
 	query := `
 		SELECT id, name, is_default
 		FROM recharge_templates
+		WHERE environment = 'live'
 		ORDER BY id ASC
 		LIMIT 1`
 	err := db.Pool(ctx).QueryRow(ctx, query).Scan(&t.ID, &t.Name, &t.IsDefault)
@@ -177,12 +180,12 @@ func wholeBookProductAvailable(ctx context.Context, q checkoutQueryer, userID in
 			LEFT JOIN LATERAL (SELECT id, novel_id, recharge_template_id FROM reader_promotion_for_user(u.id)) promo ON TRUE
 			WHERE u.id = $1
 			  AND EXISTS (SELECT 1 FROM novels WHERE id = $3 AND status <> 'archived' AND publish_status = 'published')
-			  AND ($2 = 0 OR $2 = COALESCE(promo.recharge_template_id, (SELECT id FROM recharge_templates ORDER BY is_default DESC NULLS LAST, id LIMIT 1)))
+			  AND ($2 = 0 OR $2 = COALESCE(promo.recharge_template_id, ` + defaultLiveTemplateIDSQL + `))
 			  AND (
 			      ($4 = 'all_published')
 			   OR ($4 = 'promoted_novel' AND promo.novel_id = $3)
 			   OR ($4 = 'specific_novels' AND $3 = ANY($5::bigint[]))
-			   OR ($4 = 'promoted_or_default' AND (promo.novel_id = $3 OR (promo.id IS NULL AND EXISTS(SELECT 1 FROM recharge_templates WHERE id = $2 AND is_default))))
+			   OR ($4 = 'promoted_or_default' AND (promo.novel_id = $3 OR (promo.id IS NULL AND EXISTS(SELECT 1 FROM recharge_templates WHERE id = $2 AND is_default AND environment = 'live'))))
 			  )
 		)`, userID, templateID, novelID, scopeType, scopeIDs).Scan(&allowed)
 	return allowed, err

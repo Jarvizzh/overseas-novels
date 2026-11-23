@@ -5,14 +5,23 @@ export class ApiError extends Error {
   readonly code?: string;
   readonly field?: string;
   readonly appIds?: string[];
+  readonly data?: Record<string, unknown>;
 
-  constructor(message: string, status: number, code?: string, field?: string, appIds?: string[]) {
+  constructor(
+    message: string,
+    status: number,
+    code?: string,
+    field?: string,
+    appIds?: string[],
+    data?: Record<string, unknown>,
+  ) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
     this.code = code;
     this.field = field;
     this.appIds = appIds;
+    this.data = data;
   }
 }
 
@@ -73,6 +82,7 @@ export async function apiRequest(
       errorData.error || `请求失败 (${response.status})`, response.status, errorCode,
       typeof errorData.field === 'string' ? errorData.field : undefined,
       Array.isArray(errorData.app_ids) ? errorData.app_ids.filter((id: unknown) => typeof id === 'string') : undefined,
+      errorData && typeof errorData === 'object' ? (errorData as Record<string, unknown>) : undefined,
     );
   }
 

@@ -71,12 +71,15 @@ type RechargeSlot struct {
 }
 
 type RechargeTemplate struct {
-	ID        int            `json:"id"`
-	Name      string         `json:"name"`
-	IsDefault bool           `json:"is_default"`
-	Slots     []RechargeSlot `json:"slots"`
-	CreatedAt time.Time      `json:"created_at"`
-	UpdatedAt time.Time      `json:"updated_at"`
+	ID                   int            `json:"id"`
+	Name                 string         `json:"name"`
+	Environment          string         `json:"environment"`
+	IsDefault            bool           `json:"is_default"`
+	LinkedPromotionCount int            `json:"linked_promotion_count"`
+	LinkedPromotionNames []string       `json:"linked_promotion_names,omitempty"`
+	Slots                []RechargeSlot `json:"slots"`
+	CreatedAt            time.Time      `json:"created_at"`
+	UpdatedAt            time.Time      `json:"updated_at"`
 }
 
 type ThirdPartyPaymentOrder struct {

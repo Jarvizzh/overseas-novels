@@ -167,3 +167,8 @@ var PaymentCatalogAndChannelSQL string
 //
 //go:embed migrations/2026111929.sql
 var PaymentVIPSwitchSQL string
+
+// PaymentTemplateCatalogFixesSQL adds Stripe catalog revision tracking, template environment scoping, and restricted promotion template FK.
+//
+//go:embed migrations/2026111930.sql
+var PaymentTemplateCatalogFixesSQL string

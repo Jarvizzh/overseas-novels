@@ -53,12 +53,7 @@ func (h *Handler) RegisterRoutes(rg *gin.RouterGroup) {
 		payments.POST("/channels/:id/validate", paymentRoles("SuperAdmin"), h.ValidatePaymentChannel)
 		payments.POST("/channels/:id/publish", paymentRoles("SuperAdmin"), h.PublishPaymentChannel)
 		payments.POST("/channels/:id/deactivate", paymentRoles("SuperAdmin"), h.DeactivatePaymentChannel)
-		payments.GET("/channels/vip-offers", paymentRoles("SuperAdmin"), h.ListVIPOfferPublications)
 		payments.PUT("/channels/:id", paymentRoles("SuperAdmin"), h.UpdatePaymentChannel)
-		payments.GET("/channels/:id/stripe-one-time", paymentRoles("SuperAdmin"), h.listStripeOneTimeOffers)
-		payments.PUT("/channels/:id/stripe-one-time/:slot", paymentRoles("SuperAdmin"), h.updateStripeOneTimeOffer)
-		payments.GET("/channels/:id/stripe-vip", paymentRoles("SuperAdmin"), h.listStripeVIPOffers)
-		payments.PUT("/channels/:id/stripe-vip/:slot", paymentRoles("SuperAdmin"), h.updateStripeVIPOffer)
 		payments.GET("/channels/:id/aftercare-policy", superAdmin, h.getAftercarePolicy)
 		payments.PUT("/channels/:id/aftercare-policy", superAdmin, h.updateAftercarePolicy)
 		payments.POST("/refunds", financeRoles, h.SubmitRefundCommand)
@@ -349,9 +344,10 @@ func (s SlotReq) hasCommercialOverride() bool {
 }
 
 type SaveTemplateReq struct {
-	Name      string    `json:"name" binding:"required"`
-	IsDefault bool      `json:"is_default"`
-	Slots     []SlotReq `json:"slots" binding:"required"`
+	Name        string    `json:"name" binding:"required"`
+	Environment string    `json:"environment" binding:"omitempty,oneof=sandbox live"`
+	IsDefault   bool      `json:"is_default"`
+	Slots       []SlotReq `json:"slots" binding:"required"`
 }
 
 func buildTemplateSlots(reqs []SlotReq) ([]RechargeSlot, bool) {
@@ -377,7 +373,7 @@ func writeTemplateSaveError(c *gin.Context, err error) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "Financial permission required"})
 	case errors.Is(err, ErrTemplateSlotCountInvalid), errors.Is(err, ErrTemplateSlotBonusTooHigh), errors.Is(err, ErrTemplateSlotInvalid):
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-	case errors.Is(err, ErrTemplateProductNotPublished):
+	case errors.Is(err, ErrTemplateProductNotPublished), errors.Is(err, ErrCannotUnsetLastDefaultTemplate), errors.Is(err, ErrTemplateReferenced), errors.Is(err, ErrTemplateEnvPolicy):
 		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
 	case errors.Is(err, ErrTemplateNotFound):
 		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
@@ -400,7 +396,7 @@ func (h *Handler) CreateRechargeTemplate(c *gin.Context) {
 	}
 
 	ctx := c.Request.Context()
-	templateID, err := h.service.CreateRechargeTemplate(ctx, c.GetString("admin_id"), req.Name, req.IsDefault, slots)
+	templateID, err := h.service.CreateRechargeTemplate(ctx, c.GetString("admin_id"), req.Name, req.Environment, req.IsDefault, slots)
 	if err != nil {
 		writeTemplateSaveError(c, err)
 		return
@@ -429,7 +425,7 @@ func (h *Handler) UpdateRechargeTemplate(c *gin.Context) {
 	}
 
 	ctx := c.Request.Context()
-	err = h.service.UpdateRechargeTemplate(ctx, c.GetString("admin_id"), id, req.Name, req.IsDefault, slots)
+	err = h.service.UpdateRechargeTemplate(ctx, c.GetString("admin_id"), id, req.Name, req.Environment, req.IsDefault, slots)
 	if err != nil {
 		writeTemplateSaveError(c, err)
 		return
@@ -452,8 +448,12 @@ func (h *Handler) DeleteRechargeTemplate(c *gin.Context) {
 			c.JSON(http.StatusForbidden, gin.H{"error": "Financial permission required"})
 			return
 		}
-		if errors.Is(err, ErrDefaultTemplateNotDelete) || errors.Is(err, ErrTemplateNotFound) {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		if errors.Is(err, ErrTemplateReferenced) || errors.Is(err, ErrDefaultTemplateNotDelete) {
+			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ErrTemplateNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
 			return
 		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -475,6 +475,10 @@ func (h *Handler) SetDefaultRechargeTemplate(c *gin.Context) {
 	if err != nil {
 		if errors.Is(err, ErrRefundForbidden) {
 			c.JSON(http.StatusForbidden, gin.H{"error": "Financial permission required"})
+			return
+		}
+		if errors.Is(err, ErrTemplateEnvPolicy) {
+			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
 			return
 		}
 		if errors.Is(err, ErrTemplateNotFound) {

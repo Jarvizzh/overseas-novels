@@ -36,6 +36,14 @@ import {
   VIP_CYCLE_LABELS,
   type VipCycle,
 } from '../utils/paymentCatalogApi';
+import {
+  extractStripeCatalogTax,
+  filterPublishedChannelAccounts,
+  findBindingForAccount,
+  nextCopyCode,
+  parseSpecificNovelIds as combineSpecificNovelIds,
+  toggleSpecificNovelScope,
+} from '../utils/productCatalogHelpers';
 
 interface ProductsPageProps {
   canWrite: boolean;
@@ -87,6 +95,7 @@ type StripeBindForm = {
   countries: string;
   release_evidence: string;
   market_policy: string;
+  reprovision: boolean;
   enabled: boolean;
   reason: string;
 };
@@ -136,7 +145,7 @@ export default function ProductsPage({ canWrite, canManageBindings }: ProductsPa
   const [ppForm, setPpForm] = useState<PayPalBindForm>({ account_id: '', external_product_ref: '', external_price_ref: '', enabled: true, reason: '' });
   const [stForm, setStForm] = useState<StripeBindForm>({
     account_id: '', sales_mode: 'direct', tax_liability_account: '', tax_code: 'txcd_10103001',
-    tax_behavior: 'exclusive', countries: 'US', release_evidence: '', market_policy: '', enabled: true, reason: '',
+    tax_behavior: 'exclusive', countries: 'US', release_evidence: '', market_policy: '', reprovision: false, enabled: true, reason: '',
   });
 
   const [statusDialog, setStatusDialog] = useState<{ product: ProductView; action: 'publish' | 'pause' | 'retire' } | null>(null);
@@ -209,11 +218,13 @@ export default function ProductsPage({ canWrite, canManageBindings }: ProductsPa
     return () => controller.abort();
   }, [drawerOpen, formState.product_type, formState.novel_scope_type, novelSearch]);
 
-  const envAccounts = useMemo(() => {
-    const pp = accounts.filter((a) => a.provider === 'paypal' && a.environment === env && a.status !== 'disabled');
-    const st = accounts.filter((a) => a.provider === 'stripe' && a.environment === env && a.status !== 'disabled');
-    return { paypal: pp, stripe: st };
-  }, [accounts, env]);
+  const envAccounts = useMemo(
+    () => ({
+      paypal: filterPublishedChannelAccounts(accounts, 'paypal', env),
+      stripe: filterPublishedChannelAccounts(accounts, 'stripe', env),
+    }),
+    [accounts, env],
+  );
 
   const openCreateDrawer = () => {
     setCopySource(null);
@@ -225,7 +236,7 @@ export default function ProductsPage({ canWrite, canManageBindings }: ProductsPa
   const openCopyDrawer = (prod: ProductView) => {
     setCopySource(prod);
     setFormState({
-      code: `${prod.code}_V2`.slice(0, 64),
+      code: nextCopyCode(prod.code),
       product_type: prod.product_type,
       name: `${prod.name} (新版本)`,
       description: prod.description || '',
@@ -235,19 +246,14 @@ export default function ProductsPage({ canWrite, canManageBindings }: ProductsPa
       vip_cycle: (prod.vip_cycle || 'month') as VipCycle,
       novel_scope_type: prod.novel_scope_type === 'none' ? 'all_published' : prod.novel_scope_type,
       novel_scope_ids: prod.novel_scope_ids ?? [],
-      manual_novel_ids: (prod.novel_scope_ids ?? []).join(', '),
+      manual_novel_ids: '',
     });
     setFormError('');
     setDrawerOpen(true);
   };
 
-  const parseSpecificNovelIds = (): number[] => {
-    const manual = formState.manual_novel_ids
-      .split(/[\s,，]+/)
-      .map((item) => Number(item))
-      .filter((n) => Number.isInteger(n) && n > 0);
-    return Array.from(new Set([...formState.novel_scope_ids, ...manual])).sort((a, b) => a - b);
-  };
+  const parseSpecificNovelIds = (): number[] =>
+    combineSpecificNovelIds(formState.novel_scope_ids, formState.manual_novel_ids);
 
   const handleSaveProduct = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -294,26 +300,33 @@ export default function ProductsPage({ canWrite, canManageBindings }: ProductsPa
     }
   };
 
-  const syncBindingFormsFromProduct = (prod: ProductView) => {
+  const syncBindingFormsFromProduct = (prod: ProductView, preferredPPAccountId?: string, preferredSTAccountId?: string) => {
     const ppAccDefault = envAccounts.paypal.find((a) => a.is_primary) ?? envAccounts.paypal[0];
     const stAccDefault = envAccounts.stripe.find((a) => a.is_primary) ?? envAccounts.stripe[0];
+    const ppAccountId = preferredPPAccountId || String(prod.paypal_binding?.account_id ?? ppAccDefault?.id ?? '');
+    const stAccountId = preferredSTAccountId || String(prod.stripe_binding?.account_id ?? stAccDefault?.id ?? '');
+    const ppBinding = findBindingForAccount(prod, 'paypal', ppAccountId);
+    const stBinding = findBindingForAccount(prod, 'stripe', stAccountId);
+    const { taxCode, taxBehavior } = extractStripeCatalogTax(stBinding?.validated_catalog);
+
     setPpForm({
-      account_id: String(prod.paypal_binding?.account_id ?? ppAccDefault?.id ?? ''),
-      external_product_ref: prod.paypal_binding?.external_product_ref ?? '',
-      external_price_ref: prod.paypal_binding?.external_price_ref ?? '',
-      enabled: prod.paypal_binding?.enabled ?? true,
+      account_id: ppAccountId,
+      external_product_ref: ppBinding?.external_product_ref ?? '',
+      external_price_ref: ppBinding?.external_price_ref ?? '',
+      enabled: ppBinding?.enabled ?? true,
       reason: '',
     });
     setStForm({
-      account_id: String(prod.stripe_binding?.account_id ?? stAccDefault?.id ?? ''),
-      sales_mode: prod.stripe_binding?.sales_mode ?? 'direct',
-      tax_liability_account: prod.stripe_binding?.tax_liability_account ?? '',
-      tax_code: 'txcd_10103001',
-      tax_behavior: 'exclusive',
-      countries: prod.stripe_binding?.allowed_countries?.join(', ') || 'US',
-      release_evidence: prod.stripe_binding?.release_evidence ?? '',
-      market_policy: prod.stripe_binding?.market_policy ?? '',
-      enabled: prod.stripe_binding?.enabled ?? true,
+      account_id: stAccountId,
+      sales_mode: stBinding?.sales_mode ?? 'direct',
+      tax_liability_account: stBinding?.tax_liability_account ?? '',
+      tax_code: taxCode,
+      tax_behavior: taxBehavior,
+      countries: stBinding?.allowed_countries?.join(', ') || 'US',
+      release_evidence: stBinding?.release_evidence ?? '',
+      market_policy: stBinding?.market_policy ?? '',
+      reprovision: false,
+      enabled: stBinding?.enabled ?? true,
       reason: '',
     });
   };
@@ -356,7 +369,7 @@ export default function ProductsPage({ canWrite, canManageBindings }: ProductsPa
       });
       const updated = await productsApi.get(bindingProduct.id, env);
       setBindingProduct(updated.product);
-      syncBindingFormsFromProduct(updated.product);
+      syncBindingFormsFromProduct(updated.product, ppForm.account_id, stForm.account_id);
       showToast('PayPal 渠道绑定已验证并保存', 'success');
       await loadData();
     } catch (err) {
@@ -395,12 +408,13 @@ export default function ProductsPage({ canWrite, canManageBindings }: ProductsPa
         countries,
         release_evidence: stForm.release_evidence.trim(),
         market_policy: stForm.market_policy.trim(),
+        reprovision: stForm.reprovision || undefined,
         enabled: stForm.enabled,
         reason: stForm.reason.trim(),
       });
       const updated = await productsApi.get(bindingProduct.id, env);
       setBindingProduct(updated.product);
-      syncBindingFormsFromProduct(updated.product);
+      syncBindingFormsFromProduct(updated.product, ppForm.account_id, stForm.account_id);
       showToast('已联动 Stripe 自动创建/核验并保存绑定', 'success');
       await loadData();
     } catch (err) {
@@ -412,7 +426,7 @@ export default function ProductsPage({ canWrite, canManageBindings }: ProductsPa
 
   const handleTransitionStatus = async () => {
     if (!statusDialog || submitting) return;
-    if (!canWrite || (statusDialog.action === 'publish' && (!canPublish || (env === 'live' && !statusReason.trim())))) return;
+    if (!canPublish || (env === 'live' && !statusReason.trim())) return;
     setSubmitting(true);
     setFormError('');
     try {
@@ -442,9 +456,7 @@ export default function ProductsPage({ canWrite, canManageBindings }: ProductsPa
   const toggleNovelId = (novelId: number) => {
     setFormState((prev) => ({
       ...prev,
-      novel_scope_ids: prev.novel_scope_ids.includes(novelId)
-        ? prev.novel_scope_ids.filter((id) => id !== novelId)
-        : [...prev.novel_scope_ids, novelId],
+      ...toggleSpecificNovelScope(prev.novel_scope_ids, prev.manual_novel_ids, novelId),
     }));
   };
 
@@ -713,7 +725,7 @@ export default function ProductsPage({ canWrite, canManageBindings }: ProductsPa
                   const pubStatus: PublicationStatus = pub?.status ?? 'draft';
                   const pubMeta = PUBLICATION_STATUS_META[pubStatus];
                   const menuItems: RowActionItem[] = [];
-                  if (canWrite && pubStatus === 'published') {
+                  if (canPublish && pubStatus === 'published') {
                     menuItems.push({
                       label: '暂停销售',
                       onClick: () => {
@@ -726,7 +738,7 @@ export default function ProductsPage({ canWrite, canManageBindings }: ProductsPa
                   if (canWrite) {
                     menuItems.push({ label: '复制调价', onClick: () => openCopyDrawer(p) });
                   }
-                  if (canWrite && pubStatus !== 'retired') {
+                  if (canPublish && pubStatus !== 'retired') {
                     menuItems.push({
                       label: '下线商品',
                       tone: 'danger',
@@ -1015,6 +1027,19 @@ export default function ProductsPage({ canWrite, canManageBindings }: ProductsPa
                     ariaLabel="筛选已上架小说"
                   />
                   <div className="max-h-40 overflow-y-auto space-y-1 border border-[var(--cms-border)] rounded-lg p-2 bg-[var(--cms-card)]">
+                    {formState.novel_scope_ids
+                      .filter((id) => !novelOptions.some((n) => n.id === id))
+                      .map((id) => (
+                        <label key={`selected-${id}`} className="flex items-center gap-2 text-xs py-1 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked
+                            onChange={() => toggleNovelId(id)}
+                          />
+                          <span className="font-mono-code text-[var(--cms-muted-fg)]">#{id}</span>
+                          <span className="truncate text-[var(--cms-muted-fg)]">已关联小说 #{id}</span>
+                        </label>
+                      ))}
                     {novelOptions.map((n) => (
                       <label key={n.id} className="flex items-center gap-2 text-xs py-1 cursor-pointer">
                         <input
@@ -1026,7 +1051,7 @@ export default function ProductsPage({ canWrite, canManageBindings }: ProductsPa
                         <span className="truncate">{n.title}</span>
                       </label>
                     ))}
-                    {novelOptions.length === 0 && (
+                    {novelOptions.length === 0 && formState.novel_scope_ids.length === 0 && (
                       <div className="text-xs text-[var(--cms-muted-fg)] py-1">未检索到匹配上架小说</div>
                     )}
                   </div>
@@ -1118,12 +1143,18 @@ export default function ProductsPage({ canWrite, canManageBindings }: ProductsPa
 
             {formError && <p role="alert" className="text-xs text-[var(--cms-error)]">{formError}</p>}
 
-            {canManageBindings && <>
+            {canManageBindings && (() => {
+              const activePPBinding = findBindingForAccount(bindingProduct, 'paypal', ppForm.account_id);
+              const activeSTBinding = findBindingForAccount(bindingProduct, 'stripe', stForm.account_id);
+              return <>
             {/* PayPal 绑定表单 */}
             <form onSubmit={handleSavePayPalBinding} className="cms-card p-4 space-y-3">
               <div className="flex items-center justify-between">
                 <h3 className="text-sm font-semibold">PayPal 渠道绑定</h3>
-                <StatusDot tone={bindingProduct.paypal_ready ? 'success' : 'warning'} label={bindingProduct.paypal_ready ? '已就绪' : '未就绪'} />
+                <StatusDot
+                  tone={activePPBinding ? (activePPBinding.validation_status === 'verified' && activePPBinding.enabled ? 'success' : 'warning') : (bindingProduct.paypal_ready ? 'success' : 'warning')}
+                  label={activePPBinding ? (activePPBinding.validation_status === 'verified' && activePPBinding.enabled ? (activePPBinding.account_is_primary ? '已就绪' : '备账户已就绪') : activePPBinding.validation_status) : '未绑定'}
+                />
               </div>
 
               <div>
@@ -1132,14 +1163,29 @@ export default function ProductsPage({ canWrite, canManageBindings }: ProductsPa
                   id={`${formId}-pp-acc`}
                   width="100%"
                   value={ppForm.account_id}
-                  onChange={(v) => setPpForm((prev) => ({ ...prev, account_id: v }))}
+                  onChange={(v) => {
+                    const matched = findBindingForAccount(bindingProduct, 'paypal', v);
+                    setPpForm({
+                      account_id: v,
+                      external_product_ref: matched?.external_product_ref ?? '',
+                      external_price_ref: matched?.external_price_ref ?? '',
+                      enabled: matched?.enabled ?? true,
+                      reason: '',
+                    });
+                  }}
                   options={envAccounts.paypal.map((a) => ({
                     value: String(a.id),
-                    label: `${a.display_name || a.account_label}${a.is_primary ? ' (主用)' : ''} · ${a.status}`,
+                    label: `${a.display_name || a.account_label}${a.is_primary ? ' (主用)' : ' (备选)'} · ${a.status}`,
                   }))}
                   placeholder="选择 PayPal 账户"
                 />
               </div>
+
+              {activePPBinding?.validation_error && (
+                <p role="alert" className="text-xs text-[var(--cms-error)]">
+                  上次同步异常：{activePPBinding.validation_error}
+                </p>
+              )}
 
               {bindingProduct.product_type === 'vip' ? (
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -1189,7 +1235,10 @@ export default function ProductsPage({ canWrite, canManageBindings }: ProductsPa
             <form onSubmit={handleSaveStripeBinding} className="cms-card p-4 space-y-3">
               <div className="flex items-center justify-between">
                 <h3 className="text-sm font-semibold">Stripe 渠道绑定</h3>
-                <StatusDot tone={bindingProduct.stripe_ready ? 'success' : 'warning'} label={bindingProduct.stripe_ready ? '已就绪' : '未就绪'} />
+                <StatusDot
+                  tone={activeSTBinding ? (activeSTBinding.validation_status === 'verified' && activeSTBinding.enabled ? 'success' : 'warning') : 'warning'}
+                  label={activeSTBinding ? (activeSTBinding.validation_status === 'verified' && activeSTBinding.enabled ? (activeSTBinding.account_is_primary ? '已就绪' : '备账户已就绪') : activeSTBinding.validation_status) : '未绑定'}
+                />
               </div>
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -1199,10 +1248,26 @@ export default function ProductsPage({ canWrite, canManageBindings }: ProductsPa
                     id={`${formId}-st-acc`}
                     width="100%"
                     value={stForm.account_id}
-                    onChange={(v) => setStForm((prev) => ({ ...prev, account_id: v }))}
+                    onChange={(v) => {
+                      const matched = findBindingForAccount(bindingProduct, 'stripe', v);
+                      const { taxCode, taxBehavior } = extractStripeCatalogTax(matched?.validated_catalog);
+                      setStForm({
+                        account_id: v,
+                        sales_mode: matched?.sales_mode ?? 'direct',
+                        tax_liability_account: matched?.tax_liability_account ?? '',
+                        tax_code: taxCode,
+                        tax_behavior: taxBehavior,
+                        countries: matched?.allowed_countries?.join(', ') || 'US',
+                        release_evidence: matched?.release_evidence ?? '',
+                        market_policy: matched?.market_policy ?? '',
+                        reprovision: false,
+                        enabled: matched?.enabled ?? true,
+                        reason: '',
+                      });
+                    }}
                     options={envAccounts.stripe.map((a) => ({
                       value: String(a.id),
-                      label: `${a.display_name || a.account_label}${a.is_primary ? ' (主用)' : ''} · ${a.status}`,
+                      label: `${a.display_name || a.account_label}${a.is_primary ? ' (主用)' : ' (备选)'} · ${a.status}`,
                     }))}
                     placeholder="选择 Stripe 账户"
                   />
@@ -1222,12 +1287,12 @@ export default function ProductsPage({ canWrite, canManageBindings }: ProductsPa
                 </div>
               </div>
 
-              {bindingProduct.stripe_binding?.external_price_ref ? (
+              {activeSTBinding?.external_price_ref ? (
                 <div className="rounded-lg border border-[var(--cms-border)] bg-[var(--cms-surface-alt)] px-3 py-2 text-xs space-y-1">
                   <div className="font-medium text-[var(--cms-fg)]">已自动联动 Stripe 外部资源（不可手动绑定）</div>
                   <div className="flex flex-wrap gap-x-4 gap-y-1 font-mono-code text-[var(--cms-muted-fg)]">
-                    <span>Product: {bindingProduct.stripe_binding.external_product_ref || '—'}</span>
-                    <span>Price: {bindingProduct.stripe_binding.external_price_ref}</span>
+                    <span>Product: {activeSTBinding.external_product_ref || '—'}</span>
+                    <span>Price: {activeSTBinding.external_price_ref}</span>
                   </div>
                 </div>
               ) : (
@@ -1236,10 +1301,21 @@ export default function ProductsPage({ canWrite, canManageBindings }: ProductsPa
                 </p>
               )}
 
-              {bindingProduct.stripe_binding?.validation_error && (
+              {activeSTBinding?.validation_error && (
                 <p role="alert" className="text-xs text-[var(--cms-error)]">
-                  上次同步异常：{bindingProduct.stripe_binding.validation_error}
+                  上次同步异常：{activeSTBinding.validation_error}
                 </p>
+              )}
+
+              {activeSTBinding?.validation_status === 'failed' && activeSTBinding?.external_price_ref && (
+                <label className="inline-flex items-center gap-2 text-xs text-[var(--cms-warning)] cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={stForm.reprovision}
+                    onChange={(e) => setStForm((prev) => ({ ...prev, reprovision: e.target.checked }))}
+                  />
+                  <span>远端 Stripe Product / Price 已归档失效，强制重建新资源（Reprovision）</span>
+                </label>
               )}
 
               {stForm.sales_mode === 'merchant_of_record' && (
@@ -1347,14 +1423,15 @@ export default function ProductsPage({ canWrite, canManageBindings }: ProductsPa
                   <button type="submit" className="btn-primary text-xs" disabled={submitting}>
                     {submitting
                       ? '联动 Stripe 创建并核验中…'
-                      : bindingProduct.stripe_binding?.external_price_ref
+                      : activeSTBinding?.external_price_ref
                         ? '同步并保存 Stripe 绑定'
                         : '联动 Stripe 创建并绑定'}
                   </button>
                 )}
               </div>
             </form>
-            </>}
+            </>;
+            })()}
           </div>
         )}
       </CmsDialog>
@@ -1380,7 +1457,7 @@ export default function ProductsPage({ canWrite, canManageBindings }: ProductsPa
             <button
               type="button"
               className={`btn-primary ${statusDialog?.action === 'retire' ? 'bg-[var(--cms-error)] border-[var(--cms-error)]' : ''}`}
-              disabled={submitting || (statusDialog?.action === 'publish' && env === 'live' && !statusReason.trim())}
+              disabled={submitting || (env === 'live' && !statusReason.trim())}
               onClick={() => void handleTransitionStatus()}
             >
               {submitting ? '提交中…' : '确认'}
@@ -1396,7 +1473,9 @@ export default function ProductsPage({ canWrite, canManageBindings }: ProductsPa
               </p>
             )}
             <div>
-              <label htmlFor={`${formId}-sreason`} className="block text-xs font-medium text-[var(--cms-muted-fg)] mb-1">{statusDialog.action === 'publish' && env === 'live' ? '正式发布依据（必填）' : '操作备注（可选）'}</label>
+              <label htmlFor={`${formId}-sreason`} className="block text-xs font-medium text-[var(--cms-muted-fg)] mb-1">
+                {env === 'live' ? '正式环境操作依据（必填）' : '操作备注（可选）'}
+              </label>
               <input
                 id={`${formId}-sreason`}
                 type="text"

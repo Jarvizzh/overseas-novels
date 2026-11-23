@@ -36,6 +36,7 @@ var (
 	ErrInvalidSettingValue     = errors.New("无效的全局配置参数")
 	ErrInvalidNovelPricing     = errors.New("小说千字单价必须为 0 到 2147483647 的整数")
 	ErrInvalidPromoPricing     = errors.New("无效的推广链接计费参数")
+	ErrInvalidPromoTemplate    = errors.New("推广链接仅支持绑定 Live 环境的充值模板")
 	ErrInvalidGenres           = errors.New("分类标签总长度不能超过 2048 个字符")
 	ErrInvalidFilterParam      = errors.New("无效的查询筛选参数")
 	ErrInvalidBatchNovelIDs    = errors.New("请至少选择一本有效书籍")

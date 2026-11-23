@@ -29,7 +29,6 @@ func (s *service) RunReconciliation(ctx context.Context) {
 		{func(ctx context.Context) { s.eachPayPalAccount(ctx, (*service).reconcilePayPalEvents) }, 15 * time.Second}, {s.reconcilePayPalOrders, 15 * time.Second},
 		{s.reconcilePayPalCancellations, 15 * time.Second}, {s.reconcilePayPalSubscriptions, 15 * time.Second},
 		{func(ctx context.Context) { s.eachPayPalAccount(ctx, (*service).reconcileRefundCommands) }, 15 * time.Second},
-		{func(ctx context.Context) { s.eachPayPalAccount(ctx, (*service).reconcilePayPalVIPOffers) }, vipPlanPublishInterval},
 		{s.reconcileAftercare, aftercareInterval},
 		{func(ctx context.Context) { s.eachStripeAccount(ctx, (*service).reconcileStripeCheckouts) }, stripeCheckoutInterval},
 		{func(ctx context.Context) { s.eachPayPalAccount(ctx, (*service).recoverPayPalEventWindow) }, paymentEventRecoveryInterval},

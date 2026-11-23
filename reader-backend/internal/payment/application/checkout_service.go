@@ -22,7 +22,7 @@ import (
 
 func (s *service) PreparePurchase(ctx context.Context, userID, productID int64, slotID int, novelID int64, requestKey, returnPath string, attribution checkoutAttribution) (*PurchaseIntent, error) {
 	key, err := uuid.Parse(requestKey)
-	if err != nil || key == uuid.Nil || (productID <= 0 && slotID <= 0) {
+	if err != nil || key == uuid.Nil || slotID <= 0 {
 		return nil, ErrCheckoutUnavailable
 	}
 	returnPath = checkoutReadingPath(returnPath, novelID)

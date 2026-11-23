@@ -28,8 +28,24 @@ func vipSwitchSource(row vipCheckoutIntentRow) string {
 const vipSwitchSourcePredicate = `intent_id=$1 AND user_id=$2 AND checkout_environment=$3 AND status='Pending'
 	AND active_provider=$4 AND CASE WHEN $4='paypal' THEN paypal_intent_id=$5::uuid ELSE stripe_intent_id=$5::uuid END`
 
+// A persisted switch is resolved before checking whether the destination
+// can still accept a new checkout.
+func (s *service) resumeVIPSwitch(ctx context.Context, row *vipCheckoutIntentRow, target string) error {
+	if row.switchTo == "" {
+		return nil
+	}
+	if row.switchTo != target {
+		return ErrCheckoutPending
+	}
+	if err := s.switchVIPChannel(ctx, *row, target); err != nil {
+		return err
+	}
+	row.activeProvider, row.switchTo = "", ""
+	return nil
+}
+
 func (s *service) switchVIPChannel(ctx context.Context, row vipCheckoutIntentRow, target string) error {
-	if !slices.Contains(loadAvailableProductChannels(ctx, row.productID, "vip", currentPaymentLedgerEnvironment()), target) {
+	if row.switchTo == "" && !slices.Contains(loadAvailableProductChannels(ctx, row.productID, "vip", currentPaymentLedgerEnvironment()), target) {
 		return ErrCheckoutPaused
 	}
 	if err := beginVIPSwitch(ctx, row, target); err != nil {
@@ -56,8 +72,8 @@ func beginVIPSwitch(ctx context.Context, row vipCheckoutIntentRow, target string
 	defer tx.Rollback(context.WithoutCancel(ctx))
 	tag, err := tx.Exec(ctx, `UPDATE payment_vip_checkout_intents
 		SET switch_to_provider=$6, updated_at=now()
-		WHERE `+vipSwitchSourcePredicate+` AND (switch_to_provider IS NULL OR switch_to_provider=$6)`,
-		row.intentID, row.userID, row.environment, row.activeProvider, source, target)
+		WHERE `+vipSwitchSourcePredicate+` AND COALESCE(switch_to_provider,'')=$7`,
+		row.intentID, row.userID, row.environment, row.activeProvider, source, target, row.switchTo)
 	if err != nil {
 		return err
 	}
@@ -89,6 +105,18 @@ func detachVIPChannelTx(ctx context.Context, tx pgx.Tx, row vipCheckoutIntentRow
 	}
 	return err
 }
+
+// The binding lock is held through the first-send marker, so a CMS update
+// either wins the eligibility check or follows an already claimed send.
+const paypalVIPBindingMatchSQL = `
+	SELECT 1 FROM product_channel_bindings b
+	JOIN payment_channel_accounts a ON a.id=i.checkout_account_id AND a.provider='paypal'
+	WHERE b.product_id=i.product_id AND b.account_id=i.checkout_account_id
+	  AND b.provider='paypal' AND b.environment=a.environment
+	  AND b.enabled AND b.validation_status='verified' AND b.external_price_ref=i.plan_id
+`
+
+const paypalVIPBindingForShare = `EXISTS (` + paypalVIPBindingMatchSQL + ` FOR SHARE OF b)`
 
 // The create lease and the first-send marker are written together, before any
 // provider call. A switch can detach an unidentified child only if it never sent.
@@ -142,6 +170,14 @@ func claimUnifiedPayPalVIP(ctx context.Context, row vipCheckoutIntentRow, switch
 		}
 		if err := validateVIPQuoteTx(ctx, tx, row.userID, row.productID, row.slotID, row.templateID, row.priceCents, row.cycle); err != nil {
 			return nil, err
+		}
+		var allowed bool
+		if err := tx.QueryRow(ctx, `SELECT `+paypalVIPBindingForShare+`
+			FROM paypal_subscription_intents i WHERE i.intent_id=$1`, intent.id).Scan(&allowed); err != nil {
+			return nil, err
+		}
+		if !allowed {
+			return nil, ErrCheckoutPaused
 		}
 	}
 	_, err = tx.Exec(ctx, `UPDATE paypal_subscription_intents

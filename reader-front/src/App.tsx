@@ -33,7 +33,6 @@ const TRACKING_KEYS = [
   'utm_campaign',
   'fbclid',
   'pixel_id',
-  'template_id',
   'link_id',
   'promo_id',
 ];
@@ -279,13 +278,11 @@ function AppContent() {
     const utmCampaign = params.get('utm_campaign');
     const fbclid = params.get('fbclid');
     const pixelId = params.get('pixel_id');
-    const templateId = params.get('template_id');
     const linkId = params.get('link_id') || params.get('promo_id');
 
     if (utmSource) readerStorage.setItem('utm_source', utmSource);
     if (utmCampaign) readerStorage.setItem('utm_campaign', utmCampaign);
     if (pixelId) readerStorage.setItem('fb_pixel_id', pixelId);
-    if (templateId) readerStorage.setItem('recharge_template_id', templateId);
     if (linkId) readerStorage.setItem('promo_id', linkId);
     if (fbclid) {
       readerStorage.setItem('fbclid', fbclid);

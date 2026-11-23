@@ -29,12 +29,12 @@ type BillingRepository interface {
 	GetRechargeSlots(ctx context.Context, templateID int) ([]RechargeSlot, error)
 
 	ClearDefaultTemplatesTx(ctx context.Context, tx pgx.Tx) error
-	CreateRechargeTemplateTx(ctx context.Context, tx pgx.Tx, name string, isDefault bool) (int, error)
+	CreateRechargeTemplateTx(ctx context.Context, tx pgx.Tx, name, environment string, isDefault bool) (int, error)
 	CreateRechargeSlotTx(ctx context.Context, tx pgx.Tx, templateID, index int, productID int64, badge string, isHighlighted bool, displayAlias string) error
 
-	UpdateRechargeTemplateTx(ctx context.Context, tx pgx.Tx, id int, name string, isDefault bool) (int64, error)
+	UpdateRechargeTemplateTx(ctx context.Context, tx pgx.Tx, id int, name, environment string, isDefault bool) (int64, error)
 	SetDefaultTemplateOnlyTx(ctx context.Context, tx pgx.Tx, id int) (int64, error)
-	DeleteRechargeSlotsTx(ctx context.Context, tx pgx.Tx, templateID int) error
+	SyncRechargeSlotsTx(ctx context.Context, tx pgx.Tx, templateID int, slots []RechargeSlot) error
 }
 
 type dbBillingRepository struct{}
@@ -194,9 +194,17 @@ func (r *dbBillingRepository) GetThirdPartyPaymentDetails(ctx context.Context, o
 
 func (r *dbBillingRepository) ListRechargeTemplates(ctx context.Context) ([]RechargeTemplate, error) {
 	rows, err := db.DB.Query(ctx, `
-		SELECT id, name, is_default, created_at, updated_at
-		FROM recharge_templates
-		ORDER BY id DESC
+		SELECT t.id, t.name, t.environment, t.is_default, t.created_at, t.updated_at,
+		       COALESCE(p.cnt, 0),
+		       COALESCE(p.names, '{}'::text[])
+		FROM recharge_templates t
+		LEFT JOIN LATERAL (
+			SELECT count(*)::int AS cnt,
+			       array_agg(COALESCE(NULLIF(pl.name, ''), '#' || pl.id::text) ORDER BY pl.id) AS names
+			FROM promotion_links pl
+			WHERE pl.recharge_template_id = t.id
+		) p ON true
+		ORDER BY t.id DESC
 	`)
 	if err != nil {
 		return nil, err
@@ -206,9 +214,12 @@ func (r *dbBillingRepository) ListRechargeTemplates(ctx context.Context) ([]Rech
 	var templates []RechargeTemplate
 	for rows.Next() {
 		var t RechargeTemplate
-		err := rows.Scan(&t.ID, &t.Name, &t.IsDefault, &t.CreatedAt, &t.UpdatedAt)
+		err := rows.Scan(&t.ID, &t.Name, &t.Environment, &t.IsDefault, &t.CreatedAt, &t.UpdatedAt, &t.LinkedPromotionCount, &t.LinkedPromotionNames)
 		if err != nil {
 			return nil, err
+		}
+		if t.LinkedPromotionNames == nil {
+			t.LinkedPromotionNames = []string{}
 		}
 		templates = append(templates, t)
 	}
@@ -268,13 +279,13 @@ func (r *dbBillingRepository) ClearDefaultTemplatesTx(ctx context.Context, tx pg
 	return err
 }
 
-func (r *dbBillingRepository) CreateRechargeTemplateTx(ctx context.Context, tx pgx.Tx, name string, isDefault bool) (int, error) {
+func (r *dbBillingRepository) CreateRechargeTemplateTx(ctx context.Context, tx pgx.Tx, name, environment string, isDefault bool) (int, error) {
 	var templateID int
 	query := `
-		INSERT INTO recharge_templates (name, is_default)
-		VALUES ($1, $2)
+		INSERT INTO recharge_templates (name, environment, is_default)
+		VALUES ($1, $2, $3)
 		RETURNING id`
-	err := tx.QueryRow(ctx, query, name, isDefault).Scan(&templateID)
+	err := tx.QueryRow(ctx, query, name, environment, isDefault).Scan(&templateID)
 	return templateID, err
 }
 
@@ -286,21 +297,95 @@ func (r *dbBillingRepository) CreateRechargeSlotTx(ctx context.Context, tx pgx.T
 	return err
 }
 
-func (r *dbBillingRepository) UpdateRechargeTemplateTx(ctx context.Context, tx pgx.Tx, id int, name string, isDefault bool) (int64, error) {
+func (r *dbBillingRepository) UpdateRechargeTemplateTx(ctx context.Context, tx pgx.Tx, id int, name, environment string, isDefault bool) (int64, error) {
 	query := `
 		UPDATE recharge_templates
-		SET name = $1, is_default = $2, updated_at = CURRENT_TIMESTAMP
-		WHERE id = $3`
-	tag, err := tx.Exec(ctx, query, name, isDefault, id)
+		SET name = $1, environment = $2, is_default = $3, updated_at = CURRENT_TIMESTAMP
+		WHERE id = $4`
+	tag, err := tx.Exec(ctx, query, name, environment, isDefault, id)
 	if err != nil {
 		return 0, err
 	}
 	return tag.RowsAffected(), nil
 }
 
-func (r *dbBillingRepository) DeleteRechargeSlotsTx(ctx context.Context, tx pgx.Tx, templateID int) error {
-	_, err := tx.Exec(ctx, "DELETE FROM recharge_slots WHERE template_id = $1", templateID)
-	return err
+func (r *dbBillingRepository) SyncRechargeSlotsTx(ctx context.Context, tx pgx.Tx, templateID int, slots []RechargeSlot) error {
+	rows, err := tx.Query(ctx, `SELECT id, product_id FROM recharge_slots WHERE template_id = $1 FOR UPDATE`, templateID)
+	if err != nil {
+		return err
+	}
+	existingByProd := make(map[int64]int)
+	for rows.Next() {
+		var slotID int
+		var prodID int64
+		if err := rows.Scan(&slotID, &prodID); err != nil {
+			rows.Close()
+			return err
+		}
+		existingByProd[prodID] = slotID
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+
+	desiredByProd := make(map[int64]RechargeSlot, len(slots))
+	for _, s := range slots {
+		desiredByProd[s.ProductID] = s
+	}
+
+	var removeIDs []int
+	var parkIDs []int
+	var keepSlots []struct {
+		id   int
+		slot RechargeSlot
+	}
+	var addSlots []RechargeSlot
+
+	for prodID, slotID := range existingByProd {
+		if _, ok := desiredByProd[prodID]; !ok {
+			removeIDs = append(removeIDs, slotID)
+		}
+	}
+	for _, s := range slots {
+		if slotID, ok := existingByProd[s.ProductID]; ok {
+			parkIDs = append(parkIDs, slotID)
+			keepSlots = append(keepSlots, struct {
+				id   int
+				slot RechargeSlot
+			}{id: slotID, slot: s})
+		} else {
+			addSlots = append(addSlots, s)
+		}
+	}
+
+	if len(removeIDs) > 0 {
+		if _, err := tx.Exec(ctx, `DELETE FROM recharge_slots WHERE template_id = $1 AND id = ANY($2::int[])`, templateID, removeIDs); err != nil {
+			return err
+		}
+	}
+	// Temporarily negate retained slot_index values so reordering never collides with UNIQUE(template_id, slot_index).
+	if len(parkIDs) > 0 {
+		if _, err := tx.Exec(ctx, `UPDATE recharge_slots SET slot_index = -id WHERE template_id = $1 AND id = ANY($2::int[])`, templateID, parkIDs); err != nil {
+			return err
+		}
+		for _, item := range keepSlots {
+			if _, err := tx.Exec(ctx, `
+				UPDATE recharge_slots
+				SET slot_index = $2, badge = $3, is_highlighted = $4, display_alias = $5
+				WHERE id = $1 AND template_id = $6`,
+				item.id, item.slot.SlotIndex, item.slot.Badge, item.slot.IsHighlighted, item.slot.DisplayAlias, templateID); err != nil {
+				return err
+			}
+		}
+	}
+	for _, s := range addSlots {
+		if err := r.CreateRechargeSlotTx(ctx, tx, templateID, s.SlotIndex, s.ProductID, s.Badge, s.IsHighlighted, s.DisplayAlias); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (r *dbBillingRepository) SetDefaultTemplateOnlyTx(ctx context.Context, tx pgx.Tx, id int) (int64, error) {

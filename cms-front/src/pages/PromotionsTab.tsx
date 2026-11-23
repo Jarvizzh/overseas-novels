@@ -3,6 +3,7 @@ import { apiRequest, domainApi } from '../utils/api';
 import type { SystemDomain } from '../utils/api';
 import { copyTextToClipboard } from '../utils/clipboard';
 import { canWritePromotions, validateAndBuildPromotionPayload } from '../utils/promotion';
+import { filterLivePromotionTemplates } from '../utils/templateCatalogHelpers';
 import CustomSelect from '../components/CustomSelect';
 import { CmsDialog } from '../components/ui/CmsDialog';
 import { Pagination } from '../components/ui/Pagination';
@@ -45,6 +46,7 @@ interface FBPixel {
 interface RechargeTemplate {
   id: number;
   name: string;
+  environment?: string;
   is_default: boolean;
 }
 
@@ -602,9 +604,12 @@ export default function PromotionsTab() {
                 onChange={(val) => setEditForm({ ...editForm, rechargeTemplateId: val })}
                 options={[
                   { value: '', label: '-- 使用默认激活模板 --' },
-                  ...templates.map((t) => ({ value: String(t.id), label: `${t.name} ${t.is_default ? '(默认)' : ''}` })),
+                  ...filterLivePromotionTemplates(templates).map((t) => ({ value: String(t.id), label: `${t.name} ${t.is_default ? '(默认)' : ''}` })),
                 ]}
               />
+              <span className="block text-[11px] text-[var(--cms-muted-fg)]">
+                该模板绑定仅对通过此推广链接首次注册/首次触达的读者生效；已归因老用户仍按首触推广或默认模板计价。
+              </span>
             </label>
           </form>
         )}

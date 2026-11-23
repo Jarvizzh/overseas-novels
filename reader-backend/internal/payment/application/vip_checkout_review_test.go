@@ -274,8 +274,8 @@ func testUnifiedVIPReview(t *testing.T, svc *service, pool *pgxpool.Pool, pp *si
 		exec(`INSERT INTO recharge_templates(id,name,is_default) VALUES(799,'Other template',false);
 			UPDATE recharge_slots SET template_id=799 WHERE id=605`)
 		defer exec(`UPDATE recharge_slots SET template_id=600 WHERE id=605`)
-		if _, err := svc.PreparePurchase(ctx, 623, 0, 605, 0, uuid.NewString(), "", checkoutAttribution{}); !errors.Is(err, ErrVIPQuoteChanged) {
-			t.Fatalf("stale card was accepted: %v", err)
+		if _, err := svc.PreparePurchase(ctx, 623, 0, 605, 0, uuid.NewString(), "", checkoutAttribution{}); !errors.Is(err, ErrCheckoutUnavailable) {
+			t.Fatalf("cross-template stale card expected ErrCheckoutUnavailable, got: %v", err)
 		}
 		if _, err := svc.StartStripeCheckout(ctx, 622, unsubmitted.ID, origin); !errors.Is(err, ErrVIPQuoteChanged) {
 			t.Fatalf("old template checkout started: %v", err)

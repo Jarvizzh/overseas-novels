@@ -107,7 +107,7 @@ func purchaseAttribution(c *gin.Context) checkoutAttribution {
 
 type preparePurchaseRequest struct {
 	ProductID  int64  `json:"product_id" binding:"gte=0"`
-	SlotID     int    `json:"slot_id" binding:"gte=0"`
+	SlotID     int    `json:"slot_id" binding:"gt=0"`
 	NovelID    int64  `json:"novel_id" binding:"gte=0"`
 	RequestKey string `json:"request_key" binding:"required,uuid"`
 	ReturnPath string `json:"return_path" binding:"max=1024"`
@@ -115,7 +115,7 @@ type preparePurchaseRequest struct {
 
 func (h *Handler) PreparePurchase(c *gin.Context) {
 	var req preparePurchaseRequest
-	if err := c.ShouldBindJSON(&req); err != nil || (req.ProductID <= 0 && req.SlotID <= 0) {
+	if err := c.ShouldBindJSON(&req); err != nil || req.SlotID <= 0 {
 		httpx.Fail(c, http.StatusBadRequest, "invalid_request", "Invalid checkout details", nil)
 		return
 	}

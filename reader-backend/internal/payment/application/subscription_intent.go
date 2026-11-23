@@ -297,8 +297,9 @@ func (r *dbRepository) releaseSubscriptionIntent(ctx context.Context, id string)
 }
 
 func (r *dbRepository) submitSubscriptionIntent(ctx context.Context, id, planID string) error {
-	tag, err := db.Pool(ctx).Exec(ctx, `UPDATE paypal_subscription_intents SET plan_id=$2,submitted_at=COALESCE(submitted_at,now())
+	tag, err := db.Pool(ctx).Exec(ctx, `UPDATE paypal_subscription_intents i SET plan_id=$2,submitted_at=COALESCE(submitted_at,now())
 		WHERE intent_id=$1 AND (plan_id IS NULL OR plan_id=$2) AND subscription_id IS NULL
+		AND (i.submitted_at IS NOT NULL OR i.product_id IS NULL OR `+paypalVIPBindingForShare+`)
 		AND NOT EXISTS(SELECT 1 FROM payment_vip_checkout_intents v WHERE v.paypal_intent_id=$1 AND v.switch_to_provider IS NOT NULL)`, id, planID)
 	if err == nil && tag.RowsAffected() != 1 {
 		return ErrSubscriptionConflict

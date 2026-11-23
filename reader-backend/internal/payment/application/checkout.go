@@ -54,7 +54,7 @@ func (r *dbRepository) GetCheckoutTemplate(ctx context.Context, userID int64) (i
 	err := db.Pool(ctx).QueryRow(ctx, `
 		SELECT COALESCE(
 			(SELECT p.recharge_template_id FROM reader_promotion_for_user($1) p WHERE p.recharge_template_id IS NOT NULL),
-			(SELECT id FROM recharge_templates ORDER BY is_default DESC NULLS LAST, id LIMIT 1), 0)`, userID).Scan(&id)
+			`+defaultLiveTemplateIDSQL+`, 0)`, userID).Scan(&id)
 	return id, err
 }
 
@@ -114,8 +114,9 @@ func insertCheckout(ctx context.Context, q checkoutQueryer, key string, userID i
 		FROM users u
 		LEFT JOIN LATERAL (SELECT id,novel_id,recharge_template_id FROM reader_promotion_for_user(u.id)) p ON TRUE
 		WHERE u.id = $11
-		  AND ($6 = 0 OR $7 = COALESCE(p.recharge_template_id,(SELECT id FROM recharge_templates ORDER BY is_default DESC NULLS LAST,id LIMIT 1)))
-		  AND ($6 = 0 OR EXISTS(SELECT 1 FROM recharge_slots s WHERE s.id = $6 AND s.template_id = $7 AND s.product_id = $8))
+		  AND $6 > 0
+		  AND $7 = COALESCE(p.recharge_template_id,`+defaultLiveTemplateIDSQL+`)
+		  AND EXISTS(SELECT 1 FROM recharge_slots s WHERE s.id = $6 AND s.template_id = $7 AND s.product_id = $8)
 		  AND EXISTS (
 		      SELECT 1 FROM products pr
 		      JOIN product_publications pub ON pub.product_id = pr.id AND pub.environment = $15 AND pub.status = 'published'

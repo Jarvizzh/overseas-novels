@@ -20,6 +20,7 @@ import {
 } from '../components/ui/Primitives';
 import CustomSelect from '../components/CustomSelect';
 import { ToastContext } from '../context/ToastContext';
+import { ApiError } from '../utils/api';
 import {
   CHANNEL_STATUS_META,
   type ChannelAccount,
@@ -96,6 +97,8 @@ export function PaymentChannelsPanel() {
   const [publishPrimary, setPublishPrimary] = useState(true);
   const [publishOrders, setPublishOrders] = useState(true);
   const [publishSubs, setPublishSubs] = useState(true);
+  const [publishForceSwitch, setPublishForceSwitch] = useState(false);
+  const [unreadyProducts, setUnreadyProducts] = useState<Array<{ id: number; code: string; name: string }>>([]);
 
   const [deactivateTarget, setDeactivateTarget] = useState<ChannelAccount | null>(null);
   const [validationNote, setValidationNote] = useState<{ account: ChannelAccount; ok: boolean; summary?: ChannelValidationSummary; message?: string } | null>(null);
@@ -335,6 +338,8 @@ export function PaymentChannelsPanel() {
     setPublishPrimary(true);
     setPublishOrders(ch.new_orders_enabled || ch.status !== 'published');
     setPublishSubs(ch.new_subscriptions_enabled || ch.status !== 'published');
+    setPublishForceSwitch(false);
+    setUnreadyProducts([]);
     setDialogError('');
   };
 
@@ -342,17 +347,29 @@ export function PaymentChannelsPanel() {
     if (!publishTarget || submitting) return;
     setSubmitting(true);
     setDialogError('');
+    setUnreadyProducts([]);
     try {
       await channelsApi.publish(publishTarget.id, {
         set_primary: publishPrimary,
         new_orders_enabled: publishOrders,
         new_subscriptions_enabled: publishSubs,
         expected_version: publishTarget.pending_version,
+        force_switch_when_products_unready: publishForceSwitch,
       });
       showToast(`${publishTarget.display_name || publishTarget.account_label} v${publishTarget.pending_version} 已发布`, 'success');
       setPublishTarget(null);
       await loadChannels();
     } catch (err) {
+      if (err instanceof ApiError && Array.isArray(err.data?.unready_published_products)) {
+        const list = (err.data.unready_published_products as Array<Record<string, unknown>>)
+          .filter((item) => typeof item?.id === 'number')
+          .map((item) => ({
+            id: Number(item.id),
+            code: String(item.code || ''),
+            name: String(item.name || ''),
+          }));
+        setUnreadyProducts(list);
+      }
       setDialogError(errMsg(err, '发布渠道失败'));
     } finally {
       setSubmitting(false);
@@ -1018,6 +1035,28 @@ export function PaymentChannelsPanel() {
               <input type="checkbox" checked={publishSubs} onChange={(e) => setPublishSubs(e.target.checked)} />
               <span>开放新 VIP 订阅创建</span>
             </label>
+            {unreadyProducts.length > 0 && (
+              <div className="p-3 rounded-lg border border-[var(--cms-warning)] bg-[var(--cms-warning-soft)] text-xs space-y-2">
+                <div className="font-medium text-[var(--cms-fg)]">
+                  以下已上架商品尚未在此账户完成绑定，直接切主会导致这些商品在 H5 立即下架：
+                </div>
+                <ul className="list-disc list-inside text-[var(--cms-muted-fg)] max-h-28 overflow-y-auto">
+                  {unreadyProducts.map((p) => (
+                    <li key={p.id}>
+                      {p.name} (<span className="font-mono-code">{p.code}</span>)
+                    </li>
+                  ))}
+                </ul>
+                <label className="flex items-center gap-2 cursor-pointer text-[var(--cms-error)] font-medium pt-1">
+                  <input
+                    type="checkbox"
+                    checked={publishForceSwitch}
+                    onChange={(e) => setPublishForceSwitch(e.target.checked)}
+                  />
+                  <span>我已确认风险，仍强制切换为主账户</span>
+                </label>
+              </div>
+            )}
             {dialogError && <p role="alert" className="text-xs text-[var(--cms-error)]">{dialogError}</p>}
           </div>
         )}

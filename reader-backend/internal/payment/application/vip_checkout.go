@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/url"
+	"slices"
 	"time"
 
 	"github.com/google/uuid"
@@ -95,12 +96,14 @@ func buildVIPPurchaseIntentView(ctx context.Context, q checkoutQueryer, r vipChe
 	switch r.activeProvider {
 	case payment.ProviderPayPal:
 		var approval, subID, subStatus, firstOrderStatus string
-		var busy, needsReview bool
+		var busy, needsReview, bindingBlocked bool
 		err := q.QueryRow(ctx, `
 			SELECT COALESCE(i.approval_url, ''), COALESCE(user_subscriptions.subscription_id, i.subscription_id, ''),
 			       COALESCE(user_subscriptions.status, ''), COALESCE(first_order.order_status, ''),
 			       COALESCE(i.lease_until > now(), false),
-			       COALESCE(i.submitted_at <= now()-make_interval(secs=>$6::int), false)
+			       COALESCE(i.submitted_at <= now()-make_interval(secs=>$6::int), false),
+			       i.product_id IS NOT NULL AND i.submitted_at IS NULL AND i.subscription_id IS NULL
+			         AND NOT EXISTS (`+paypalVIPBindingMatchSQL+`)
 			FROM payment_vip_checkout_intents parent
 			LEFT JOIN paypal_subscription_intents i ON i.intent_id=parent.paypal_intent_id
 			LEFT JOIN user_subscriptions ON user_subscriptions.subscription_id=COALESCE(parent.subscription_id,i.subscription_id)
@@ -110,7 +113,7 @@ func buildVIPPurchaseIntentView(ctx context.Context, q checkoutQueryer, r vipChe
 			WHERE parent.intent_id=$1 AND parent.user_id=$2 AND parent.checkout_environment=$3
 			  AND parent.paypal_intent_id=$4::uuid AND parent.active_provider=$5`,
 			r.intentID, r.userID, r.environment, r.paypalIntentID, r.activeProvider, int(payPalVIPCreateRetryWindow/time.Second)).
-			Scan(&approval, &subID, &subStatus, &firstOrderStatus, &busy, &needsReview)
+			Scan(&approval, &subID, &subStatus, &firstOrderStatus, &busy, &needsReview, &bindingBlocked)
 		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			return nil, err
 		}
@@ -123,6 +126,8 @@ func buildVIPPurchaseIntentView(ctx context.Context, q checkoutQueryer, r vipChe
 		case firstOrderStatus != "":
 			out.Status, out.ConfirmationMessage = "completed", ""
 		case r.status != "Pending":
+		case bindingBlocked:
+			markVIPChannelUnavailable(out)
 		case subStatus == "CANCELLED" || subStatus == "EXPIRED":
 			out.Status = "retryable"
 		case subStatus == "PENDING" && approval != "":
@@ -137,10 +142,14 @@ func buildVIPPurchaseIntentView(ctx context.Context, q checkoutQueryer, r vipChe
 
 	case payment.ProviderStripe:
 		var approval, subID, state string
-		err := q.QueryRow(ctx, `SELECT COALESCE(v.approval_url,''), COALESCE(v.subscription_ref,''), `+stripeVIPPurchaseStateSQL+`
-			FROM payment_stripe_subscription_intents v `+stripeVIPFirstPeriodJoin+`
+		var bindingBlocked bool
+		err := q.QueryRow(ctx, `SELECT COALESCE(v.approval_url,''), COALESCE(v.subscription_ref,''), `+stripeVIPPurchaseStateSQL+`,
+			v.status='creating' AND v.first_sent_at IS NULL AND v.checkout_ref IS NULL AND v.subscription_ref IS NULL
+			  AND v.product_id IS NOT NULL AND NOT EXISTS (`+stripeVIPBindingMatchSQL+`)
+			FROM payment_stripe_subscription_intents v JOIN payment_channel_accounts a ON a.id=v.account_id
+			`+stripeVIPFirstPeriodJoin+`
 			WHERE v.id=$1 AND v.user_id=$2 AND v.checkout_environment=$3`,
-			r.stripeIntentID, r.userID, r.environment).Scan(&approval, &subID, &state)
+			r.stripeIntentID, r.userID, r.environment).Scan(&approval, &subID, &state, &bindingBlocked)
 		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			return nil, err
 		}
@@ -151,6 +160,8 @@ func buildVIPPurchaseIntentView(ctx context.Context, q checkoutQueryer, r vipChe
 		case state == "refunded" || state == "completed":
 			out.Status, out.ConfirmationMessage = state, ""
 		case r.status != "Pending":
+		case bindingBlocked:
+			markVIPChannelUnavailable(out)
 		case state == "closed":
 			out.Status = "retryable"
 		case state != "":
@@ -170,6 +181,11 @@ func buildVIPPurchaseIntentView(ctx context.Context, q checkoutQueryer, r vipChe
 		out.AvailableChannels = []string{r.switchTo}
 	}
 	return out, nil
+}
+
+func markVIPChannelUnavailable(out *PurchaseIntent) {
+	out.Status, out.ConfirmationMessage = "confirming", ErrCheckoutPaused.Error()
+	out.AvailableChannels = slices.DeleteFunc(out.AvailableChannels, func(provider string) bool { return provider == out.Provider })
 }
 
 func checkVIPActiveConflictTx(ctx context.Context, tx pgx.Tx, userID int64, env string, ignoreVIPIntentID string) error {
@@ -218,7 +234,7 @@ func validateVIPQuoteTx(ctx context.Context, tx pgx.Tx, userID, productID int64,
 		  AND p.product_type='vip' AND p.currency='USD' AND p.price_cents=$5 AND p.vip_cycle=$6
 		  AND s.template_id=COALESCE(
 		    (SELECT recharge_template_id FROM reader_promotion_for_user($1) WHERE recharge_template_id IS NOT NULL),
-		    (SELECT id FROM recharge_templates ORDER BY is_default DESC NULLS LAST,id LIMIT 1))
+		    `+defaultLiveTemplateIDSQL+`)
 		FOR SHARE OF s,p,pub`, userID, slotID, templateID, productID, price, cycle, currentPaymentLedgerEnvironment()).Scan(&slot)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrVIPQuoteChanged
@@ -248,6 +264,58 @@ func lockVIPForChannelReservation(ctx context.Context, tx pgx.Tx, v vipCheckoutI
 	return checkVIPActiveConflictTx(ctx, tx, v.userID, v.environment, v.intentID)
 }
 
+// The caller holds the parent row lock. Settlement locks the Stripe child
+// first, so skip a busy child and let the next read see the committed evidence.
+func expireStaleStripeVIPQuoteTx(ctx context.Context, tx pgx.Tx, row *vipCheckoutIntentRow) error {
+	if row.status != "Pending" || row.activeProvider != payment.ProviderStripe || row.stripeIntentID == "" || row.switchTo != "" {
+		return nil
+	}
+	err := validateVIPQuoteTx(ctx, tx, row.userID, row.productID, row.slotID, row.templateID, row.priceCents, row.cycle)
+	if !errors.Is(err, ErrVIPQuoteChanged) {
+		return err
+	}
+	var child string
+	err = tx.QueryRow(ctx, `SELECT id::text FROM payment_stripe_subscription_intents
+		WHERE id=$1 AND user_id=$2 AND checkout_environment=$3 AND status='creating'
+		  AND first_sent_at IS NULL AND checkout_ref IS NULL AND subscription_ref IS NULL
+		FOR UPDATE SKIP LOCKED`, row.stripeIntentID, row.userID, row.environment).Scan(&child)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE payment_stripe_subscription_intents SET status='closed',approval_url=NULL WHERE id=$1`, child); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE payment_vip_checkout_intents SET status='Expired',updated_at=now() WHERE intent_id=$1`, row.intentID); err != nil {
+		return err
+	}
+	row.status = "Expired"
+	return nil
+}
+
+func lockVIPCheckoutIntent(ctx context.Context, tx pgx.Tx, userID int64, id string) (vipCheckoutIntentRow, error) {
+	return scanVIPCheckoutIntentRow(tx.QueryRow(ctx, vipCheckoutIntentSelect+`
+		WHERE v.intent_id=$1 AND v.user_id=$2 AND v.checkout_environment=$3 FOR UPDATE`, id, userID, conversion.Environment()))
+}
+
+func expireStaleStripeVIPQuote(ctx context.Context, row vipCheckoutIntentRow) (vipCheckoutIntentRow, error) {
+	tx, err := db.Pool(ctx).Begin(ctx)
+	if err != nil {
+		return row, err
+	}
+	defer tx.Rollback(context.WithoutCancel(ctx))
+	current, err := lockVIPCheckoutIntent(ctx, tx, row.userID, row.intentID)
+	if err != nil {
+		return row, err
+	}
+	if err := expireStaleStripeVIPQuoteTx(ctx, tx, &current); err != nil {
+		return row, err
+	}
+	return current, tx.Commit(ctx)
+}
+
 func reserveVIPCheckoutIntentTx(
 	ctx context.Context, tx pgx.Tx, e *checkoutEvaluation, prod resolvedProduct, req purchaseRequest, attribution checkoutAttribution,
 ) (*PurchaseIntent, error) {
@@ -274,11 +342,16 @@ func reserveVIPCheckoutIntentTx(
 			e.resumed, e.checkoutID = true, row.intentID
 			return buildVIPPurchaseIntentView(ctx, tx, row)
 		}
-		if row.activeProvider != "" {
-			return nil, ErrSubscriptionConflict
-		}
-		if _, err := tx.Exec(ctx, `UPDATE payment_vip_checkout_intents SET status='Expired', updated_at=now() WHERE intent_id=$1`, row.intentID); err != nil {
+		if err := expireStaleStripeVIPQuoteTx(ctx, tx, &row); err != nil {
 			return nil, err
+		}
+		if row.status == "Pending" {
+			if row.activeProvider != "" {
+				return nil, ErrSubscriptionConflict
+			}
+			if _, err := tx.Exec(ctx, `UPDATE payment_vip_checkout_intents SET status='Expired', updated_at=now() WHERE intent_id=$1`, row.intentID); err != nil {
+				return nil, err
+			}
 		}
 	}
 
@@ -347,6 +420,12 @@ func (s *service) tryGetVIPPurchaseIntent(ctx context.Context, userID int64, int
 	if err != nil {
 		return nil, true, err
 	}
+	if row.status == "Pending" && row.activeProvider == payment.ProviderStripe && row.switchTo == "" {
+		row, err = expireStaleStripeVIPQuote(ctx, row)
+		if err != nil {
+			return nil, true, err
+		}
+	}
 	if refresh && row.status == "Pending" && row.switchTo == "" {
 		switch row.activeProvider {
 		case payment.ProviderStripe:
@@ -399,6 +478,9 @@ func (s *service) startVIPPayPalCheckout(ctx context.Context, userID int64, inte
 	if row.status != "Pending" {
 		return nil, ErrVIPQuoteChanged
 	}
+	if err := s.resumeVIPSwitch(ctx, &row, payment.ProviderPayPal); err != nil {
+		return nil, err
+	}
 	if row.activeProvider != payment.ProviderPayPal {
 		site, err := s.checkoutSite(ctx, origin)
 		if err != nil {
@@ -440,6 +522,9 @@ func (s *service) startVIPStripeCheckout(ctx context.Context, userID int64, inte
 	if row.status != "Pending" {
 		return nil, ErrVIPQuoteChanged
 	}
+	if err := s.resumeVIPSwitch(ctx, &row, payment.ProviderStripe); err != nil {
+		return nil, err
+	}
 	if row.activeProvider != payment.ProviderStripe {
 		adapter, available := s.stripeVIPAdapter()
 		if !available || !stripeVIPCheckoutEnabled(ctx) {
@@ -459,9 +544,6 @@ func (s *service) startVIPStripeCheckout(ctx context.Context, userID int64, inte
 		if err != nil {
 			return nil, err
 		}
-	}
-	if row.switchTo == payment.ProviderPayPal {
-		return nil, ErrCheckoutPending
 	}
 	s.refreshUnifiedStripeVIP(ctx, row)
 	return s.unifiedVIPPurchaseView(ctx, userID, intentID)

@@ -75,6 +75,7 @@ export interface PublishChannelPayload {
   new_orders_enabled?: boolean;
   new_subscriptions_enabled?: boolean;
   expected_version?: number;
+  force_switch_when_products_unready?: boolean;
 }
 
 export interface ProductPublicationView {
@@ -173,6 +174,7 @@ export interface BindStripeProductPayload {
   countries: string[];
   release_evidence?: string;
   market_policy?: string;
+  reprovision?: boolean;
   enabled?: boolean;
   reason: string;
 }
@@ -204,7 +206,10 @@ export interface TemplateSlotDTO {
 export interface RechargeTemplateDTO {
   id: number;
   name: string;
+  environment?: PaymentEnvironment;
   is_default: boolean;
+  linked_promotion_count?: number;
+  linked_promotion_names?: string[];
   slots: TemplateSlotDTO[];
   created_at: string;
   updated_at: string;
@@ -295,19 +300,21 @@ export const productsApi = {
     apiRequest('PUT', `/products/${id}/bindings/stripe`, payload),
   publish: (id: number, environment: PaymentEnvironment, reason = '') =>
     apiRequest('POST', `/products/${id}/publish`, { environment, reason }),
-  pause: (id: number, environment: PaymentEnvironment, reason = '') =>
-    apiRequest('POST', `/products/${id}/pause`, { environment, reason }),
-  retire: (id: number, environment: PaymentEnvironment, reason = '') =>
-    apiRequest('POST', `/products/${id}/retire`, { environment, reason }),
+  pause: (id: number, environment: PaymentEnvironment, reason = '', force = false) =>
+    apiRequest('POST', `/products/${id}/pause`, { environment, reason, force }),
+  retire: (id: number, environment: PaymentEnvironment, reason = '', force = false) =>
+    apiRequest('POST', `/products/${id}/retire`, { environment, reason, force }),
 };
 
 export const templatesApi = {
   list: (signal?: AbortSignal): Promise<RechargeTemplateDTO[]> =>
     apiRequest('GET', '/recharge-templates', undefined, false, signal),
-  create: (payload: { name: string; is_default: boolean; slots: TemplateSlotWriteItem[] }) =>
+  create: (payload: { name: string; environment?: PaymentEnvironment; is_default: boolean; slots: TemplateSlotWriteItem[] }) =>
     apiRequest('POST', '/recharge-templates', payload),
-  update: (id: number, payload: { name: string; is_default: boolean; slots: TemplateSlotWriteItem[] }) =>
+  update: (id: number, payload: { name: string; environment?: PaymentEnvironment; is_default: boolean; slots: TemplateSlotWriteItem[] }) =>
     apiRequest('PUT', `/recharge-templates/${id}`, payload),
+  delete: (id: number) =>
+    apiRequest('DELETE', `/recharge-templates/${id}`),
   setDefault: (id: number) =>
     apiRequest('POST', `/recharge-templates/${id}/set-default`, {}),
 };

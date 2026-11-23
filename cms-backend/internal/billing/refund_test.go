@@ -16,8 +16,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
-	dbassets "star-novel-cms/db"
 	"star-novel-cms/internal/db"
 )
 
@@ -32,46 +30,16 @@ func TestPaymentCenterRefundAuthorizationIntegration(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	pool, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer pool.Close()
+	pool := openTestBillingPool(t, dsn)
+	origDB := db.DB
 	db.DB = pool
-	defer func() { db.DB = nil }()
-	schema, err := os.ReadFile("../../db/schema.sql")
-	if err != nil {
-		t.Fatal(err)
-	}
+	t.Cleanup(func() { db.DB = origDB })
 	exec := func(query string, args ...any) {
 		t.Helper()
 		if _, err := pool.Exec(ctx, query, args...); err != nil {
 			t.Fatal(err)
 		}
 	}
-	exec(string(schema))
-	for _, migration := range []string{
-		dbassets.ChapterPublicationSQL, dbassets.ReaderPerformanceSQL, dbassets.ReaderQueueAndShelfSQL,
-		dbassets.ConversionReportingSQL, dbassets.ReaderConversionSQL, dbassets.LegacyConversionSQL, dbassets.ConversionReconciliationSQL,
-		dbassets.ConversionOperationsSQL, dbassets.ConversionReviewSQL, dbassets.SinanConversionSQL, dbassets.SinanReviewSQL,
-		dbassets.SinanRecheckSQL, dbassets.PaymentPolicySQL, dbassets.ReaderPaymentPolicySQL, dbassets.SinanPaymentPolicySQL,
-		dbassets.ReaderPaymentReviewSQL, dbassets.ReaderPaymentRecoverySQL, dbassets.ReaderSubscriptionEvidenceSQL,
-	} {
-		exec(migration)
-	}
-	exec(dbassets.PaymentDomainFoundationSQL)
-	exec(dbassets.PaymentCheckoutSQL)
-	exec(dbassets.VIPOfferVersionsSQL)
-	exec(dbassets.PaymentLedgerSQL)
-	exec(dbassets.PaymentSettlementSQL)
-	exec(dbassets.PaymentCheckoutDecisionsSQL)
-	exec(dbassets.PaymentAftercareSQL)
-	exec(dbassets.StripeOneTimeCheckoutSQL)
-	exec(dbassets.StripeVIPCheckoutSQL)
-	exec(dbassets.PaymentCompletionSQL)
-	exec(dbassets.PaymentRecoverySQL)
-	exec(dbassets.PaymentReviewFixesSQL)
-	exec(dbassets.PaymentCatalogAndChannelSQL)
 	exec(`INSERT INTO admins(id,username,password_hash,role,status)
 		VALUES('test-editor','test-editor','none','Editor',1),
 		('test-disabled','test-disabled','none','Finance',2),
@@ -110,6 +78,9 @@ func TestPaymentCenterRefundAuthorizationIntegration(t *testing.T) {
 	finance := "test-finance"
 	t.Run("template writes require live financial permission and atomic audit", func(t *testing.T) {
 		exec(`
+			INSERT INTO payment_channel_accounts(provider,account_key,environment,credentials_ref,webhook_ref,status,is_primary,new_orders_enabled,new_subscriptions_enabled)
+			VALUES('paypal','tpl-pp-live','live','env:pp','env:pp','published',true,true,true),
+			      ('stripe','acct_TplLive','live','env:st','env:st','published',true,true,true);
 			INSERT INTO products(id,code,product_type,name,price_cents,currency,coins,bonus,vip_cycle,novel_scope_type)
 			OVERRIDING SYSTEM VALUE VALUES
 			(9001,'TEST_COIN_999','single','Test Coin 999',999,'USD',100,0,NULL,'none'),
@@ -118,9 +89,15 @@ func TestPaymentCenterRefundAuthorizationIntegration(t *testing.T) {
 			(9004,'TEST_BOOK_999','whole_book','Test Whole Book',999,'USD',0,0,NULL,'all_published'),
 			(9005,'TEST_COIN_1299','single','Test Coin 1299',1299,'USD',150,0,NULL,'none');
 			INSERT INTO product_publications(product_id,environment,status,published_at)
-			VALUES(9001,'sandbox','published',now()),(9002,'sandbox','published',now()),
-			      (9003,'sandbox','published',now()),(9004,'sandbox','published',now()),
-			      (9005,'sandbox','published',now());`)
+			VALUES(9001,'live','published',now()),(9002,'live','published',now()),
+			      (9003,'live','published',now()),(9004,'live','published',now()),
+			      (9005,'live','published',now());
+			INSERT INTO product_channel_bindings(product_id,account_id,provider,environment,external_product_ref,external_price_ref,validated_catalog,release_evidence,market_policy,validation_status,enabled)
+			SELECT p.id, a.id, 'paypal', 'live', CASE WHEN p.product_type='vip' THEN 'PROD-PP' ELSE '' END, CASE WHEN p.product_type='vip' THEN 'P-TEST-999' ELSE '' END, '{}'::jsonb, 'ev', 'US', 'verified', true
+			FROM products p, payment_channel_accounts a WHERE p.id BETWEEN 9001 AND 9005 AND a.provider='paypal' AND a.account_key='tpl-pp-live';
+			INSERT INTO product_channel_bindings(product_id,account_id,provider,environment,external_product_ref,external_price_ref,validated_catalog,release_evidence,market_policy,validation_status,enabled)
+			SELECT p.id, a.id, 'stripe', 'live', 'prod_live_'||p.id, 'price_live_'||p.id, '{}'::jsonb, 'ev', 'US', 'verified', true
+			FROM products p, payment_channel_accounts a WHERE p.id BETWEEN 9001 AND 9005 AND a.provider='stripe' AND a.account_key='acct_TplLive';`)
 		slots := []RechargeSlot{
 			{SlotIndex: 1, ProductID: 9001, DisplayAlias: "Starter"},
 			{SlotIndex: 2, ProductID: 9002},
@@ -128,10 +105,10 @@ func TestPaymentCenterRefundAuthorizationIntegration(t *testing.T) {
 			{SlotIndex: 4, ProductID: 9004},
 		}
 		for _, actor := range []string{"", "test-editor", "test-disabled", "test-missing"} {
-			if _, err := s.CreateRechargeTemplate(ctx, actor, "unauthorized", false, slots); !errors.Is(err, ErrRefundForbidden) {
+			if _, err := s.CreateRechargeTemplate(ctx, actor, "unauthorized", "live", false, slots); !errors.Is(err, ErrRefundForbidden) {
 				t.Fatalf("create %s: %v", actor, err)
 			}
-			if err := s.UpdateRechargeTemplate(ctx, actor, 999999, "unauthorized", false, slots); !errors.Is(err, ErrRefundForbidden) {
+			if err := s.UpdateRechargeTemplate(ctx, actor, 999999, "unauthorized", "live", false, slots); !errors.Is(err, ErrRefundForbidden) {
 				t.Fatalf("update %s: %v", actor, err)
 			}
 			if err := s.DeleteRechargeTemplate(ctx, actor, 999999); !errors.Is(err, ErrRefundForbidden) {
@@ -141,14 +118,14 @@ func TestPaymentCenterRefundAuthorizationIntegration(t *testing.T) {
 				t.Fatalf("default %s: %v", actor, err)
 			}
 		}
-		id, err := s.CreateRechargeTemplate(ctx, finance, "audited", false, slots)
+		id, err := s.CreateRechargeTemplate(ctx, finance, "audited", "live", false, slots)
 		if err != nil {
 			t.Fatal(err)
 		}
 		slots[0].ProductID = 9005
 		slots[0].Badge = "HOT"
 		slots[0].IsHighlighted = true
-		if err := s.UpdateRechargeTemplate(ctx, finance, id, "audited edit", false, slots); err != nil {
+		if err := s.UpdateRechargeTemplate(ctx, finance, id, "audited edit", "live", false, slots); err != nil {
 			t.Fatal(err)
 		}
 		var beforeProd, afterProd int64
@@ -170,7 +147,7 @@ func TestPaymentCenterRefundAuthorizationIntegration(t *testing.T) {
 			t.Fatalf("stale finance session: %v", err)
 		}
 		exec(`UPDATE admins SET status=1 WHERE id='test-finance'`)
-		another, err := s.CreateRechargeTemplate(ctx, finance, "to delete", false, slots)
+		another, err := s.CreateRechargeTemplate(ctx, finance, "to delete", "live", false, slots)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -189,7 +166,7 @@ func TestPaymentCenterRefundAuthorizationIntegration(t *testing.T) {
 			INSERT INTO third_party_payment_orders(id,order_id,payment_provider,external_order_id,capture_id,
 				currency,gross_amount,status,account_id,object_type)
 			SELECT 95503,95503,'paypal','I-SALE','SALE-95503','USD',9.99,'VERIFIED',id,'sale'
-			FROM payment_channel_accounts WHERE provider='paypal'`)
+			FROM payment_channel_accounts WHERE provider='paypal' AND account_key='refund-command-fixture'`)
 		detail, err := s.repo.GetThirdPartyPaymentDetails(ctx, 95503)
 		if err != nil || detail == nil || detail.GrossAmount != 9.99 || detail.NetAmount != nil || detail.FeeAmount != nil {
 			t.Fatalf("gross alone became net: %+v %v", detail, err)
@@ -197,7 +174,7 @@ func TestPaymentCenterRefundAuthorizationIntegration(t *testing.T) {
 		exec(`WITH movement AS (
 				INSERT INTO payment_ledger_movements(account_id,movement_key,kind,currency,posted_at)
 				SELECT id,'SALE-95503/T0002/USD','payment','USD',now() FROM payment_channel_accounts
-				WHERE provider='paypal' RETURNING id
+				WHERE provider='paypal' AND account_key='refund-command-fixture' RETURNING id
 			), link AS (
 				INSERT INTO payment_ledger_references(movement_id,object_type,object_id)
 				SELECT id,'paypal_transaction','SALE-95503' FROM movement

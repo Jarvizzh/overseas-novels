@@ -122,9 +122,11 @@ type sixFlowStripeAdapter struct {
 	account       payment.WebhookAccount
 	sessionSeq    int
 	vipSessionSeq int
+	vipCreates    []payment.StripeVIPCheckoutRequest
 	closedVIP     []string
 	loseVIPReply  bool
 	closeVIPProof func(payment.StripeVIPCheckout) payment.StripeVIPCheckout
+	closeVIPErr   error
 	vipByIntent   map[string]string
 }
 
@@ -149,12 +151,16 @@ func (a *sixFlowStripeAdapter) ReadSingleCheckout(_ context.Context, sessionID, 
 }
 
 func (a *sixFlowStripeAdapter) CreateStripeVIPCheckout(_ context.Context, req payment.StripeVIPCheckoutRequest) (payment.StripeVIPCheckout, error) {
-	a.vipSessionSeq++
-	id := fmt.Sprintf("cs_vip_%d", a.vipSessionSeq)
-	if a.vipByIntent == nil {
-		a.vipByIntent = make(map[string]string)
+	a.vipCreates = append(a.vipCreates, req)
+	id := a.vipByIntent[req.IntentID]
+	if id == "" {
+		a.vipSessionSeq++
+		id = fmt.Sprintf("cs_vip_%d", a.vipSessionSeq)
+		if a.vipByIntent == nil {
+			a.vipByIntent = make(map[string]string)
+		}
+		a.vipByIntent[req.IntentID] = id
 	}
-	a.vipByIntent[req.IntentID] = id
 	if a.loseVIPReply {
 		return payment.StripeVIPCheckout{}, context.DeadlineExceeded
 	}
@@ -175,6 +181,9 @@ func (a *sixFlowStripeAdapter) ReadStripeVIPCheckout(_ context.Context, sessionI
 
 func (a *sixFlowStripeAdapter) CloseStripeVIPCheckout(_ context.Context, sessionID, intentID, _ string) (payment.StripeVIPCheckout, error) {
 	a.closedVIP = append(a.closedVIP, sessionID)
+	if a.closeVIPErr != nil {
+		return payment.StripeVIPCheckout{}, a.closeVIPErr
+	}
 	proof := payment.StripeVIPCheckout{ID: sessionID, IntentID: intentID, Expired: true}
 	if a.closeVIPProof != nil {
 		proof = a.closeVIPProof(proof)
@@ -335,8 +344,8 @@ func TestSixH5PurchaseFlowsEndToEnd(t *testing.T) {
 
 	// Flow 2: Coins x Stripe (happy path + pre-fulfillment refund + partial-to-full refund shortfall)
 	t.Run("Flow2_Coins_Stripe", func(t *testing.T) {
-		// Happy path using product_id directly!
-		intent, err := svc.PreparePurchase(ctx, 601, pCoins, 0, 0, uuid.NewString(), "", checkoutAttribution{})
+		// Happy path via user's active template slot!
+		intent, err := svc.PreparePurchase(ctx, 601, pCoins, 601, 0, uuid.NewString(), "", checkoutAttribution{})
 		if err != nil || intent.ProductID != pCoins || intent.OrderType != "single" {
 			t.Fatalf("Flow 2 prepare by product_id: %+v err=%v", intent, err)
 		}
@@ -511,7 +520,7 @@ func TestSixH5PurchaseFlowsEndToEnd(t *testing.T) {
 
 	// Flow 5: VIP (year cycle!) x PayPal unified via PreparePurchase
 	t.Run("Flow5_VIP_Year_PayPal", func(t *testing.T) {
-		intent, err := svc.PreparePurchase(ctx, 603, pVIPYear, 0, 0, uuid.NewString(), "", checkoutAttribution{})
+		intent, err := svc.PreparePurchase(ctx, 603, pVIPYear, 604, 0, uuid.NewString(), "", checkoutAttribution{})
 		if err != nil || intent.OrderType != "subscription" || intent.Cycle != "year" || intent.Badge != "Save 45%" || intent.DisplayAlias != "Annual VIP" {
 			t.Fatalf("Flow 5 prepare: %+v err=%v", intent, err)
 		}
@@ -596,10 +605,17 @@ func TestSixH5PurchaseFlowsEndToEnd(t *testing.T) {
 		testUnifiedVIPReview(t, svc, pool, ppAdapter, stAdapter, origin)
 	})
 
+	t.Run("UnifiedVIPRereviewRegressions", func(t *testing.T) {
+		testUnifiedVIPRereview(t, svc, pool, ppAdapter, stAdapter, origin)
+	})
+
 	// Dual-channel gate: disabling Stripe binding on pCoins excludes it from catalog & PreparePurchase
 	t.Run("DualChannelReadyGate", func(t *testing.T) {
 		exec(`UPDATE product_channel_bindings SET enabled=false WHERE product_id=$1 AND provider='stripe'`, pCoins)
-		if _, err := svc.PreparePurchase(ctx, 601, pCoins, 0, 0, uuid.NewString(), "", checkoutAttribution{}); !errors.Is(err, ErrCheckoutUnavailable) {
+		t.Cleanup(func() {
+			exec(`UPDATE product_channel_bindings SET enabled=true WHERE product_id=$1 AND provider='stripe'`, pCoins)
+		})
+		if _, err := svc.PreparePurchase(ctx, 601, pCoins, 601, 0, uuid.NewString(), "", checkoutAttribution{}); !errors.Is(err, ErrCheckoutUnavailable) {
 			t.Fatalf("expected ErrCheckoutUnavailable when Stripe binding disabled, got %v", err)
 		}
 		tplAfter, err := svc.GetRechargeTemplates(ctx, 601, 601)

@@ -21,9 +21,9 @@ import { Pagination } from '../components/ui/Pagination';
 import { SearchInput, SkeletonRows, StatusDot, TableRegion } from '../components/ui/Primitives';
 import { ConfirmContext } from '../context/ConfirmContext';
 import { ToastContext } from '../context/ToastContext';
-import { apiRequest } from '../utils/api';
 import {
   NOVEL_SCOPE_LABELS,
+  type PaymentEnvironment,
   PRODUCT_TYPE_LABELS,
   productsApi,
   type ProductView,
@@ -34,6 +34,12 @@ import {
   VIP_CYCLE_LABELS,
   type VipCycle,
 } from '../utils/paymentCatalogApi';
+import {
+  canDeleteTemplate,
+  canSetDefaultTemplate,
+  filterEligibleTemplateProducts,
+  shouldLockDefaultTemplate,
+} from '../utils/templateCatalogHelpers';
 
 type SlotDraft = {
   uid: string;
@@ -104,12 +110,14 @@ export default function TemplatesTab() {
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(10);
 
-  // Published product catalog for editor dropdown (deduped across sandbox + live published)
-  const [publishedProducts, setPublishedProducts] = useState<ProductView[]>([]);
+  // Published product catalog for editor dropdown grouped by environment
+  const [liveProducts, setLiveProducts] = useState<ProductView[]>([]);
+  const [sandboxProducts, setSandboxProducts] = useState<ProductView[]>([]);
   const [productsLoading, setProductsLoading] = useState(false);
 
   // Editor state
   const [tplName, setTplName] = useState('');
+  const [tplEnv, setTplEnv] = useState<PaymentEnvironment>('live');
   const [tplIsDefault, setTplIsDefault] = useState(false);
   const [drafts, setDrafts] = useState<SlotDraft[]>([]);
   const [previewTheme, setPreviewTheme] = useState<'light' | 'dark'>('light');
@@ -135,13 +143,13 @@ export default function TemplatesTab() {
         productsApi.list({ environment: 'live', status: 'published' }, signal),
       ]);
       if (signal?.aborted) return;
-      const merged = new Map<number, ProductView>();
-      for (const p of [...(live.products ?? []), ...(sbx.products ?? [])]) {
-        if (!merged.has(p.id)) merged.set(p.id, p);
-      }
-      setPublishedProducts(Array.from(merged.values()));
+      setLiveProducts(live.products ?? []);
+      setSandboxProducts(sbx.products ?? []);
     } catch {
-      if (!signal?.aborted) setPublishedProducts([]);
+      if (!signal?.aborted) {
+        setLiveProducts([]);
+        setSandboxProducts([]);
+      }
     } finally {
       if (!signal?.aborted) setProductsLoading(false);
     }
@@ -165,6 +173,7 @@ export default function TemplatesTab() {
         return;
       }
       setTplName(target.name);
+      setTplEnv(target.environment === 'sandbox' ? 'sandbox' : 'live');
       setTplIsDefault(target.is_default);
       setDrafts(
         (target.slots || []).map((s) => ({
@@ -182,6 +191,7 @@ export default function TemplatesTab() {
       const src = templates.find((t) => t.id === copyFromId);
       if (src) {
         setTplName(`${src.name} - 副本`);
+        setTplEnv(src.environment === 'sandbox' ? 'sandbox' : 'live');
         setTplIsDefault(false);
         setDrafts(
           (src.slots || []).map((s) => ({
@@ -197,15 +207,34 @@ export default function TemplatesTab() {
     }
 
     setTplName('');
+    setTplEnv('live');
     setTplIsDefault(false);
     setDrafts([]);
   }, [isEditor, editTemplateId, copyFromId, templates]);
 
+  const envPublishedProducts = useMemo(
+    () => (tplEnv === 'live' ? liveProducts : sandboxProducts),
+    [tplEnv, liveProducts, sandboxProducts],
+  );
+  const eligibleProducts = useMemo(
+    () => filterEligibleTemplateProducts(envPublishedProducts),
+    [envPublishedProducts],
+  );
+  const eligibleProductMap = useMemo(() => {
+    const map = new Map<number, ProductView>();
+    for (const p of eligibleProducts) map.set(p.id, p);
+    return map;
+  }, [eligibleProducts]);
   const productMap = useMemo(() => {
     const map = new Map<number, ProductView>();
-    for (const p of publishedProducts) map.set(p.id, p);
+    for (const p of [...sandboxProducts, ...liveProducts]) map.set(p.id, p);
+    for (const p of envPublishedProducts) map.set(p.id, p);
     return map;
-  }, [publishedProducts]);
+  }, [liveProducts, sandboxProducts, envPublishedProducts]);
+  const lockDefaultCheckbox = useMemo(
+    () => shouldLockDefaultTemplate(templates ?? [], editTemplateId),
+    [templates, editTemplateId],
+  );
 
   // Also index slot product metadata already hydrated from GET /recharge-templates so existing slot details remain readable even if paused later
   const fallbackSlotMetaMap = useMemo(() => {
@@ -245,9 +274,14 @@ export default function TemplatesTab() {
       showToast('默认模板不可删除，请先设置其他模板为默认', 'error');
       return;
     }
+    if ((tpl.linked_promotion_count ?? 0) > 0) {
+      const names = (tpl.linked_promotion_names ?? []).slice(0, 3).join('、');
+      showToast(`该模板已被 ${tpl.linked_promotion_count} 条推广链接引用${names ? `（${names}）` : ''}，无法删除`, 'error');
+      return;
+    }
     const runDelete = async () => {
       try {
-        await apiRequest('DELETE', `/recharge-templates/${tpl.id}`);
+        await templatesApi.delete(tpl.id);
         showToast('模板已删除', 'success');
         await loadTemplates();
       } catch (err) {
@@ -269,7 +303,7 @@ export default function TemplatesTab() {
       showToast('每个模板最多只能配置 8 个槽位', 'error');
       return;
     }
-    const nextUnassigned = publishedProducts.find((p) => !selectedProductIds.has(p.id));
+    const nextUnassigned = eligibleProducts.find((p) => !selectedProductIds.has(p.id));
     setDrafts((prev) => [
       ...prev,
       {
@@ -309,10 +343,13 @@ export default function TemplatesTab() {
       const pid = drafts[i].product_id;
       if (!pid || pid <= 0) return `第 ${i + 1} 个槽位尚未选择已上架商品`;
       if (seen.has(pid)) return `商品 #${pid} 在同一模板中重复选择`;
+      if (!productsLoading && !eligibleProductMap.has(pid)) {
+        return `第 ${i + 1} 个槽位商品 #${pid} 未在 ${tplEnv} 环境下架或未满足双渠道就绪`;
+      }
       seen.add(pid);
     }
     return '';
-  }, [tplName, drafts]);
+  }, [tplName, drafts, productsLoading, eligibleProductMap, tplEnv]);
 
   const handleSaveTemplate = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -332,10 +369,10 @@ export default function TemplatesTab() {
         display_alias: d.display_alias.trim(),
       }));
       if (editTemplateId !== null) {
-        await templatesApi.update(editTemplateId, { name: tplName.trim(), is_default: tplIsDefault, slots });
+        await templatesApi.update(editTemplateId, { name: tplName.trim(), environment: tplEnv, is_default: tplIsDefault, slots });
         showToast('模板保存成功', 'success');
       } else {
-        await templatesApi.create({ name: tplName.trim(), is_default: tplIsDefault, slots });
+        await templatesApi.create({ name: tplName.trim(), environment: tplEnv, is_default: tplIsDefault, slots });
         showToast('模板创建成功', 'success');
       }
       navigate('/recharge-templates');
@@ -424,10 +461,44 @@ export default function TemplatesTab() {
                     onChange={(e) => setTplName(e.target.value)}
                   />
                 </div>
-                <label className="flex items-center gap-2 text-sm cursor-pointer pb-2">
-                  <input type="checkbox" checked={tplIsDefault} onChange={(e) => setTplIsDefault(e.target.checked)} />
+                <div>
+                  <label htmlFor={`${formId}-tenv`} className="block text-xs font-medium text-[var(--cms-muted-fg)] mb-1">模板校验环境 *</label>
+                  <CustomSelect
+                    id={`${formId}-tenv`}
+                    width="100%"
+                    value={tplEnv}
+                    onChange={(v) => {
+                      const nextEnv = v === 'sandbox' ? 'sandbox' : 'live';
+                      setTplEnv(nextEnv);
+                      if (nextEnv !== 'live') setTplIsDefault(false);
+                    }}
+                    options={[
+                      { value: 'live', label: 'Live 正式（推荐：要求商品在 Live 已上架且双渠道就绪）' },
+                      { value: 'sandbox', label: 'Sandbox 沙箱测试（要求商品在 Sandbox 已上架）' },
+                    ]}
+                  />
+                </div>
+              </div>
+              <div className="space-y-1">
+                <label className={`flex items-center gap-2 text-sm ${lockDefaultCheckbox || tplEnv !== 'live' ? 'cursor-not-allowed opacity-75' : 'cursor-pointer'}`}>
+                  <input
+                    type="checkbox"
+                    checked={tplEnv === 'live' && tplIsDefault}
+                    disabled={lockDefaultCheckbox || tplEnv !== 'live'}
+                    onChange={(e) => setTplIsDefault(e.target.checked)}
+                  />
                   <span>设为全站默认模板（自然流量与兜底用户生效）</span>
                 </label>
+                {lockDefaultCheckbox && (
+                  <p className="text-xs text-[var(--cms-muted-fg)]">
+                    当前为全站唯一默认模板，不能直接取消默认；请先在列表将其他模板「设为默认」。
+                  </p>
+                )}
+                {tplEnv !== 'live' && (
+                  <p className="text-xs text-[var(--cms-muted-fg)]">
+                    仅 Live 环境模板可设为全站默认模板或用于推广绑定；Sandbox 模板仅用于沙箱预演。
+                  </p>
+                )}
               </div>
             </div>
 
@@ -438,7 +509,7 @@ export default function TemplatesTab() {
                     商品槽位编排 ({drafts.length} / 8，需 4–8 个)
                   </h2>
                   <p className="text-xs text-[var(--cms-muted-fg)]">
-                    仅可选择已上架（已通过 PayPal + Stripe 双渠道验证）且不重复的商品。
+                    仅可选择在 {tplEnv === 'live' ? 'Live' : 'Sandbox'} 环境已上架且 PayPal + Stripe 双渠道就绪的不重复商品。
                   </p>
                 </div>
                 <button
@@ -452,25 +523,27 @@ export default function TemplatesTab() {
                 </button>
               </div>
 
-              {publishedProducts.length === 0 && !productsLoading && (
+              {eligibleProducts.length === 0 && !productsLoading && (
                 <div role="alert" className="p-3 rounded-xl border border-[var(--cms-warning)] bg-[var(--cms-warning-soft)] text-xs text-[var(--cms-warning)]">
-                  当前尚未有在 Sandbox 或 Live 环境下「已上架」的商品，请先前往 <Link to="/payments/products" className="underline font-medium">商品与定价</Link> 完成 PayPal / Stripe 绑定并上架。
+                  当前尚未有在 {tplEnv === 'live' ? 'Live' : 'Sandbox'} 环境下「已上架且双渠道就绪」的商品，请先前往 <Link to={`/payments/products?environment=${tplEnv}`} className="underline font-medium">商品与定价</Link> 完成 PayPal / Stripe 绑定并上架。
                 </div>
               )}
 
               <div className="space-y-3">
                 {drafts.map((draft, idx) => {
                   const summary = resolveProductSummary(draft.product_id);
-                  const selectOptions = publishedProducts
+                  const envEligible = draft.product_id <= 0 || eligibleProductMap.has(draft.product_id);
+                  const selectOptions = eligibleProducts
                     .filter((p) => p.id === draft.product_id || !selectedProductIds.has(p.id))
                     .map((p) => ({
                       value: String(p.id),
-                      label: `[${PRODUCT_TYPE_LABELS[p.product_type]}] ${p.name} · ${p.price} (${p.code})`,
+                      label: `[${tplEnv === 'live' ? 'Live 已上架' : 'Sandbox 已上架'} · ${PRODUCT_TYPE_LABELS[p.product_type]}] ${p.name} · ${p.price} (${p.code})`,
                     }));
-                  if (draft.product_id > 0 && !productMap.has(draft.product_id) && summary) {
+                  if (draft.product_id > 0 && !eligibleProductMap.has(draft.product_id) && summary) {
+                    const sbxOnly = tplEnv === 'live' && sandboxProducts.some((sp) => sp.id === draft.product_id);
                     selectOptions.unshift({
                       value: String(draft.product_id),
-                      label: `[未上架/已暂停] ${summary.name} · ${summary.price} (${summary.code})`,
+                      label: `[${sbxOnly ? '仅 Sandbox' : `${tplEnv} 未就绪`}] ${summary.name} · ${summary.price} (${summary.code})`,
                     });
                   }
 
@@ -479,6 +552,11 @@ export default function TemplatesTab() {
                       <div className="flex flex-wrap items-center justify-between gap-2">
                         <div className="flex items-center gap-2">
                           <span className="badge badge-gray font-mono-code">槽位 #{idx + 1}</span>
+                          {!envEligible && !productsLoading && (
+                            <span className="badge badge-red text-[11px]">
+                              {tplEnv === 'live' && sandboxProducts.some((sp) => sp.id === draft.product_id) ? '仅 Sandbox 上架' : `${tplEnv} 未就绪`}
+                            </span>
+                          )}
                           {summary && (
                             <span className="text-xs font-medium text-[var(--cms-fg)] flex items-center gap-1">
                               <Lock size={11} aria-hidden="true" />
@@ -728,16 +806,24 @@ export default function TemplatesTab() {
               pagedTemplates.map((t) => {
                 const { summary, priceRange } = summarizeSlots(t.slots || []);
                 const slotCount = t.slots?.length || 0;
+                const promoCount = t.linked_promotion_count ?? 0;
+                const hasPromoRefs = !canDeleteTemplate(t) && !t.is_default;
                 return (
                   <tr key={t.id}>
                     <td className="font-mono-code text-xs text-[var(--cms-muted-fg)]">#{t.id}</td>
                     <td>
                       <div className="flex items-center gap-2 font-medium text-[var(--cms-fg)]">
                         <span>{t.name}</span>
+                        <span className="badge badge-gray text-[11px]">{t.environment === 'sandbox' ? 'Sandbox' : 'Live'}</span>
                         {t.is_default && (
                           <span className="badge badge-green inline-flex items-center gap-1">
                             <Check size={11} aria-hidden="true" />
                             全站默认
+                          </span>
+                        )}
+                        {hasPromoRefs && (
+                          <span className="badge badge-gray text-[11px]" title={(t.linked_promotion_names ?? []).join('、')}>
+                            已绑定 {promoCount} 条推广
                           </span>
                         )}
                       </div>
@@ -768,7 +854,7 @@ export default function TemplatesTab() {
                           <Copy size={12} aria-hidden="true" />
                           复制
                         </button>
-                        {!t.is_default && (
+                        {canSetDefaultTemplate(t) && (
                           <button
                             type="button"
                             className="btn-detail inline-flex items-center gap-1"
@@ -781,10 +867,12 @@ export default function TemplatesTab() {
                         {!t.is_default && (
                           <button
                             type="button"
-                            className="btn-ghost text-xs text-[var(--cms-error)]"
+                            className="btn-ghost text-xs text-[var(--cms-error)] disabled:opacity-45 disabled:cursor-not-allowed"
+                            disabled={hasPromoRefs}
+                            title={hasPromoRefs ? `已被 ${promoCount} 条推广链接引用，请先解绑后再删除` : undefined}
                             onClick={() => void handleDelete(t)}
                           >
-                            删除
+                            {hasPromoRefs ? `引用中 (${promoCount})` : '删除'}
                           </button>
                         )}
                       </div>

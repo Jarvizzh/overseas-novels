@@ -986,6 +986,10 @@ func (h *Handler) CreatePromotionLink(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
+		if errors.Is(err, ErrInvalidPromoTemplate) {
+			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+			return
+		}
 		if errors.Is(err, ErrNovelNotFound) {
 			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
 			return
@@ -1035,6 +1039,10 @@ func (h *Handler) UpdatePromotionLink(c *gin.Context) {
 	if err != nil {
 		if errors.Is(err, ErrInvalidPromoPricing) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, ErrInvalidPromoTemplate) {
+			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
 			return
 		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
