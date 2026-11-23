@@ -17,19 +17,13 @@ import {
   formatAmount,
   getErrorMessage,
   getReasonLabel,
-  isServiceUnavailableError,
   partnerReportStatusLabel,
   sourceEventLabel,
   sourceLabel,
   status,
   timestamp,
 } from '../../utils/conversionStatus';
-import {
-  ConversionStatusDot,
-  CopyableText,
-  InlineErrorBanner,
-  ServiceUnavailableState,
-} from './ConversionShared';
+import { ConversionStatusDot, CopyableText, InlineErrorBanner } from './ConversionShared';
 import type {
   ConversionDestination,
   ConversionEvent,
@@ -157,10 +151,6 @@ export function ConversionEventsTab({
   refreshToken,
   initialPixelId = '',
   onClearUrlPixelId,
-  serviceUnavailable,
-  retryingService = false,
-  onServiceUnavailable,
-  onRetryService,
   onSelectEvent,
   onJumpToOrder,
 }: {
@@ -172,11 +162,7 @@ export function ConversionEventsTab({
   refreshToken: number;
   initialPixelId?: string;
   onClearUrlPixelId?: () => void;
-  serviceUnavailable: boolean;
-  retryingService?: boolean;
-  onServiceUnavailable: () => void;
-  onRetryService: () => void;
-  onSelectEvent: (ev: ConversionEvent) => void;
+  onSelectEvent: (ev: ConversionEvent, pixel: string) => void;
   onJumpToOrder: (orderId: string, integrationId?: string) => void;
 }) {
   const [draft, setDraft] = useState<EventFilterState>(() => ({
@@ -225,11 +211,6 @@ export function ConversionEventsTab({
   const currentCursor = cursorStack.at(-1) ?? '';
 
   useEffect(() => {
-    if (serviceUnavailable) {
-      setLoading(false);
-      return;
-    }
-
     const seq = ++requestSeqRef.current;
     const controller = new AbortController();
     setLoading(true);
@@ -280,11 +261,7 @@ export function ConversionEventsTab({
       })
       .catch((err) => {
         if (seq !== requestSeqRef.current || controller.signal.aborted) return;
-        if (isServiceUnavailableError(err)) {
-          onServiceUnavailable();
-        } else {
-          setError(getErrorMessage(err, '加载回传事件列表失败'));
-        }
+        setError(getErrorMessage(err, '加载回传事件列表失败'));
         setHasLoadedOnce(true);
       })
       .finally(() => {
@@ -294,7 +271,7 @@ export function ConversionEventsTab({
       });
 
     return () => controller.abort();
-  }, [committed, currentCursor, limit, refreshToken, manualNonce, serviceUnavailable, onServiceUnavailable]);
+  }, [committed, currentCursor, limit, refreshToken, manualNonce]);
 
   const commitFilters = useCallback((next: EventFilterState): boolean => {
     if (next.timePreset === 'custom' && next.fromLocal && next.toLocal) {
@@ -465,15 +442,6 @@ export function ConversionEventsTab({
     (visibleCols.promotion_id ? 1 : 0) +
     (visibleCols.source_event_id ? 1 : 0) +
     (visibleCols.enqueued_at ? 1 : 0);
-
-  if (serviceUnavailable) {
-    return (
-      <ServiceUnavailableState
-        retrying={retryingService}
-        onRetry={onRetryService}
-      />
-    );
-  }
 
   const integrationOptions = [
     { value: '', label: '全部接入账户' },
@@ -1072,7 +1040,7 @@ export function ConversionEventsTab({
                     <td className="text-right whitespace-nowrap">
                       <button
                         type="button"
-                        onClick={() => onSelectEvent(item)}
+                        onClick={() => onSelectEvent(item, committed.pixelId.trim())}
                         className="btn-detail"
                       >
                         详情

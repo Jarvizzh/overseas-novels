@@ -68,7 +68,7 @@ GRANT SELECT ON conversion.integrations,conversion.integration_destinations,conv
     conversion.legacy_outbox_imports,conversion.worker_heartbeats,conversion.alerts TO :"api_role";
 GRANT SELECT (report_id,attempt_no,started_at,sending_at,responded_at,recorded_at,outcome,reason,retry_at,http_status,business_code)
     ON conversion.partner_report_attempts TO :"api_role";
-GRANT SELECT (id,integration_id,source_order_id,source_event_type,source_event_id,source_app_id,normalized_event_id,received_at,state,reason)
+GRANT SELECT (id,integration_id,source_order_id,source_event_type,source_event_id,source_app_id,normalized_event_id,received_at,state,reason,processed_at)
     ON conversion.inbox TO :"api_role";
 GRANT SELECT (id), INSERT (ciphertext,key_version) ON conversion.credentials TO :"api_role";
 GRANT INSERT, UPDATE ON conversion.integrations,conversion.destinations,conversion.integration_destinations TO :"api_role";
@@ -86,7 +86,7 @@ GRANT SELECT (id,integration_id,state,received_at) ON conversion.inbox TO :"coll
 GRANT SELECT (id,environment,source,account_key,report_config) ON conversion.integrations TO :"collector_role";
 GRANT SELECT (id,environment,integration_id,source_event_type,source_event_id,reason,attribution_state,received_at)
     ON conversion.events TO :"collector_role";
-GRANT SELECT (id,pixel_id) ON conversion.destinations TO :"collector_role";
+GRANT SELECT (id,pixel_id,environment,credential_id,blocked_credential_id) ON conversion.destinations TO :"collector_role";
 GRANT SELECT (id,event_id,role,environment,state,lease_token,deadline_at,next_attempt_at,destination_id,reason)
     ON conversion.deliveries TO :"collector_role";
 GRANT SELECT (event_id,legacy_state,legacy_delivered_at) ON conversion.legacy_outbox_imports TO :"collector_role";
@@ -127,3 +127,21 @@ GRANT UPDATE (payment_policy_state,payment_policy_decision_id,reason,attribution
 GRANT SELECT (order_id,state,delivered_at) ON payment_event_outbox TO :"worker_role";
 
 COMMIT;
+
+-- Conversion Center operational statistics and frozen Reader routes.
+GRANT EXECUTE ON FUNCTION conversion.reader_payment_attribution_time(bigint,text) TO :"worker_role", :"api_role";
+GRANT UPDATE (consecutive_payment_claims,nonpayment_claim_streak,blocked_credential_id) ON conversion.destinations TO :"worker_role";
+GRANT SELECT ON conversion.collector_samples TO :"api_role";
+GRANT SELECT,INSERT,UPDATE ON conversion.collector_samples TO :"collector_role";
+GRANT SELECT (finalized_at,unknown_attempt_no) ON conversion.deliveries TO :"collector_role";
+GRANT SELECT (delivery_id,responded_at,reason,batch_id) ON conversion.delivery_attempts TO :"collector_role";
+GRANT SELECT (checkout_environment) ON recharge_orders TO :"api_role";
+GRANT EXECUTE ON FUNCTION conversion.reader_order_environment(bigint,text,text) TO :"api_role";
+
+GRANT SELECT ON conversion.meta_batches TO :"worker_role";
+GRANT INSERT (environment,destination_id,lease_until) ON conversion.meta_batches TO :"worker_role";
+GRANT UPDATE (started_at,sent_count,credential_id,key_version,receipt_at,receipt,late_receipt_at,late_receipt,finished_at)
+    ON conversion.meta_batches TO :"worker_role";
+GRANT SELECT (id,environment,destination_id,created_at,started_at,sent_count,receipt_at,receipt,late_receipt_at,late_receipt,finished_at,confirmed)
+    ON conversion.meta_batches TO :"api_role";
+GRANT SELECT (id,environment,destination_id,started_at,sent_count,receipt_at,receipt,late_receipt,finished_at) ON conversion.meta_batches TO :"collector_role";

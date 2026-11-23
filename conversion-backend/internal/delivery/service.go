@@ -44,9 +44,7 @@ func decide(current deliveryState, attempt int, r Result, requestWindow time.Dur
 	case r.Outcome == PermanentRejection:
 		t.state = "failed"
 	default:
-		n := min(max(attempt-current.base-1, 0), 7)
-		backoff := min(30*time.Second<<n, time.Hour)
-		t.next = maxTime(current.now.Add(backoff/2+rand.N(backoff/2)), r.RetryAfter)
+		t.next = retryAt(current, attempt, r)
 		t.state = "pending"
 		if attempt-current.base >= attemptBudget {
 			t.state = "blocked"
@@ -61,6 +59,12 @@ func decide(current deliveryState, attempt int, r Result, requestWindow time.Dur
 		}
 	}
 	return t
+}
+
+func retryAt(current deliveryState, attempt int, r Result) time.Time {
+	n := min(max(attempt-current.base-1, 0), 7)
+	backoff := min(30*time.Second<<n, time.Hour)
+	return maxTime(current.now.Add(backoff/2+rand.N(backoff/2)), r.RetryAfter)
 }
 
 func maxTime(a, b time.Time) time.Time {
@@ -85,6 +89,9 @@ func (s Service) Complete(ctx context.Context, job Lease, r Result, requestWindo
 		return err
 	}
 	t := decide(current, job.Attempt, r, requestWindow)
+	if err := persistPixelCooldown(ctx, tx, job, current, t, r); err != nil {
+		return err
+	}
 	if err := recordAttempt(ctx, tx, job, r); err != nil {
 		return err
 	}
@@ -92,6 +99,20 @@ func (s Service) Complete(ctx context.Context, job Lease, r Result, requestWindo
 		return err
 	}
 	return tx.Commit(ctx)
+}
+
+func persistPixelCooldown(ctx context.Context, tx pgx.Tx, job Lease, current deliveryState, t transition, r Result) error {
+	if r.Outcome != RetryableRejection || r.Reason != MetaRateLimited {
+		return nil
+	}
+	until := t.next
+	if !until.After(current.now) {
+		until = retryAt(current, job.Attempt, r)
+	}
+	_, err := tx.Exec(ctx, `
+        UPDATE conversion.destinations x SET next_claim_at=GREATEST(x.next_claim_at,$2)
+        FROM conversion.deliveries d WHERE d.id=$1 AND x.id=d.destination_id`, job.ID, until)
+	return err
 }
 
 // Claim reserves a sending slot across workers in the same environment.
@@ -106,9 +127,6 @@ func (s Service) Claim(ctx context.Context, paymentFirst bool, limit int, lease,
 	}
 
 	job, err := claimTx(ctx, tx, s.Environment, paymentFirst, limit, lease, requestWindow, pixelInterval)
-	if errors.Is(err, pgx.ErrNoRows) {
-		job, err = claimTx(ctx, tx, s.Environment, !paymentFirst, limit, lease, requestWindow, pixelInterval)
-	}
 	if err != nil {
 		return Lease{}, err
 	}
@@ -117,12 +135,16 @@ func (s Service) Claim(ctx context.Context, paymentFirst bool, limit int, lease,
 
 // Sweep handles expired leases and deadlines without requiring a new send.
 func (s Service) Sweep(ctx context.Context, limit int, requestWindow time.Duration) (int, error) {
+	recovered, err := s.sweepBatches(ctx, limit, requestWindow)
+	if err != nil || recovered == limit {
+		return recovered, err
+	}
 	tx, err := s.Pool.Begin(ctx)
 	if err != nil {
 		return 0, err
 	}
 	defer tx.Rollback(ctx)
-	batch, err := expiredTx(ctx, tx, s.Environment, limit)
+	batch, err := expiredTx(ctx, tx, s.Environment, limit-recovered)
 	if err != nil {
 		return 0, err
 	}
@@ -145,6 +167,9 @@ func (s Service) Sweep(ctx context.Context, limit int, requestWindow time.Durati
 				return 0, err
 			}
 			t = decide(e.current, e.job.Attempt, r, requestWindow)
+			if err := persistPixelCooldown(ctx, tx, e.job, e.current, t, r); err != nil {
+				return 0, err
+			}
 		} else if t.unknown != nil {
 			t.reason = "meta_no_confirmation"
 		} else if e.reason != nil {
@@ -154,5 +179,5 @@ func (s Service) Sweep(ctx context.Context, limit int, requestWindow time.Durati
 			return 0, err
 		}
 	}
-	return len(batch), tx.Commit(ctx)
+	return recovered + len(batch), tx.Commit(ctx)
 }

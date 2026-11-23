@@ -175,6 +175,19 @@ func TestConfigurationAuditQueryAndRestrictedRole(t *testing.T) {
 		t.Fatalf("get destinations: %d %s", res.Code, res.Body.String())
 	}
 
+	for _, fixture := range []struct{ body, code string }{
+		{`{"enabled":true,"reason":"no apps"}`, "sinan_apps_required"},
+		{`{"enabled":true,"allowed_apps":["10"],"reason":"no events"}`, "sinan_events_required"},
+	} {
+		if res := doReq(http.MethodPatch, "/integrations/2", "Admin", fixture.body); res.Code != http.StatusBadRequest ||
+			!strings.Contains(res.Body.String(), fixture.code) {
+			t.Fatalf("accepts incomplete enabled configuration: %d %s", res.Code, res.Body.String())
+		}
+	}
+	if res := doReq(http.MethodGet, "/throughput?minutes=1", "Finance", ""); res.Code != http.StatusOK {
+		t.Fatalf("restricted API role cannot read throughput: %d %s", res.Code, res.Body.String())
+	}
+
 	// Update integration + sinan-mock on integration #2
 	if res := doReq(http.MethodPatch, "/integrations/2", "Admin",
 		`{"enabled":true,"allowed_apps":["10"],"allowed_events":["recharge-paid"],"bindings":[{"destination_id":"1","additional":true}],"reason":"enable sinan"}`); res.Code != http.StatusOK {
@@ -183,6 +196,12 @@ func TestConfigurationAuditQueryAndRestrictedRole(t *testing.T) {
 	if res := doReq(http.MethodPut, "/integrations/2/sinan-mock", "Admin",
 		fmt.Sprintf(`{"config":{"app_pixels":{"10":["123456"]},"endpoint":"http://127.0.0.1:8080/final","max_age_seconds":3600},"inbound_token":"inbound-secret-fixture-token-01","signing_seed":%q,"reason":"setup mock"}`, seed)); res.Code != http.StatusOK {
 		t.Fatalf("sinan-mock: %d %s", res.Code, res.Body.String())
+	}
+
+	if res := doReq(http.MethodPatch, "/integrations/2", "Admin",
+		`{"allowed_apps":[],"reason":"clear enabled application list"}`); res.Code != http.StatusBadRequest ||
+		!strings.Contains(res.Body.String(), "sinan_apps_required") {
+		t.Fatalf("enabled integration accepts empty app list: %d %s", res.Code, res.Body.String())
 	}
 
 	// Finance (read-only role) queries destination audit page 1 (limit=1) and page 2 (before_id)

@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -73,8 +74,14 @@ func newFixtureFrom(t *testing.T, schemaVersion string, beforeUpgrade func(fixtu
 	}
 	t.Cleanup(owner.Close)
 	execSQLFile(t, ctx, owner, "schema.sql", nil)
-	versions := []string{"2026111702", "2026111703", "2026111704", "2026111901", "2026111902",
-		"2026111903", "2026111904", "2026111905", "2026111906", "2026111907", "2026111908", "2026111909", "2026111910", "2026111911", "2026111912", "2026111913", "2026111914", "2026111915", "2026111916", "2026111917", "2026111918", "2026111919", "2026111920", "2026111921", "2026111922", "2026111923", "2026111924", "2026111925", "2026111926", "2026111927", "2026111928", "2026111929"}
+	migrations, err := filepath.Glob("../../../../cms-backend/db/migrations/*.sql")
+	if err != nil || len(migrations) == 0 {
+		t.Fatalf("CMS migrations: %v", err)
+	}
+	versions := make([]string, 0, len(migrations))
+	for _, migration := range migrations {
+		versions = append(versions, strings.TrimSuffix(filepath.Base(migration), ".sql"))
+	}
 	for _, version := range versions {
 		if version <= schemaVersion {
 			execSQLFile(t, ctx, owner, "migrations/"+version+".sql", nil)

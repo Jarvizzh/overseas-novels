@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
 	"strconv"
 	"sync"
 	"testing"
@@ -18,7 +19,7 @@ func TestDurableDeliveryLifecycle(t *testing.T) {
 	if dsn == "" {
 		t.Skip("requires disposable PostgreSQL")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	admin, err := pgxpool.New(ctx, dsn)
 	if err != nil {
@@ -39,9 +40,12 @@ func TestDurableDeliveryLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer pool.Close()
-	for _, asset := range []string{"schema.sql", "migrations/2026111702.sql", "migrations/2026111703.sql",
-		"migrations/2026111704.sql", "migrations/2026111901.sql", "migrations/2026111902.sql", "migrations/2026111903.sql", "migrations/2026111904.sql", "migrations/2026111905.sql", "migrations/2026111906.sql", "migrations/2026111907.sql", "migrations/2026111908.sql", "migrations/2026111909.sql", "migrations/2026111910.sql", "migrations/2026111911.sql", "migrations/2026111912.sql", "migrations/2026111913.sql", "migrations/2026111914.sql", "migrations/2026111915.sql", "migrations/2026111916.sql", "migrations/2026111917.sql", "migrations/2026111918.sql", "migrations/2026111919.sql", "migrations/2026111920.sql", "migrations/2026111921.sql", "migrations/2026111922.sql", "migrations/2026111923.sql", "migrations/2026111924.sql", "migrations/2026111925.sql", "migrations/2026111926.sql", "migrations/2026111927.sql", "migrations/2026111928.sql", "migrations/2026111929.sql"} {
-		sql, err := os.ReadFile("../../../cms-backend/db/" + asset)
+	migrations, err := filepath.Glob("../../../cms-backend/db/migrations/*.sql")
+	if err != nil || len(migrations) == 0 {
+		t.Fatalf("CMS migrations: %v", err)
+	}
+	for _, asset := range append([]string{"../../../cms-backend/db/schema.sql"}, migrations...) {
+		sql, err := os.ReadFile(asset)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -189,8 +193,8 @@ func TestDurableDeliveryLifecycle(t *testing.T) {
 	assertString(t, ctx, pool, "SELECT state FROM conversion.deliveries WHERE id=3", "succeeded")
 	mustExec(t, ctx, pool, "ALTER TABLE conversion.unavailable_diagnostics RENAME TO delivery_diagnostics")
 	mustExec(t, ctx, pool, `
-		INSERT INTO conversion.integrations(source,account_key,environment,contract_version,enabled)
-		VALUES ('starnovel','reader','test','v1',true);
+		INSERT INTO conversion.integrations(source,account_key,environment,contract_version,enabled,allowed_events)
+		VALUES ('starnovel','reader','test','v1',true,ARRAY['CompleteRegistration','InitiateCheckout','Purchase','Subscribe']);
 		INSERT INTO conversion.integration_destinations(integration_id,destination_id,environment,default_route)
 		VALUES(2,1,'test',false),(2,2,'test',true);
 		INSERT INTO system_domains(name,domain,status) VALUES ('test','example.invalid',1);
@@ -218,7 +222,11 @@ func TestDurableDeliveryLifecycle(t *testing.T) {
 	t.Run("legacy evidence review", func(t *testing.T) { testLegacyReview(t, ctx, s) })
 	t.Run("restricted roles and retention", func(t *testing.T) { testRestrictedRoles(t, ctx, s) })
 	t.Run("reader payment policy", func(t *testing.T) { testReaderPaymentPolicy(t, ctx, s) })
+	t.Run("Reader whitelist and retired Pixel", func(t *testing.T) { testReaderConversionReview(t, ctx, s) })
+	t.Run("Pixel fairness and durable rate limit", func(t *testing.T) { testPixelClaimReview(t, ctx, s) })
+	t.Run("worker refills an available send slot", func(t *testing.T) { testWorkerRefillsSlots(t, ctx, s) })
 
+	t.Run("batch delivery boundaries and recovery", func(t *testing.T) { testBatchDelivery(t, ctx, s) })
 }
 
 func mustExec(t *testing.T, ctx context.Context, pool *pgxpool.Pool, sql string) {

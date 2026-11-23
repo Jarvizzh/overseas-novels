@@ -23,8 +23,8 @@ func testReaderSubscriptionRecovery(t *testing.T, ctx context.Context, owner, wo
 	}
 	exec(`
 		INSERT INTO users(id) VALUES (851),(852);
-		INSERT INTO conversion.integrations(source,account_key,environment,contract_version,enabled)
-		VALUES ('starnovel','reader','reader-recovery','v1',true);
+		INSERT INTO conversion.integrations(source,account_key,environment,contract_version,enabled,allowed_events)
+		VALUES ('starnovel','reader','reader-recovery','v1',true,ARRAY['CompleteRegistration','InitiateCheckout','Purchase','Subscribe']);
 		INSERT INTO conversion.destinations(environment,media,pixel_id,credential_id) VALUES ('reader-recovery','meta','541',1);
 		INSERT INTO conversion.integration_destinations(integration_id,destination_id,environment,default_route)
 		SELECT i.id,d.id,i.environment,false FROM conversion.integrations i

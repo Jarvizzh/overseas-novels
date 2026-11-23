@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/netip"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -21,6 +22,8 @@ type readerMessage struct {
 	createdAt          time.Time
 	snapshot           []byte
 	integrationID      int64
+	allowedEvents      []string
+	environment        string
 }
 
 type readerSnapshot struct {
@@ -109,6 +112,12 @@ func normalizeReaderMessage(ctx context.Context, tx pgx.Tx, message readerMessag
 		return Event{}, nil, "invalid_reader_attribution_state", nil
 	}
 
+	if !slices.Contains(message.allowedEvents, message.name) {
+		return Event{IntegrationID: message.integrationID, SourceType: message.name, SourceID: message.key,
+			Name: message.name, OrderID: message.orderID, OrderType: data.OrderType, TimeSource: data.TimeSource,
+			PromotionID: data.PromotionID, AttributionState: data.AttributionState, OccurredAt: message.occurredAt,
+			ReceivedAt: message.createdAt, Reason: readerEventExcluded, policyState: "not_applicable"}, nil, "", nil
+	}
 	event, err := readerEvent(ctx, tx, message, data)
 	if event.failureReason != "" && event.readerPayment == nil {
 		return Event{}, nil, event.failureReason, nil
@@ -120,7 +129,11 @@ func normalizeReaderMessage(ctx context.Context, tx pgx.Tx, message readerMessag
 	if data.AttributionState != "matched" {
 		return event, nil, "", nil
 	}
-	targets, err := readerTargetsTx(ctx, tx, message.integrationID, data.Attribution.PixelID, "starnovel:"+message.key)
+	bindingTime, err := readerBindingTimeTx(ctx, tx, message.orderID, data.Attribution.PixelID, message.createdAt)
+	if err != nil {
+		return Event{}, nil, "", err
+	}
+	targets, err := readerTargetsTx(ctx, tx, message.integrationID, data.Attribution.PixelID, "starnovel:"+message.key, message.environment, bindingTime)
 	if err != nil {
 		return Event{}, nil, "", err
 	}
@@ -217,23 +230,56 @@ func readerSourceURL(ctx context.Context, tx pgx.Tx, raw string) (*string, error
 }
 
 func claimReaderMessageTx(ctx context.Context, tx pgx.Tx, environment string) (readerMessage, error) {
-	var m readerMessage
+	m := readerMessage{environment: environment}
 	err := tx.QueryRow(ctx, `
-		SELECT o.business_key,o.event_name,COALESCE(o.order_id::text,''),o.occurred_at,o.created_at,o.snapshot,i.id
+		SELECT o.business_key,o.event_name,COALESCE(o.order_id::text,''),o.occurred_at,o.created_at,o.snapshot,i.id,i.allowed_events
 		FROM reader_conversion_outbox o
 		JOIN conversion.integrations i ON i.environment=o.environment AND i.source='starnovel' AND i.account_key='reader'
 		WHERE o.environment=$1 AND o.consumed_at IS NULL AND i.enabled
 		ORDER BY o.created_at,o.business_key LIMIT 1 FOR UPDATE OF o SKIP LOCKED FOR SHARE OF i`, environment).
-		Scan(&m.key, &m.name, &m.orderID, &m.occurredAt, &m.createdAt, &m.snapshot, &m.integrationID)
+		Scan(&m.key, &m.name, &m.orderID, &m.occurredAt, &m.createdAt, &m.snapshot, &m.integrationID, &m.allowedEvents)
 	return m, err
 }
 
-func readerTargetsTx(ctx context.Context, tx pgx.Tx, integrationID int64, pixel, metaID string) ([]Target, error) {
+const readerEventExcluded = "event_not_allowed"
+
+const readerRouteIssue = `COALESCE((
+    SELECT CASE
+        WHEN NOT x.enabled THEN 'destination_disabled'
+        WHEN NOT i.enabled OR NOT EXISTS (
+            SELECT 1 FROM conversion.integration_destinations r
+            WHERE r.integration_id=i.id AND r.destination_id=x.id AND r.environment=i.environment
+        ) THEN 'reader_route_not_authorized'
+        WHEN d.role='original' AND x.retired_at IS NOT NULL AND d.created_at>x.retired_at
+             AND NOT COALESCE(
+                CASE WHEN e.source_order_id ~ '^[1-9][0-9]{0,17}$'
+                     OR (length(e.source_order_id)=19 AND e.source_order_id ~ '^[1-9][0-9]+$'
+                         AND e.source_order_id COLLATE "C"<='9223372036854775807')
+                THEN conversion.reader_payment_attribution_time(e.source_order_id::bigint,x.pixel_id)
+                ELSE e.received_at END <= x.retired_at,false)
+            THEN 'destination_disabled'
+    END
+    FROM conversion.integrations i WHERE i.id=e.integration_id AND i.source='starnovel'
+), '')`
+
+// Both initial normalization and repair use the same original-target eligibility.
+const readerOriginalEnabled = `x.enabled AND (x.retired_at IS NULL OR $4::timestamptz <= x.retired_at)`
+
+func readerBindingTimeTx(ctx context.Context, tx pgx.Tx, orderID, pixel string, receivedAt time.Time) (*time.Time, error) {
+	if orderID == "" {
+		return &receivedAt, nil
+	}
+	var boundAt *time.Time
+	err := tx.QueryRow(ctx, "SELECT conversion.reader_payment_attribution_time($1::text::bigint,$2)", orderID, pixel).Scan(&boundAt)
+	return boundAt, err
+}
+
+func readerTargetsTx(ctx context.Context, tx pgx.Tx, integrationID int64, pixel, metaID, environment string, bindingTime *time.Time) ([]Target, error) {
 	rows, err := tx.Query(ctx, `
-		SELECT x.id,x.pixel_id=$2,x.enabled AND x.retired_at IS NULL
+		SELECT x.id,x.pixel_id=$2,COALESCE(`+readerOriginalEnabled+`,false)
 		FROM conversion.integration_destinations r JOIN conversion.destinations x ON x.id=r.destination_id
-		WHERE r.integration_id=$1 AND (x.pixel_id=$2 OR (r.default_route AND x.enabled AND x.retired_at IS NULL))
-		ORDER BY (x.pixel_id=$2) DESC,x.id FOR SHARE OF x`, integrationID, pixel)
+		WHERE r.integration_id=$1 AND x.environment=$3 AND (x.pixel_id=$2 OR (r.default_route AND x.enabled AND x.retired_at IS NULL))
+		ORDER BY (x.pixel_id=$2) DESC,x.id FOR SHARE OF x`, integrationID, pixel, environment, bindingTime)
 	if err != nil {
 		return nil, err
 	}

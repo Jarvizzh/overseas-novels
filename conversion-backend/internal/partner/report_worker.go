@@ -30,49 +30,76 @@ type Reporter struct {
 const reportHTTPTimeout = 5 * time.Second
 
 func (w Reporter) Run(ctx context.Context) {
-	ticker := time.NewTicker(15 * time.Second)
-	defer ticker.Stop()
-	for ctx.Err() == nil {
-		w.cycle(ctx)
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
+	var maintenance sync.WaitGroup
+	var progress atomic.Bool
+	maintenance.Go(func() {
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+		for ctx.Err() == nil {
+			var recovered int
+			if w.Adapter != nil {
+				dbCtx, cancel := context.WithTimeout(ctx, reportDBTimeout)
+				count, err := w.Queue.Sweep(dbCtx, 50)
+				cancel()
+				recovered = count
+				w.logError("partner report lease recovery failed", 0, err)
+			}
+			sent := progress.Swap(false)
+			w.heartbeat(ctx, recovered > 0 || sent)
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
 		}
+	})
+	if w.Adapter != nil {
+		w.sendReady(ctx, &progress)
 	}
+	maintenance.Wait()
 }
 
-func (w Reporter) cycle(ctx context.Context) {
-	enabled := w.Adapter != nil
-	var completed atomic.Bool
-	if enabled {
-		dbCtx, cancel := context.WithTimeout(ctx, reportDBTimeout)
-		count, err := w.Queue.Sweep(dbCtx, 50)
-		cancel()
-		completed.Store(count > 0)
-		w.logError("partner report lease recovery failed", 0, err)
-		var workers sync.WaitGroup
-		for range reportConcurrency {
+func (w Reporter) sendReady(ctx context.Context, progress *atomic.Bool) {
+	finished := make(chan bool, reportConcurrency)
+	active := 0
+	for ctx.Err() == nil {
+		delay := 250 * time.Millisecond
+		if active < reportConcurrency {
 			dbCtx, cancel := context.WithTimeout(ctx, reportDBTimeout)
 			job, err := w.Queue.Claim(dbCtx)
 			cancel()
-			if err != nil {
-				if !errors.Is(err, pgx.ErrNoRows) && ctx.Err() == nil {
-					w.logError("partner report claim failed", 0, err)
-				}
-				break
+			if err == nil {
+				active++
+				go func() { finished <- w.Process(ctx, job) == nil }()
+				continue
 			}
-			workers.Go(func() {
-				if w.Process(ctx, job) == nil {
-					completed.Store(true)
-				}
-			})
+			if !errors.Is(err, pgx.ErrNoRows) && ctx.Err() == nil {
+				w.logError("partner report claim failed", 0, err)
+				delay = time.Second
+			}
 		}
-		workers.Wait()
+		timer := time.NewTimer(delay)
+		select {
+		case progressed := <-finished:
+			active--
+			if progressed {
+				progress.Store(true)
+			}
+		case <-timer.C:
+		case <-ctx.Done():
+		}
+		timer.Stop()
 	}
+	for range active {
+		<-finished
+	}
+}
+
+func (w Reporter) heartbeat(ctx context.Context, progressed bool) {
 	dbCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), reportDBTimeout)
 	defer cancel()
-	w.logError("partner report heartbeat failed", 0, (delivery.Store{Pool: w.Queue.Pool, Environment: w.Queue.Environment}).Heartbeat(dbCtx, "partner_report", w.Instance, !enabled, completed.Load()))
+	store := delivery.Store{Pool: w.Queue.Pool, Environment: w.Queue.Environment}
+	w.logError("partner report heartbeat failed", 0, store.Heartbeat(dbCtx, "partner_report", w.Instance, w.Adapter == nil, progressed))
 }
 
 func (w Reporter) Process(ctx context.Context, job ReportJob) error {

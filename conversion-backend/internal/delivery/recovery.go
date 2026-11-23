@@ -20,7 +20,10 @@ func expiredTx(ctx context.Context, tx pgx.Tx, environment string, limit int) ([
 	rows, err := tx.Query(ctx, `
 		WITH due AS (
 			(SELECT id, lease_until AS due_at FROM conversion.deliveries
-			 WHERE environment = $1 AND lease_until <= now() ORDER BY lease_until, id LIMIT $2)
+			 WHERE environment = $1 AND lease_until <= now() AND NOT EXISTS (
+			    SELECT 1 FROM conversion.delivery_attempts a WHERE a.delivery_id=deliveries.id
+			      AND a.attempt_no=deliveries.attempts AND a.batch_id IS NOT NULL
+			 ) ORDER BY lease_until, id LIMIT $2)
 			UNION ALL
 			(SELECT id, deadline_at AS due_at FROM conversion.deliveries
 			 WHERE environment = $1 AND finalized_at IS NULL AND lease_until IS NULL AND deadline_at <= now()
@@ -50,6 +53,10 @@ func expiredTx(ctx context.Context, tx pgx.Tx, environment string, limit int) ([
 // createReport freezes the outcome and source fields. Partner-specific encoding
 // and credentials are applied by the adapter for the stored contract version.
 func createReport(ctx context.Context, tx pgx.Tx, id int64) error {
+	return createReports(ctx, tx, []int64{id})
+}
+
+func createReports(ctx context.Context, tx pgx.Tx, ids []int64) error {
 	_, err := tx.Exec(ctx, `
 		INSERT INTO conversion.partner_reports
 			(integration_id, event_id, original_delivery_id, report_status, contract_version, payload, state, reason)
@@ -79,8 +86,8 @@ func createReport(ctx context.Context, tx pgx.Tx, id int64) error {
 		        THEN 'missing_promotion_contract_unconfirmed'
 		    END AS block_reason
 		) contract
-		WHERE d.id = $1 AND d.role = 'original' AND i.source <> 'starnovel'
-		ON CONFLICT (integration_id, event_id, original_delivery_id) DO NOTHING`, id)
+		WHERE d.id=ANY($1::bigint[]) AND d.role = 'original' AND i.source <> 'starnovel'
+		ON CONFLICT (integration_id, event_id, original_delivery_id) DO NOTHING`, ids)
 	return err
 }
 
@@ -105,9 +112,13 @@ func confirmedEvidenceTx(ctx context.Context, tx pgx.Tx, e expired) (*Result, er
 		return nil, err
 	}
 	var result Result
-	if json.Unmarshal(data, &result) != nil || result.Outcome != Accepted ||
-		result.HTTPStatus == nil || *result.HTTPStatus != 200 ||
-		result.EventsReceived == nil || *result.EventsReceived != 1 {
+	if json.Unmarshal(data, &result) != nil {
+		return nil, nil
+	}
+	accepted := result.Outcome == Accepted && result.HTTPStatus != nil && *result.HTTPStatus == 200 &&
+		result.EventsReceived != nil && *result.EventsReceived == 1
+	rateLimited := result.Outcome == RetryableRejection && result.Reason == MetaRateLimited
+	if !accepted && !rateLimited {
 		return nil, nil
 	}
 

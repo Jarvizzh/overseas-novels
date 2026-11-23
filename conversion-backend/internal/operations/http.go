@@ -22,9 +22,11 @@ func NewHandler(repo Repository, token string) http.Handler {
 	mux.HandleFunc("POST /internal/conversion/deliveries/{id}/retry", handleAction(svc.retry, http.StatusAccepted))
 	mux.HandleFunc("POST /internal/conversion/partner-reports/{id}/retry", handleAction(svc.retryReport, http.StatusAccepted))
 	mux.HandleFunc("GET /internal/conversion/summary", repo.handleSummary)
+	mux.HandleFunc("GET /internal/conversion/throughput", repo.handleThroughput)
 	mux.HandleFunc("GET /internal/conversion/events", repo.handleEvents)
 	mux.HandleFunc("GET /internal/conversion/events/{id}", repo.handleEvent)
 	mux.HandleFunc("GET /internal/conversion/events/{id}/destinations", repo.handleAllowedTargets)
+	mux.HandleFunc("GET /internal/conversion/events/{id}/deliveries", repo.handleEventDeliveries)
 	mux.HandleFunc("GET /internal/conversion/orders/{order_id}", func(w http.ResponseWriter, r *http.Request) {
 		query := r.URL.Query()
 		key, ok := ParseOrderKey(r.PathValue("order_id"), query.Get("integration_id"), query.Get("app_id"))
@@ -91,7 +93,8 @@ func (repo Repository) handleAllowedTargets(w http.ResponseWriter, r *http.Reque
 		   AND COALESCE(conversion.sinan_route_issue(e.id,x.id),'')=''
 		   AND NOT EXISTS (SELECT 1 FROM conversion.deliveries j WHERE j.event_id=e.id AND j.destination_id=x.id)),'[]')
 		FROM conversion.events e WHERE e.id=$1 AND e.environment=$2
-		  AND (e.payment_policy_state IN ('historical','not_applicable') OR
+		  AND e.reason IS DISTINCT FROM 'event_not_allowed'
+          AND (e.payment_policy_state IN ('historical','not_applicable') OR
 		      (e.payment_policy_state='decided' AND EXISTS (SELECT 1 FROM conversion.payment_policy_decisions p
 		         WHERE p.id=e.payment_policy_decision_id AND p.outcome='selected')))`, id, repo.Environment).Scan(&result)
 	if errors.Is(err, pgx.ErrNoRows) {

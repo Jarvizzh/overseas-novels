@@ -72,7 +72,7 @@ func Open(t *testing.T) *pgxpool.Pool {
 
 func applyMigrations(t *testing.T, pool *pgxpool.Pool, schema, cmsDB string) {
 	t.Helper()
-	for _, version := range []string{"2026111702", "2026111703", "2026111704", "2026111901", "2026111902", "2026111903", "2026111904", "2026111905", "2026111906", "2026111907", "2026111908", "2026111909", "2026111910", "2026111911", "2026111912", "2026111913", "2026111914", "2026111915", "2026111916", "2026111917", "2026111918", "2026111919", "2026111920", "2026111921", "2026111922", "2026111923", "2026111924", "2026111925", "2026111926", "2026111927", "2026111928", "2026111929", "2026111930"} {
+	for _, version := range []string{"2026111702", "2026111703", "2026111704", "2026111901", "2026111902", "2026111903", "2026111904", "2026111905", "2026111906", "2026111907", "2026111908", "2026111909", "2026111910", "2026111911", "2026111912", "2026111913", "2026111914", "2026111915", "2026111916", "2026111917", "2026111918", "2026111919", "2026111920", "2026111921", "2026111922", "2026111923", "2026111924", "2026111925", "2026111926", "2026111927", "2026111928", "2026111929", "2026111930", "2026111931", "2026111932", "2026111933"} {
 		sql, err := os.ReadFile(filepath.Join(cmsDB, "migrations", version+".sql"))
 		if err != nil {
 			t.Fatal(err)
@@ -82,13 +82,17 @@ func applyMigrations(t *testing.T, pool *pgxpool.Pool, schema, cmsDB string) {
 			// Preserve schema isolation for tests that share a database.
 			migration = strings.NewReplacer("CREATE SCHEMA conversion;", "CREATE SCHEMA "+schema+"_conversion;", "conversion.", schema+"_conversion.", "public.admins", schema+".admins", "public.recharge_orders", schema+".recharge_orders", "public.payment_event_outbox", schema+".payment_event_outbox",
 				"public.promotion_links", schema+".promotion_links", "public.fb_pixels", schema+".fb_pixels",
+				"public.user_subscriptions", schema+".user_subscriptions",
+				"public.paypal_subscription_intents", schema+".paypal_subscription_intents",
+				"public.payment_stripe_invoice_periods", schema+".payment_stripe_invoice_periods",
+				"public.payment_stripe_subscription_intents", schema+".payment_stripe_subscription_intents",
+				"public.third_party_payment_orders", schema+".third_party_payment_orders",
+				"public.payment_channel_accounts", schema+".payment_channel_accounts",
 				"public.reader_schema_migrations", schema+".reader_schema_migrations", "public.reader_payment_promotion_coverage", schema+".reader_payment_promotion_coverage",
 				"public.reader_payment_first_on_promotion", schema+".reader_payment_first_on_promotion",
 				"public.reader_payment_promotion_key", schema+".reader_payment_promotion_key",
 				"public.reader_payment_coverage_verified", schema+".reader_payment_coverage_verified",
 				"public.reader_subscription_payment_kind", schema+".reader_subscription_payment_kind",
-				"public.payment_stripe_invoice_periods", schema+".payment_stripe_invoice_periods",
-				"public.user_subscriptions", schema+".user_subscriptions", "public.third_party_payment_orders", schema+".third_party_payment_orders",
 				"pg_catalog, public, pg_temp", "pg_catalog, "+schema+", pg_temp").Replace(migration)
 		}
 		if _, err := pool.Exec(context.Background(), migration); err != nil {

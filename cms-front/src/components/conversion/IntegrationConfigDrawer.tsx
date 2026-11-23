@@ -347,8 +347,14 @@ export function IntegrationConfigDrawer({
       cErr = '契约版本长度不能超过 100 字节';
     }
 
-    const appsErr = validateListLimits(mergedApps, '允许应用 ID');
-    const evErr = validateListLimits(mergedEvents, '允许事件');
+    const appsErr =
+      activeSource === 'sinan' && enabled && mergedApps.length === 0
+        ? '启用司南前至少填写一个允许应用 ID'
+        : validateListLimits(mergedApps, '允许应用 ID');
+    const evErr =
+      activeSource === 'sinan' && enabled && mergedEvents.length === 0
+        ? '启用司南前至少选择一个允许事件'
+        : validateListLimits(mergedEvents, '允许事件');
     const rErr = validateReason(reason);
 
     setAccountError(aErr);
@@ -401,7 +407,13 @@ export function IntegrationConfigDrawer({
         );
       }
     } catch (err) {
-      if (err instanceof ApiError && err.status === 409) {
+      if (err instanceof ApiError && err.code === 'sinan_apps_required') {
+        setAppsError('启用司南前至少填写一个允许应用 ID');
+        appsRef.current?.focus();
+      } else if (err instanceof ApiError && err.code === 'sinan_events_required') {
+        setEventsError('启用司南前至少选择一个允许事件');
+        customEventsRef.current?.focus();
+      } else if (err instanceof ApiError && err.status === 409) {
         setSubmitError(
           isCreate
             ? '保存冲突：该接入账户（来源 + 账户 Key）已存在，或所选绑定 Pixel 已停用/退役'
@@ -661,46 +673,59 @@ export function IntegrationConfigDrawer({
                 <div>
                   <h3 className="text-sm font-semibold text-[var(--cms-fg)] m-0">应用与事件白名单</h3>
                   <p className="text-[11px] text-[var(--cms-muted-fg)] m-0 mt-0.5">
-                    限制仅放行指定应用与事件类型；不在白名单内的回调将被归一化拒绝。
+                    {activeSource === 'starnovel'
+                      ? 'Reader 仅回传已选事件。留空时跳过所有事件并保留对账记录。'
+                      : '司南启用后仅接收白名单内的应用与事件。停用时可保存空白草稿。'}
                   </p>
                 </div>
 
-                <div className="space-y-1.5">
-                  <label htmlFor={`${formId}-allowed-apps`} className="block font-medium text-[var(--cms-fg)]">
-                    允许应用 ID（逗号或换行分隔，留空代表不限应用）
-                  </label>
-                  <input
-                    ref={appsRef}
-                    id={`${formId}-allowed-apps`}
-                    type="text"
-                    disabled={!canWrite || submitting}
-                    value={appsInput}
-                    placeholder="例如：1001, 1002"
-                    aria-invalid={appsError ? 'true' : 'false'}
-                    aria-describedby={appsError ? appsErrId : undefined}
-                    onChange={(e) => {
-                      setAppsInput(e.target.value);
-                      if (appsError) setAppsError('');
-                    }}
-                    className="input-field font-mono-code"
-                    style={appsError ? { borderColor: 'var(--cms-error)' } : undefined}
-                  />
-                  {appsError ? (
-                    <p id={appsErrId} className="m-0 text-[11px] text-[var(--cms-error)]">
-                      {appsError}
+                {activeSource !== 'starnovel' && (
+                  <div className="space-y-1.5">
+                    <label
+                      htmlFor={`${formId}-allowed-apps`}
+                      className="block font-medium text-[var(--cms-fg)]"
+                    >
+                      允许应用 ID
+                    </label>
+                    <p
+                      id={`${formId}-apps-help`}
+                      className="m-0 text-[11px] text-[var(--cms-muted-fg)]"
+                    >
+                      使用逗号或换行分隔。启用前至少填写一个应用 ID。
                     </p>
-                  ) : (
-                    mergedApps.length > 0 && (
-                      <div className="flex flex-wrap gap-1 pt-0.5">
-                        {mergedApps.map((app) => (
-                          <span key={app} className="badge badge-gray font-mono-code">
-                            App {app}
-                          </span>
-                        ))}
-                      </div>
-                    )
-                  )}
-                </div>
+                    <input
+                      ref={appsRef}
+                      id={`${formId}-allowed-apps`}
+                      type="text"
+                      disabled={!canWrite || submitting}
+                      value={appsInput}
+                      placeholder="例如：1001, 1002"
+                      aria-invalid={appsError ? 'true' : 'false'}
+                      aria-describedby={appsError ? appsErrId : `${formId}-apps-help`}
+                      onChange={(e) => {
+                        setAppsInput(e.target.value);
+                        if (appsError) setAppsError('');
+                      }}
+                      className="input-field font-mono-code"
+                      style={appsError ? { borderColor: 'var(--cms-error)' } : undefined}
+                    />
+                    {appsError ? (
+                      <p id={appsErrId} className="m-0 text-[11px] text-[var(--cms-error)]">
+                        {appsError}
+                      </p>
+                    ) : (
+                      mergedApps.length > 0 && (
+                        <div className="flex flex-wrap gap-1 pt-0.5">
+                          {mergedApps.map((app) => (
+                            <span key={app} className="badge badge-gray font-mono-code">
+                              App {app}
+                            </span>
+                          ))}
+                        </div>
+                      )
+                    )}
+                  </div>
+                )}
 
                 <div className="space-y-2">
                   <div className="font-medium text-[var(--cms-fg)]">允许接收事件</div>

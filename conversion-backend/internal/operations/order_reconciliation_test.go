@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -129,10 +130,12 @@ func operationsTestPool(t *testing.T) (context.Context, *pgxpool.Pool) {
 		t.Fatal(err)
 	}
 	t.Cleanup(pool.Close)
-	for _, asset := range []string{"schema.sql", "migrations/2026111702.sql", "migrations/2026111703.sql",
-		"migrations/2026111704.sql", "migrations/2026111901.sql", "migrations/2026111902.sql", "migrations/2026111903.sql",
-		"migrations/2026111904.sql", "migrations/2026111905.sql", "migrations/2026111906.sql", "migrations/2026111907.sql", "migrations/2026111908.sql", "migrations/2026111909.sql", "migrations/2026111910.sql", "migrations/2026111911.sql", "migrations/2026111912.sql", "migrations/2026111913.sql", "migrations/2026111914.sql", "migrations/2026111915.sql", "migrations/2026111916.sql", "migrations/2026111917.sql", "migrations/2026111918.sql", "migrations/2026111919.sql", "migrations/2026111920.sql", "migrations/2026111921.sql", "migrations/2026111922.sql", "migrations/2026111923.sql", "migrations/2026111924.sql", "migrations/2026111925.sql", "migrations/2026111926.sql", "migrations/2026111927.sql", "migrations/2026111928.sql", "migrations/2026111929.sql"} {
-		sql, err := os.ReadFile("../../../cms-backend/db/" + asset)
+	migrations, err := filepath.Glob("../../../cms-backend/db/migrations/*.sql")
+	if err != nil || len(migrations) == 0 {
+		t.Fatalf("CMS migrations: %v", err)
+	}
+	for _, asset := range append([]string{"../../../cms-backend/db/schema.sql"}, migrations...) {
+		sql, err := os.ReadFile(asset)
 		if err != nil {
 			t.Fatal(err)
 		}

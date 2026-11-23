@@ -190,17 +190,21 @@ func (s Service) readerPaymentEvidenceTx(ctx context.Context, tx pgx.Tx, event E
 	return restored, err
 }
 
-func readerAuthorizedOriginalTx(ctx context.Context, tx pgx.Tx, environment string, integration int64, pixel string, lock bool) (int64, error) {
+func readerAuthorizedOriginalTx(ctx context.Context, tx pgx.Tx, environment string, integration int64, pixel, orderID string, receivedAt time.Time, lock bool) (int64, error) {
+	bindingTime, err := readerBindingTimeTx(ctx, tx, orderID, pixel, receivedAt)
+	if err != nil {
+		return 0, err
+	}
 	query := `
-		SELECT x.id FROM conversion.integration_destinations r
+        SELECT x.id FROM conversion.integration_destinations r
 		JOIN conversion.destinations x ON x.id=r.destination_id AND x.environment=r.environment
 		JOIN conversion.integrations i ON i.id=r.integration_id AND i.environment=r.environment
-		WHERE i.id=$1 AND i.environment=$2 AND i.enabled AND x.pixel_id=$3 AND x.enabled AND x.retired_at IS NULL`
+		WHERE i.id=$1 AND i.environment=$2 AND i.enabled AND x.pixel_id=$3 AND ` + readerOriginalEnabled
 	if lock {
 		query += " FOR SHARE OF x"
 	}
 	var target int64
-	err := tx.QueryRow(ctx, query, integration, environment, pixel).Scan(&target)
+	err = tx.QueryRow(ctx, query, integration, environment, pixel, bindingTime).Scan(&target)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return 0, ErrOperationConflict
 	}

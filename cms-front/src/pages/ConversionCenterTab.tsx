@@ -2,7 +2,7 @@ import { type KeyboardEvent, useCallback, useEffect, useId, useMemo, useRef, use
 import { useSearchParams } from 'react-router-dom';
 import { Activity, FileSearch, ListChecks } from 'lucide-react';
 import { apiRequest } from '../utils/api';
-import { getErrorMessage, isServiceUnavailableError } from '../utils/conversionStatus';
+import { getErrorMessage } from '../utils/conversionStatus';
 import { InlineErrorBanner } from '../components/conversion/ConversionShared';
 import { ConversionEventDrawer } from '../components/conversion/ConversionEventDrawer';
 import { ConversionEventsTab } from '../components/conversion/ConversionEventsTab';
@@ -41,13 +41,12 @@ export default function ConversionCenterTab({ canWrite }: { canWrite: boolean })
 
   const [integrations, setIntegrations] = useState<ConversionIntegration[]>([]);
   const [destinations, setDestinations] = useState<ConversionDestination[]>([]);
-  const [alertsCount, setAlertsCount] = useState<number>(0);
-  const [serviceUnavailable, setServiceUnavailable] = useState(false);
-  const [metaLoading, setMetaLoading] = useState(true);
+  const [alertsCount, setAlertsCount] = useState<number | null>(0);
   const [metaError, setMetaError] = useState('');
   const [metaNonce, setMetaNonce] = useState(0);
 
   const [drawerEventId, setDrawerEventId] = useState<string | null>(urlEventId);
+  const [drawerPixel, setDrawerPixel] = useState(urlEventId ? urlPixelId : '');
   const [drawerInitialSummary, setDrawerInitialSummary] = useState<ConversionEvent | null>(null);
   const [eventsRefreshToken, setEventsRefreshToken] = useState(0);
 
@@ -88,58 +87,44 @@ export default function ConversionCenterTab({ canWrite }: { canWrite: boolean })
     }));
   }, [urlOrderId, urlIntegrationId]);
 
-  // Load shared lookup metadata (integrations, destinations) and initial active alert badge count
   useEffect(() => {
     const controller = new AbortController();
-    setMetaLoading(true);
     setMetaError('');
     Promise.allSettled([
       apiRequest('GET', '/conversion/integrations', undefined, false, controller.signal),
       apiRequest('GET', '/conversion/destinations', undefined, false, controller.signal),
-      apiRequest('GET', '/conversion/summary?hours=24', undefined, false, controller.signal),
-    ]).then(([integRes, destRes, sumRes]) => {
+    ]).then(([integrationResult, destinationResult]) => {
       if (controller.signal.aborted) return;
-      setMetaLoading(false);
-
-      let unavailableCount = 0;
-      const nonServiceErrors: string[] = [];
-
-      if (integRes.status === 'fulfilled') {
-        setIntegrations(integRes.value || []);
-      } else if (isServiceUnavailableError(integRes.reason)) {
-        unavailableCount += 1;
+      const errors: string[] = [];
+      if (integrationResult.status === 'fulfilled') {
+        setIntegrations(integrationResult.value || []);
       } else {
-        nonServiceErrors.push(getErrorMessage(integRes.reason, '接入配置'));
+        errors.push(getErrorMessage(integrationResult.reason, '加载接入配置'));
       }
-
-      if (destRes.status === 'fulfilled') {
-        setDestinations(destRes.value || []);
-      } else if (isServiceUnavailableError(destRes.reason)) {
-        unavailableCount += 1;
+      if (destinationResult.status === 'fulfilled') {
+        setDestinations(destinationResult.value || []);
       } else {
-        nonServiceErrors.push(getErrorMessage(destRes.reason, 'Pixel 目标列表'));
+        errors.push(getErrorMessage(destinationResult.reason, '加载 Pixel 目标列表'));
       }
-
-      if (sumRes.status === 'fulfilled') {
-        const sumData = sumRes.value as ConversionSummaryData;
-        setAlertsCount(sumData?.alerts?.length ?? 0);
-      } else if (isServiceUnavailableError(sumRes.reason)) {
-        unavailableCount += 1;
-      }
-
-      if (unavailableCount > 0) {
-        setServiceUnavailable(true);
-        setMetaError('');
-      } else {
-        setServiceUnavailable(false);
-        if (nonServiceErrors.length > 0) {
-          setMetaError(`基础配置元数据加载不完整：${nonServiceErrors.join('；')}`);
-        }
-      }
+      setMetaError(errors.join('；'));
     });
-
     return () => controller.abort();
   }, [metaNonce]);
+
+  useEffect(() => {
+    if (activeTab === 'summary') return;
+    const controller = new AbortController();
+    apiRequest('GET', '/conversion/summary?hours=24', undefined, false, controller.signal)
+      .then((summary: ConversionSummaryData) => {
+        if (!controller.signal.aborted) {
+          setAlertsCount(summary.collector?.state === 'fresh' ? summary.alerts.length : null);
+        }
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) setAlertsCount(null);
+      });
+    return () => controller.abort();
+  }, [activeTab]);
 
   const integrationMap = useMemo(() => {
     const map = new Map<string, ConversionIntegration>();
@@ -186,12 +171,14 @@ export default function ConversionCenterTab({ canWrite }: { canWrite: boolean })
     [searchParams, setSearchParams],
   );
 
-  const handleOpenDrawerFromList = useCallback((ev: ConversionEvent) => {
+  const handleOpenDrawerFromList = useCallback((ev: ConversionEvent, pixel: string) => {
+    setDrawerPixel(pixel);
     setDrawerInitialSummary(ev);
     setDrawerEventId(ev.id);
   }, []);
 
   const handleOpenDrawerById = useCallback((eventId: string) => {
+    setDrawerPixel('');
     setDrawerInitialSummary(null);
     setDrawerEventId(eventId);
   }, []);
@@ -226,7 +213,6 @@ export default function ConversionCenterTab({ canWrite }: { canWrite: boolean })
   );
 
   const handleRetryService = useCallback(() => {
-    setServiceUnavailable(false);
     setMetaError('');
     setMetaNonce((n) => n + 1);
   }, []);
@@ -292,7 +278,10 @@ export default function ConversionCenterTab({ canWrite }: { canWrite: boolean })
                 {tab.key === 'orders' && <FileSearch size={14} aria-hidden="true" />}
                 {tab.key === 'summary' && <Activity size={14} aria-hidden="true" />}
                 <span>{tab.label}</span>
-                {tab.key === 'summary' && alertsCount > 0 && !serviceUnavailable && (
+                {tab.key === 'summary' && alertsCount === null && (
+                  <span className="text-[11px]">告警数未知</span>
+                )}
+                {tab.key === 'summary' && alertsCount !== null && alertsCount > 0 && (
                   <span
                     className="min-w-[18px] h-[18px] px-1.5 rounded-full text-[11px] font-semibold tabular-nums inline-flex items-center justify-center leading-none"
                     style={{
@@ -311,9 +300,7 @@ export default function ConversionCenterTab({ canWrite }: { canWrite: boolean })
 
       {/* Active Tab Panel */}
       <div role="tabpanel" aria-labelledby={`${baseId}-tab-${activeTab}`} className="space-y-4">
-        {metaError && !serviceUnavailable && (
-          <InlineErrorBanner message={metaError} onRetry={handleRetryService} />
-        )}
+        {metaError && <InlineErrorBanner message={metaError} onRetry={handleRetryService} />}
 
         {activeTab === 'events' && (
           <ConversionEventsTab
@@ -325,10 +312,6 @@ export default function ConversionCenterTab({ canWrite }: { canWrite: boolean })
             onClearUrlPixelId={handleClearUrlPixelId}
             selectedEventId={drawerEventId}
             refreshToken={eventsRefreshToken}
-            serviceUnavailable={serviceUnavailable}
-            retryingService={metaLoading}
-            onServiceUnavailable={() => setServiceUnavailable(true)}
-            onRetryService={handleRetryService}
             onSelectEvent={handleOpenDrawerFromList}
             onJumpToOrder={handleJumpToOrder}
           />
@@ -339,10 +322,6 @@ export default function ConversionCenterTab({ canWrite }: { canWrite: boolean })
             integrations={integrations}
             destinationByPixel={destinationByPixel}
             initialQuery={orderLookupTrigger}
-            serviceUnavailable={serviceUnavailable}
-            retryingService={metaLoading}
-            onServiceUnavailable={() => setServiceUnavailable(true)}
-            onRetryService={handleRetryService}
             onOpenEventDrawer={handleOpenDrawerById}
           />
         )}
@@ -353,10 +332,6 @@ export default function ConversionCenterTab({ canWrite }: { canWrite: boolean })
             destinations={destinations}
             integrationMap={integrationMap}
             destinationById={destinationById}
-            serviceUnavailable={serviceUnavailable}
-            retryingService={metaLoading}
-            onServiceUnavailable={() => setServiceUnavailable(true)}
-            onRetryService={handleRetryService}
             onOpenEventDrawer={handleOpenDrawerById}
             onAlertsCountChange={setAlertsCount}
           />
@@ -368,6 +343,7 @@ export default function ConversionCenterTab({ canWrite }: { canWrite: boolean })
       <ConversionEventDrawer
         eventId={drawerEventId}
         initialSummary={drawerInitialSummary}
+        initialPixelId={drawerPixel}
         canWrite={canWrite}
         integrationMap={integrationMap}
         destinationByPixel={destinationByPixel}

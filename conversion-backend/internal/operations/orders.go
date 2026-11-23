@@ -72,14 +72,7 @@ func (r Repository) Order(ctx context.Context, key OrderKey) (json.RawMessage, e
 }
 
 // Delivery projection excludes matching data, frozen routes, credentials and raw responses.
-const deliveryDetails = `
-	LEFT JOIN LATERAL (
-		SELECT COALESCE(jsonb_agg(item ORDER BY rn) FILTER (WHERE rn <= 50),'[]') AS items,
-		       count(*)>50 AS truncated, bool_or(role='original' AND state='succeeded') AS confirmed,
-		       bool_or(role='original') AS has_original
-		FROM (
-			SELECT d.id,d.role,d.state,row_number() OVER (ORDER BY (d.role='original') DESC,d.id) AS rn,
-				jsonb_strip_nulls(jsonb_build_object(
+const deliveryProjection = `jsonb_strip_nulls(jsonb_build_object(
 					'id',d.id::text,'pixel_id',p.pixel_id,'role',d.role,'state',d.state,'reason',d.reason,
 					'meta_event_id',d.meta_event_id,'attempts',d.attempts,'created_at',d.created_at,
 					'last_attempt_at',d.last_attempt_at,'next_attempt_at',CASE WHEN d.state='pending' THEN d.next_attempt_at END,
@@ -88,10 +81,30 @@ const deliveryDetails = `
 					'last_attempt',CASE WHEN a.attempt_no IS NOT NULL THEN jsonb_strip_nulls(jsonb_build_object(
 						'number',a.attempt_no,'outcome',a.outcome,'reason',a.reason,'http_status',a.http_status,
 						'graph_code',a.graph_code,'graph_subcode',a.graph_subcode,'events_received',a.events_received,
-						'fbtrace_id',a.fbtrace_id,'recorded_at',a.recorded_at)) END)) AS item
+						'fbtrace_id',a.fbtrace_id,'recorded_at',a.recorded_at,'batch',a.batch)) END))`
+
+// Only expose the receipt evidence intended for operations readers.
+const batchSummary = `CASE WHEN a.batch_position IS NOT NULL THEN jsonb_strip_nulls(jsonb_build_object(
+    'id',b.id::text,'position',a.batch_position,'sent',b.sent_count,'received',b.receipt->'EventsReceived',
+    'receipt_at',b.receipt_at,'late_received',b.late_receipt->'EventsReceived','late_receipt_at',b.late_receipt_at)) END`
+
+const deliveryLastAttempt = `LEFT JOIN LATERAL (
+    SELECT a.attempt_no,a.outcome,a.reason,a.http_status,a.graph_code,a.graph_subcode,a.events_received,
+        a.fbtrace_id,a.recorded_at,` + batchSummary + ` AS batch
+    FROM conversion.delivery_attempts a LEFT JOIN conversion.meta_batches b ON b.id=a.batch_id
+    WHERE a.delivery_id=d.id ORDER BY a.attempt_no DESC LIMIT 1
+) a ON true`
+
+const deliveryDetails = `
+	LEFT JOIN LATERAL (
+		SELECT COALESCE(jsonb_agg(item ORDER BY rn) FILTER (WHERE rn <= 50),'[]') AS items,
+		       count(*)>50 AS truncated, bool_or(role='original' AND state='succeeded') AS confirmed,
+		       bool_or(role='original') AS has_original
+		FROM (
+			SELECT d.id,d.role,d.state,row_number() OVER (ORDER BY (d.role='original') DESC,d.id) AS rn,
+				` + deliveryProjection + ` AS item
 			FROM conversion.deliveries d JOIN conversion.destinations p ON p.id=d.destination_id
-			LEFT JOIN LATERAL (SELECT attempt_no,outcome,reason,http_status,graph_code,graph_subcode,events_received,fbtrace_id,recorded_at
-				FROM conversion.delivery_attempts WHERE delivery_id=d.id ORDER BY attempt_no DESC LIMIT 1) a ON true
+            ` + deliveryLastAttempt + `
 			WHERE d.event_id=e.id
 			ORDER BY (d.role='original') DESC,d.id LIMIT 51
 		) targets
@@ -99,14 +112,16 @@ const deliveryDetails = `
 `
 
 var readerOrderSQL = `
-	WITH local_order AS (
+	WITH classified_order AS (
 		SELECT id,status,order_type,subscription_id,fulfilled_at,capi_expectation,
 			COALESCE(reconciliation_note,'') <> '' AS review,
+            conversion.reader_order_environment(id,capi_expectation->>'environment',checkout_environment) AS environment,
 			'payment:'||id||':Purchase' AS purchase_key,
 			'subscription:'||subscription_id||':Subscribe' AS subscribe_key
 		FROM recharge_orders
 		WHERE id=$1::text::bigint
-		  AND COALESCE(capi_expectation->>'environment',$2)=$2
+		  ), local_order AS (
+        SELECT * FROM classified_order WHERE environment IN ($2,'unknown','conflict')
 	), expected AS (
 		SELECT spec->>'business_key' AS key,spec->>'name' AS name
 		FROM local_order o CROSS JOIN LATERAL jsonb_array_elements(
@@ -141,12 +156,12 @@ var readerOrderSQL = `
 	), event_rows AS (
 		SELECT k.key, jsonb_strip_nulls(jsonb_build_object(
 			'id',e.id::text,'business_key',k.key,'event_name',COALESCE(e.event_name,x.name,q.event_name,l.event_name),
-			'expected',x.key IS NOT NULL OR COALESCE(l.qualifies,false),'occurred_at',COALESCE(e.occurred_at,q.occurred_at),
+			'expected',(x.key IS NOT NULL AND e.reason IS DISTINCT FROM 'event_not_allowed') OR COALESCE(l.qualifies,false),'occurred_at',COALESCE(e.occurred_at,q.occurred_at),
 			'enqueued_at',COALESCE(q.created_at,e.received_at),'attribution_state',e.attribution_state,
 			'reason',COALESCE(q.processing_error,e.reason),
 			'state',CASE WHEN outbound.confirmed OR (l.state='delivered' AND l.delivered_at IS NOT NULL) THEN 'confirmed'
 				WHEN e.id IS NOT NULL AND outbound.has_original THEN 'delivery_created'
-				WHEN e.id IS NOT NULL AND e.attribution_state='organic' THEN 'not_required'
+				WHEN e.id IS NOT NULL AND (e.attribution_state='organic' OR e.reason='event_not_allowed') THEN 'not_required'
 				WHEN e.id IS NOT NULL THEN 'missing_target'
 				WHEN q.processing_error IS NOT NULL THEN 'normalization_failed'
 				WHEN q.consumed_at IS NOT NULL THEN 'missing_event'
@@ -163,7 +178,7 @@ var readerOrderSQL = `
 		LEFT JOIN legacy l ON l.event_id=k.key
 		` + deliveryDetails + `
 	)
-	SELECT jsonb_strip_nulls(jsonb_build_object('order_id',o.id::text,'source','starnovel','environment',$2,
+	SELECT jsonb_strip_nulls(jsonb_build_object('order_id',o.id::text,'source','starnovel','environment',o.environment,
 		'order_type',o.order_type,'order_status',o.status,
 		'eligibility',jsonb_strip_nulls(jsonb_build_object(
 			'state',CASE WHEN EXISTS(SELECT 1 FROM legacy WHERE qualifies) THEN 'expected'
@@ -171,7 +186,9 @@ var readerOrderSQL = `
 				CASE WHEN o.review AND o.fulfilled_at IS NULL THEN 'pending_review'
 				WHEN o.status='Pending' THEN 'pending'
 				ELSE 'unknown' END
-			WHEN EXISTS(SELECT 1 FROM expected) THEN 'expected' ELSE 'not_required' END,
+			WHEN EXISTS(SELECT 1 FROM expected x WHERE NOT EXISTS(
+                SELECT 1 FROM normalized e WHERE e.source_event_id=x.key AND e.reason='event_not_allowed'
+            )) THEN 'expected' ELSE 'not_required' END,
 			'reason',COALESCE(o.capi_expectation->>'reason',CASE WHEN EXISTS(SELECT 1 FROM legacy WHERE qualifies) THEN 'legacy_verified' END),'pixel_id',o.capi_expectation->>'pixel_id',
 			'occurred_at',o.capi_expectation->'occurred_at','time_source',o.capi_expectation->>'time_source',
 			'fulfilled_at',o.fulfilled_at)),

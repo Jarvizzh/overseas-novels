@@ -1,6 +1,6 @@
 # Star Novel 转化服务
 
-转化服务消费 Reader 事务 Outbox，创建统一事件与各 Pixel 投递任务。迁移由 CMS 的 `-migrate` 入口管理，启动时要求 schema `2026111927`。应用架构、实施顺序与验收标准见 [统一转化回传架构升级与开发文档](../docs/conversion-reporting-architecture.md)。
+转化服务消费 Reader 事务 Outbox，创建统一事件与各 Pixel 投递任务。迁移由 CMS 的 `-migrate` 入口管理，启动时要求 schema `2026111933`。应用架构、实施顺序与验收标准见 [统一转化回传架构升级与开发文档](../docs/conversion-reporting-architecture.md)。
 
 从本目录运行 `go run ./cmd/conversion`。配置如下。
 
@@ -104,3 +104,69 @@ psql -X -f cms-backend/db/conversion_sinan_mock_grants.sql \
 - 缺推广 ID 的新付款最终回告进入契约阻塞。隔离 Mock 可配置 `missing_promotion_encoding=null`，再重排同一回告任务，出站 `promotion_id` 为 JSON `null`。正式编码和成功响应以司南联调为准。
 - 无真实 trace 的失败默认阻塞。模拟接收方确认省略或空字符串后，设置 `no_trace_encoding=omit` 或 `empty`，通过 CMS 或 `conversion-ops retry-partner-report` 审计重排。明确拒收的限流按 `Retry-After` 和退避重试。只有模拟账户明确配置 `replay_supported=true` 时才自动重放结果未知的回告。业务请求体从首次进入发送起冻结。司南返回 HTTP 200 且业务码为 0 后，如果首次定稿失败，Worker 会按原发送尝试及其租约令牌保存确认。扫描已收回租约时，若后续尝试尚未发送，可据此确认回告并结束已领取但未发送的重试。后续尝试已发送时，原确认保留为历史证据。CMS 事件详情显示最近 20 次回告的 HTTP 状态、业务码、尝试时间和重试计划。
 - 正式上线依赖架构文档 §7.2 的真实样本和联调结果，包括入站验证、签名及字段、无 trace 失败回告和结果未知后的重放语义。模拟模式只接受测试环境和回环地址。
+
+
+### 投递调度
+
+同一环境的 Worker 共用数据库租约和 Pixel 冷却时间。明确限流按 Pixel 退避，未确认回执仍按原有审计流程处理。同一 Pixel 的两类任务都就绪时，任一类连续领取最多 4 条，计数跨批次、进程和重启保留。就绪超过 1 分钟的非支付任务可提前获得一个名额，随后将机会交回支付任务。只有一类就绪时可以填满批次。
+
+| 环境变量 | 默认值 | 用途 |
+| --- | --- | --- |
+| `CONVERSION_META_GLOBAL_LIMIT` | `5` | 同环境全局租约上限，所有实例需使用同一值 |
+| `CONVERSION_META_CONCURRENCY` | `5` | 单实例发送并发，受全局上限约束 |
+| `CONVERSION_META_PIXEL_INTERVAL` | `3s` | 同一 Pixel 的最小领取间隔 |
+| `CONVERSION_WORKER_POLL_INTERVAL` | `15s` | 归一化心跳、到期扫描和发送数据库故障后的轮询间隔 |
+| `CONVERSION_WORKER_QUEUE_PROBE_INTERVAL` | `250ms` | 归一化和发送队列的空闲探测上限 |
+| `CONVERSION_META_REQUEST_TIMEOUT` | `5s` | 每次 Meta HTTP 请求的超时 |
+| `CONVERSION_NORMALIZE_BATCH` | `20` | 每个归一化消费者单轮最多处理的消息数 |
+| `CONVERSION_READER_NORMALIZERS` | `2` | 每进程 Reader 归一化消费者数，允许 1–3 |
+| `CONVERSION_INBOX_NORMALIZERS` | `2` | 已注册的分销 Inbox 每进程消费者数，允许 1–3 |
+| `CONVERSION_NORMALIZER_LIMIT` | `4` | 每进程已启用的消费者合计上限，最多使用 Worker 连接池的一半 |
+| `CONVERSION_WORKER_DB_MAX_CONNS` | `16` | 每个 Worker 的独立数据库连接池上限 |
+| `CONVERSION_DB_MAX_CONNS` | `8` | API、Collector、Callback 和分销回告各自的连接池上限 |
+| `CONVERSION_META_BATCH_SIZE` | `1` | 每次 Meta 请求的成员上限，允许 1–100 |
+
+使用独立数据库角色的环境升级至 1933 后，按部署流程重新应用 `cms-backend/db/conversion_role_grants.sql`。Reader 接入的空事件白名单会跳过所有事件。迁移保留已有审计记录的空白名单，对无配置审计的旧 Reader 接入保留历史四事件默认行为。上线前核对有审计记录但白名单仍为空的旧账户。
+
+Collector 每 30 秒采样，首次采样成功前标为等待，最后一次成功采样达到 90 秒时标为过期。明确限流和定稿失败按 Pixel 统计最近 15 分钟。
+
+Reader Outbox 与分销 Inbox 各自连续消费。满批或在 3 秒单轮预算内取得进展后耗尽预算，会马上启动下一轮。空队列从 50 ms 退避到 250 ms，空闲发送器最多每 250 ms 探测一次。归一化数据库错误按 100 ms 至 5 秒退避。每条归一化消息仍独立提交。
+
+吞吐诊断可通过私网 `GET /internal/conversion/throughput?minutes=15&source=starnovel&pixel_id=123456` 或 CMS 同名代理读取。时间窗为 1–60 分钟，来源和 Pixel 均可省略。入口按来源和源事件类型聚合。投递及尝试按来源、统一事件名和 Pixel 聚合。Pixel 筛选仅影响投递和尝试，入口计数按源消息计算。时间数组依次为 P50、P95、P99，单位为毫秒。空样本返回 null。已生成的目标包含进入阻塞等状态的目标，就绪数单独计算。尝试统计使用数据库发送边界；HTTP 开始时间还可用隔离模拟服务器采集。使用此诊断前，按部署流程在事务外应用 `cms-backend/db/conversion_query_indexes.sql`。
+
+隔离采样命令在 `conversion-backend` 下运行。它测量 1,000 笔已提交付款的归一化，以及 20 次单笔冷流量从付款提交到本机模拟 Meta 收到 HTTP 的延迟。
+
+```sh
+CONVERSION_THROUGHPUT_SAMPLE=1 CONVERSION_THROUGHPUT_COLD_SAMPLES=20 \
+  go test -count=1 -v ./internal/operations -run '^TestThroughputSample$'
+```
+
+测试需要设置 `STAR_NOVEL_TEST_DATABASE_URL` 指向可创建一次性数据库的隔离 PostgreSQL。设 `CONVERSION_THROUGHPUT_NORMALIZERS=3` 可测量三个 Reader 消费者。
+
+
+### 配置与批量切换
+
+线上配置入口为 `deploy/linux/config.yaml` 的 `conversion` 段。运行 `deploy/linux/prepare-config.py` 后，Compose 按 `worker_instances` 启动 Worker，默认两个副本，各自使用 16 个连接。Reader 与 Partner Inbox 各配置 2 个消费者，合计预算上限 4。生产的分销 Inbox 要在正式契约和鉴权接通后注册消费者。测试环境使用 `config.test.yaml` 中的隔离司南适配器，生成的 Worker 实例文件带各自的心跳标识：
+
+```sh
+python3 deploy/linux/prepare-config.py --config conversion-backend/config.test.yaml \
+  --output-dir /tmp/star-novel-conversion-test-env
+```
+
+生成目录含 API、Collector、Callback、分销回告和运维 CLI 的独立环境文件，也含 CMS 代理和 Reader 入队的配置片段。测试启动前将 YAML 中的 DSN 指向已初始化的一次性测试库。单独设置各角色连接时，可在 `conversion` 中使用 `api_database_url`、`worker_database_url`、`collector_database_url`、`callback_database_url`、`partner_worker_database_url`、`ops_database_url`，缺省沿用 `common.database_url`。
+
+升级前先停旧 Worker 的新领取，等待旧租约定稿。由 CMS 执行 `-migrate` 时保持旧发送器停止。更新独立数据库角色授权后，线上首发以 `meta_batch_size: 1` 启动新版并验证确认和恢复，后续按压测和灰度结果调整。缩小批次只影响下一次领取，当前或待恢复的请求按已冻结成员定稿。回退二进制前先清空在途请求，并使用支持当前 schema 和批次账本的版本。
+
+Meta 凭据故障会暂停目标使用当前凭据领取新任务。凭据轮换后可继续领取，已发且接收证据不足的任务仍进入原有的人工核对流程。只在接收总数明确为零时按拒绝重排或阻塞。
+
+吞吐接口的发送、确认及未知成员数随来源筛选变化。请求数、429 和真实批大小使用整批口径，同一请求可能出现在多个来源筛选结果里。Partner Inbox 以自己的 `processed_at` 计数，分别显示新事件、重复归并、隔离及冲突。处理时间从 schema 1933 开始记录，响应通过 `partner_completion_recording_since` 和 `unknown_completion_time` 标明覆盖范围。
+
+批量隔离验收：
+
+```sh
+CONVERSION_THROUGHPUT_SAMPLE=1 CONVERSION_THROUGHPUT_BATCH_RUN=1 \
+  CONVERSION_THROUGHPUT_BATCH_SIZE=100 CONVERSION_THROUGHPUT_NORMALIZERS=3 \
+  go test -count=1 -v ./internal/operations -run '^TestThroughputSample$'
+```
+
+这个测试用本机 HTTP 服务模拟 2 秒响应，验证预就绪及 Outbox 两种负载、稳定事件 ID、逐条成功以及 3 秒 Pixel 间隔。用 `CONVERSION_THROUGHPUT_VOLUME`、`CONVERSION_THROUGHPUT_PIXEL_INTERVAL`、`CONVERSION_THROUGHPUT_REQUEST_DELAY` 可设置固定负载并对比 1、10、50、100 批量。生产峰值及 1.5 倍回放需要实际的脱敏流量分布。

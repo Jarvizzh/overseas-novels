@@ -46,9 +46,11 @@ func RegisterConversionOrders(rg *gin.RouterGroup, admins adminLookup, rawURL, t
 	}{
 		{http.MethodGet, "/conversion/orders/:order_id", func(c *gin.Context) []string { return []string{"orders", c.Param("order_id")} }},
 		{http.MethodGet, "/conversion/summary", func(*gin.Context) []string { return []string{"summary"} }},
+		{http.MethodGet, "/conversion/throughput", func(*gin.Context) []string { return []string{"throughput"} }},
 		{http.MethodGet, "/conversion/events", func(*gin.Context) []string { return []string{"events"} }},
 		{http.MethodGet, "/conversion/events/:id", func(c *gin.Context) []string { return []string{"events", c.Param("id")} }},
 		{http.MethodGet, "/conversion/events/:id/destinations", func(c *gin.Context) []string { return []string{"events", c.Param("id"), "destinations"} }},
+		{http.MethodGet, "/conversion/events/:id/deliveries", func(c *gin.Context) []string { return []string{"events", c.Param("id"), "deliveries"} }},
 		{http.MethodPost, "/conversion/events/:id/deliveries", func(c *gin.Context) []string { return []string{"events", c.Param("id"), "deliveries"} }},
 		{http.MethodPost, "/conversion/deliveries/:id/retry", func(c *gin.Context) []string { return []string{"deliveries", c.Param("id"), "retry"} }},
 		{http.MethodPost, "/conversion/partner-reports/:id/retry", func(c *gin.Context) []string { return []string{"partner-reports", c.Param("id"), "retry"} }},
@@ -194,6 +196,8 @@ var conversionUpstreamErrorCatalog = map[int]map[string]string{
 		"payment_policy_first_requires_promotion":  "仅推广链接专属规则可配置首单",
 		"payment_policy_first_coverage_unverified": "该链接的历史付款覆盖尚未核实",
 		"payment_policy_first_source_unsupported":  "该来源暂不支持首单规则",
+		"sinan_apps_required":                      "启用司南前至少填写一个允许应用 ID",
+		"sinan_events_required":                    "启用司南前至少选择一个允许事件",
 		"invalid_operation":                        "操作参数无效，请核对必填字段与原因长度（1-500 字）",
 	},
 	http.StatusForbidden: {

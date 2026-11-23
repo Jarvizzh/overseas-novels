@@ -54,7 +54,7 @@ func runPartnerWorker(ctx context.Context, store delivery.Store) error {
 			return errors.New("CONVERSION_CREDENTIAL_KEYS is required for mock partner reports")
 		}
 	}
-	instance, err := os.Hostname()
+	instance, err := workerInstance()
 	if err != nil {
 		return errors.New("read partner worker hostname")
 	}

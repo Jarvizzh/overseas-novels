@@ -563,11 +563,13 @@ curl -fsS http://127.0.0.1:8081/healthz
 ```
 
 > [!NOTE]
-> **关于 `deploy/linux/` 自动化部署包**：若生产使用 `deploy/scripts/build-linux.sh` 与 `deploy/linux/compose.yaml`（参见 [deploy/linux/README.md](deploy/linux/README.md)），当前 `compose.yaml` 仅内置 `redis`（`172.30.87.0/24`）、`cms` 与 `reader`。部署新版前，须确认 `conversion-api` 已接入同一容器网络（或宿主机回环可访路径），并在生成的 `cms.env` 中配置 `CONVERSION_PRIVATE_URL` 与 `CONVERSION_PRIVATE_TOKEN`。
+> 自动化部署包从 `deploy/linux/config.yaml` 生成 CMS、Reader 和 Conversion 的环境文件。Compose 内置 API、Worker 和 Collector。Worker 默认由同一部署配置启动两个副本。
 
 ### 5.3 部署独立统一转化回传服务 (`conversion-backend`)
 
 `conversion-backend/Dockerfile` 采用多阶段构建，打包出 `/app/bin/conversion`（常驻服务入口，支持 `--mode=api|worker|collector|callback|partner-worker`）与 `/app/bin/conversion-ops`（运维/接管 CLI）。三个核心生产实例按职责拆分进程运行（当前统一使用 `star_novel` RDS 账号）：
+
+由 `deploy/linux/config.yaml` 统一配置回传，通过 `prepare-config.py` 生成下述环境文件。Worker 每实例使用 16 个数据库连接，Reader 和已注册的 Partner Inbox 各 2 个消费者，合计上限 4。独立测试使用 `conversion-backend/config.test.yaml`，生成到单独目录。批量模式升级先暂停旧发送器、等待在途请求定稿，再执行 CMS `-migrate` 至 `2026111933`，按需刷新受限角色授权后以每请求最多 1 条启动。 [回传配置与切换](conversion-backend/README.md)
 
 1. **准备三份独立环境配置文件**：
    - 生成共享 Token 与凭据加密主密钥：
@@ -595,6 +597,19 @@ curl -fsS http://127.0.0.1:8081/healthz
      # 初次切换上线先设 false 验证入队与心跳，确认无误后再改为 true 放量
      CONVERSION_META_ENABLED=false
      META_GRAPH_VERSION=v21.0
+     CONVERSION_WORKER_DB_MAX_CONNS=16
+     CONVERSION_READER_NORMALIZERS=2
+     CONVERSION_INBOX_NORMALIZERS=2
+     CONVERSION_NORMALIZER_LIMIT=4
+     CONVERSION_NORMALIZE_BATCH=20
+     CONVERSION_META_GLOBAL_LIMIT=5
+     CONVERSION_META_CONCURRENCY=5
+     CONVERSION_META_BATCH_SIZE=1
+     CONVERSION_META_PIXEL_INTERVAL=3s
+     CONVERSION_WORKER_POLL_INTERVAL=15s
+     CONVERSION_WORKER_QUEUE_PROBE_INTERVAL=250ms
+     CONVERSION_META_REQUEST_TIMEOUT=5s
+     CONVERSION_SINAN_MOCK_ENABLED=false
      # 须保留所有仍在使用的历史及当前密钥版本，确保平滑轮换期间可解密旧目标凭据
      CONVERSION_CREDENTIAL_KEYS={"v1":"<Base64 32-byte AES Key>"}
      ```

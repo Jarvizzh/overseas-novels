@@ -112,7 +112,7 @@ func TestCollectorAndSummaryWithoutWorker(t *testing.T) {
 		group[row.Name+":"+row.Eligibility] = counts{row.Events, row.Confirmed, row.MissingTarget}
 	}
 	if group["Purchase:expected"] != (counts{3, 1, 1}) || group["Subscribe:expected"] != (counts{1, 1, 0}) ||
-		group["Purchase:historical_unknown"].total != 1 {
+		group["Purchase:environment_unknown"].total != 1 {
 		t.Fatalf("population: %+v", group)
 	}
 	changes, err = repo.Collect(ctx)

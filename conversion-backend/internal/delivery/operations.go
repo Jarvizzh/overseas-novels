@@ -121,8 +121,18 @@ func (s Service) RetryDelivery(ctx context.Context, operator Operator, id int64,
 		if err != nil {
 			return OperationResult{}, err
 		}
+		var routeIssue string
+		if err := tx.QueryRow(ctx, `
+            SELECT `+readerRouteIssue+` FROM conversion.deliveries d
+            JOIN conversion.events e ON e.id=d.event_id
+            JOIN conversion.destinations x ON x.id=d.destination_id WHERE d.id=$1`, id).Scan(&routeIssue); err != nil {
+			return OperationResult{}, err
+		}
+		if routeIssue != "" {
+			return OperationResult{}, ErrOperationConflict
+		}
 		next := d.now
-		if d.state == "pending" && d.reason == "meta_retryable_rejection" {
+		if d.state == "pending" && (d.reason == "meta_retryable_rejection" || d.reason == MetaRateLimited || d.reason == MetaBatchParameterRejected) {
 			return OperationResult{}, ErrOperationConflict
 		}
 		_, err = tx.Exec(ctx, `
@@ -166,7 +176,7 @@ func retryPolicy(d retryState, expected int, acknowledge bool) (base int, reset,
 	case "blocked":
 		switch d.reason {
 		case "retry_budget_exhausted", "destination_or_credential_unavailable", "credential_decryption_failed",
-			"meta_credentials_or_permissions", "destination_disabled", "promotion_pixel_mismatch", "partner_route_not_authorized":
+			"meta_credentials_or_permissions", "destination_disabled", "promotion_pixel_mismatch", "partner_route_not_authorized", "reader_route_not_authorized":
 		default:
 			return 0, false, false, ErrOperationConflict
 		}

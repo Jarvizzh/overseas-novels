@@ -20,8 +20,8 @@ func testReaderPaymentPolicy(t *testing.T, ctx context.Context, base Service) {
 	mustExec(t, ctx, pool, `
 		INSERT INTO admins(id,username,password_hash,role) VALUES ('policy-ops','policy-ops','fixture','Admin');
 		INSERT INTO users(id) VALUES (81);
-		INSERT INTO conversion.integrations(source,account_key,environment,contract_version,enabled)
-		VALUES ('starnovel','reader','reader-policy','v1',true);
+		INSERT INTO conversion.integrations(source,account_key,environment,contract_version,enabled,allowed_events)
+		VALUES ('starnovel','reader','reader-policy','v1',true,ARRAY['CompleteRegistration','InitiateCheckout','Purchase','Subscribe']);
 		INSERT INTO conversion.destinations(environment,media,pixel_id,credential_id)
 		VALUES ('reader-policy','meta','151',1),('reader-policy','meta','152',1),('reader-policy','meta','153',1);
 		INSERT INTO conversion.integration_destinations(integration_id,destination_id,environment,default_route)
@@ -310,4 +310,31 @@ func testReaderPaymentPolicy(t *testing.T, ctx context.Context, base Service) {
 	assertString(t, ctx, pool, `SELECT string_agg(payment_key||':'||payment_kind||':'||COALESCE(cycle_sequence::text,'all'),',' ORDER BY payment_key)
 		FROM conversion.payment_policy_decisions WHERE environment='reader-policy' AND promotion_key='86'`,
 		"811:subscription_initial:all,812:subscription_renewal:2,813:subscription_renewal:1,814:subscription_renewal:3")
+
+	// Parallel normalization of the same cycle must allocate one unique,
+	// gap-free sequence number per payment, regardless of sibling ordering.
+	for id := int64(820); id <= 831; id++ {
+		settle(id, true, 0)
+	}
+	for range 3 {
+		group.Go(func() {
+			if _, err := s.ConsumeReader(ctx, 32); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+	group.Wait()
+	assertString(t, ctx, pool, `SELECT (count(*)=12 AND count(DISTINCT cycle_sequence)=12
+        AND max(cycle_sequence)-min(cycle_sequence)=11 AND count(*) FILTER (WHERE outcome='selected')=6)::text
+        FROM conversion.payment_policy_decisions WHERE environment='reader-policy' AND payment_key BETWEEN '820' AND '831'`, "true")
+	for id := int64(820); id <= 831; id++ {
+		var deliveries, decisions int
+		err := pool.QueryRow(ctx, `SELECT count(*),count(DISTINCT e.payment_policy_decision_id)
+            FROM conversion.events e JOIN conversion.deliveries d ON d.event_id=e.id
+            WHERE e.environment='reader-policy' AND e.source_order_id=$1`, strconv.FormatInt(id, 10)).
+			Scan(&deliveries, &decisions)
+		if err != nil || deliveries != 4 || decisions != 1 {
+			t.Fatalf("parallel payment %d: deliveries=%d decisions=%d error=%v", id, deliveries, decisions, err)
+		}
+	}
 }

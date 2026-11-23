@@ -3,6 +3,7 @@ package delivery
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -85,6 +86,7 @@ func (s Service) ConfigureDestination(ctx context.Context, actor Operator, id in
 			state.credential = &credential
 		}
 		update, err := tx.Exec(ctx, `UPDATE conversion.destinations SET display_name=$2,credential_id=$3,
+            blocked_credential_id=CASE WHEN credential_id IS DISTINCT FROM $3 THEN NULL ELSE blocked_credential_id END,
 			retired_at=CASE WHEN $4 THEN COALESCE(retired_at,clock_timestamp()) ELSE retired_at END
 			WHERE id=$1`, id, state.name, state.credential, input.Retire)
 		if err := requireOne(update.RowsAffected(), err); err != nil {
@@ -154,6 +156,11 @@ func insertCredential(ctx context.Context, tx pgx.Tx, cipher []byte, version str
 	return id, err
 }
 
+var (
+	ErrSinanAppsRequired   = fmt.Errorf("sinan_apps_required: %w", ErrInvalidOperation)
+	ErrSinanEventsRequired = fmt.Errorf("sinan_events_required: %w", ErrInvalidOperation)
+)
+
 type IntegrationChange struct {
 	Source, AccountKey, ContractVersion, Reason string
 	Enabled                                     *bool
@@ -210,14 +217,25 @@ func (s Service) ConfigureIntegration(ctx context.Context, actor Operator, id in
 			}
 		}
 		var after map[string]any
+		var source string
+		var enabled bool
+		var apps, events []string
 		err := tx.QueryRow(ctx, `UPDATE conversion.integrations SET enabled=COALESCE($2,enabled),
 			allowed_apps=COALESCE($3,allowed_apps),allowed_events=COALESCE($4,allowed_events),
 			contract_version=COALESCE(NULLIF($5,''),contract_version)
-			WHERE id=$1 RETURNING jsonb_build_object('enabled',enabled,'allowed_apps',allowed_apps,
+			WHERE id=$1 RETURNING source,enabled,allowed_apps,allowed_events,jsonb_build_object('enabled',enabled,'allowed_apps',allowed_apps,
 				'allowed_events',allowed_events,'contract_version',contract_version)`,
-			id, input.Enabled, input.AllowedApps, input.AllowedEvents, input.ContractVersion).Scan(&after)
+			id, input.Enabled, input.AllowedApps, input.AllowedEvents, input.ContractVersion).Scan(&source, &enabled, &apps, &events, &after)
 		if err != nil {
 			return OperationResult{}, err
+		}
+		if source == "sinan" && enabled {
+			if len(apps) == 0 {
+				return OperationResult{}, ErrSinanAppsRequired
+			}
+			if len(events) == 0 {
+				return OperationResult{}, ErrSinanEventsRequired
+			}
 		}
 		beforeBindings := make(map[string]any)
 		afterBindings := make(map[string]any)

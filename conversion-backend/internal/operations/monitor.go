@@ -73,10 +73,15 @@ func (r Repository) Collect(ctx context.Context) ([]AlertChange, error) {
 	if err != nil {
 		return nil, err
 	}
+	if _, err := tx.Exec(ctx, `
+        INSERT INTO conversion.collector_samples(environment,sampled_at) VALUES ($1,clock_timestamp())
+        ON CONFLICT (environment) DO UPDATE SET sampled_at=EXCLUDED.sampled_at`, r.Environment); err != nil {
+		return nil, err
+	}
 	return changes, tx.Commit(ctx)
 }
 
-const summarySQL = `
+var summarySQL = `
 	WITH period AS (
 		SELECT now()-$2::interval AS from_at, now() AS to_at
 	), accounts AS (
@@ -87,6 +92,7 @@ const summarySQL = `
 			o.capi_expectation->>'reason' AS reason,o.capi_expectation->>'pixel_id' AS pixel,
 			o.capi_expectation->'events' AS expected,o.capi_expectation IS NULL AS legacy_order,
 			o.capi_expectation->>'payment_key' AS payment_key,
+            conversion.reader_order_environment(o.id,o.capi_expectation->>'environment',o.checkout_environment) AS environment,
 			NULLIF(o.capi_expectation->>'occurred_at','')::timestamptz AS occurred_at,
 			COALESCE(o.fulfilled_at,CASE WHEN o.capi_expectation->>'reason'='refunded_before_fulfillment' THEN o.paid_at END) AS fulfilled_at
 		FROM recharge_orders o CROSS JOIN period w
@@ -94,7 +100,7 @@ const summarySQL = `
 		  AND a.id=(SELECT id FROM conversion.integrations WHERE environment=$1 AND source='starnovel' AND account_key='reader')
 		WHERE (o.fulfilled_at BETWEEN w.from_at AND w.to_at OR (
 			o.fulfilled_at IS NULL AND o.capi_expectation->>'reason'='refunded_before_fulfillment' AND o.paid_at BETWEEN w.from_at AND w.to_at))
-		  AND (o.capi_expectation->>'environment'=$1 OR o.capi_expectation IS NULL)
+
 		  AND ($3='' OR $3='starnovel') AND ($5=0 OR a.id IS NOT NULL)
 	), historical_facts AS (
 		SELECT p.id AS order_id,e.id AS event_id,e.event_name,e.occurred_at,
@@ -103,7 +109,7 @@ const summarySQL = `
 		FROM payments p JOIN conversion.events e ON e.integration_id=p.integration_id AND e.source_order_id=p.id::text
 		JOIN conversion.legacy_outbox_imports l ON l.event_id=e.id AND l.legacy_event_id=e.source_event_id
 		LEFT JOIN conversion.deliveries d ON d.event_id=e.id AND d.role='original'
-		WHERE p.legacy_order
+		WHERE p.legacy_order AND p.environment IN ($1,'unknown')
 		  AND ((e.event_name='Purchase' AND e.source_event_id='payment:'||p.id||':Purchase')
 		    OR (e.event_name='Subscribe' AND e.source_event_id='subscription:'||p.subscription_id||':Subscribe'
 		        AND EXISTS(SELECT 1 FROM user_subscriptions s WHERE s.subscription_id=p.subscription_id
@@ -113,9 +119,12 @@ const summarySQL = `
 	), payment_facts AS (
 		SELECT COALESCE(p.source,'starnovel') AS source,p.integration_id,
 			COALESCE(spec->>'name','Purchase') AS event_name,
-			CASE WHEN decision.outcome='skipped' THEN 'policy_skipped' WHEN spec IS NOT NULL THEN 'expected'
+			CASE WHEN p.environment IN ('unknown','conflict') THEN 'environment_'||p.environment
+                 WHEN e.reason='event_not_allowed' THEN 'configuration_skipped'
+                 WHEN decision.outcome='skipped' THEN 'policy_skipped' WHEN spec IS NOT NULL THEN 'expected'
 			     WHEN p.reason='organic' THEN 'organic' WHEN p.reason IS NULL THEN 'historical_unknown' ELSE 'not_required' END AS eligibility,
-			p.occurred_at IS NULL AND spec IS NOT NULL AND decision.outcome IS DISTINCT FROM 'skipped' AS missing_time,
+			p.environment=$1 AND p.occurred_at IS NULL AND spec IS NOT NULL
+                AND e.reason IS DISTINCT FROM 'event_not_allowed' AND decision.outcome IS DISTINCT FROM 'skipped' AS missing_time,
 			e.id AS event_id, q.business_key IS NOT NULL AS queued,
 			original.state='succeeded' AS confirmed, original.id IS NULL AS missing_target
 		FROM payments p CROSS JOIN period w
@@ -127,7 +136,7 @@ const summarySQL = `
 			AND decision.payment_key=p.payment_key AND p.payment_key=p.id::text
 		LEFT JOIN reader_conversion_outbox q ON q.business_key=spec->>'business_key' AND q.environment=$1
 		LEFT JOIN conversion.deliveries original ON original.event_id=e.id AND original.role='original'
-		WHERE COALESCE(p.occurred_at,p.fulfilled_at)>=w.from_at AND COALESCE(p.occurred_at,p.fulfilled_at)<=w.to_at
+		WHERE p.environment IN ($1,'unknown','conflict') AND COALESCE(p.occurred_at,p.fulfilled_at)>=w.from_at AND COALESCE(p.occurred_at,p.fulfilled_at)<=w.to_at
 		  AND ($4='' OR COALESCE(spec->>'name','Purchase')=$4)
 		  AND (spec->>'name' IS DISTINCT FROM 'Subscribe' OR EXISTS (SELECT 1 FROM user_subscriptions s
 		      WHERE s.subscription_id=p.subscription_id AND s.capi_subscribe_order_id=p.id))
@@ -140,7 +149,8 @@ const summarySQL = `
 		  AND ($4='' OR h.event_name=$4)
 	), other_facts AS (
 		SELECT a.source,a.id AS integration_id,e.event_name,
-			CASE WHEN decision.outcome='skipped' THEN 'policy_skipped'
+			CASE WHEN e.reason='event_not_allowed' THEN 'configuration_skipped'
+                 WHEN decision.outcome='skipped' THEN 'policy_skipped'
 			     WHEN e.attribution_state='organic' THEN 'organic' WHEN e.attribution_state='unknown' THEN 'historical_unknown'
 			     ELSE 'expected' END AS eligibility,
 			false AS missing_time,e.id AS event_id,true AS queued,
@@ -175,6 +185,22 @@ const summarySQL = `
 		WHERE d.environment=$1 AND (d.finalized_at IS NULL OR (e.occurred_at>=w.from_at AND e.occurred_at<=w.to_at))
 		  AND ($4='' OR e.event_name=$4) AND ($6=0 OR d.destination_id=$6)
 		GROUP BY a.source,a.id,e.event_name,d.destination_id,x.pixel_id,d.role,7,d.reason
+    ), request_metrics AS (
+        SELECT x.pixel_id,count(*) AS requests,sum(matched.members) AS sent,
+            avg(b.sent_count)::float8 AS mean_batch_size,
+            count(*) FILTER (WHERE b.receipt->>'HTTPStatus'='429') AS http_429,
+            count(*) FILTER (WHERE b.receipt IS NOT NULL AND b.receipt->>'HTTPStatus' IS NOT NULL) AS http_responses,
+            count(*) FILTER (WHERE unresolved.unknown) AS unknown_requests,
+            COALESCE(sum(matched.members) FILTER (WHERE unresolved.unknown),0) AS unknown_deliveries,
+            COALESCE(sum(matched.members) FILTER (WHERE b.confirmed),0) AS confirmed_members
+        FROM conversion.meta_batches b JOIN conversion.destinations x ON x.id=b.destination_id CROSS JOIN period w
+        CROSS JOIN LATERAL (
+            SELECT b.receipt->>'Outcome'='outcome_unknown' OR (b.receipt IS NULL AND b.finished_at IS NOT NULL) AS unknown
+        ) unresolved
+        ` + matchingBatchMembers("$3<>'' OR $4<>'' OR $5<>0", "$4='' OR e.event_name=$4") + `
+        WHERE b.environment=$1 AND b.started_at BETWEEN w.from_at AND w.to_at AND ($6=0 OR b.destination_id=$6)
+          AND matched.members>0
+        GROUP BY x.pixel_id
 	), report_metrics AS (
 		SELECT a.source,a.id::text AS integration_id,e.event_name,d.destination_id::text,p.state,p.reason,count(*) AS reports,
 		       min(p.created_at) FILTER (WHERE p.state<>'confirmed') AS oldest_pending_at
@@ -200,10 +226,12 @@ const summarySQL = `
 			THEN p.payment_key::bigint END
 		CROSS JOIN LATERAL jsonb_array_elements(CASE
 			WHEN jsonb_typeof(o.capi_expectation->'events')='array' THEN o.capi_expectation->'events' ELSE '[]' END) spec
-		LEFT JOIN conversion.events e ON e.payment_policy_decision_id=p.id
-		    AND e.event_name=spec->>'name' AND e.source_event_id=spec->>'business_key'
+		LEFT JOIN conversion.events e ON e.integration_id=p.integration_id AND e.source_event_type=spec->>'name'
+            AND e.source_event_id=spec->>'business_key'
 		WHERE p.source='starnovel' AND p.app_scope='reader'
-		  AND o.capi_expectation->>'environment'=$1 AND o.capi_expectation->>'payment_key'=p.payment_key
+		  AND conversion.reader_order_environment(o.id,o.capi_expectation->>'environment',o.checkout_environment)=$1
+          AND o.capi_expectation->>'payment_key'=p.payment_key
+          AND e.reason IS DISTINCT FROM 'event_not_allowed'
 		  AND ($4='' OR spec->>'name'=$4)
 		  AND (spec->>'name'='Purchase' OR (spec->>'name'='Subscribe' AND EXISTS (
 		      SELECT 1 FROM user_subscriptions s WHERE s.subscription_id=o.subscription_id
@@ -226,9 +254,15 @@ const summarySQL = `
 	)
 	SELECT jsonb_build_object('environment',$1,'from_at',w.from_at,'to_at',w.to_at,
 		'payment_coverage',(SELECT to_jsonb(c) FROM payment_coverage c),
+        'collector',jsonb_build_object(
+            'sampled_at',sample.sampled_at,
+            'state',CASE WHEN sample.sampled_at IS NULL THEN 'waiting'
+                         WHEN sample.sampled_at<=now()-interval '90 seconds' THEN 'stale' ELSE 'fresh' END),
 		'selected_confirmation',(SELECT COALESCE(jsonb_agg(to_jsonb(c) ORDER BY c.event_name),'[]') FROM selected_confirmation c),
 		'population',(SELECT COALESCE(jsonb_agg(jsonb_set(to_jsonb(p),'{integration_id}',COALESCE(to_jsonb(p.integration_id::text),'null'))),'[]') FROM population p),
 		'targets',(SELECT COALESCE(jsonb_agg(to_jsonb(t)),'[]') FROM target_metrics t),
+        'request_counts_additive_across_filters',false,
+        'requests',(SELECT COALESCE(jsonb_agg(to_jsonb(t) ORDER BY pixel_id),'[]') FROM request_metrics t),
 		'reports',(SELECT COALESCE(jsonb_agg(to_jsonb(r)),'[]') FROM report_metrics r),
 		'alerts',(SELECT COALESCE(jsonb_agg(jsonb_build_object('kind',kind,'subject',subject,'detail',detail,'opened_at',opened_at)
 			ORDER BY opened_at DESC),'[]') FROM (SELECT * FROM conversion.alerts WHERE environment=$1 AND resolved_at IS NULL
@@ -237,7 +271,7 @@ const summarySQL = `
 		    'heartbeat_at',heartbeat_at,'last_progress_at',last_progress_at,'paused',paused)),'[]')
 		    FROM (SELECT * FROM conversion.worker_heartbeats WHERE environment=$1 AND heartbeat_at>now()-interval '24 hours'
 		          ORDER BY heartbeat_at DESC LIMIT 100) live))
-	FROM period w
+	FROM period w LEFT JOIN conversion.collector_samples sample ON sample.environment=$1
 `
 
 const alertSQL = `
@@ -268,7 +302,8 @@ const alertSQL = `
 		       jsonb_build_object('count',count(*),'oldest_at',min(e.received_at),
 		           'sample_event_id',min(e.id)::text) AS detail
 		FROM conversion.events e
-		WHERE e.environment=$1 AND (e.attribution_state='missing_pixel' OR e.reason='original_target_unavailable')
+		WHERE e.environment=$1 AND e.reason IS DISTINCT FROM 'event_not_allowed'
+          AND (e.attribution_state='missing_pixel' OR e.reason='original_target_unavailable')
 		  AND e.received_at>=now()-interval '7 days'
 		  AND NOT EXISTS(SELECT 1 FROM conversion.deliveries d WHERE d.event_id=e.id AND d.role='original')
 		  AND NOT EXISTS(SELECT 1 FROM conversion.legacy_outbox_imports m WHERE m.event_id=e.id
@@ -290,8 +325,44 @@ const alertSQL = `
 		       d.destination_id::text,jsonb_build_object('count',count(*),'pixel_id',x.pixel_id)
 		FROM conversion.deliveries d JOIN conversion.destinations x ON x.id=d.destination_id
 		WHERE d.environment=$1 AND (d.state='outcome_unknown' OR (d.state='blocked' AND
-		   d.reason IN ('destination_or_credential_unavailable','credential_decryption_failed','meta_credentials_or_permissions','destination_disabled','promotion_pixel_mismatch','partner_route_not_authorized')))
+		   d.reason IN ('destination_or_credential_unavailable','credential_decryption_failed','meta_credentials_or_permissions','destination_disabled','promotion_pixel_mismatch','partner_route_not_authorized','reader_route_not_authorized')))
 		GROUP BY 1,d.destination_id,x.pixel_id
+        UNION ALL
+        SELECT CASE WHEN d.deadline_at<=d.finalized_at OR d.reason='deadline_exhausted' THEN 'meta_delivery_expired'
+                    WHEN d.reason='meta_invalid_parameter' THEN 'meta_parameter_rejected'
+                    WHEN d.unknown_attempt_no IS NOT NULL THEN 'meta_outcome_unknown_recent'
+                    WHEN d.reason LIKE 'meta_%' THEN 'meta_delivery_failed'
+                    ELSE 'meta_local_validation_failed' END,
+               d.destination_id::text,jsonb_build_object('count',count(*),'pixel_id',x.pixel_id,
+                   'sample_event_id',min(d.event_id)::text)
+        FROM conversion.deliveries d JOIN conversion.destinations x ON x.id=d.destination_id
+        WHERE d.environment=$1 AND d.state='failed' AND d.finalized_at>now()-interval '15 minutes'
+        GROUP BY 1,d.destination_id,x.pixel_id
+        UNION ALL
+        SELECT 'meta_rate_limited',limits.destination_id::text,jsonb_build_object(
+            'count',count(*),'pixel_id',x.pixel_id,'sample_event_id',min(limits.event_id)::text)
+        FROM (
+            SELECT d.destination_id,d.event_id
+            FROM conversion.delivery_attempts a JOIN conversion.deliveries d ON d.id=a.delivery_id
+            WHERE d.environment=$1 AND a.batch_id IS NULL AND a.reason='meta_rate_limited'
+              AND a.responded_at>now()-interval '15 minutes'
+            UNION ALL
+            SELECT b.destination_id,NULL::bigint FROM conversion.meta_batches b
+            WHERE b.environment=$1 AND b.started_at>now()-interval '15 minutes'
+              AND (COALESCE(b.receipt,b.late_receipt)->>'RateLimited')::boolean
+        ) limits JOIN conversion.destinations x ON x.id=limits.destination_id
+        GROUP BY limits.destination_id,x.pixel_id
+        UNION ALL
+        SELECT 'meta_credential_paused',x.id::text,jsonb_build_object('pixel_id',x.pixel_id)
+        FROM conversion.destinations x
+        WHERE x.environment=$1 AND x.blocked_credential_id=x.credential_id
+        UNION ALL
+        SELECT 'meta_batch_no_confirmation',b.destination_id::text,jsonb_build_object(
+            'count',count(*),'affected_deliveries',sum(b.sent_count),'pixel_id',x.pixel_id)
+        FROM conversion.meta_batches b JOIN conversion.destinations x ON x.id=b.destination_id
+        WHERE b.environment=$1 AND b.started_at>now()-interval '15 minutes'
+          AND (b.receipt->>'Outcome'='outcome_unknown' OR (b.receipt IS NULL AND b.finished_at IS NOT NULL))
+        GROUP BY b.destination_id,x.pixel_id
 	), receipts AS (
 		SELECT 'partner_report_delayed' AS kind,i.id::text AS subject,jsonb_build_object('count',count(*),'oldest_at',min(p.created_at)) AS detail
 		FROM conversion.partner_reports p JOIN conversion.integrations i ON i.id=p.integration_id

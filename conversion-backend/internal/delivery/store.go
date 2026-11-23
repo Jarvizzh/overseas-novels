@@ -15,10 +15,12 @@ const (
 	Accepted           = "accepted"
 	NotSent            = "not_sent"
 	RetryableRejection = "retryable_rejection"
+	MetaRateLimited    = "meta_rate_limited"
 	PermanentRejection = "permanent_rejection"
 	OutcomeUnknown     = "outcome_unknown"
 
-	attemptBudget = 24
+	attemptBudget               = 24
+	maxConsecutivePaymentClaims = 4
 )
 
 var ErrLeaseLost = errors.New("delivery lease no longer active")
@@ -27,6 +29,7 @@ type Result struct {
 	Outcome        string
 	Reason         string
 	Block          bool
+	RateLimited    bool
 	HTTPStatus     *int
 	GraphCode      *int
 	GraphSubcode   *int
@@ -35,6 +38,22 @@ type Result struct {
 	RespondedAt    time.Time
 	RetryAfter     time.Time
 }
+
+// CredentialRejected is independent of a member's acceptance evidence.
+func (r Result) CredentialRejected() bool {
+	if r.HTTPStatus == nil || *r.HTTPStatus < 400 || *r.HTTPStatus >= 600 || r.GraphCode == nil {
+		return false
+	}
+	switch *r.GraphCode {
+	case 190, 10, 200:
+		return true
+	default:
+		return false
+	}
+}
+
+// The destination alias is shared by scheduling and pre-send queries.
+const credentialCanSend = `(x.blocked_credential_id IS NULL OR x.blocked_credential_id IS DISTINCT FROM x.credential_id)`
 
 type Lease struct {
 	ID      int64
@@ -65,7 +84,7 @@ type Store struct {
 }
 
 func (s Store) CheckSchema(ctx context.Context) error {
-	const required = 2026111929
+	const required = 2026111933
 	var version int
 	if err := s.Pool.QueryRow(ctx, "SELECT max(version) FROM reader_schema_migrations").Scan(&version); err != nil {
 		return err
@@ -80,25 +99,29 @@ func claimTx(ctx context.Context, tx pgx.Tx, environment string, paymentFirst bo
 	var job Lease
 	err := tx.QueryRow(ctx, `
 		WITH candidate AS (
-			SELECT d.id, d.destination_id
+			SELECT d.id, d.destination_id, e.event_name IN ('Purchase','Subscribe') AS payment
 			FROM conversion.deliveries d
 			JOIN conversion.events e ON e.id = d.event_id
 			JOIN conversion.destinations x ON x.id = d.destination_id
 			WHERE d.environment = $1 AND d.state = 'pending' AND d.lease_until IS NULL
-			  AND (e.event_name IN ('Purchase','Subscribe')) = $4
 			  AND `+paymentCanSend+`
 			  AND d.next_attempt_at <= now() AND d.deadline_at > now() + $2::interval
-			  AND x.next_claim_at <= now()
+			  AND x.next_claim_at <= now() AND `+credentialCanSend+`
 			  AND NOT EXISTS (
 			    SELECT 1 FROM conversion.deliveries active
-			    WHERE active.destination_id = x.id AND active.lease_until > now()
+			    WHERE active.environment=$1 AND active.destination_id=x.id AND active.lease_until IS NOT NULL
 			  )
 			  AND (SELECT count(*) FROM conversion.deliveries
 			       WHERE environment = $1 AND lease_until > now()) < $3
-			ORDER BY d.next_attempt_at, d.id
-			LIMIT 1 FOR UPDATE OF d, x SKIP LOCKED
+			ORDER BY CASE
+                WHEN e.event_name NOT IN ('Purchase','Subscribe')
+                     AND (x.consecutive_payment_claims >= $7 OR d.next_attempt_at<=now()-interval '1 minute') THEN 0
+                WHEN (e.event_name IN ('Purchase','Subscribe')) = $4 THEN 1
+                ELSE 2 END,d.next_attempt_at,d.id
+            LIMIT 1 FOR UPDATE OF d, x SKIP LOCKED
 		), reserved AS (
-			UPDATE conversion.destinations x SET next_claim_at = now() + $5::interval
+			UPDATE conversion.destinations x SET next_claim_at = now() + $5::interval,
+                consecutive_payment_claims = CASE WHEN c.payment THEN LEAST(x.consecutive_payment_claims+1,$7) ELSE 0 END
 			FROM candidate c WHERE x.id = c.destination_id RETURNING x.id
 		), claimed AS (
 			UPDATE conversion.deliveries d SET lease_token = gen_random_uuid(),
@@ -109,7 +132,7 @@ func claimTx(ctx context.Context, tx pgx.Tx, environment string, paymentFirst bo
 		INSERT INTO conversion.delivery_attempts (delivery_id, attempt_no, lease_token)
 		SELECT id, attempts, lease_token FROM claimed
 		RETURNING delivery_id, lease_token::text, attempt_no`,
-		environment, requestWindow, limit, paymentFirst, pixelInterval, lease).Scan(&job.ID, &job.Token, &job.Attempt)
+		environment, requestWindow, limit, paymentFirst, pixelInterval, lease, maxConsecutivePaymentClaims).Scan(&job.ID, &job.Token, &job.Attempt)
 	if err != nil {
 		return Lease{}, err
 	}
@@ -121,7 +144,7 @@ func (s Store) Payload(ctx context.Context, job Lease) (Payload, error) {
 	err := s.Pool.QueryRow(ctx, `
 		SELECT x.pixel_id, x.enabled, x.credential_id, c.ciphertext, c.key_version, d.meta_event_id,
 		       e.event_name, e.occurred_at, e.action_source, e.source_url, e.matching_data,
-		       e.amount::text, e.currency, COALESCE(conversion.sinan_route_issue(e.id,x.id),'')
+		       e.amount::text, e.currency, COALESCE(conversion.sinan_route_issue(e.id,x.id),NULLIF(`+readerRouteIssue+`,''),'')
 		FROM conversion.deliveries d
 		JOIN conversion.events e ON e.id = d.event_id
 		JOIN conversion.destinations x ON x.id = d.destination_id
@@ -145,8 +168,8 @@ func (s Store) StartSend(ctx context.Context, job Lease, credentialID int64, cip
 			WHERE d.id = $1 AND d.lease_token = $2::uuid AND d.attempts = $3
 			  AND d.environment = $4 AND d.lease_until > now() + $8::interval
 			  AND d.deadline_at > now() + $8::interval
-			  AND x.enabled AND c.id = $5 AND c.ciphertext = $6 AND c.key_version = $7
-			  AND COALESCE(conversion.sinan_route_issue(d.event_id,x.id),'')=''
+			  AND x.enabled AND `+credentialCanSend+` AND c.id = $5 AND c.ciphertext = $6 AND c.key_version = $7
+			  AND COALESCE(conversion.sinan_route_issue(d.event_id,x.id),NULLIF(`+readerRouteIssue+`,''),'')=''
 			  AND `+paymentCanSend+`
 			FOR UPDATE OF d FOR SHARE OF x
 		)

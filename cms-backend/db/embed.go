@@ -172,3 +172,12 @@ var PaymentVIPSwitchSQL string
 //
 //go:embed migrations/2026111930.sql
 var PaymentTemplateCatalogFixesSQL string
+
+//go:embed migrations/2026111931.sql
+var ConversionCenterReviewSQL string
+
+//go:embed migrations/2026111932.sql
+var ConversionBatchSQL string
+
+//go:embed migrations/2026111933.sql
+var ConversionThroughputRereviewSQL string

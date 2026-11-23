@@ -38,34 +38,53 @@ type event struct {
 }
 
 func (c Client) Prepare(p delivery.Payload, token string) (delivery.Send, error) {
-	if err := delivery.ValidatePayload(p); err != nil {
-		return nil, err
+	return c.prepare([]delivery.Payload{p}, token, false)
+}
+
+func (c Client) PrepareBatch(payloads []delivery.Payload, token string) (delivery.Send, error) {
+	return c.prepare(payloads, token, true)
+}
+
+func (c Client) prepare(payloads []delivery.Payload, token string, strict bool) (delivery.Send, error) {
+	if len(payloads) < 1 || len(payloads) > delivery.MaxBatchSize {
+		return nil, errors.New("invalid_meta_batch_size")
 	}
-	e := event{EventName: p.EventName, EventID: p.EventID, EventTime: p.OccurredAt.Unix(),
-		ActionSource: *p.ActionSource, UserData: p.MatchingData}
-	if p.SourceURL != nil {
-		e.SourceURL = *p.SourceURL
-	}
-	if p.Amount != nil && p.Currency != nil {
-		e.CustomData = map[string]any{"value": json.Number(*p.Amount), "currency": *p.Currency}
+	pixel := payloads[0].PixelID
+	data := make([]event, 0, len(payloads))
+	for _, p := range payloads {
+		if p.PixelID != pixel {
+			return nil, errors.New("mixed_meta_batch_destinations")
+		}
+		if err := delivery.ValidatePayload(p); err != nil {
+			return nil, err
+		}
+		e := event{EventName: p.EventName, EventID: p.EventID, EventTime: p.OccurredAt.Unix(),
+			ActionSource: *p.ActionSource, UserData: p.MatchingData}
+		if p.SourceURL != nil {
+			e.SourceURL = *p.SourceURL
+		}
+		if p.Amount != nil && p.Currency != nil {
+			e.CustomData = map[string]any{"value": json.Number(*p.Amount), "currency": *p.Currency}
+		}
+		data = append(data, e)
 	}
 	body, err := json.Marshal(struct {
 		Data []event `json:"data"`
-	}{[]event{e}})
+	}{data})
 	if err != nil {
 		return nil, errors.New("invalid_event_payload")
 	}
-	req, err := http.NewRequest(http.MethodPost, c.BaseURL.JoinPath(p.PixelID, "events").String(), bytes.NewReader(body))
+	req, err := http.NewRequest(http.MethodPost, c.BaseURL.JoinPath(pixel, "events").String(), bytes.NewReader(body))
 	if err != nil {
 		return nil, errors.New("invalid_meta_endpoint")
 	}
 	req.GetBody = nil
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+token)
-	return func(ctx context.Context) delivery.Result { return c.send(ctx, req) }, nil
+	return func(ctx context.Context) delivery.Result { return c.send(ctx, req, len(data), strict) }, nil
 }
 
-func (c Client) send(ctx context.Context, req *http.Request) delivery.Result {
+func (c Client) send(ctx context.Context, req *http.Request, sent int, strict bool) delivery.Result {
 	var connected atomic.Bool
 	trace := &httptrace.ClientTrace{GotConn: func(httptrace.GotConnInfo) { connected.Store(true) }}
 	req = req.WithContext(httptrace.WithClientTrace(ctx, trace))
@@ -85,6 +104,10 @@ func (c Client) send(ctx context.Context, req *http.Request) delivery.Result {
 	now := time.Now()
 	r := delivery.Result{Outcome: delivery.OutcomeUnknown, Reason: "meta_no_confirmation",
 		HTTPStatus: &res.StatusCode, RespondedAt: now}
+	if res.StatusCode == http.StatusTooManyRequests {
+		r.RateLimited = true
+		r.RetryAfter = retryAfter(res.Header.Get("Retry-After"), now)
+	}
 	raw, err := io.ReadAll(io.LimitReader(res.Body, maxResponse+1))
 	if err != nil || len(raw) > maxResponse {
 		return r
@@ -104,27 +127,45 @@ func (c Client) send(ctx context.Context, req *http.Request) delivery.Result {
 	}
 	r.EventsReceived = response.EventsReceived
 	r.TraceID = validTrace(response.TraceID)
-	if res.StatusCode == http.StatusOK && response.Error == nil && r.EventsReceived != nil && *r.EventsReceived == 1 {
+	if res.StatusCode == http.StatusOK && response.Error == nil && r.EventsReceived != nil && *r.EventsReceived == sent {
 		r.Outcome, r.Reason = delivery.Accepted, ""
 		return r
 	}
 	e := response.Error
-	if e == nil || e.Code <= 0 || res.StatusCode < 400 || (r.EventsReceived != nil && *r.EventsReceived != 0) {
+	if e != nil && e.Code > 0 {
+		r.GraphCode, r.GraphSubcode = &e.Code, &e.Subcode
+		if responseTrace := validTrace(e.TraceID); responseTrace != "" {
+			r.TraceID = responseTrace
+		}
+		if e.Code == 4 || e.Code == 17 || e.Code == 32 || e.Code == 613 {
+			r.RateLimited = true
+			r.RetryAfter = retryAfter(res.Header.Get("Retry-After"), now)
+		}
+	}
+	zero := r.EventsReceived != nil && *r.EventsReceived == 0
+	if res.StatusCode < 400 || (!zero && (strict || r.EventsReceived != nil)) {
 		return r
 	}
-	r.GraphCode, r.GraphSubcode = &e.Code, &e.Subcode
-	if responseTrace := validTrace(e.TraceID); responseTrace != "" {
-		r.TraceID = responseTrace
+	if r.CredentialRejected() {
+		r.Outcome, r.Reason, r.Block = delivery.PermanentRejection, "meta_credentials_or_permissions", true
+		return r
+	}
+	if r.RateLimited && (zero || (e != nil && e.Code > 0)) {
+		r.Outcome, r.Reason = delivery.RetryableRejection, delivery.MetaRateLimited
+		return r
+	}
+	if e == nil || e.Code <= 0 {
+		return r
 	}
 	switch {
-	case e.Code == 190 || e.Code == 10 || e.Code == 200:
-		r.Outcome, r.Reason, r.Block = delivery.PermanentRejection, "meta_credentials_or_permissions", true
-	case res.StatusCode == http.StatusTooManyRequests || e.Transient ||
-		e.Code == 4 || e.Code == 17 || e.Code == 32 || e.Code == 613:
+	case e.Transient:
 		r.Outcome, r.Reason = delivery.RetryableRejection, "meta_retryable_rejection"
 		r.RetryAfter = retryAfter(res.Header.Get("Retry-After"), now)
 	case res.StatusCode == http.StatusBadRequest && e.Code == 100:
 		r.Outcome, r.Reason = delivery.PermanentRejection, "meta_invalid_parameter"
+		if sent > 1 {
+			r.Outcome, r.Reason = delivery.RetryableRejection, delivery.MetaBatchParameterRejected
+		}
 	}
 	return r
 }

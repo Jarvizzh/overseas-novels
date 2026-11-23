@@ -152,6 +152,9 @@ func TestSinanPaymentDedupAndRouteRecoveryUnderConcurrentWorkers(t *testing.T) {
 		SELECT (SELECT count(*) FROM conversion.events)||':'||
 		       (SELECT count(*) FROM conversion.payment_policy_decisions)||':'||
 		       (SELECT count(*) FROM conversion.inbox WHERE reason='duplicate_payment_event')`)
+	f.check(t, "2:1", `SELECT count(*)||':'||count(DISTINCT normalized_event_id)
+	    FROM conversion.inbox WHERE source_event_id IN ('receipt-a','receipt-b')
+	      AND processed_at IS NOT NULL AND processed_at>=received_at`)
 	f.check(t, "2", "SELECT count(*)::text FROM conversion.deliveries WHERE state='blocked'")
 	var original int64
 	if err := f.owner.QueryRow(f.ctx, "SELECT id FROM conversion.deliveries WHERE role='original'").Scan(&original); err != nil {
