@@ -158,6 +158,42 @@ func (s *service) cancelStripeVIP(ctx context.Context, userID int64, subscriptio
 	return queueStripeVIPCancellation(ctx, v, reason)
 }
 
+func (s *service) refreshUnifiedStripeVIP(ctx context.Context, row vipCheckoutIntentRow) {
+	account, err := stripeVIPAccountForOwner(ctx, row.userID, row.stripeIntentID, true)
+	if err != nil {
+		return
+	}
+	adapter, ok := stripeCapabilityForAccount[payment.StripeVIPAdapter](s, account)
+	if !ok {
+		return
+	}
+	request, cancel := context.WithTimeout(ctx, stripeVIPRequestTimeout)
+	defer cancel()
+	intent, err := findStripeVIPIntent(request, db.Pool(ctx), account, row.stripeIntentID)
+	if err != nil || intent.Status == "closed" {
+		return
+	}
+	if intent.SessionID != "" || intent.SubscriptionID != "" {
+		_ = s.syncStripeVIP(request, adapter, intent, "")
+		return
+	}
+	primary, available := s.stripeVIPAdapter()
+	allowNew := available && primary.AccountScope() == account && !s.historicalStripe && stripeVIPCheckoutEnabled(request)
+	due, err := claimStripeVIP(request, account, intent.ID, allowNew)
+	if err != nil {
+		return
+	}
+	for _, item := range due {
+		if err := s.syncStripeVIP(request, adapter, item, ""); err != nil {
+			log.Printf("task=stripe_vip action=refresh intent=%s error=%v", item.ID, err)
+		}
+	}
+}
+
+func findUnidentifiedStripeVIPCheckout(ctx context.Context, adapter payment.StripeVIPAdapter, v stripeVIPIntent) (string, error) {
+	return adapter.FindStripeVIPCheckout(ctx, v.ID, v.FirstSentAt.Add(-time.Minute), v.FirstSentAt.Add(stripeCreateRetryWindow+time.Hour))
+}
+
 func (s *service) syncStripeVIP(ctx context.Context, adapter payment.StripeVIPAdapter, v stripeVIPIntent, sessionID string) error {
 	if sessionID == "" && v.SubscriptionID != "" {
 		return s.syncStripeVIPSubscription(ctx, adapter, v.SubscriptionID, "")
@@ -167,7 +203,7 @@ func (s *service) syncStripeVIP(ctx context.Context, adapter payment.StripeVIPAd
 	}
 	var proof payment.StripeVIPCheckout
 	var err error
-	if sessionID == "" && !v.LookupOnly {
+	if sessionID == "" && v.MayCreate {
 		proof, err = adapter.CreateStripeVIPCheckout(ctx, payment.StripeVIPCheckoutRequest{
 			IntentID: v.ID, ReturnURL: v.ReturnURL, CancelURL: v.CancelURL, Offer: v.Offer,
 		})
@@ -177,7 +213,10 @@ func (s *service) syncStripeVIP(ctx context.Context, adapter payment.StripeVIPAd
 		}
 	} else {
 		if sessionID == "" {
-			sessionID, err = adapter.FindStripeVIPCheckout(ctx, v.ID, v.CreatedAt.Add(-time.Minute), v.CreatedAt.Add(stripeCreateRetryWindow+time.Hour))
+			if v.FirstSentAt == nil {
+				return nil
+			}
+			sessionID, err = findUnidentifiedStripeVIPCheckout(ctx, adapter, v)
 			if err != nil || sessionID == "" {
 				return err
 			}

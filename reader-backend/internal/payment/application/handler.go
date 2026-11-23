@@ -204,6 +204,11 @@ func writePurchaseError(c *gin.Context, err error) {
 		httpx.Fail(c, http.StatusConflict, "request_key_conflict", err.Error(), nil)
 	case errors.Is(err, ErrCheckoutConflict):
 		httpx.Fail(c, http.StatusConflict, "checkout_exists", err.Error(), nil)
+	case errors.Is(err, ErrSubscriptionConflict), errors.Is(err, ErrSubscriptionPending), errors.Is(err, ErrSubscriptionReview):
+		code, message := publicSubscriptionError(err)
+		httpx.Fail(c, http.StatusConflict, code, message, nil)
+	case errors.Is(err, ErrVIPQuoteChanged):
+		httpx.Fail(c, http.StatusConflict, "vip_quote_changed", ErrVIPQuoteChanged.Error(), nil)
 	case errors.Is(err, ErrCheckoutPending):
 		httpx.Fail(c, http.StatusConflict, "checkout_pending", err.Error(), nil)
 	case errors.Is(err, ErrCheckoutPaused):

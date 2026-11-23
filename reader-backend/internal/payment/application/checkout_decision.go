@@ -64,7 +64,7 @@ func checkoutDecisionFor(e checkoutEvaluation, issue error) checkoutDecision {
 		return checkoutDecision{checkoutAllow, reasonExistingIntent}
 	case issue == nil:
 		return checkoutDecision{checkoutAllow, reasonEligible}
-	case errors.Is(issue, ErrCheckoutUnavailable):
+	case errors.Is(issue, ErrCheckoutUnavailable), errors.Is(issue, ErrVIPQuoteChanged):
 		return checkoutDecision{checkoutBlock, reasonNotEligible}
 	case errors.Is(issue, ErrCheckoutKeyConflict):
 		return checkoutDecision{checkoutBlock, reasonRequestKeyConflict}

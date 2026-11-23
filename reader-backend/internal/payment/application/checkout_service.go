@@ -51,6 +51,10 @@ func checkoutReadingPath(raw string, novelID int64) string {
 }
 
 func (s *service) GetPurchase(ctx context.Context, userID int64, intentID, paypalOrderID string) (*PurchaseIntent, error) {
+	return s.getPurchase(ctx, userID, intentID, paypalOrderID, true)
+}
+
+func (s *service) getPurchase(ctx context.Context, userID int64, intentID, paypalOrderID string, refreshVIP bool) (*PurchaseIntent, error) {
 	if intentID != "" {
 		id, err := uuid.Parse(intentID)
 		if err != nil || id == uuid.Nil {
@@ -60,7 +64,7 @@ func (s *service) GetPurchase(ctx context.Context, userID int64, intentID, paypa
 	} else if paypalOrderID == "" {
 		return nil, ErrCheckoutUnavailable
 	}
-	if vipIntent, found, err := s.tryGetVIPPurchaseIntent(ctx, userID, intentID, paypalOrderID); found {
+	if vipIntent, found, err := s.tryGetVIPPurchaseIntent(ctx, userID, intentID, paypalOrderID, refreshVIP); found {
 		return vipIntent, err
 	}
 	return s.repo.purchaseByReference(ctx, userID, intentID, paypalOrderID)
@@ -139,19 +143,19 @@ func (s *service) GetVIPPurchase(ctx context.Context, userID int64, intentID, ex
 	} else if externalID == "" {
 		return nil, ErrCheckoutUnavailable
 	}
-	if vipIntent, found, err := s.tryGetVIPPurchaseIntent(ctx, userID, intentID, externalID); found {
+	if vipIntent, found, err := s.tryGetVIPPurchaseIntent(ctx, userID, intentID, externalID, true); found {
 		return vipIntent, err
 	}
 	return s.repo.getVIPPurchase(ctx, userID, intentID, externalID)
 }
 
 func (s *service) StartPayPalCheckout(ctx context.Context, userID int64, intentID, origin string) (*PurchaseIntent, error) {
-	intent, err := s.GetPurchase(ctx, userID, intentID, "")
+	intent, err := s.getPurchase(ctx, userID, intentID, "", false)
 	if err != nil {
 		return nil, err
 	}
 	if intent.OrderType == "subscription" {
-		return s.startVIPPayPalCheckout(ctx, userID, intentID, origin)
+		return s.startVIPPayPalCheckout(ctx, userID, intent.ID, origin)
 	}
 	if intent.Status != "ready" && intent.Status != "retryable" && intent.Status != "confirming" && intent.Status != "awaiting_approval" {
 		return intent, nil

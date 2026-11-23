@@ -53,12 +53,14 @@ func (r *dbRepository) reserveSubscriptionIntent(ctx context.Context, proposed s
 func (r *dbRepository) reservePayPalSubscriptionTx(ctx context.Context, tx pgx.Tx, evaluation *checkoutEvaluation, proposed subscriptionIntent) (*subscriptionIntent, error) {
 	// An unsubmitted checkout cannot have created a provider subscription.
 	if _, err := tx.Exec(ctx, `DELETE FROM paypal_subscription_intents WHERE user_id=$1 AND slot_id<>$2 AND checkout_environment=$3
- AND submitted_at IS NULL AND subscription_id IS NULL AND COALESCE(lease_until,now())<=now()`, proposed.userID, proposed.slotID, conversion.Environment()); err != nil {
+ AND submitted_at IS NULL AND subscription_id IS NULL AND COALESCE(lease_until,now())<=now()
+ AND NOT EXISTS(SELECT 1 FROM payment_vip_checkout_intents v WHERE v.paypal_intent_id=paypal_subscription_intents.intent_id AND v.status='Pending')`, proposed.userID, proposed.slotID, conversion.Environment()); err != nil {
 		return nil, err
 	}
 	_, err := tx.Exec(ctx, `DELETE FROM paypal_subscription_intents i USING user_subscriptions s
 		WHERE i.user_id=$1 AND i.checkout_environment=$2 AND s.user_id=i.user_id AND s.subscription_id=i.subscription_id
-		AND s.status IN ('CANCELLED','EXPIRED')`, proposed.userID, conversion.Environment())
+		AND s.status IN ('CANCELLED','EXPIRED')
+		AND NOT EXISTS(SELECT 1 FROM payment_vip_checkout_intents v WHERE v.paypal_intent_id=i.intent_id AND v.status='Pending')`, proposed.userID, conversion.Environment())
 	if err != nil {
 		return nil, err
 	}
@@ -74,6 +76,16 @@ func (r *dbRepository) reservePayPalSubscriptionTx(ctx context.Context, tx pgx.T
 	}
 	evaluation.checkoutID = current.id
 	evaluation.resumed = current.id != ""
+	if current.id != "" {
+		var switching bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM payment_vip_checkout_intents
+			WHERE paypal_intent_id=$1 AND switch_to_provider IS NOT NULL)`, current.id).Scan(&switching); err != nil {
+			return nil, err
+		}
+		if switching {
+			return nil, ErrSubscriptionPending
+		}
+	}
 	if err := checkVIPCheckout(ctx, tx, evaluation, current, proposed.slotID); err != nil {
 		return nil, err
 	}
@@ -183,15 +195,30 @@ func appendVIPReturnReference(rawURL, intentID string) string {
 	return target.String()
 }
 
+// Prefer the original fulfillment order recorded on the agreement. Legacy
+// agreements may lack that pointer, so use their earliest verified paid period.
+const paypalVIPFirstOrderJoin = `LEFT JOIN LATERAL (
+	SELECT o.status AS order_status FROM recharge_orders o
+	WHERE o.subscription_id=user_subscriptions.subscription_id AND o.user_id=user_subscriptions.user_id
+	  AND o.order_type='subscription' AND o.payment_method='paypal'
+	  AND (o.id=user_subscriptions.capi_subscribe_order_id OR (user_subscriptions.capi_subscribe_order_id IS NULL
+	    AND (o.fulfilled_at IS NOT NULL OR (o.status='Refunded' AND o.paid_period_end IS NOT NULL))))
+	ORDER BY o.paid_at NULLS LAST,o.id LIMIT 1
+) first_order ON true`
+
 const paypalVIPPurchaseRows = `
 	SELECT COALESCE(checkout_intent_id::text,'') AS intent_id,subscription_id AS external_id,COALESCE(slot_id,0) AS slot,
 		price_cents AS amount,currency,
-		CASE WHEN ` + novel.PaidSubscriptionPredicate + ` THEN 'completed'
+		CASE WHEN first_order.order_status='Refunded' THEN 'refunded'
+		     WHEN first_order.order_status IS NOT NULL OR ` + novel.PaidSubscriptionPredicate + ` THEN 'completed'
 		     WHEN status IN ('CANCELLED','EXPIRED') THEN 'closed'
+		     WHEN EXISTS(SELECT 1 FROM payment_vip_checkout_intents v WHERE v.paypal_intent_id=user_subscriptions.checkout_intent_id
+		          AND v.switch_to_provider IS NOT NULL) THEN 'confirming'
 		     WHEN status='PENDING' AND COALESCE(approval.url,'')<>'' THEN 'awaiting_approval'
 		     ELSE 'confirming' END AS checkout_state,
 		checkout_return_path AS return_path,COALESCE(approval.url,'') AS approval_url,created_at
 	FROM user_subscriptions
+	` + paypalVIPFirstOrderJoin + `
 	LEFT JOIN LATERAL (SELECT i.approval_url AS url FROM paypal_subscription_intents i WHERE i.intent_id=user_subscriptions.checkout_intent_id
 		AND (i.checkout_account_id IS NULL OR EXISTS(SELECT 1 FROM payment_channel_accounts a
 		    WHERE a.id=i.checkout_account_id AND a.provider='paypal' AND a.environment=CASE $2 WHEN 'production' THEN 'live' ELSE $2 END))) approval ON true
@@ -199,7 +226,9 @@ const paypalVIPPurchaseRows = `
 	AND payment_subscription_environment(user_subscriptions)=$2
 	UNION ALL
 	SELECT i.intent_id::text,COALESCE(i.subscription_id,''),i.slot_id,i.price_cents,'USD',
-		CASE WHEN COALESCE(i.approval_url,'')<>'' THEN 'awaiting_approval'
+		CASE WHEN EXISTS(SELECT 1 FROM payment_vip_checkout_intents v WHERE v.paypal_intent_id=i.intent_id
+		          AND v.switch_to_provider IS NOT NULL) THEN 'confirming'
+		     WHEN COALESCE(i.approval_url,'')<>'' THEN 'awaiting_approval'
 		     WHEN i.submitted_at<now()-interval '24 hours' THEN 'review' ELSE 'confirming' END,
 		i.checkout_return_path,COALESCE(i.approval_url,''),COALESCE(i.submitted_at,i.lease_until,now())
 	FROM paypal_subscription_intents i
@@ -254,6 +283,8 @@ func (r *dbRepository) claimVIPActivation(ctx context.Context, subscriptionID st
 	tag, err := db.Pool(ctx).Exec(ctx, `UPDATE user_subscriptions AS s SET paypal_activation_requested_at=now()
 		WHERE s.subscription_id=$1 AND s.payment_method='paypal' AND s.status='PENDING'
 		AND s.paypal_activation_requested_at IS NULL
+		AND NOT EXISTS (SELECT 1 FROM payment_vip_checkout_intents v WHERE v.paypal_intent_id=s.checkout_intent_id
+		 AND v.switch_to_provider IS NOT NULL)
 		AND (s.checkout_account_id IS NULL OR EXISTS(
 			SELECT 1 FROM payment_channel_accounts a WHERE a.id=s.checkout_account_id AND a.provider='paypal' AND
 			((a.account_key=$2 AND a.environment=$3) OR ($2='' AND EXISTS(SELECT 1 FROM paypal_identity_lock p
@@ -267,7 +298,8 @@ func (r *dbRepository) releaseSubscriptionIntent(ctx context.Context, id string)
 
 func (r *dbRepository) submitSubscriptionIntent(ctx context.Context, id, planID string) error {
 	tag, err := db.Pool(ctx).Exec(ctx, `UPDATE paypal_subscription_intents SET plan_id=$2,submitted_at=COALESCE(submitted_at,now())
-		WHERE intent_id=$1 AND (plan_id IS NULL OR plan_id=$2) AND subscription_id IS NULL`, id, planID)
+		WHERE intent_id=$1 AND (plan_id IS NULL OR plan_id=$2) AND subscription_id IS NULL
+		AND NOT EXISTS(SELECT 1 FROM payment_vip_checkout_intents v WHERE v.paypal_intent_id=$1 AND v.switch_to_provider IS NOT NULL)`, id, planID)
 	if err == nil && tag.RowsAffected() != 1 {
 		return ErrSubscriptionConflict
 	}

@@ -61,12 +61,12 @@ func (s *service) GetStripeOfferSlots(ctx context.Context, userID int64) ([]int,
 }
 
 func (s *service) StartStripeCheckout(ctx context.Context, userID int64, intentID, origin string) (*PurchaseIntent, error) {
-	intent, err := s.GetPurchase(ctx, userID, intentID, "")
+	intent, err := s.getPurchase(ctx, userID, intentID, "", false)
 	if err != nil {
 		return nil, err
 	}
 	if intent.OrderType == "subscription" {
-		return s.startVIPStripeCheckout(ctx, userID, intentID, origin)
+		return s.startVIPStripeCheckout(ctx, userID, intent.ID, origin)
 	}
 	provider, available := s.stripeCheckoutAdapter()
 	if !available {

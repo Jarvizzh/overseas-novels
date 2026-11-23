@@ -162,3 +162,8 @@ var PaymentReviewFixesSQL string
 //
 //go:embed migrations/2026111928.sql
 var PaymentCatalogAndChannelSQL string
+
+// PaymentVIPSwitchSQL persists a unified VIP channel switch until it is verified.
+//
+//go:embed migrations/2026111929.sql
+var PaymentVIPSwitchSQL string

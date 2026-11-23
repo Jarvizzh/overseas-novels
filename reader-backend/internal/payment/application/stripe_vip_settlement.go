@@ -401,7 +401,7 @@ func grantStripeVIPPeriod(ctx context.Context, tx pgx.Tx, proof payment.StripeVI
 	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE payment_vip_checkout_intents
-		SET status='Completed',subscription_id=COALESCE(NULLIF(subscription_id,''),$1),updated_at=now()
+		SET status='Completed',switch_to_provider=NULL,subscription_id=COALESCE(NULLIF(subscription_id,''),$1),updated_at=now()
 		WHERE status='Pending'
 		  AND stripe_intent_id=(SELECT checkout_intent_id FROM user_subscriptions WHERE subscription_id=$1 AND payment_method='stripe' LIMIT 1)`,
 		proof.Subscription.ID); err != nil {

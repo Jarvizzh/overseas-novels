@@ -19,22 +19,23 @@ type stripeVIPIntent struct {
 	Account                                                                                          payment.WebhookAccount
 	SlotID, TemplateID                                                                               int
 	Offer                                                                                            payment.StripeVIPOffer
-	CreatedAt                                                                                        time.Time
 	InvoiceScanCursor                                                                                string
 	LookupOnly                                                                                       bool
+	FirstSentAt                                                                                      *time.Time
+	MayCreate                                                                                        bool
 }
 
 const stripeVIPFields = `v.id::text,v.status,v.user_id,v.account_id,v.slot_id,v.template_id,v.product_ref,v.price_ref,
 	v.amount_minor,v.cycle,v.sales_mode,v.allowed_countries,COALESCE(v.expected_country,''),COALESCE(v.tax_liability_account,''),
 	v.return_url,v.cancel_url,v.return_path,COALESCE(v.checkout_ref,''),COALESCE(v.subscription_ref,''),
-	COALESCE(v.customer_ref,''),COALESCE(v.approval_url,''),v.created_at,COALESCE(v.invoice_scan_cursor,''),
+	COALESCE(v.customer_ref,''),COALESCE(v.approval_url,''),COALESCE(v.invoice_scan_cursor,''),v.first_sent_at,
 	(v.create_lookup_only OR COALESCE(v.retry_until<=now(),false))`
 
 func scanStripeVIP(row pgx.Row) (stripeVIPIntent, error) {
 	var v stripeVIPIntent
 	err := row.Scan(&v.ID, &v.Status, &v.UserID, &v.AccountID, &v.SlotID, &v.TemplateID, &v.Offer.ProductID, &v.Offer.PriceID,
 		&v.Offer.AmountMinor, &v.Offer.Cycle, &v.Offer.SalesMode, &v.Offer.Countries, &v.Offer.ExpectedCountry, &v.Offer.TaxLiabilityAccount, &v.ReturnURL,
-		&v.CancelURL, &v.ReturnPath, &v.SessionID, &v.SubscriptionID, &v.CustomerID, &v.ApprovalURL, &v.CreatedAt, &v.InvoiceScanCursor, &v.LookupOnly)
+		&v.CancelURL, &v.ReturnPath, &v.SessionID, &v.SubscriptionID, &v.CustomerID, &v.ApprovalURL, &v.InvoiceScanCursor, &v.FirstSentAt, &v.LookupOnly)
 	return v, err
 }
 
@@ -96,7 +97,8 @@ func reserveStripeVIPTx(ctx context.Context, tx pgx.Tx, e *checkoutEvaluation, r
 	}
 	var paypalReserved bool
 	err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM paypal_subscription_intents i WHERE i.user_id=$1 AND i.checkout_environment=$2
-		AND (i.submitted_at IS NOT NULL OR COALESCE(i.lease_until>now(),false) OR i.subscription_id IS NOT NULL)
+		AND (i.submitted_at IS NOT NULL OR COALESCE(i.lease_until>now(),false) OR i.subscription_id IS NOT NULL
+		    OR EXISTS(SELECT 1 FROM payment_vip_checkout_intents u WHERE u.paypal_intent_id=i.intent_id AND u.status='Pending'))
 		AND NOT EXISTS(SELECT 1 FROM user_subscriptions s WHERE s.user_id=i.user_id AND s.subscription_id=i.subscription_id
 		 AND s.payment_method='paypal' AND s.status IN ('CANCELLED','EXPIRED')))`, req.userID, conversion.Environment()).Scan(&paypalReserved)
 	if err != nil {
@@ -183,12 +185,27 @@ func claimStripeVIP(ctx context.Context, account payment.WebhookAccount, id stri
 		  AND ($4='' OR v.id=NULLIF($4,'')::uuid) AND v.next_check_at<=now()
 		  AND v.status IN ('creating','buyer_action','bound')
 		  AND (v.cancelled_at IS NULL OR v.cancelled_at>now()-interval '7 days')
-		  AND (v.status<>'creating' OR v.first_sent_at IS NOT NULL OR ($6 AND a.new_subscriptions_enabled))
+		  AND (v.status<>'creating' OR v.first_sent_at IS NOT NULL
+		       OR v.checkout_ref IS NOT NULL OR ($6 AND a.new_subscriptions_enabled AND a.status='published' AND a.is_primary
+		          AND NOT EXISTS(
+		              SELECT 1 FROM payment_vip_checkout_intents u WHERE u.stripe_intent_id=v.id
+		                AND NOT EXISTS (
+		                    SELECT 1 FROM recharge_slots s JOIN products p ON p.id=s.product_id
+		                    JOIN product_publications pub ON pub.product_id=p.id AND pub.environment=a.environment AND pub.status='published'
+		                    WHERE s.id=u.slot_id AND s.template_id=u.template_id AND p.id=u.product_id
+		                      AND p.product_type='vip' AND p.currency=u.currency AND p.price_cents=u.price_cents AND p.vip_cycle=u.cycle
+		                      AND s.template_id=COALESCE(
+		                          (SELECT recharge_template_id FROM reader_promotion_for_user(u.user_id) WHERE recharge_template_id IS NOT NULL),
+		                          (SELECT id FROM recharge_templates ORDER BY is_default DESC NULLS LAST,id LIMIT 1))
+		                ))))
+		  AND (v.checkout_ref IS NOT NULL OR v.subscription_ref IS NOT NULL OR NOT EXISTS (
+		      SELECT 1 FROM payment_vip_checkout_intents u
+		      WHERE u.stripe_intent_id=v.id AND (u.status<>'Pending' OR u.switch_to_provider IS NOT NULL)))
 		ORDER BY v.next_check_at,v.id LIMIT 5 FOR UPDATE OF v SKIP LOCKED
 	), leased AS (
 		UPDATE payment_stripe_subscription_intents v SET
-		  first_sent_at=CASE WHEN v.status='creating' THEN COALESCE(v.first_sent_at,now()) ELSE v.first_sent_at END,
-		  retry_until=CASE WHEN v.status='creating' THEN COALESCE(v.retry_until,now()+make_interval(secs=>$5::int)) ELSE v.retry_until END,
+		  first_sent_at=CASE WHEN v.status='creating' AND v.checkout_ref IS NULL THEN COALESCE(v.first_sent_at,now()) ELSE v.first_sent_at END,
+		  retry_until=CASE WHEN v.status='creating' AND v.checkout_ref IS NULL THEN COALESCE(v.retry_until,now()+make_interval(secs=>$5::int)) ELSE v.retry_until END,
 		  next_check_at=now()+CASE WHEN v.status='bound' THEN interval '15 minutes' ELSE interval '1 minute' END
 		FROM due WHERE v.id=due.id RETURNING v.*
 	) SELECT `+stripeVIPFields+` FROM leased v`, account.AccountKey, account.Environment, conversion.Environment(), id,
@@ -196,7 +213,12 @@ func claimStripeVIP(ctx context.Context, account payment.WebhookAccount, id stri
 	if err != nil {
 		return nil, err
 	}
-	return pgx.CollectRows(rows, func(row pgx.CollectableRow) (stripeVIPIntent, error) { return scanStripeVIP(row) })
+	return pgx.CollectRows(rows, func(row pgx.CollectableRow) (stripeVIPIntent, error) {
+		v, err := scanStripeVIP(row)
+		v.Account = account
+		v.MayCreate = v.Status == "creating" && v.SessionID == "" && v.FirstSentAt != nil && !v.LookupOnly
+		return v, err
+	})
 }
 
 func saveStripeVIPCheckout(ctx context.Context, v stripeVIPIntent, proof payment.StripeVIPCheckout) error {
@@ -311,23 +333,29 @@ func stripeLocalAgreementStatus(proof payment.StripeVIPSubscription) string {
 	return "PENDING"
 }
 
+const stripeVIPPurchaseStateSQL = `CASE WHEN o.status='Refunded' THEN 'refunded'
+		WHEN p.admitted AND o.fulfilled_at IS NOT NULL THEN 'completed'
+		WHEN v.status='closed' THEN 'closed'
+		WHEN EXISTS(SELECT 1 FROM payment_vip_checkout_intents u WHERE u.stripe_intent_id=v.id AND u.switch_to_provider IS NOT NULL) THEN 'confirming'
+		WHEN p.review_reason IS NOT NULL OR (v.status='creating' AND (v.create_lookup_only OR v.retry_until<=now())) THEN 'review'
+		WHEN v.status='buyer_action' AND v.approval_url IS NOT NULL THEN 'awaiting_approval'
+		WHEN v.cancelled_at IS NOT NULL THEN 'closed'
+		ELSE 'confirming' END`
+
+const stripeVIPFirstPeriodJoin = `LEFT JOIN LATERAL (
+		SELECT b.order_id,b.review_reason,b.admitted FROM payment_stripe_invoice_periods b
+		WHERE b.intent_id=v.id AND NOT EXISTS (
+			SELECT 1 FROM payment_stripe_invoice_periods revision
+			WHERE revision.intent_id=b.intent_id AND revision.revises_invoice_ref=b.invoice_ref AND revision.revision_verified
+		)
+		ORDER BY (b.billing_reason='subscription_create') DESC,b.service_start NULLS LAST,b.order_id LIMIT 1
+	) p ON true LEFT JOIN recharge_orders o ON o.id=p.order_id`
+
 const stripeVIPPurchaseProjection = `SELECT v.id::text,v.slot_id,v.amount_minor,v.return_path,COALESCE(v.approval_url,''),COALESCE(v.subscription_ref,''),
-		CASE WHEN o.status='Refunded' THEN 'refunded'
-		     WHEN p.admitted AND o.fulfilled_at IS NOT NULL THEN 'completed'
-		     WHEN v.status='closed' THEN 'closed'
-		     WHEN p.review_reason IS NOT NULL OR (v.status='creating' AND (v.create_lookup_only OR v.retry_until<=now())) THEN 'review'
-		     WHEN v.status='buyer_action' AND v.approval_url IS NOT NULL THEN 'awaiting_approval'
-		     WHEN v.cancelled_at IS NOT NULL THEN 'closed'
-		     ELSE 'confirming' END
-		FROM payment_stripe_subscription_intents v JOIN payment_channel_accounts a ON a.id=v.account_id
-		LEFT JOIN LATERAL (
-		 SELECT b.order_id,b.review_reason,b.admitted FROM payment_stripe_invoice_periods b
-	 WHERE b.intent_id=v.id AND NOT EXISTS (
-	   SELECT 1 FROM payment_stripe_invoice_periods revision
-	   WHERE revision.intent_id=b.intent_id AND revision.revises_invoice_ref=b.invoice_ref AND revision.revision_verified
-	 ) ORDER BY (b.billing_reason='subscription_create') DESC,b.service_start NULLS LAST,b.order_id LIMIT 1
-		) p ON true LEFT JOIN recharge_orders o ON o.id=p.order_id
-		WHERE v.user_id=$1 AND a.provider='stripe' AND a.account_key=$2 AND a.environment=$3 AND v.checkout_environment=$4`
+	` + stripeVIPPurchaseStateSQL + `
+	FROM payment_stripe_subscription_intents v JOIN payment_channel_accounts a ON a.id=v.account_id
+	` + stripeVIPFirstPeriodJoin + `
+	WHERE v.user_id=$1 AND a.provider='stripe' AND a.account_key=$2 AND a.environment=$3 AND v.checkout_environment=$4`
 
 func scanStripeVIPPurchase(row pgx.Row) (PurchaseIntent, error) {
 	result := PurchaseIntent{OrderType: "subscription", Currency: "USD", Provider: payment.ProviderStripe}

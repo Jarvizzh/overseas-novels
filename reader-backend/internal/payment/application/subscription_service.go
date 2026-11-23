@@ -194,15 +194,18 @@ func (s *service) recordPayPalSubscriptionTransaction(ctx context.Context, sub *
 	if err != nil || transaction.ID == "" || transaction.Time.IsZero() || transaction.Amount.Gross.Currency != sub.Currency {
 		return errors.New("invalid PayPal subscription transaction")
 	}
+	// Every recurring payment must meet the agreement terms before any evidence can establish its period.
 	var periodEnd time.Time
-	if transaction.Status == "COMPLETED" && details.LastPaymentTime != nil &&
+	admissible := transaction.Status == "COMPLETED" && details.SubscriptionID == sub.SubscriptionID &&
+		sub.PlanID != "" && details.PlanID == sub.PlanID && sub.PriceCents > 0 && amount >= int64(sub.PriceCents)
+	if admissible && details.LastPaymentTime != nil &&
 		transaction.Time.Sub(*details.LastPaymentTime).Abs() <= time.Minute &&
 		details.LastPaymentCents == amount && details.LastPaymentCurrency == sub.Currency &&
-		amount >= int64(sub.PriceCents) && details.CurrentPeriodEnd != nil && details.CurrentPeriodEnd.After(transaction.Time) {
+		details.CurrentPeriodEnd != nil && details.CurrentPeriodEnd.After(transaction.Time) {
 		periodEnd = *details.CurrentPeriodEnd
 	}
 
-	if periodEnd.IsZero() && transaction.Status == "COMPLETED" {
+	if periodEnd.IsZero() && admissible {
 		periodEnd, err = s.repo.getPayPalBillingSnapshot(ctx, sub.SubscriptionID, transaction.Time, sub.Currency, amount)
 		if err != nil {
 			return err

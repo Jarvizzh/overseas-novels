@@ -168,6 +168,7 @@ func (r *dbRepository) RecordSubscriptionRenewalOrderTx(
 			(SELECT product_snapshot FROM user_subscriptions WHERE subscription_id=$7::text),
 			CASE WHEN $10::timestamptz IS NOT NULL THEN $6::timestamptz END,$10,COALESCE((SELECT attribution->>'utm_source' FROM user_subscriptions WHERE subscription_id=$7::text),u.utm_source),COALESCE((SELECT attribution->>'utm_campaign' FROM user_subscriptions WHERE subscription_id=$7::text),u.utm_campaign),p.id,p.novel_id,
  CASE WHEN $11 THEN 'PayPal reports refunded sale; match refund ID'
+ WHEN $10::timestamptz IS NULL AND $3::int < $14::int THEN 'PayPal settled amount is below the agreement price; billing period needs review'
  WHEN $10::timestamptz IS NULL THEN 'PayPal settled amount verified; billing period needs review' END,$11,(SELECT attribution FROM user_subscriptions WHERE subscription_id=$7::text) || jsonb_build_object('payer_email',$12::text),NULLIF($13,'')
 		FROM users u LEFT JOIN LATERAL (
 			SELECT id,novel_id FROM reader_promotion_for_user(u.id)
@@ -185,7 +186,7 @@ func (r *dbRepository) RecordSubscriptionRenewalOrderTx(
 			AND recharge_orders.subscription_id=EXCLUDED.subscription_id AND recharge_orders.payment_method=EXCLUDED.payment_method
 			AND recharge_orders.amount_cents=EXCLUDED.amount_cents AND recharge_orders.currency=EXCLUDED.currency
 		RETURNING id`,
-		sub.UserID, externalRefID, amountCents, currency, sub.PaymentMethod, paidAt, sub.SubscriptionID, sub.SlotID, sub.TemplateID, confirmedEnd, reportedRefund, tpOrder.PayerEmail, sub.Environment).Scan(&orderID)
+		sub.UserID, externalRefID, amountCents, currency, sub.PaymentMethod, paidAt, sub.SubscriptionID, sub.SlotID, sub.TemplateID, confirmedEnd, reportedRefund, tpOrder.PayerEmail, sub.Environment, sub.PriceCents).Scan(&orderID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}
@@ -294,7 +295,7 @@ func (r *dbRepository) RecordSubscriptionRenewalOrderTx(
 	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE payment_vip_checkout_intents
-		SET status='Completed',subscription_id=COALESCE(NULLIF(subscription_id,''),$1),updated_at=now()
+		SET status='Completed',switch_to_provider=NULL,subscription_id=COALESCE(NULLIF(subscription_id,''),$1),updated_at=now()
 		WHERE status='Pending'
 		  AND (paypal_intent_id=(SELECT checkout_intent_id FROM user_subscriptions WHERE subscription_id=$1 AND payment_method='paypal' LIMIT 1)
 		    OR subscription_id=$1)`, sub.SubscriptionID); err != nil {

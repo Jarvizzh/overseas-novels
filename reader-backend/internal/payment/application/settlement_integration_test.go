@@ -459,7 +459,7 @@ func TestPaymentSettlementIntegration(t *testing.T) {
 	t.Run("paid boundary snapshot survives external cancellation", func(t *testing.T) {
 		paidAt := time.Now().UTC().Truncate(time.Second)
 		end := paidAt.AddDate(0, 1, 0)
-		exec(`INSERT INTO user_subscriptions(user_id,subscription_id,payment_method,status) VALUES(192,'I-SNAPSHOT','paypal','CANCELLED')`)
+		exec(`INSERT INTO user_subscriptions(user_id,subscription_id,payment_method,status,plan_id) VALUES(192,'I-SNAPSHOT','paypal','CANCELLED','P-TEST')`)
 		d := &payment.SubscriptionDetails{SubscriptionID: "I-SNAPSHOT", LastPaymentTime: &paidAt, CurrentPeriodEnd: &end, LastPaymentCents: 999, LastPaymentCurrency: "USD"}
 		if err := r.savePayPalBillingSnapshot(ctx, d); err != nil {
 			t.Fatal(err)
@@ -478,7 +478,7 @@ func TestPaymentSettlementIntegration(t *testing.T) {
 		transaction.Amount.Gross.Value = "9.99"
 		transaction.Amount.Gross.Currency = "USD"
 		service := NewService(r, n, payment.Adapters{}).(*service)
-		if err := service.recordPayPalSubscriptionTransaction(ctx, sub, &payment.SubscriptionDetails{Status: "CANCELLED"}, transaction); err != nil {
+		if err := service.recordPayPalSubscriptionTransaction(ctx, sub, &payment.SubscriptionDetails{SubscriptionID: sub.SubscriptionID, PlanID: sub.PlanID, Status: "CANCELLED"}, transaction); err != nil {
 			t.Fatal(err)
 		}
 		var stored time.Time
@@ -560,7 +560,7 @@ func TestPaymentSettlementIntegration(t *testing.T) {
 		}
 		testdb.ScopeSubscriptions(t, pool, "paypal", "live", "I-CANCEL-FIRST")
 		paidAt := time.Now().UTC().Truncate(time.Second)
-		details := &payment.SubscriptionDetails{Status: "CANCELLED", CurrentPeriodStart: &paidAt, LastPaymentTime: &paidAt, LastPaymentCents: 999, LastPaymentCurrency: "USD"}
+		details := &payment.SubscriptionDetails{SubscriptionID: sub.SubscriptionID, PlanID: sub.PlanID, Status: "CANCELLED", CurrentPeriodStart: &paidAt, LastPaymentTime: &paidAt, LastPaymentCents: 999, LastPaymentCurrency: "USD"}
 		transaction := payment.SubscriptionTransaction{ID: "cancel-first-sale", Status: "COMPLETED", Time: paidAt}
 		transaction.Amount.Gross.Value = "9.99"
 		transaction.Amount.Gross.Currency = "USD"

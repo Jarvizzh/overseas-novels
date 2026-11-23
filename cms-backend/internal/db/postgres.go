@@ -84,7 +84,8 @@ const (
 	paymentCompletionVersion          int64 = 2026111925
 	paymentRecoveryVersion            int64 = 2026111926
 	paymentReviewFixesVersion         int64 = 2026111927
-	RequiredSchemaVersion             int64 = 2026111928
+	paymentCatalogAndChannelVersion   int64 = 2026111928
+	RequiredSchemaVersion             int64 = 2026111929
 )
 
 func autoMigrate(ctx context.Context, pool *pgxpool.Pool) error {
@@ -274,7 +275,12 @@ func autoMigrate(ctx context.Context, pool *pgxpool.Pool) error {
 			return fmt.Errorf("schema migration %d: %w", paymentReviewFixesVersion, err)
 		}
 	}
-	if _, err := tx.Exec(ctx, dbassets.PaymentCatalogAndChannelSQL); err != nil {
+	if version < paymentCatalogAndChannelVersion {
+		if _, err := tx.Exec(ctx, dbassets.PaymentCatalogAndChannelSQL); err != nil {
+			return fmt.Errorf("schema migration %d: %w", paymentCatalogAndChannelVersion, err)
+		}
+	}
+	if _, err := tx.Exec(ctx, dbassets.PaymentVIPSwitchSQL); err != nil {
 		return fmt.Errorf("schema migration %d: %w", RequiredSchemaVersion, err)
 	}
 	return tx.Commit(ctx)

@@ -29,6 +29,10 @@ type sixFlowPayPalAdapter struct {
 	capturesByRef  map[string]*payment.OrderCapture
 	captureErr     error
 	subDetailsByID map[string]*payment.SubscriptionDetails
+	subByRequest   map[string]string
+	createFault    string
+	cancelFault    func(string) error
+	beforeCreate   func()
 }
 
 func (a *sixFlowPayPalAdapter) CreateOrder(_ context.Context, _ payment.WebhookAccount, _ int64, customID, _, _, _, _ string) (string, string, error) {
@@ -66,7 +70,26 @@ func (a *sixFlowPayPalAdapter) CanCloseSingleCheckout(context.Context, string, s
 
 func (a *sixFlowPayPalAdapter) CreateSubscription(_ context.Context, p payment.CreateSubscriptionParam) (*payment.SubscriptionResult, error) {
 	a.agreements = append(a.agreements, p)
-	id := fmt.Sprintf("I-SIX-%d-%d", p.UserID, len(a.agreements))
+	if a.beforeCreate != nil {
+		a.beforeCreate()
+	}
+	if a.createFault == "before" {
+		a.createFault = ""
+		return nil, context.DeadlineExceeded
+	}
+	id := a.subByRequest[p.RequestID]
+	if id == "" {
+		id = fmt.Sprintf("I-SIX-%d-%d", p.UserID, len(a.agreements))
+		if a.subByRequest == nil {
+			a.subByRequest = make(map[string]string)
+		}
+		a.subByRequest[p.RequestID] = id
+		a.subDetailsByID[id] = &payment.SubscriptionDetails{SubscriptionID: id, PlanID: p.PlanID, CustomID: p.CustomID, Status: "APPROVAL_PENDING"}
+	}
+	if a.createFault == "after" {
+		a.createFault = ""
+		return nil, context.DeadlineExceeded
+	}
 	return &payment.SubscriptionResult{
 		SubscriptionID: id,
 		ApproveURL:     "https://www.sandbox.paypal.com/webapps/billing/subscriptions?ba_token=" + id,
@@ -84,6 +107,10 @@ func (a *sixFlowPayPalAdapter) ActivateSubscription(context.Context, string) err
 
 func (a *sixFlowPayPalAdapter) CancelSubscription(_ context.Context, id, _ string) error {
 	a.cancelledSubs = append(a.cancelledSubs, id)
+	if a.cancelFault != nil {
+		return a.cancelFault(id)
+	}
+	a.subDetailsByID[id].Status = "CANCELLED"
 	return nil
 }
 
@@ -96,6 +123,9 @@ type sixFlowStripeAdapter struct {
 	sessionSeq    int
 	vipSessionSeq int
 	closedVIP     []string
+	loseVIPReply  bool
+	closeVIPProof func(payment.StripeVIPCheckout) payment.StripeVIPCheckout
+	vipByIntent   map[string]string
 }
 
 func (a *sixFlowStripeAdapter) Provider() string                     { return payment.ProviderStripe }
@@ -121,23 +151,35 @@ func (a *sixFlowStripeAdapter) ReadSingleCheckout(_ context.Context, sessionID, 
 func (a *sixFlowStripeAdapter) CreateStripeVIPCheckout(_ context.Context, req payment.StripeVIPCheckoutRequest) (payment.StripeVIPCheckout, error) {
 	a.vipSessionSeq++
 	id := fmt.Sprintf("cs_vip_%d", a.vipSessionSeq)
+	if a.vipByIntent == nil {
+		a.vipByIntent = make(map[string]string)
+	}
+	a.vipByIntent[req.IntentID] = id
+	if a.loseVIPReply {
+		return payment.StripeVIPCheckout{}, context.DeadlineExceeded
+	}
 	return payment.StripeVIPCheckout{
 		ID: id, IntentID: req.IntentID, AwaitingBuyer: true,
 		URL: "https://checkout.stripe.com/c/pay/" + id,
 	}, nil
 }
 
-func (a *sixFlowStripeAdapter) FindStripeVIPCheckout(context.Context, string, time.Time, time.Time) (string, error) {
-	return "", nil
+func (a *sixFlowStripeAdapter) FindStripeVIPCheckout(_ context.Context, intentID string, _, _ time.Time) (string, error) {
+	return a.vipByIntent[intentID], nil
 }
 
 func (a *sixFlowStripeAdapter) ReadStripeVIPCheckout(_ context.Context, sessionID, intentID, _ string) (payment.StripeVIPCheckout, error) {
-	return payment.StripeVIPCheckout{ID: sessionID, IntentID: intentID, AwaitingBuyer: true}, nil
+	return payment.StripeVIPCheckout{ID: sessionID, IntentID: intentID, AwaitingBuyer: true,
+		URL: "https://checkout.stripe.com/c/pay/" + sessionID}, nil
 }
 
 func (a *sixFlowStripeAdapter) CloseStripeVIPCheckout(_ context.Context, sessionID, intentID, _ string) (payment.StripeVIPCheckout, error) {
 	a.closedVIP = append(a.closedVIP, sessionID)
-	return payment.StripeVIPCheckout{ID: sessionID, IntentID: intentID, Expired: true}, nil
+	proof := payment.StripeVIPCheckout{ID: sessionID, IntentID: intentID, Expired: true}
+	if a.closeVIPProof != nil {
+		proof = a.closeVIPProof(proof)
+	}
+	return proof, nil
 }
 
 func (a *sixFlowStripeAdapter) ReadStripeVIPSubscription(_ context.Context, subID string) (payment.StripeVIPSubscription, error) {
@@ -548,6 +590,10 @@ func TestSixH5PurchaseFlowsEndToEnd(t *testing.T) {
 		if done, err := svc.GetPurchase(ctx, 604, intent.ID, ""); err != nil || done.Status != "completed" {
 			t.Fatalf("Flow 6 final purchase status: %+v err=%v", done, err)
 		}
+	})
+
+	t.Run("UnifiedVIPReviewRegressions", func(t *testing.T) {
+		testUnifiedVIPReview(t, svc, pool, ppAdapter, stAdapter, origin)
 	})
 
 	// Dual-channel gate: disabling Stripe binding on pCoins excludes it from catalog & PreparePurchase
