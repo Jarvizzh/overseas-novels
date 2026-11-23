@@ -1,5 +1,55 @@
 # 回传中心修复与整链路吞吐复审
 
+## 最新复测 · 2026-11-23 · schema 2026111934
+
+**上轮“迟到的凭据错误暂停健康 Pixel”P2 已关闭。本次修复范围内未发现新的阻塞问题。** 审查对象为 `75ae7b2` 加当前工作区的 1934 改动。目标现在记录决定当前凭据健康状态的批次 ID，收到完整成功或明确凭据错误时，按同一凭据的批次先后更新暂停状态。旧批次仍保留自己的回执及成员结果。[回执事务](../conversion-backend/internal/delivery/batch_receipt.go#L95) · [轮换凭据](../conversion-backend/internal/delivery/configuration.go#L88)
+
+| 隔离 PostgreSQL 16 实测 | 结果 |
+| --- | --- |
+| 同一凭据，A 失租，较新批次 B 已经发出 | A 的旧错误先落库、B 的成功先落库两种顺序均通过。第 3 条投递成功，A 保持未知且仅尝试一次，迟到的 190/463 错误可查。[原场景回归](../conversion-backend/internal/delivery/batch_test.go#L145) |
+| B 的最新回执确认为凭据错误，A 的旧成功随后落库 | Pixel 保持暂停，第 3 条无法领取。凭据轮换后旧版本错误不影响新凭据的用例也通过。[反向与轮换用例](../conversion-backend/internal/delivery/batch_test.go#L185) |
+| 两个事务同时写同一 Pixel 的 A 错误与 B 成功 | 通过临时 Go test overlay 运行 12 组并发写入。每组第 3 条均可领取并按模拟成功回执定稿，最终均为 1 条未知、2 条成功。 |
+| 历史库升级到 1934 | CMS 正式迁移入口恢复了 1933 错停且已有更新成功批次的 Pixel，最新证据仍为凭据错误的 Pixel 继续暂停。[回填 SQL](../cms-backend/db/migrations/2026111934.sql#L6) · [升级用例](../cms-backend/internal/db/migration_test.go#L562) |
+
+本轮 Conversion 全模块 `go test -race -count=1 -p 1 ./...` 与 CMS 数据库升级用例均通过，未调用真实 Meta。下文的 Reader 耗时来自 1933 复测。双实例 Reader 与 Partner 混合峰值、30 分钟稳态、1.5 倍峰值与重启容量仍待按实际流量分布验证。
+
+## 上轮复测 · 2026-11-23 · `75ae7b2`
+
+**上轮四项问题的原始场景均通过复测。单 Pixel、批量 100 的 Reader 吞吐也达到方案目标。** 故障恢复仍有一项 P2：同一凭据已有更新的成功回执时，旧批次迟到的错误可以暂停该 Pixel。建议修复这个边界后再扩大生产批量。Linux 配置及发布说明已统一为从批量 1 起步。
+
+### P2 · 旧批次的迟到错误会覆盖同一凭据的新成功
+
+**已用真实 PostgreSQL 复现。** 在一个 Pixel 上预置 3 条就绪投递。批次 A 开始发送并取得 HTTP 400、Graph 190，延迟写入该错误。A 租约到期并由 Sweep 定稿为未知后，批次 B 使用同一凭据发送第 2 条，取得完整的 1/1 确认并落库。此时写入 A 的迟到回执，目标的 `blocked_credential_id` 又被设为当前凭据。第 3 条仍然就绪，`ClaimBatch` 却返回无任务。该问题需要失租和回执乱序同时发生，影响该 Pixel 后续全部待发投递。
+
+回执事务检查了当前凭据 ID，但没有比较同一凭据的批次先后。1933 迁移回填时却已经比较最后一次失败和成功的批次 ID，运行时与迁移对同一段历史可能给出不同结论。[运行时更新](../conversion-backend/internal/delivery/batch_receipt.go#L95) · [迁移回填](../cms-backend/db/migrations/2026111933.sql#L7) · [领取过滤](../conversion-backend/internal/delivery/batch_claim.go#L45)
+
+**修复与验收。** 在目标行锁保护下，按目标、凭据和批次顺序更新健康状态。晚到的旧错误仍写入原批次账本；较新批次已经证实同一凭据有效时，保持后续领取畅通。还需覆盖 A 的错误先落库、已经发出的 B 随后成功的顺序，由较新的成功解除旧错误造成的暂停。两种顺序都应允许第 3 条发送，A 的成员继续保留未知。保留已有的“换新凭据后收到旧错误”及“最新批次确实失效就暂停”用例。
+
+### 上轮四项修复的验收结果
+
+| 原发现 | 本轮结果 |
+| --- | --- |
+| P1 凭据失效后继续发 | 原场景通过。批量 1 和 100 下，缺少接收数的 190 错误保留成员未知，同时拦住同 Pixel 后续领取；独立 Pixel 可发送。轮换凭据后，旧版本迟到错误不会暂停新版本。相同版本的乱序边界见上。[批次用例](../conversion-backend/internal/delivery/batch_test.go#L145) |
+| P2 超龄注册挤占支付 | 通过。104 条超龄注册与 1 条 Purchase 同时就绪，批量 100 的首批已包含 Purchase；批量 1 时切换到另一个 Service 后，第二次领取取得 Purchase。原有连续支付时让出非支付名额的用例也通过。[调度与跨批计数](../conversion-backend/internal/delivery/batch_claim.go#L135) · [双向用例](../conversion-backend/internal/delivery/batch_test.go#L200) |
+| P2 混合批次成员计数 | 通过。1 条 Reader 和 99 条 Partner 共用同一 Pixel，分别构造成功批次和未知批次；吞吐及监控查询按来源归属 1/99，真实平均批大小保留 100。监控的事件及账户筛选也通过。[数据库断言](../conversion-backend/internal/operations/throughput_rereview_test.go#L60) |
+| P2 Partner 完成时间 | 通过。已消费和已隔离的 Inbox 在状态转换时记录自己的处理时间。跨窗口付款别名计入当前窗口归并量，隔离消息按处理时间计数，旧数据缺失时间单列。司南消费集成用例通过。[时间戳触发器](../cms-backend/db/migrations/2026111933.sql#L27) · [指标用例](../conversion-backend/internal/operations/throughput_rereview_test.go#L82) |
+
+### 容量与测试边界
+
+使用一次性 PostgreSQL 16、单 Worker、2 个 Reader 消费者、连接池上限 16、单 Pixel、批量上限 100、请求间隔 3 秒。积压场景的本机 HTTP 服务模拟 2 秒响应。
+
+| 场景 | 原目标 | 本轮实测 |
+| --- | --- | --- |
+| 1,000 条预就绪投递至全部确认 | ≤35 秒、10 个请求 | **29.903 秒**，10 个满批，最短发起间隔 3.064 秒 |
+| 1,000 条 Reader Outbox 至全部确认 | ≤60 秒 | **34.208 秒**，11 个请求，首批 22 条、末批 78 条，最短间隔 3.092 秒 |
+| 空队列单笔付款至模拟 HTTP 收到请求 | P95 ≤1 秒 | **P95 479 毫秒**，20 笔、20 个请求，最大 483 毫秒 |
+
+Conversion 全模块在隔离库执行 `go test -race -count=1 -p 1 ./...` 通过。以上计时取自另行运行的无竞态插桩容量用例。迟到回执由临时 Go test overlay 调用正式领取、持久化、扫描及定稿路径复现。本轮未向 Meta 发送真实事件。Reader 与 Partner 双实例混合峰值、30 分钟稳态、1.5 倍峰值和单实例重启仍待按实际流量分布验收。[容量用例](../conversion-backend/internal/operations/throughput_test.go) · [双源验收条件](conversion-throughput-plan.md)
+
+---
+
+## 上轮复审记录 · 1932
+
 2026-11-23，审查基线为 `codex/payment-domain` 的 `5ec1513` 加当前工作区改动，包含 1931、1932 迁移及未提交的批量发送实现。审查依据为[原 Review 的 R01–R12](conversion-center-review-2026-11-23.md)和[吞吐优化方案](conversion-throughput-plan.md)。
 
 **建议暂缓将生产批量扩大到 50 或 100。** 同 Pixel 最多 100 条、槽位释放后续领、跨实例共享冷却和批次回执持久化均已进入正式 Worker 路径。仍有一个凭据故障可连续影响多个批次，一个调度条件可让已就绪的 Purchase 长时间得不到发送机会。现有采样也不足以验收 Reader 与 Partner 同时上线时的容量。

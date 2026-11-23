@@ -1,6 +1,6 @@
 # Star Novel 转化服务
 
-转化服务消费 Reader 事务 Outbox，创建统一事件与各 Pixel 投递任务。迁移由 CMS 的 `-migrate` 入口管理，启动时要求 schema `2026111933`。应用架构、实施顺序与验收标准见 [统一转化回传架构升级与开发文档](../docs/conversion-reporting-architecture.md)。
+转化服务消费 Reader 事务 Outbox，创建统一事件与各 Pixel 投递任务。迁移由 CMS 的 `-migrate` 入口管理，启动时要求 schema `2026111934`。应用架构、实施顺序与验收标准见 [统一转化回传架构升级与开发文档](../docs/conversion-reporting-architecture.md)。
 
 从本目录运行 `go run ./cmd/conversion`。配置如下。
 
@@ -126,7 +126,7 @@ psql -X -f cms-backend/db/conversion_sinan_mock_grants.sql \
 | `CONVERSION_DB_MAX_CONNS` | `8` | API、Collector、Callback 和分销回告各自的连接池上限 |
 | `CONVERSION_META_BATCH_SIZE` | `1` | 每次 Meta 请求的成员上限，允许 1–100 |
 
-使用独立数据库角色的环境升级至 1933 后，按部署流程重新应用 `cms-backend/db/conversion_role_grants.sql`。Reader 接入的空事件白名单会跳过所有事件。迁移保留已有审计记录的空白名单，对无配置审计的旧 Reader 接入保留历史四事件默认行为。上线前核对有审计记录但白名单仍为空的旧账户。
+使用独立数据库角色的环境升级至 1934 后，按部署流程重新应用 `cms-backend/db/conversion_role_grants.sql`。Reader 接入的空事件白名单会跳过所有事件。迁移保留已有审计记录的空白名单，对无配置审计的旧 Reader 接入保留历史四事件默认行为。上线前核对有审计记录但白名单仍为空的旧账户。
 
 Collector 每 30 秒采样，首次采样成功前标为等待，最后一次成功采样达到 90 秒时标为过期。明确限流和定稿失败按 Pixel 统计最近 15 分钟。
 
@@ -157,7 +157,7 @@ python3 deploy/linux/prepare-config.py --config conversion-backend/config.test.y
 
 升级前先停旧 Worker 的新领取，等待旧租约定稿。由 CMS 执行 `-migrate` 时保持旧发送器停止。更新独立数据库角色授权后，线上首发以 `meta_batch_size: 1` 启动新版并验证确认和恢复，后续按压测和灰度结果调整。缩小批次只影响下一次领取，当前或待恢复的请求按已冻结成员定稿。回退二进制前先清空在途请求，并使用支持当前 schema 和批次账本的版本。
 
-Meta 凭据故障会暂停目标使用当前凭据领取新任务。凭据轮换后可继续领取，已发且接收证据不足的任务仍进入原有的人工核对流程。只在接收总数明确为零时按拒绝重排或阻塞。
+Meta 凭据故障会暂停目标使用当前凭据领取新任务。凭据状态按批次顺序更新。较新的完整回执会恢复当前凭据的领取，较早批次的迟到错误保留在原批次。凭据轮换后可继续领取，已发且接收证据不足的任务仍进入原有的人工核对流程。只在接收总数明确为零时按拒绝重排或阻塞。
 
 吞吐接口的发送、确认及未知成员数随来源筛选变化。请求数、429 和真实批大小使用整批口径，同一请求可能出现在多个来源筛选结果里。Partner Inbox 以自己的 `processed_at` 计数，分别显示新事件、重复归并、隔离及冲突。处理时间从 schema 1933 开始记录，响应通过 `partner_completion_recording_since` 和 `unknown_completion_time` 标明覆盖范围。
 

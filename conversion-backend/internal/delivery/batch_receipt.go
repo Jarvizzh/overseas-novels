@@ -92,12 +92,20 @@ func (s Service) PersistBatchReceipt(ctx context.Context, batch BatchLease, resu
 		WHERE id=$1`, batch.ID, evidence, finished); err != nil {
 		return err
 	}
+	// The destination update serializes health changes from competing receipts.
+	// Stale credential errors still commit their evidence above.
 	if _, err = tx.Exec(ctx, `
 		UPDATE conversion.destinations SET
-            next_claim_at=CASE WHEN $3 AND credential_id IS DISTINCT FROM $4 THEN next_claim_at
-                               ELSE GREATEST(next_claim_at,$2) END,
-            blocked_credential_id=CASE WHEN $3 AND credential_id=$4 THEN $4 ELSE blocked_credential_id END
-        WHERE id=$1`, destination, next, result.CredentialRejected(), credential); err != nil {
+		    next_claim_at=GREATEST(next_claim_at,$2),
+		    blocked_credential_id=CASE
+		        WHEN $3 THEN $4
+		        WHEN $5 AND credential_id=$4 AND $6>COALESCE(credential_health_batch_id,0) THEN NULL
+		        ELSE blocked_credential_id END,
+		    credential_health_batch_id=CASE
+		        WHEN ($3 OR $5) AND credential_id=$4 AND $6>COALESCE(credential_health_batch_id,0) THEN $6
+		        ELSE credential_health_batch_id END
+		WHERE id=$1 AND (NOT $3 OR (credential_id=$4 AND $6>COALESCE(credential_health_batch_id,0)))`,
+		destination, next, result.CredentialRejected(), credential, result.Outcome == Accepted, batch.ID); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)

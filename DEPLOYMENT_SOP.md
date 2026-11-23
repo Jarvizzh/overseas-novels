@@ -569,7 +569,7 @@ curl -fsS http://127.0.0.1:8081/healthz
 
 `conversion-backend/Dockerfile` 采用多阶段构建，打包出 `/app/bin/conversion`（常驻服务入口，支持 `--mode=api|worker|collector|callback|partner-worker`）与 `/app/bin/conversion-ops`（运维/接管 CLI）。三个核心生产实例按职责拆分进程运行（当前统一使用 `star_novel` RDS 账号）：
 
-由 `deploy/linux/config.yaml` 统一配置回传，通过 `prepare-config.py` 生成下述环境文件。Worker 每实例使用 16 个数据库连接，Reader 和已注册的 Partner Inbox 各 2 个消费者，合计上限 4。独立测试使用 `conversion-backend/config.test.yaml`，生成到单独目录。批量模式升级先暂停旧发送器、等待在途请求定稿，再执行 CMS `-migrate` 至 `2026111933`，按需刷新受限角色授权后以每请求最多 1 条启动。 [回传配置与切换](conversion-backend/README.md)
+由 `deploy/linux/config.yaml` 统一配置回传，通过 `prepare-config.py` 生成下述环境文件。Worker 每实例使用 16 个数据库连接，Reader 和已注册的 Partner Inbox 各 2 个消费者，合计上限 4。独立测试使用 `conversion-backend/config.test.yaml`，生成到单独目录。批量模式升级先暂停旧发送器、等待在途请求定稿，再执行 CMS `-migrate` 至 `2026111934`，按需刷新受限角色授权后以每请求最多 1 条启动。 [回传配置与切换](conversion-backend/README.md)
 
 1. **准备三份独立环境配置文件**：
    - 生成共享 Token 与凭据加密主密钥：

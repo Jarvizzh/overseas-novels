@@ -89,7 +89,8 @@ const (
 	paymentTemplateCatalogVersion     int64 = 2026111930
 	conversionCenterReviewVersion     int64 = 2026111931
 	conversionBatchVersion            int64 = 2026111932
-	RequiredSchemaVersion             int64 = 2026111933
+	conversionRereviewVersion         int64 = 2026111933
+	RequiredSchemaVersion             int64 = 2026111934
 )
 
 func autoMigrate(ctx context.Context, pool *pgxpool.Pool) error {
@@ -304,7 +305,12 @@ func autoMigrate(ctx context.Context, pool *pgxpool.Pool) error {
 			return fmt.Errorf("schema migration %d: %w", conversionBatchVersion, err)
 		}
 	}
-	if _, err := tx.Exec(ctx, dbassets.ConversionThroughputRereviewSQL); err != nil {
+	if version < conversionRereviewVersion {
+		if _, err := tx.Exec(ctx, dbassets.ConversionThroughputRereviewSQL); err != nil {
+			return fmt.Errorf("schema migration %d: %w", conversionRereviewVersion, err)
+		}
+	}
+	if _, err := tx.Exec(ctx, dbassets.ConversionCredentialHealthSQL); err != nil {
 		return fmt.Errorf("schema migration %d: %w", RequiredSchemaVersion, err)
 	}
 	return tx.Commit(ctx)

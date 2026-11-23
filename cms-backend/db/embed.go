@@ -181,3 +181,6 @@ var ConversionBatchSQL string
 
 //go:embed migrations/2026111933.sql
 var ConversionThroughputRereviewSQL string
+
+//go:embed migrations/2026111934.sql
+var ConversionCredentialHealthSQL string

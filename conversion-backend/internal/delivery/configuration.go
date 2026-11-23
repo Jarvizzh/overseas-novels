@@ -87,6 +87,7 @@ func (s Service) ConfigureDestination(ctx context.Context, actor Operator, id in
 		}
 		update, err := tx.Exec(ctx, `UPDATE conversion.destinations SET display_name=$2,credential_id=$3,
             blocked_credential_id=CASE WHEN credential_id IS DISTINCT FROM $3 THEN NULL ELSE blocked_credential_id END,
+            credential_health_batch_id=CASE WHEN credential_id IS DISTINCT FROM $3 THEN NULL ELSE credential_health_batch_id END,
 			retired_at=CASE WHEN $4 THEN COALESCE(retired_at,clock_timestamp()) ELSE retired_at END
 			WHERE id=$1`, id, state.name, state.credential, input.Retire)
 		if err := requireOne(update.RowsAffected(), err); err != nil {

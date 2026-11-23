@@ -142,6 +142,68 @@ func testBatchDelivery(t *testing.T, ctx context.Context, base Service) {
 		count(t, s, `SELECT count(*) FROM conversion.deliveries WHERE environment=$1 AND state='succeeded'`, 2)
 		count(t, s, `SELECT count(*) FROM conversion.deliveries WHERE environment=$1 AND state='pending' AND reason='meta_rate_limited'`, 3)
 	})
+	for _, laterSuccessFirst := range []bool{true, false} {
+		t.Run(fmt.Sprintf("newer success wins over late credential fault success_first=%t", laterSuccessFirst), func(t *testing.T) {
+			s := fixture(t, fmt.Sprintf("batch-credential-order-%t", laterSuccessFirst), 3)
+			old := claim(t, s, 5, 1)
+			start(t, s, old, 1, "")
+			execBatchFixture(t, ctx, s, `UPDATE conversion.meta_batches SET lease_until=now() WHERE id=$1`, old.ID)
+			if swept, err := s.Sweep(ctx, 5, time.Second); err != nil || swept != 1 {
+				t.Fatalf("expire old batch: %d, %v", swept, err)
+			}
+			newer := claim(t, s, 5, 1)
+			start(t, s, newer, 1, "")
+			ok := response(Accepted, "", 200, 1)
+			fault := response(OutcomeUnknown, "meta_no_confirmation", 400, 0)
+			code, subcode := 190, 463
+			fault.EventsReceived, fault.GraphCode, fault.GraphSubcode = nil, &code, &subcode
+			if laterSuccessFirst {
+				receipt(t, s, newer, ok)
+			}
+			receipt(t, s, old, fault)
+			if !laterSuccessFirst {
+				receipt(t, s, newer, ok)
+			}
+			count(t, s, `SELECT count(*) FROM conversion.destinations
+			    WHERE environment=$1 AND blocked_credential_id=credential_id`, 0)
+			finish(t, s, newer)
+
+			next := claim(t, s, 5, 1)
+			start(t, s, next, 1, "")
+			receipt(t, s, next, ok)
+			finish(t, s, next)
+			count(t, s, `SELECT count(*) FROM conversion.deliveries
+			    WHERE environment=$1 AND meta_event_id='1' AND state='outcome_unknown' AND attempts=1`, 1)
+			count(t, s, `SELECT count(*) FROM conversion.deliveries
+			    WHERE environment=$1 AND meta_event_id IN ('2','3') AND state='succeeded'`, 2)
+			count(t, s, `SELECT count(*) FROM conversion.meta_batches
+			    WHERE environment=$1 AND receipt IS NULL AND late_receipt->>'GraphSubcode'='463'`, 1)
+		})
+	}
+
+	t.Run("older success cannot clear a newer credential fault", func(t *testing.T) {
+		s := fixture(t, "batch-credential-newer-fault", 3)
+		old := claim(t, s, 5, 1)
+		start(t, s, old, 1, "")
+		execBatchFixture(t, ctx, s, `UPDATE conversion.meta_batches SET lease_until=now() WHERE id=$1`, old.ID)
+		if swept, err := s.Sweep(ctx, 5, time.Second); err != nil || swept != 1 {
+			t.Fatalf("expire old batch: %d, %v", swept, err)
+		}
+		newer := claim(t, s, 5, 1)
+		start(t, s, newer, 1, "")
+		fault := response(PermanentRejection, "meta_credentials_or_permissions", 400, 0)
+		code := 190
+		fault.GraphCode, fault.Block = &code, true
+		receipt(t, s, newer, fault)
+		finish(t, s, newer)
+		receipt(t, s, old, response(Accepted, "", 200, 1))
+		if _, err := s.ClaimBatch(ctx, 5, 1, time.Minute, time.Second); !errors.Is(err, pgx.ErrNoRows) {
+			t.Fatalf("older success cleared a newer credential fault: %v", err)
+		}
+		count(t, s, `SELECT count(*) FROM conversion.deliveries WHERE environment=$1 AND meta_event_id='1' AND state='outcome_unknown'`, 1)
+		count(t, s, `SELECT count(*) FROM conversion.deliveries WHERE environment=$1 AND meta_event_id='2' AND state='blocked'`, 1)
+	})
+
 	for _, size := range []int{1, 100} {
 		t.Run(fmt.Sprintf("credential failure fences the Pixel at batch %d", size), func(t *testing.T) {
 			s := fixture(t, fmt.Sprintf("credential-fault-%d", size), size+3)

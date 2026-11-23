@@ -130,7 +130,7 @@ COMMIT;
 
 -- Conversion Center operational statistics and frozen Reader routes.
 GRANT EXECUTE ON FUNCTION conversion.reader_payment_attribution_time(bigint,text) TO :"worker_role", :"api_role";
-GRANT UPDATE (consecutive_payment_claims,nonpayment_claim_streak,blocked_credential_id) ON conversion.destinations TO :"worker_role";
+GRANT UPDATE (consecutive_payment_claims,nonpayment_claim_streak,blocked_credential_id,credential_health_batch_id) ON conversion.destinations TO :"worker_role";
 GRANT SELECT ON conversion.collector_samples TO :"api_role";
 GRANT SELECT,INSERT,UPDATE ON conversion.collector_samples TO :"collector_role";
 GRANT SELECT (finalized_at,unknown_attempt_no) ON conversion.deliveries TO :"collector_role";
