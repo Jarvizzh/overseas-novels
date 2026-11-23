@@ -1,854 +1,240 @@
-# STAR NOVEL 生产上线部署标准化操作指南 (SOP)
+# STAR NOVEL 生产部署 SOP
 
-本文档面向 **STAR NOVEL（海外小说平台与运营管理系统）** 运维与研发团队，详细定义了 **「宝塔 Nginx 统一网关 (H5 + CMS 静态托管) + 读者 API 多 ECS 负载均衡集群 + CMS 运营单实例 + 独立统一转化回传服务 (`conversion-backend`: api / worker / collector) + 阿里云 RDS PostgreSQL + Redis」** 生产部署架构的全流程落地规范与维护手册。
+适用于 Reader H5、CMS、支付域和回传中心的首次部署及协调升级。当前发布线要求 CMS、Reader 和 Conversion 使用同一数据库版本 **`2026111934`**。发下一版时，以该次发布提交中的三个 schema 检查和 CMS 内嵌迁移为准。回传首发批量上限为 **1**。
 
----
+**发布顺序**　同一提交打包 → 网关进入维护并停旧写入及发送 → CMS 单次迁移 → 补并发索引和授权 → Redis、Conversion API、CMS → 核对支付账户和回传路由 → Collector、Conversion Worker（暂停发送）、Reader → 发布两个前端和验证 Webhook → 恢复业务并回补维护窗口事件 → 单独启用 Meta 发送。
 
-## 🏗️ 一、 生产部署全景架构图 (Architecture Topology)
+## 1. 拓扑与网络
 
 ```mermaid
-flowchart TD
-    %% 样式定义
-    classDef clientStyle fill:#EBF5FB,stroke:#2980B9,stroke-width:2px,color:#1B4F72;
-    classDef cdnStyle fill:#FEF9E7,stroke:#F39C12,stroke-width:2px,color:#7D6608;
-    classDef gatewayStyle fill:#E8F8F5,stroke:#1ABC9C,stroke-width:2px,color:#0E6251;
-    classDef backendStyle fill:#F4ECF7,stroke:#8E44AD,stroke-width:2px,color:#512E5F;
-    classDef dataStyle fill:#FDEDEC,stroke:#E74C3C,stroke-width:2px,color:#78281F;
-    classDef extStyle fill:#EAEDED,stroke:#7F8C8D,stroke-width:1px,color:#34495E;
-
-    %% 1. 用户与接入层
-    subgraph Layer1 ["【接入与边缘加速层】"]
-        ReaderUser["📱 海外移动端读者 (H5)"]:::clientStyle
-        AdminUser["💻 运营管理员 (CMS)"]:::clientStyle
-        PartnerSrc["🤝 外部分销平台<br/>(如番茄司南，按阶段启用)"]:::extStyle
-        CDN["⚡ Cloudflare 全球 CDN<br/>(静态资源 Edge 缓存 / SSL 卸载 / DDoS 防护)"]:::cdnStyle
-        
-        ReaderUser -->|"h5.star-novel.com<br/>*.star-novel.com"| CDN
-        AdminUser -->|"admin.star-novel.com"| CDN
-        PartnerSrc -.->|"Webhook /callbacks/... (仅授权入站)"| CDN
-    end
-
-    %% 2. 宝塔 Nginx 统一网关与前端机
-    subgraph Layer2 ["【网关与运营控制层 (ECS-Gateway)】"]
-        BTNginx["🌐 宝塔 Nginx 统一网关 (:80 / :443)<br/>• 证书管理 & 强制 HTTPS<br/>• SPA 路由回退 (/pixels, /conversions)<br/>• 真实客户端 IP 透传 (X-Real-IP)"]:::gatewayStyle
-        
-        subgraph StaticFiles ["静态资源托管"]
-            H5Dist["📁 reader-front 静态产物<br/>(/www/wwwroot/h5.../dist)"]:::gatewayStyle
-            CMSDist["📁 cms-front 静态产物<br/>(/www/wwwroot/admin.../dist)"]:::gatewayStyle
-        end
-        
-        CMSNode["⚙️ cms-backend 单实例<br/>(Docker :8081)"]:::backendStyle
-    end
-
-    CDN -->|"HTTPS 统一回源"| BTNginx
-    BTNginx -->|"GET /* (H5页面)"| H5Dist
-    BTNginx -->|"GET /* (CMS页面)"| CMSDist
-    BTNginx -->|"/api/v1/admin/* (反代)"| CMSNode
-
-    %% 3. VPC 内网读者后端集群
-    subgraph Layer3 ["【阿里云 VPC 专有网络 - 读者端后端集群】"]
-        UpstreamRoute{"🔀 Nginx Upstream 调度<br/>(least_conn 最少连接均衡)"}:::gatewayStyle
-        
-        ReaderNode1["🚀 ECS-Reader-1<br/>reader-backend (:8080)<br/>事务写 Outbox，不直连 Meta"]:::backendStyle
-        ReaderNode2["🚀 ECS-Reader-2<br/>reader-backend (:8080)"]:::backendStyle
-        ReaderNodeN["🚀 ECS-Reader-N (弹性扩容)<br/>reader-backend (:8080)"]:::backendStyle
-    end
-
-    BTNginx -->|"/api/v1/* (读者API)"| UpstreamRoute
-    UpstreamRoute -->|"内网分发"| ReaderNode1
-    UpstreamRoute -->|"内网分发"| ReaderNode2
-    UpstreamRoute -->|"内网分发"| ReaderNodeN
-
-    %% 3.5 独立统一转化回传服务
-    subgraph Layer3Conv ["【阿里云 VPC / 私网 - 统一转化回传服务 (conversion-backend)】"]
-        ConvAPI["🔐 conversion --mode=api<br/>私网接口 (127.0.0.1 / 内网 :8092)<br/>Bearer Token + 操作人角色校验"]:::backendStyle
-        ConvWorker["⚡ conversion --mode=worker<br/>消费 Outbox & Inbox / Meta 异步投递<br/>租约隔离 + 审计重排 + 定稿"]:::backendStyle
-        ConvCollector["📡 conversion --mode=collector<br/>30s 独立心跳/积压采集与告警"]:::backendStyle
-        ConvCallback["🪝 conversion --mode=callback / partner-worker<br/>(仅分销阶段启用，隔离测试/授权放行)"]:::backendStyle
-    end
-
-    CMSNode -->|"/internal/conversion/*<br/>(CONVERSION_PRIVATE_URL + Token)"| ConvAPI
-    BTNginx -.->|"/callbacks/* (仅分销正式接入放行)"| ConvCallback
-
-    %% 4. 集中数据与持久化层
-    subgraph Layer4 ["【阿里云 VPC 专有网络 - 集中数据层】"]
-        RDS[("🗄️ 阿里云 RDS PostgreSQL 18<br/>(schema: public + conversion)<br/>• reader_conversion_outbox 事务出站<br/>• conversion.* 统一事件/任务/审计/密文<br/>• 当前统一使用 RDS 账号 star_novel")]:::dataStyle
-        
-        Redis[("⚡ Redis 7 缓存<br/>(独立 Compose 内网或 VPC ECS :6379)<br/>• 0~20% Jitter 缓存防雪崩<br/>• SingleFlight / 分布式锁 / AOF")]:::dataStyle
-    end
-
-    ReaderNode1 --> RDS & Redis
-    ReaderNode2 --> RDS & Redis
-    ReaderNodeN --> RDS & Redis
-    CMSNode --> RDS & Redis
-    ConvAPI --> RDS
-    ConvWorker --> RDS
-    ConvCollector --> RDS
-    ConvCallback -.-> RDS
-
-    %% 5. 海外第三方对接
-    subgraph Layer5 ["【海外第三方生态】"]
-        StripePay["💳 PayPal / 支付网关 (Stripe 当前停用)"]:::extStyle
-        FBCAPI["📊 Meta Conversions API (异步可靠回传)"]:::extStyle
-        PartnerReport["📤 分销平台回告端点 (阶段 C)"]:::extStyle
-    end
-
-    ReaderNode1 -.-> StripePay
-    ConvWorker -.-> FBCAPI
-    ConvCallback -.-> PartnerReport
+flowchart LR
+    H5[Reader H5] --> G[HTTPS 网关]
+    Admin[CMS 浏览器] --> G
+    Pay[PayPal / Stripe] -->|支付 Webhook| G
+    G -->|Reader API 和 Webhook| R[Reader API 与支付后台任务]
+    G -->|CMS API| C[CMS API]
+    C -->|Docker 私网| A[Conversion API]
+    R -->|订单、权益、支付 Inbox、Reader Outbox| DB[(PostgreSQL)]
+    C -->|渠道、商品与财务操作| DB
+    A --> DB
+    DB --> W[Conversion Worker]
+    W -->|Meta 批次发送| M[Meta CAPI]
+    O[Conversion Collector] --> DB
+    R --> Cache[(Redis)]
+    C --> Cache
 ```
 
----
+| 组件 | 默认生产部署与端口 |
+| --- | --- |
+| 宝塔 Nginx | 公网 `80/443`。独立托管 CMS 和 H5 两个 SPA，HTTPS 反代业务 API 和支付回调。 |
+| `cms` / `reader` | 同一 Compose 项目，默认分别绑定宿主机 `127.0.0.1:8081` / `127.0.0.1:8080`。Reader 进程同时运行支付 Inbox、对账和恢复任务。 |
+| `conversion-api` | CMS 使用 `http://conversion-api:8092`；API 在容器内监听 `:8092`，宿主机映射仅回环。公网网关不配置 `/internal/conversion/*`。 |
+| `conversion-worker` / `conversion-collector` | 共用后端镜像，分别按 `--mode=worker`、`--mode=collector` 启动。无公网监听。 |
+| PostgreSQL / Redis / OSS | PostgreSQL 走 RDS VPC 内网和实际配置端口。Compose Redis 走 `redis:6379` 并保留 `redisdata` 卷。OSS 正文与封面沿用目标环境的 Bucket、路径和访问权限。 |
 
-## 📋 二、 服务器规划与网络矩阵
+标准发布使用同机 Compose。已有多节点 Reader 部署应先从网关摘除全部旧节点，逐节点使用同一发布版本和业务环境，再恢复内网 upstream。跨主机节点使用受限 VPC 端口和共享依赖，本机回环地址只在当前主机可用。
 
-| 机器/服务角色 | 部署组件与职责 | 监听端口 / 访问模式 | 数据库连接账号 |
-| :--- | :--- | :--- | :--- |
-| **网关与管理机 (`ECS-Gateway`)** | 宝塔面板 + Nginx (统一网关) + `reader-front` 静态 + `cms-front` 静态 + `cms-backend` 容器 | `80`, `443` (公网开放)<br/>`127.0.0.1:8081` (仅本机反代) | `star_novel`（当前统一 RDS 账号） |
-| **转化私网 API (`conversion-api`)** | `conversion --mode=api`：Pixel/接入配置、凭据加密写入、只读变更审计与订单全链路对账、审计重排 | `8092`（**仅回环 `127.0.0.1` 或 Docker/VPC 私网互通，严禁公网暴露**） | `star_novel`（当前统一 RDS 账号） |
-| **转化异步 Worker (`conversion-worker`)** | `conversion --mode=worker`：消费 `reader_conversion_outbox` / `conversion.inbox`、投递 Meta CAPI、定稿 | 无入站监听端口（仅主动出站访问 RDS 与 Meta Graph API） | `star_novel`（当前统一 RDS 账号） |
-| **转化采集告警 (`conversion-collector`)** | `conversion --mode=collector`：独立每 30 秒采样积压、缺路由与 Worker 心跳写入 `conversion.alerts` | 无入站监听端口（仅主动查询 RDS） | `star_novel`（当前统一 RDS 账号） |
-| **分销回调与回告（阶段 C 启用）** | `conversion --mode=callback` + `partner-worker`：第三方分销入站 Webhook 与原目标最终结果回告 | `:8093`（仅限已验证接入的特定 `/callbacks/...` 路径反代放行） | `star_novel`（当前统一 RDS 账号；阶段 C 按需拆分） |
-| **读者端集群节点 (`ECS-Reader-1..N`)** | `reader-backend` Go API 容器 | `8080` (仅 VPC 内网 / 本机回环) | `star_novel`（当前统一 RDS 账号） |
-| **Redis 7 缓存** | Docker Compose 内置 `redis:7`（推荐，见 [deploy/linux/README.md](deploy/linux/README.md)）或 VPC 内网 ECS | `6379` (仅内网，严禁公网开放) | — |
-| **阿里云 RDS PostgreSQL** | 主业务数据库（含 `pg_trgm` 与 `conversion` schema） | `3433` 或 `5432` (VPC 专网连接) | 统一使用 `star_novel`（含迁移与全部业务表权限） |
+## 2. 发布前准备
 
-> [!IMPORTANT]
-> **网络与安全边界原则**：
-> 1. 所有 ECS、Redis 与 RDS 必须处于 **同一个阿里云专有网络（VPC）**；推荐容器仅绑定宿主机 `127.0.0.1`（或隔离容器网段如 `172.30.87.0/24`）配合宝塔 Nginx 统一反代，禁止裸露 `0.0.0.0` 业务端口。
-> 2. **Reader、CMS 与 8092 私网转化 API 之间严禁对公网暴露**：`conversion-api (:8092)` 仅接受持有 `CONVERSION_PRIVATE_TOKEN` 的 `cms-backend` 内网请求；读者端节点与 Redis 节点同样严禁在安全组对公网开放。
-> 3. **部署工具链与当前状态说明**：仓库内 `deploy/linux/`（见 [deploy/linux/README.md](deploy/linux/README.md)）目前编排了 `redis`、`cms`、`reader` 三个容器；`conversion-backend` 需使用独立镜像（[conversion-backend/Dockerfile](conversion-backend/Dockerfile)）并接入同 VPC / Docker 私网后同步运行，**严禁仅升级 Reader/CMS 而未部署 `conversion-worker` 与 `conversion-api`**，否则新订单会堆积在 Outbox 且 CMS 对账页将报 `503` 服务不可用。
+1. 选定已审核的提交和服务器 CPU 架构。确认 CMS、Reader、Conversion 和两个前端来自同一提交，检查工作区，避免将未审核的本地改动打入发布包。记录各环境当前 schema、容器镜像、前端版本和网关 upstream。
+2. 核对 RDS 恢复点可用性并记录恢复时间，保留上一版发布目录、镜像和两套前端。首次建库确认 UTF8、业务账号、迁移所需对象权限和 `pg_trgm`。现有生产按统一 `star_novel` 业务账号执行，确认能够迁移及访问 `public`、`conversion`、支付与目录对象。所有 Reader 节点使用同一 Reader JWT 密钥，CMS 使用独立的 `cms.jwt_secret`。
+3. 记录待处理的支付和回传状态。按账户和环境保存支付恢复游标、待处理回调、存量协议、收款与退款待核对项，以及待发、发送中、未知和已确认的转化。记下维护窗口起止时间及其时区，供 Webhook 补查。
+4. 确认网关维护切换方式、渠道控制台访问权限和回退负责人。新库初始化后先更换种子管理员凭据，再开放 CMS 入口。
 
----
+### 2.1 构建与装载
 
-## 🗄️ 三、 第一阶段：数据基础设施初始化 (RDS & Redis)
-
-### 3.1 阿里云 RDS PostgreSQL 配置
-1. **白名单配置**：在 RDS 控制台 【白名单与安全组】 中，将 VPC 内网网段（如 `172.16.0.0/24`）加入白名单；
-2. **账号与数据库创建**：统一使用高权限账号 `star_novel` 与业务数据库 `star_novel`（或既有线上库 `star_novel_db`），字符集选择 `UTF8`；
-3. **初始化或升级 Schema**。使用本次发布的 CMS 镜像，通过同一份 CMS 环境配置运行迁移命令。
-   ```bash
-   docker run --rm --env-file cms-backend/.env star-cms-backend:latest -migrate
-   ```
-   `schema.sql` 是版本 `2026111701` 的基线。迁移命令根据数据库版本依次执行尚未应用的 SQL，新库同时写入初始化数据。同版本的 CMS 和 Reader 启动与健康检查只读取版本账本。迁移失败会回滚并返回非零退出码。使用 `CREATE INDEX CONCURRENTLY` 的查询索引脚本仍单独在事务外执行。
-
-   **章节发布升级 `2026111702`**。安排一次短维护窗口，先停止旧 CMS 的发布写入和旧 Reader 的扣费流量。运行迁移后配套启动新版 CMS、Reader API 和 H5，确认各服务通过健康检查再恢复流量。迁移等待业务表锁最多 3 秒，单条 SQL 和迁移进程分别有 60 秒和 90 秒上限。出现锁超时先解除业务锁再重试。新版开始发布后，旧程序无法读取不可变正文引用。回退须协调应用与数据库共同恢复。
-
-   **阅读性能升级 `2026111703`**。继续使用同一个 CMS `-migrate` 命令，已在 `2026111702` 的数据库只执行新增迁移。启用 OSS 正文的环境，在迁移成功后用新版 CMS 镜像和原配置回填历史预览，回填可分批重跑，已生成的预览会跳过。
-   ```bash
-   docker run --rm --env-file cms-backend/.env star-cms-backend:latest -backfill-chapter-previews
-   ```
-   检查回填结果后切换 Reader 流量。仍待回填的 OSS 章节会显示付费墙，已授权的读者仍能读取全文。PostgreSQL 正文可直接生成历史预览。
-
-   **订阅对账、监控和书架升级 `2026111704`**。先用新版 CMS 镜像运行 `-migrate`。迁移会回填订阅状态变更时间和无归因事件计数，安排维护窗口并停止支付写入和后台任务，按存量规模预演迁移耗时。迁移成功后，用同一个业务库单独执行并发索引脚本，然后发布 CMS、Reader API，最后发布 H5。
-
-   ```bash
-   psql -X -v ON_ERROR_STOP=1 -f cms-backend/db/reader_query_indexes.sql
-   ```
-
-   脚本需要自动提交。核对新索引的定义和有效性后，对 `user_subscriptions`、`payment_event_outbox`、`bookshelves` 更新统计信息。旧版的 `idx_paypal_subscription_claim`、`idx_reader_shelf_feed` 如已存在，可在升级完成并确认没有依赖后单独并发删除。新版本的任务汇总在同一数据库内每分钟最多采集一次，保留 `PAYMENT_TASK_METRICS_ENABLED` 实例开关和手工查询。
-
-   已在 `2026111704` 的环境升级订单领取时，先重跑上述索引脚本，确认 `idx_paypal_order_recent_pending` 和 `idx_paypal_order_retained_claim` 均有效，再发布 Reader API。可对 `recharge_orders` 执行 `ANALYZE` 更新统计信息。旧索引 `idx_paypal_order_claim` 可在旧版本全部退出且确认没有依赖后单独并发删除。
-
-   Reader 单实例数据库连接默认前台 21、支付后台 4。可用 `READER_DB_FOREGROUND_MAX_CONNS` 和 `READER_DB_BACKGROUND_MAX_CONNS` 调整，按 Reader 实例数、CMS 和运维进程预留 RDS 总连接数。阅读请求和不同缓存回源的并发分别由 `READER_MAX_IN_FLIGHT_READS` 和 `READER_MAX_CONTENT_LOADS` 控制，默认 48 和 12。Reader 的 `/healthz` 提供两组池的累计等待、取消和使用量，数据库正常而 Redis 不可用时仍返回 200，由有界回源提供服务。CMS 的就绪检查使用现有依赖策略。
-
-   历史单章权益通过 `unlock_records.chapter_id` 迁移。仅在 PostgreSQL 能证明当前章节行已在购买前提交时自动关联。未启用或已缺失提交时间记录的数据库，需要从原始证据复核。恢复扣费流量前导出并处理下列记录。对每条记录，应根据购买时间的正文版本、备份或其他原始购买证据确认章节身份。确认后在短事务中锁住对应的 `novels` 行，填写同一小说的稳定 `chapter_id`、包含证据位置和审核人的 `identity_evidence`，以及 `identity_resolved_at`。同一用户已有该章节的有效记录时，先核对重复扣款再处置。待复核期间，读者仍可使用已确认权益，新的单章购买会提示联系支持。
-
-   ```sql
-   SELECT id, user_id, novel_id, chapter_index, created_at
-   FROM unlock_records
-   WHERE chapter_id IS NULL
-   ORDER BY novel_id, id;
-   ```
-
-   OSS 切换沿用原有 bucket 和 base path。CMS 需要正文的写、读和删除权限。旧版正文保持可读，内容被替换后，未引用对象进入延迟清理。可按 `chapter_content_objects.state`、`attempts`、`last_error` 检查清理状态。
-
-   部署新版支付前，先执行 CMS 迁移命令，再配套更新 CMS、Reader API 与 Reader H5。为 Reader 设置当前 PayPal 应用对应的 `PAYPAL_WEBHOOK_ID`（若用 Linux 配置生成脚本，则设置 `payment.paypal_webhook_id`）。注册订单批准、扣款完成、支付和订阅状态、退款完成的通知。Stripe 接口当前返回停用。CMS 必须配置独立的 `CMS_JWT_SECRET`（Linux 配置生成脚本读取 `cms.jwt_secret`），切换后 CMS 管理员需重新登录。 完成迁移后，可从 CMS 订单接口的 `reconciliation_note` 定位待核对的历史订单或账期。核实存量 PayPal 交易和退款凭证后再补发权益。
-
-
-   支付修复升级还需确认以下事项。
-
-   - CMS 的生产示例使用 `CMS_JWT_SECRET`。复制示例后，用 `openssl rand -hex 32` 生成独立密钥并填写实际配置。生产启动会拒绝占位值和开发默认值。
-   - `paypal_refund_items` 按真实退款 ID 保存已验证的退款明细，累计退满原扣款后冲销金币与权益。已有 inbox 中的退款记录会迁入明细表，退款差额继续保存在 `payment_refunds`。
-   - 新订阅会先持久化账号级创建意图。相同请求恢复原审批链接，存在有效渠道订阅时返回冲突。更换套餐需先确认旧订阅已在渠道取消或到期。渠道已收到请求但本地未取得结果且超过 24 小时的意图，需要按渠道账单核对后处理。
-   - 取消前保存渠道确认的账期快照。外部取消后，金额、币种和周期锚点均匹配的普通扣款可恢复已付周期，无法确认的补扣继续显示 `reconciliation_note`。
-   - 历史整本订单必须在 `legacy_whole_book_proofs` 中有独立的原商品类型与小说证据。审核人需记录 `order_id`、`novel_id`、原始证据定位 `evidence_reference` 和审核管理员 `verified_by`。证据中的小说必须与订单保存的原目标一致，目标缺失或错误时须依据原始商品凭证修正后再登记。核实渠道收款后仅补齐权益，已入账金币保留原账。此前已回填的历史整本权益也会检查此证据，缺少证据的订单需人工核对。
-
-   上线前执行以下只读查询，核对历史重复订阅与缺少整本证据的订单，并保存核对结果。重复订阅需分别核查渠道状态和用户权益后处理。
-
-   ```sql
-   SELECT user_id, count(*) AS subscription_count,
-          array_agg(subscription_id ORDER BY id) AS subscription_ids
-   FROM user_subscriptions
-   WHERE payment_method='paypal'
-     AND status NOT IN ('CANCELLED','EXPIRED')
-     AND subscription_id NOT LIKE 'I-MOCK%'
-   GROUP BY user_id HAVING count(*)>1;
-
-   SELECT o.id, o.user_id, o.external_ref_id, o.novel_id, o.status, o.reconciliation_note
-   FROM recharge_orders o
-   WHERE o.payment_method='paypal' AND o.order_type='whole_book'
-     AND o.checkout_id IS NULL AND o.status IN ('Pending','Success','Paid')
-     AND NOT EXISTS (SELECT 1 FROM legacy_whole_book_proofs p
-                     WHERE p.order_id=o.id AND p.novel_id=o.novel_id)
-   ORDER BY o.id;
-
-   SELECT user_id, intent_id, slot_id, plan_id, subscription_id, submitted_at
-   FROM paypal_subscription_intents
-   WHERE subscription_id IS NULL AND submitted_at < now()-interval '24 hours';
-   ```
-
-#### 统一转化回传切换（schema `2026111909`）
-
-本次架构升级将广告转化追踪彻底解耦为「**Reader 事务写 Outbox + `conversion-backend` 异步消费 / 私网控制 / 独立监控告警 + CMS 可视化回传中心与像素管理**」，同时更新 Reader、CMS、转化 Worker、私网 API 和独立 Collector。**测试与生产必须使用独立数据库、独立 `CONVERSION_ENVIRONMENT` 及独立测试 Pixel**，私网 API 只接受 CMS 私网调用。
-
-1. **停写与窗口迁移**：在维护窗口记录 `reader_schema_migrations` 版本账本、`payment_event_outbox` 各状态数量和已确认的 Meta 事件 ID（当前部署策略暂不额外执行数据库备份）。暂停旧业务写入和旧 CAPI 消费；如测试环境曾启动司南模拟服务，同步暂停回调入口和回告 Worker。等待在途请求及租约结束，使用新版 CMS 镜像与 `star_novel` 连接执行 `-migrate`，推进 schema 至 **`2026111909`**（含 `conversion` schema 15 张表、`reader_conversion_outbox`、`reader_conversion_repair_facts` 及订单资格扩展字段）。
-2. **创建并发保留期与查询索引**：使用 `star_novel` 在**事务外（保持自动提交）**单独执行：
-   ```bash
-   psql -X -v ON_ERROR_STOP=1 -f cms-backend/db/conversion_query_indexes.sql
-   ```
-   核对新增索引（`recharge_orders_conversion_fulfilled_at`、`conversion_outbox_retention`、`conversion_repair_fact_retention`、`conversion_event_retention`、`conversion_inbox_retention`）的 `pg_index.indisvalid=true`，并在接近生产规模的副本上检查执行耗时和查询计划。
-3. **数据库权限说明（当前暂不拆分多账号）**：当前所有后端服务统一使用 RDS 账号 `star_novel` 连接，**暂无需单独创建多个 RDS 子账号，也暂不运行 `cms-backend/db/conversion_role_grants.sql`（以及阶段 C 的 `conversion_sinan_mock_grants.sql`）**；待后续需收紧生产最小权限隔离时，再按该脚本拆分为 `reader_role` / `cms_role` / `worker_role` / `api_role` / `collector_role` / `retention_role`（其中 `api_role` 需保留对 `conversion.operation_audit` 的 `SELECT, INSERT` 权限以支撑只读审计时间线）。
-4. **历史队列与 Pixel 凭据接管**：使用 `star_novel` 账号运行[历史队列接管](conversion-backend/README.md#历史队列接管)（`conversion-ops import-legacy-pixels` / `backfill-legacy-subscriptions` / `import-legacy-events`）。补齐旧投递的环境证据后可用 `conversion-ops review-legacy-environment` 审计复核，确认切换完成后再清理旧表中的明文凭据。
-5. **配置密钥与首启转化服务**：按第五章 §5.3 部署并启动 `conversion-api`（`:8092`）、`conversion-worker` 和 `conversion-collector`。**初次启动务必将 Worker 的 `CONVERSION_META_ENABLED` 设为 `false`**，确认 `worker` 已正常归一化 Outbox 并更新心跳后，核对测试订单入队、逐单资格与各 Pixel 任务无误，再将 `CONVERSION_META_ENABLED` 改为 `true` 重启 `worker` 放量。
-6. **启动新版 Reader、CMS 与前端并核对告警**：按第四章 §4.3、第五章 §5.2 确保 `reader-backend` 设置一致的 `CONVERSION_ENVIRONMENT`，`cms-backend` 正确配置 `CONVERSION_PRIVATE_URL` 与共享 `CONVERSION_PRIVATE_TOKEN`。保持 Collector 运行，停用 Worker 验证心跳告警触发（`alerts`），恢复 Worker 后确认日志记录 `opened` 与 `resolved`。
-7. **运维工具切换与回滚边界**：PayPal 对账继续使用 `payment-ops`；转化重排、旧环境复核、缺行补建和保留期清理统一改由 CMS「回传中心」或[转化运维命令](conversion-backend/README.md#运行与运维)执行（旧 `payment-ops -kind outbox` 不再对应新转化队列）。迁移提交后先暂停故障链路再用匹配当前 schema 的版本修复或前滚；回退旧代码前须核对切换后新增业务、未发任务及已确认的 `meta_event_id` 证据。
-8. **司南阶段 C 约定**：使用独立测试库（`CONVERSION_ENVIRONMENT=test`）、测试凭据与回环模拟端点，按[模拟联调步骤](conversion-backend/README.md#司南阶段-c-模拟联调)完成入站鉴权、三个回调与无 trace 失败回告确认后再开启生产接入（生产严禁启用 `CONVERSION_SINAN_MOCK_ENABLED=true`）。
-
-#### 付款部分回传（schema `2026111915`）
-
-1. 在维护窗口停止 Reader 支付、订阅和对账履约写入，等待在途事务完成。用匹配版本的 CMS 镜像执行 `-migrate`，核对 `reader_schema_migrations` 已到 `2026111915`。Reader 首单迁移按 `fulfilled_at, id` 回填可核实的历史首单。使用独立数据库角色时，迁移后重新执行 `cms-backend/db/conversion_role_grants.sql`。在事务外执行 `cms-backend/db/conversion_query_indexes.sql`，补齐规则事实告警索引。
-   `2026111915` 将仍在原投递期限内、从未尝试发送且符合源订单核验条件的续费类型待查任务恢复为 `blocked/rule_fact_missing`。证据补齐后可以从回传中心重排。
-   升级规则发布核对功能时，在事务外重新执行 `cms-backend/db/conversion_query_indexes.sql`，补齐按发布 ID 查询审计的索引。
-2. 启动对应版本的 CMS、Reader 与转化服务，再恢复履约。切换后新建的链接由在线履约记录覆盖。历史链接确认覆盖完整后，由迁移账号在 `reader_payment_promotion_coverage` 记录环境、链接 ID、核验时间和证据引用，再发布该链接的首单规则。
-3. 先在隔离环境核对授权缺失、同笔订阅首付、补建和默认全传，再对指定推广链接启用规则。已判定付款沿用原结果。 [部分回传开发方案](docs/conversion-partial-reporting-implementation.md#6-开发顺序与发布)
-4. 司南 Mock 使用独立测试库。升级后重新执行 `cms-backend/db/conversion_sinan_mock_grants.sql`，按模拟接收方确认的 `missing_promotion_encoding` 和 `no_trace_encoding` 重排契约阻塞回告。生产接入前独立确认正式空值编码、原始订单及事件 ID 的唯一范围和重复付款回告口径。
-
-#### 支付渠道账户与事件队列（schema `2026111916`）
-
-1. 在维护窗口停止旧版 Reader、CMS 和转化服务。等在途请求完成后，记录 `paypal_event_inbox` 的待处理事件、尝试次数和最早待处理时间，以及 `reader_conversion_outbox` 的待消费数量。保留 PayPal Webhook URL，维护期间返回可重试的失败响应。
-2. 用新版 CMS 的 `-migrate` 推进 schema 到 `2026111916`。核对 `payment_event_inbox` 中原 PayPal 事件的处理进度和转化 Outbox。若已有真实 PayPal 身份锁，核对 `payment_channel_accounts` 对应的账户及渠道环境。使用共享账号 `star_novel`。
-3. 启动匹配版本的 Reader、CMS 和转化服务。核对新验签事件带账户 ID、原队列继续处理、已审批待扣款订单可补查。若迁移提交后验收失败，暂停新增支付并用匹配 `2026111916` 的构建前滚修复。 [协调切换方案](docs/payment-domain-architecture-and-implementation.md#61-schema-兼容与协调切换)
-
-#### PayPal 购买与退款切换（schema `2026111917`）
-
-1. 进入维护窗口，暂停新增结账、退款和订阅，等待在途数据库事务及渠道请求结束。记录旧 PayPal 未决退款原请求 ID、已知退款 ID、原收款、预留金额和有据可查的发送时间。停止旧 CMS 退款执行端、Reader 和转化服务。
-2. 用新版 CMS 执行 `-migrate`，核对 schema 为 `2026111917`，比对迁移前后 `payment_refunds` 待处理记录和 `payment_refund_commands` 接管结果。验证三个后端用共享账号 `star_novel` 启动。检查 Reader 能查询原收款和原订阅，旧待退款以查证方式接管。
-3. 在隔离环境用同一 PayPal 账户验收新配置引用、Webhook、建单、扣款、续费、退款、补查和旧交易账户归属。完成验收后发布对应 H5 和 CMS。核对旧 `/payment` 和 `/orders` 跳转、旧 `/settings` 只处理通用字段、退款命令刷新恢复和原有小说设置。恢复接收与补查后再开放新增购买。 [切换与续费验收](docs/payment-domain-architecture-and-implementation.md)
-
-#### PayPal VIP 套餐版本（schema `2026111918`）
-
-按第 6.1 节协调 Reader、CMS 与转化服务切换。新版本 CMS 的 `-migrate` 可连续执行尚未应用的支付迁移。核对存量 VIP 套餐的金额、币种和周期，以及能按原账户与新版本匹配的 Plan。Reader 启动后，从 CMS「渠道与商户」检查未绑 Plan 的版本发布结果。Plan 未绑定的套餐暂不接受新购买。用 Sandbox 验证改价前的意向、改价后的新订单以及原 PayPal 协议的续费、取消和退款。
-
-如渠道页显示「待核对」，按核对编号追查原请求，在 PayPal 确定对应的已存在 Plan 后运行 `payment-ops -kind vip-plan -id <核对编号> -plan <PayPal Plan ID>` 查看恢复目标。附上 `-apply -reason <核对依据>` 后，Reader 使用原账户查询 Plan 并核对实际金额、币种、周期和无额外收费，再提交绑定。
-
-#### 资金流水（schema `2026111919`）
-
-按支付架构第 6.1 节协调 Reader、CMS 与转化服务版本。用新版 CMS 执行 `-migrate` 并核对旧 PayPal 收款总额、退款和已付账期。旧 USD 收据缺少手续费和净额凭证时，CMS 显示「待渠道凭证」。查询余额流水时使用与原收款一致的渠道账号和环境。
-
-- PayPal 使用配置中已核验的 `PAYPAL_MERCHANT_ID` 与 Transaction Search 权限。以 `payment-ops -kind paypal-ledger -environment sandbox -from <RFC3339> -through <RFC3339>` 预览指定时间窗，单次范围最多 31 天。
-- Stripe 使用已登记的账户和环境，以及通过运行环境注入的 `STRIPE_LEDGER_API_KEY`。以 `payment-ops -kind stripe-ledger -environment sandbox -account <acct_ID> -id <txn_ID、re_ID 或 frr_ID>` 预览一次余额流水、退款相关流水或已完成的逐笔报表。按对象授权相应查询及文件读取权限。
-- 执行时追加 `-apply -reason <操作依据>`。命令只调用渠道查询接口，将凭证写入本地资金账。失败后可重跑相同入口；金额冲突保留原始入账结果和新凭证，交财务核对。在 Sandbox 或脱敏样本确认单次入账与原收款匹配，再安排实际商户报表验收。
-
-#### 结算与银行对账（schema `2026111920`）
-
-使用匹配版本的 CMS 执行迁移，再协调启动 Reader、CMS 和转化服务。结算报表及银行文件统一使用 USD，银行文件中的金额单位为美分。财务保留原银行账单和渠道文件，根据稳定的银行账号别名及交易 ID 重跑。
-
-- PayPal Settlement 文件按顺序提供所有 CSV 或 TAB 分卷。配置 `PAYPAL_MERCHANT_ID` 后使用 `payment-ops -kind paypal-settlement -environment sandbox -file <第一卷> -file <后续卷>`。提款的核对 ID 使用 `交易ID/T-code/USD`。
-- Stripe 复用 `payment-ops -kind stripe-ledger -environment sandbox -account <acct_ID> -id <frr_ID>` 导入已完成的逐笔报表。使用 `-kind stripe-payout` 配合 `-id <po_ID>` 核对单笔划拨，或以 `-from <RFC3339> -through <RFC3339>` 拉取一个时间窗。通过 `STRIPE_LEDGER_API_KEY` 提供该账户的只读权限。仅为已授权账户安排拉取任务，重复时间窗可刷新晚到的划拨状态。
-- 银行文件使用标题 `transaction_id,booked_at,currency,amount_minor,bank_reference`，入账时间用 RFC3339，贷记为正数。运行 `payment-ops -kind bank-statement -environment sandbox -bank-account <账单账户别名> -id <账单编号> -file <CSV>`。
-- 运行 `payment-ops -kind settlement-match -environment sandbox -provider <paypal或stripe> -account <渠道账户> -id <划拨编号> -bank-account <账单账户别名> -bank-transaction <银行交易ID>`。有渠道参考号时必须一致。渠道未提供参考号时，`-bank-evidence` 记录经财务确认的独立入账依据。用同一渠道参数及 `-kind settlement-status` 查询金额差异、待补流水、延迟和核对结果。
-
-导入和匹配命令默认预览参数，执行时加 `-apply -reason <操作依据>`。渠道返回不同金额时，保留原流水和新凭证，供财务核对。银行账户别名和证据编号使用内部引用，避免输入完整银行账号。PayPal 可由已获得报表权限的 SFTP 任务交付文件。 [PayPal Settlement 报表](https://developer.paypal.com/reports/settlement/) · [Stripe Payout](https://docs.stripe.com/api/payouts/object)
-
-#### 公共结账决策（schema `2026111921`）
-
-使用匹配版本的 CMS 执行 `-migrate` 后，协调启动同版本的 Reader、CMS 和转化服务。迁移增加 `payment_checkout_decisions`，从新请求开始记录。沙箱验证同一整本意向重试、在途渠道尝试、VIP 防重和结束续费后重新开通。查询时按结账环境、阶段和规则版本核对放行、拦截、待确认与待复核的记录。PayPal 拒绝和未知结果继续以原订单查证，账务和权益以已经核实的收款为准。
-
-
-#### 风控、争议与权益处置（schema `2026111922`）
-
-用新版 CMS 迁移并协调启动三个后端。PayPal 复用验签入口，登记 `CUSTOMER.DISPUTE.*`、`PAYMENT.CAPTURE.REVERSED`、`PAYMENT.SALE.REVERSED` 及可用的 Capture 状态事件。确认账户具备 Disputes API 读权限后再配置主动查询。Stripe 的 P2 事件接收使用 `/api/v1/wallet/webhook/stripe`，设置对应账户的 `STRIPE_AFTERCARE_ACCOUNT`、`STRIPE_AFTERCARE_ENVIRONMENT`、`STRIPE_AFTERCARE_API_KEY` 和 `STRIPE_AFTERCARE_WEBHOOK_SECRET`，并验收 Review、Early Fraud Warning、Dispute、Charge 和 PaymentIntent 事件。Stripe Checkout 放行按照 P3、P4 独立验收。
-
-SuperAdmin 以 `PUT /api/v1/admin/payments/channels/{id}/aftercare-policy` 写入已确认的账户策略。接口接受 `dispute_lookup`、`hold_fulfillment`、`reviewer_id`、`finance_id`、`review_seconds`、`refund_seconds`、`reminder_seconds` 和必填的 `reason`。启用暂缓履约时，处理人与值班财务必须是有效的 Finance 或 SuperAdmin，复核和退款时限必须提供。复核提醒在 CMS 的待处理视图查看。用已收款待复核、冲回来件在前、重复通知、退款先到及返还晚到的样本验收权益和钱包流水。
-
-补查命令为 `payment-ops -kind aftercare -provider <paypal|stripe> -account <账户> -environment <sandbox|live> -id <事件或案件ID>`。时间窗补查改用 `-from <RFC3339> -through <RFC3339>`。命令默认预览，执行时追加 `-apply -reason <操作依据>`。PayPal 独立冲回的最终本金核对使用已核验的 Transaction Search 或 Settlement 流水。财务在 CMS 核对原收款、权威余额流水和退款后提交权益处置；Reader 核对当前证据后执行。 [PayPal 交易事件代码](https://developer.paypal.com/reports/reference/t-codes/) · [Stripe 争议对象](https://docs.stripe.com/api/disputes/object)
-
-
-#### Stripe 整本沙箱直收（schema `2026111923`）
-
-请使用与沙箱隔离部署对应的 Stripe 已登记账户、API 密钥和 Webhook 签名密钥。Reader 的 `CONVERSION_ENVIRONMENT` 使用 `sandbox`；审核 Price、Product 及账单地区以后，再开启 `STRIPE_SINGLE_CHECKOUT_ENABLED`。超级管理员使用 `PUT /api/v1/admin/payments/channels/{id}/stripe-one-time/{slot}` 写入 `product_id`、`price_id`、`countries`、`enabled`、`reason`。Stripe Price 必须是有效的 USD 单次价格，与套餐金额完全相符。
-
-Webhook 接收 Checkout 完成、到期、异步支付成功／失败和退款状态事件。当创建响应丢失时，Reader 在同一尝试 ID 下恢复，超过幂等重试窗口仅查询原 Checkout。Sandbox 验收记录应包含回跳、跨渠道在途防重、验签、金额和账单地区不符、额度分次退款、争议及余额流水关联。
-
-#### Stripe VIP 与销售模式扩展（schema `2026111924`）
-
-在隔离数据库或存量副本演练 `2026111923` 到 `2026111924`。用新版 CMS 迁移，随后启动匹配版本的 Reader、CMS 和转化服务。Reader 的 `STRIPE_SINGLE_CHECKOUT_ENABLED` 与 `STRIPE_VIP_CHECKOUT_ENABLED` 默认关闭。沙箱 Worker 继续处理原账户已有的会话、账单和退款。生产模式按支付架构文档第 7 节逐项验收。
-
-在 CMS「渠道与商户」选择已登记的 Stripe 沙箱账户。由 SuperAdmin 分别设置整本和 VIP 映射及账户开关。配置包含 Product ID、Price ID、销售模式和获批账单地区。VIP 使用活动的 USD 周期价格，周期与发布的套餐版本一致。Managed Payments 需有效商品税码及经财务核实的税务责任账户。映射变更用于后续新意向。
-
-同一 Stripe Webhook 注册 Checkout、退款和已有风控事件，并增加 `invoice.paid`、`invoice.payment_succeeded`、`invoice.payment_failed`、`invoice.payment_action_required`、`invoice_payment.paid`、`invoice.finalized`、`invoice.voided`、`invoice.marked_uncollectible` 与 `customer.subscription.created/updated/deleted`。Stripe 直收账户配置可更新支付方式的 Customer Portal。VIP Worker 定期追查近期账单并保存较早账单的分页位置。期末取消以 Stripe 当前协议状态确认，在渠道幂等窗口以外仅查证。
-
-开通前用实际 Sandbox 核实首付、足额续费、部分付款、零额和外部记为已付、扣费失败后恢复、期末取消、退款和争议。财务从账期查原 Charge、余额流水和退款。Managed Payments 还需核实交易地区、客户税务状态、USD 实付和税务责任。Link 用户端订单管理需经授权实测。Stripe 暂停时关闭对应账户开关和 Reader 新增入口，保留回调和已有任务。迁移后已有新交易证据时保留账期和收款记录，沿当前 Schema 前滚恢复。 [Stripe 订阅 Webhook](https://docs.stripe.com/billing/subscriptions/webhooks) · [Stripe Link 验收](https://docs.stripe.com/payments/managed-payments/update-checkout#link)
-
-#### 支付域收尾与正式环境放行（schema `2026111925`）
-
-从 `2026111924` 升级时由 CMS 执行共享迁移，再启动匹配 `2026111925` 的三个后端及 Worker。保留上次事件处理进度和维护窗口补查起点。迁移后正式商品需要重新登记可核验的商品、市场和发布证据。Stripe 新购买开关默认关闭，准备阶段可继续处理已登记账户原有的会话、订阅续费、退款和争议。
-
-- Reader 使用 `STRIPE_AFTERCARE_ACCOUNT`、`STRIPE_AFTERCARE_ENVIRONMENT`、`STRIPE_AFTERCARE_API_KEY` 与 `STRIPE_AFTERCARE_WEBHOOK_SECRET` 锁定收款和事件账户。正式业务环境 `production` 对应 Stripe `live`；隔离验收使用 `sandbox`。CMS 用 `STRIPE_CATALOG_SANDBOX_API_KEY` 或 `STRIPE_CATALOG_LIVE_API_KEY` 查询该环境的 Account、Price 和 Product。密钥从部署环境加载。
-- SuperAdmin 在「渠道与商户」分别登记已批准的 USD 套餐、销售模式、账单市场、发布凭证和财务市场处理方案。核实正式商品通过渠道校验及第 7 节验收后，再开对应账户的单次或订阅能力和 Reader 的 `STRIPE_SINGLE_CHECKOUT_ENABLED`／`STRIPE_VIP_CHECKOUT_ENABLED`。MoR 还需验证实际客户市场、税务责任和经授权的 Link 售后。 [PayPal Webhook API](https://developer.paypal.com/api/rest/webhooks/rest/) · [Stripe Managed Payments 资格](https://docs.stripe.com/payments/managed-payments/eligibility)
-- 在「支付中心 → 对账」按环境提交结算报表、银行流水和匹配命令，并查 Reader 的处理结果。启用自动拉取前核对该账户的 PayPal Transaction Search 或 Stripe Payout／余额明细读取权限。Stripe 注册 `payout.paid`、`payout.failed`、`payout.canceled`、`payout.reconciliation_completed` 和 `reporting.report_run.succeeded` 触发补查和逐笔报表导入。PayPal Settlement 报表按渠道分卷文件顺序完整导入，单批上传上限为 8 MB，较大的正式文件继续使用 `payment-ops`。账单地区或税务复核通过「交易 → 第三方支付凭据详情」处理，批准后按原收款重新核实。
-- 支付恢复 Worker 按账户持久化分页进度。切换后以该账户和环境从维护开始前调度重拉。默认试运行；加 `-apply -reason '维护期事件回补'` 持久化任务。查看 `payment-ops` 的 `event_recovery_attention`、渠道 Inbox、未履约订单和待核对流水。Stripe Events API 可以回查最近 30 天的事件，超过范围按原交易、账单、退款、争议或账本凭证回补。 [Stripe Events API](https://docs.stripe.com/api/events/list)
+在仓库根目录执行。构建需要 Go 1.25、Python 3 与 PyYAML、Node.js 和 npm。以下以 Linux amd64 为例。
 
 ```bash
-payment-ops -kind event-recovery -provider stripe -account acct_Example -environment sandbox -from 2026-11-19T08:00:00Z
+python3 deploy/linux/prepare-config.py --check
+./deploy/scripts/build-linux.sh amd64
+(cd cms-front && npm ci && npm run build)
+(cd reader-front && npm ci && npm run build)
 ```
 
-#### 支付复查修复与商户切换（schema `2026111926`）
+后端归档为 `deploy/dist/star-novel-linux-amd64.tar.gz`，同目录有 `.tar.gz.sha256`。归档含 CMS、Reader、Conversion 和 Conversion Ops 二进制、Compose、配置生成器及配套 SQL。两个 `dist/` 独立发布。归档含生产配置和密钥，只通过受控渠道传输。若从早于 `2026111704` 的库升级或全新建库，同时从该提交携带 [Reader 并发索引脚本](cms-backend/db/reader_query_indexes.sql)。需要支付运维 CLI 时按 [4.3](#43-维护窗口事件补查与财务操作) 一并构建并校验。
 
-由 CMS 从 `2026111925` 执行共享迁移，再启动匹配 `2026111926` 的 Reader、CMS 与转化服务。核对旧订单、协议、收据、退款和事件进度。历史 MoR 的含税金额保留在原收据，旧履约记录的税前本金在复查取得证据前标记为未知。渠道报告和付款币种仍按 USD 核对。
-
-切换前把新旧账户登记在 `payment_channel_accounts`，保留旧账户的 API 和 Webhook 凭证。用 `PAYMENT_ACCOUNT_REFERENCES` 注入显式账户列表。每个渠道最多指定一个 `primary: true`。原有 PayPal 绑定保留为历史凭证来源。Stripe 可以继续使用原 `STRIPE_AFTERCARE_*` 配置注册旧账户，或统一把新旧账户登记在账户列表。现有 Webhook 地址继续使用，Reader 按账户配置验签。
-
-以下账户和环境变量名仅为配置示例。`secret_env` 与 `webhook_env` 指向 API 凭证与 Webhook 签名密钥或 Webhook ID。PayPal 另需 `merchant_env` 提供正式商户标识。Stripe 的 `ledger_env` 可指定该账户的独立财务读取凭证。
-
-```json
-[
-  {"provider":"paypal","account":"next_paypal_client","environment":"live","secret_env":"PAYPAL_NEXT_SECRET","webhook_env":"PAYPAL_NEXT_WEBHOOK_ID","merchant_env":"PAYPAL_NEXT_MERCHANT_ID","primary":true},
-  {"provider":"stripe","account":"acct_Example","environment":"live","secret_env":"STRIPE_NEXT_SECRET","webhook_env":"STRIPE_NEXT_WEBHOOK_SECRET","ledger_env":"STRIPE_NEXT_LEDGER_KEY","primary":true}
-]
-```
-
-新 PayPal 主账户可在新订阅暂停期间发布计划。在 CMS「渠道与商户」按账户和环境确认 VIP 套餐状态，核实计划后再开放新订阅。以新旧商户的回调、续费、退款及报表样本验证实际去向，再停用旧账户的新结账。保留仍有在途会话、协议或售后的账户配置。隔离环境使用 `sandbox` 渠道凭证，正式业务环境 `production` 使用 `live` 渠道凭证。
-
-补拉单事件失败时从 `event_recovery_failures` 指标和 `action=held` 日志定位事件。核实修复后补入原 Inbox，默认试运行。加 `-apply -reason '重放已核实的原事件'` 调度该事件。
+服务器先校验归档和文件，再合并线上环境参数。部署目录使用 `/www/star-novel-server/releases/<release>`，`current` 在验收后更新。以下命令从存放归档及校验文件的受控目录执行。
 
 ```bash
-payment-ops -kind event-retry -provider stripe -account acct_Example -environment sandbox -id evt_Example
+sha256sum -c star-novel-linux-amd64.tar.gz.sha256
+install -d -m 0750 /www/star-novel-server/releases
+tar -xzf star-novel-linux-amd64.tar.gz -C /www/star-novel-server/releases
+cd "/www/star-novel-server/releases/${RELEASE_DIR:?请填写归档中的版本目录名}"
+sha256sum -c SHA256SUMS
+chmod 600 config.yaml
 ```
 
+保留包内 `deployment.image_tag`。按生产实际值合并 DB、JWT、OSS、支付、私网鉴权和回传参数。开启首发维护时将新版 `conversion.meta_enabled` 设为 `false`，`conversion.meta_batch_size` 设为 `1`。保存本次配置与上一版的受控副本，生成的 `.env` 和 `*.env` 由脚本维护。
 
-#### 支付代码 Review 修复（schema `2026111927`）
+### 2.2 回传配置基线
 
-由 CMS 从 `2026111926` 执行共享迁移，随后协调启动对应的 Reader、CMS、转化后端及 Worker。迁移保留订单、协议和退款记录，并恢复未发送 Capture 的旧 PayPal 切换占位。CMS「订阅与账期」标记环境待核对的协议。此类协议在确认渠道身份后才能参与 Reader 权益和续费处理。
+生产入口为 `deploy/linux/config.yaml` 的 `conversion` 段，服务器使用当前发布目录的 `config.yaml`。分销隔离测试使用 [config.test.yaml](conversion-backend/config.test.yaml)。环境、URL、密钥、并发和发送参数均从对应配置生成。
 
-PayPal Webhook 保持订阅扣款失败和退款在途、失败通知的订阅。对已登记的 PayPal 完成退款，Finance 或 SuperAdmin 可在原退款命令的待核对记录中核验并关联渠道退款编号，提交核对依据。此操作结清原命令预留，保留审计记录。
+| YAML 配置 | 生产部署核对项 |
+| --- | --- |
+| `environment`、`private_url`、`private_token`、`private_addr`、`private_host_port` | 环境为 `production`，Reader、CMS、回传进程、接入和 Pixel 一致。CMS 与 API 共用私网 Token。容器内监听与 Compose 端口匹配。 |
+| `credential_key_version`、`credential_keys_json` | API 使用当前版本写入凭据，Worker 使用共同的密钥环解密。值为版本到 32 字节 Base64 密钥的 JSON 映射。 |
+| `worker_instances`、`db_max_conns`、`worker_db_max_conns` | 首发按 2 个 Worker、每个 16 连接。API 和 Collector 各 8，回传合计上限 48。另计 CMS 的 15、每个 Reader 前台 21 与支付后台 4，以及 RDS 运维和迁移预留。 |
+| `reader_normalizers`、`inbox_normalizers`、`normalizer_limit` | 每个 Worker 规划 Reader 2、Partner Inbox 2，总预算 4。当前生产只注册 Reader 消费者。已启用消费者合计应落在预算内，预算不超过 Worker 连接池的一半。 |
+| `normalize_batch`、`worker_poll_interval`、`worker_queue_probe_interval` | 每个消费者每轮 20 条，心跳及扫描间隔 15s，空闲探测 250ms。 |
+| `meta_enabled`、`meta_graph_version`、`meta_batch_size` | 上线验收前关闭发送；使用发布配置指定的 Graph 版本。首发 `1`，后续按灰度结果调整。 |
+| `meta_global_limit`、`meta_concurrency`、`meta_pixel_interval`、`meta_request_timeout` | 每环境全局 5，单进程最多 5，同 Pixel 领取至少间隔 3s，单请求超时 5s。同一环境的所有实例使用相同全局上限。 |
+| `callback_addr`、`sinan_mock_enabled`、`partner_report_enabled` | 生产配置保留回环地址，两个开关均为 `false`。默认 Compose 无 Callback 和 Partner Worker 服务。 |
 
-### 3.2 自建 Redis 生产配置
-修改 Redis 所在机器的 `/etc/redis/redis.conf`：
-```ini
-bind 172.16.0.15 127.0.0.1
-protected-mode yes
-port 6379
+隔离司南测试用以下命令生成独立环境文件，先把测试 DSN 指向已迁移的专用库。全套支付沙箱另用 `conversion.environment: sandbox` 和渠道 `sandbox`，财务任务和结账据此选定环境。其 RDS、Redis、支付应用、回调、Pixel、密钥和网关与生产隔离。
 
-# 必须设置强密码
-requirepass YOUR_STRONG_REDIS_PASSWORD_2026
-
-# 数据持久化
-appendonly yes
-appendfsync everysec
-
-# 内存上限与淘汰策略
-maxmemory 3gb
-maxmemory-policy volatile-lru
-```
-重启并验证连接：
 ```bash
-systemctl restart redis
-redis-cli -a YOUR_STRONG_REDIS_PASSWORD_2026 ping  # 预期返回 PONG
+python3 deploy/linux/prepare-config.py --config conversion-backend/config.test.yaml --check
+python3 deploy/linux/prepare-config.py --config conversion-backend/config.test.yaml \
+  --output-dir /tmp/star-novel-conversion-test-env
 ```
 
----
+### 2.3 支付配置与镜像准备
 
-## 🚀 四、 第二阶段：读者端 Go 后端多节点集群部署
+Linux 部署在私有 `config.yaml` 的 `payment` 段维护支付配置。运行 `prepare-config.py` 后，由现有 Compose 直接加载生成的 `cms.env` 和 `reader.env`。
 
-在 **每一台** 读者端业务机（`ECS-Reader-1`, `ECS-Reader-2`...）上执行：
+- `payment.credential_keys` 填入版本化密钥环，格式为 `v1:<32 字节密钥的 Base64>`，多个版本用逗号分隔。生成器向 CMS 和所有 Reader 注入同一套密钥环。`payment.credential_active_key_version` 指定 CMS 加密新凭据使用的版本。保留仍被存量密文引用的旧密钥版本。
+- 仍使用环境变量凭据的账户，按需在 `payment` 段填写 PayPal Webhook、Stripe 目录校验、对账及售后配置。多账户旧凭据通过 `account_references` 和 `account_environment` 传给 Reader。Stripe 的旧路径开关由 `stripe_single_checkout_enabled` 和 `stripe_vip_checkout_enabled` 控制，数据库管理账户按 CMS 的商户开关放行。
+- 测试与部署使用各自独立的支付密钥环。PayPal、Stripe 的凭据和 Webhook 签名由渠道提供，动态商户从 CMS 录入。配置文件和生成的环境文件保留 `600` 权限。
 
-### 4.1 安装 Docker 环境
 ```bash
-curl -fsSL https://get.docker.com | sh
-sudo systemctl enable --now docker
+dc() { docker compose -p star-novel -f compose.yaml "$@"; }
+python3 prepare-config.py --check
+python3 prepare-config.py
+dc config --quiet
+dc build cms
 ```
 
-### 4.2 准备 `reader-backend/Dockerfile` (基于预编译 Linux 二进制)
-```dockerfile
-# =========================================================================
-# STAR NOVEL - reader-backend 极速轻量运行镜像 (基于预编译 Linux 二进制)
-# =========================================================================
-FROM alpine:3.19
+## 3. 维护窗口与数据库切换
 
-WORKDIR /app
+1. 网关进入维护，停止新结账、履约、CMS 写入和配置发布。支付 Webhook 暂时不可接收时返回可重试的 `503`，保留渠道重投和事件补查的证据。
+2. 停止旧 Meta Worker 的新领取，等待在途请求和回执收尾。单独记录失租、结果未知和待核对任务。停止全部旧 Reader 实例及其支付任务、CMS、Conversion API、Worker 和 Collector。已运行的分销 Callback 与回告 Worker 一并停用。已有 Compose 部署从旧 `current` 目录用该版本的 Compose 文件停服务；首次从独立容器切换时核对实际容器名再停用。保留旧镜像、配置及 Redis 数据卷。
+3. 确认迁移连接指向正确 RDS。只由新包中的 CMS 执行迁移。新库会初始化基线和种子，旧库按版本执行待应用的迁移。用接近生产数据量的库预演，当前进程迁移时限为 90 秒，单条 SQL 上限 60 秒，业务表锁等待上限 3 秒。迁移失败时检查退出码、账本和锁等待，解除阻塞后再重试。
 
-# 安装基础运行时依赖 (CA 证书、时区、健康检查 curl)
-RUN apk add --no-cache ca-certificates tzdata curl
-ENV TZ=UTC
-
-# 复制在本地预编译好的 Linux 静态二进制文件
-COPY reader-server-linux-amd64 /app/server
-RUN chmod +x /app/server
-
-# 暴露读者端 API 端口
-EXPOSE 8080
-
-# 容器启动入口
-ENTRYPOINT ["/app/server"]
-```
-
-### 4.3 配置生产环境变量 `reader-backend/.env`
-> [!WARNING]
-> 所有 `reader-backend` 节点的 `JWT_SECRET` 与基础配置必须保持 **100% 绝对一致**。
-
-```ini
-GIN_MODE=release
-PORT=8080
-
-# 数据库与缓存内网连接（统一使用 RDS 账号 star_novel）
-DATABASE_URL=postgres://star_novel:YOUR_RDS_PASSWORD@pgm-xxxxxx.pgsql.rds.aliyuncs.com:3433/star_novel?sslmode=disable
-REDIS_URL=redis://:YOUR_STRONG_REDIS_PASSWORD_2026@172.16.0.15:6379/0
-
-# 全集群必须一致的 JWT 密钥
-JWT_SECRET=STAR_NOVEL_SUPER_JWT_KEY_PROD_2026_RANDOM_STRING
-
-# 海外支付 Live 秘钥
-PAYPAL_CLIENT_ID=xxxxxx
-PAYPAL_CLIENT_SECRET=xxxxxx
-PAYPAL_MODE=live
-
-# 默认主站落地页域名
-DEFAULT_DOMAIN=https://h5.starsfic.com
-
-# 统一转化回传所属环境（需与 conversion-backend 一致；缺省时默认为 production）
-CONVERSION_ENVIRONMENT=production
-
-# 章节正文存储引擎配置 ("postgres" 或 "oss")
-STORAGE_TYPE=postgres
-# 若启用 OSS 存储，配置以下凭证:
-OSS_ENDPOINT=oss-cn-hangzhou.aliyuncs.com
-OSS_ACCESS_KEY_ID=your_aliyun_oss_access_key_id
-OSS_ACCESS_KEY_SECRET=your_aliyun_oss_access_key_secret
-OSS_BUCKET=star-novel-content
-OSS_BASE_PATH=novels
-```
-
-### 4.4 构建并启动容器 (含容器清理与多重验证)
 ```bash
-cd reader-backend
-
-# 1. 构建镜像 (基于预编译二进制，仅耗时 1 秒，0 CPU 开销)
-docker build -t star-reader-backend:latest .
-
-# 2. 优雅停止并清理旧容器 (防端口与名称冲突)
-docker stop star_reader_backend 2>/dev/null || true
-docker rm star_reader_backend 2>/dev/null || true
-
-# 3. 启动新容器
-docker run -d \
-  --name star_reader_backend \
-  --restart always \
-  -p 8080:8080 \
-  --env-file .env \
-  star-reader-backend:latest
+# 从新版 releases 目录执行
+dc run --rm --no-deps cms -migrate
 ```
 
-#### 4.5 三步确认服务是否 100% 启动成功
-* **第一步：查看容器运行状态**
-  ```bash
-  docker ps | grep star_reader_backend
-  # 预期输出: STATUS 列显示 "Up X seconds" (持续存活未退出)
-  ```
-* **第二步：查看容器核心初始化日志**
-  ```bash
-  docker logs --tail 20 star_reader_backend
-  # 预期包含:
-  # Database connection pool initialized successfully
-  # Redis client initialized successfully
-  # Reader Content Storage initialized with driver: postgres (或 oss)
-  # Star Novel backend starting on port 8080
-  ```
-* **第三步：健康检查接口自测**
-  ```bash
-  curl http://127.0.0.1:8080/healthz
-  # 预期返回: {"status":{"database":"UP","redis":"UP"},"timestamp":"..."}
-  ```
+4. 用预先配置的 libpq 服务名或受控凭据连接同一个库，核对账本并运行独立索引脚本。以下示例使用 `PGSERVICE=star_novel_release`，需先将该服务名指向本次 RDS 目标。
 
-> [!TIP]
-> **启动异常常见排查字典**：
-> 1. 若 `docker ps` 显示 `Exited (1)`，立即执行 `docker logs star_reader_backend` 查看末尾报错：
->    * `Database connection failed`：检查 RDS 白名单是否已添加该 ECS 的内网 IP，并核对 `.env` 中的数据库密码；
->    * `Redis connection failed`：检查 Redis 容器或服务是否已启动，核对内网 IP/密码；
->    * `[CRITICAL SECURITY ERROR] JWT_SECRET...`：`GIN_MODE=release` 模式下严禁使用默认密钥，请修改 `.env` 中的 `JWT_SECRET` 为自定义复杂字符串。
-
----
-
-## 🛠️ 五、 第三阶段：CMS 运营后端与统一转化服务部署
-
-在网关/管理机（`ECS-Gateway` 或独立内网节点）上操作，确保 **`conversion-backend`** 与 **`cms-backend`** 处于同一可控私网内（例如共享 Docker 自定义网络或同宿主机 `127.0.0.1` 回环通信）。
-
-### 5.1 准备 `cms-backend/Dockerfile` (基于预编译 Linux 二进制)
-仓库根目录下的 `cms-backend/Dockerfile` 结构如下：
-```dockerfile
-# =========================================================================
-# STAR NOVEL - cms-backend 极速轻量运行镜像 (基于预编译 Linux 二进制)
-# =========================================================================
-FROM alpine:3.19
-
-WORKDIR /app
-
-# 安装基础运行时依赖 (CA 证书、时区、健康检查 curl)
-RUN apk add --no-cache ca-certificates tzdata curl
-ENV TZ=UTC
-
-# 复制在本地预编译好的 Linux 静态二进制文件
-COPY cms-server-linux-amd64 /app/cms-server
-RUN chmod +x /app/cms-server
-
-# 暴露 CMS API 端口
-EXPOSE 8081
-
-# 容器启动入口
-ENTRYPOINT ["/app/cms-server"]
-```
-
-### 5.2 配置 `cms-backend/.env` 并启动
-```ini
-GIN_MODE=release
-PORT=8081
-# 统一使用 RDS 账号 star_novel
-DATABASE_URL=postgres://star_novel:YOUR_RDS_PASSWORD@pgm-xxxxxx.pgsql.rds.aliyuncs.com:3433/star_novel?sslmode=disable
-REDIS_URL=redis://:YOUR_STRONG_REDIS_PASSWORD_2026@172.16.0.15:6379/0
-CMS_JWT_SECRET=<独立于 Reader 的至少 32 字符随机密钥，可用 openssl rand -hex 32 生成>
-DEFAULT_DOMAIN=https://h5.starsfic.com
-
-# =========================================================
-# 统一转化回传私网对接 (必须与 conversion-api 一致)
-# =========================================================
-# • 若使用同一 Docker 私网通信，指向容器名 http://conversion-api:8092
-# • 若与 conversion-api 同宿主机非容器网络运行，使用 http://127.0.0.1:8092
-# 注意：未配置或不可达时，CMS「像素管理」与「回传中心」在线视图将返回 503 降级提示
-CONVERSION_PRIVATE_URL=http://conversion-api:8092
-CONVERSION_PRIVATE_TOKEN=<与 conversion-api 一致的强随机 Bearer Token>
-
-# 章节正文存储引擎配置 ("postgres" 或 "oss")
-STORAGE_TYPE=postgres
-# 若启用 OSS 存储，配置以下凭证:
-OSS_ENDPOINT=oss-cn-hangzhou.aliyuncs.com
-OSS_ACCESS_KEY_ID=your_aliyun_oss_access_key_id
-OSS_ACCESS_KEY_SECRET=your_aliyun_oss_access_key_secret
-OSS_BUCKET=star-novel-content
-OSS_BASE_PATH=novels
-```
-
-启动容器（含容器清理防冲突）：
 ```bash
-cd cms-backend
+PGSERVICE=star_novel_release psql -X -v ON_ERROR_STOP=1 \
+  -c 'SELECT max(version) FROM reader_schema_migrations;'
+PGSERVICE=star_novel_release psql -X -v ON_ERROR_STOP=1 \
+  -f migrations/conversion_query_indexes.sql
+```
 
-# 1. 构建镜像 (基于预编译二进制，耗时不到 1 秒)
-docker build -t star-cms-backend:latest .
+   当前应返回 `2026111934`。并发索引脚本使用自动提交。核对脚本中的索引均存在且 `pg_index.indisvalid=true`；失败留下的无效索引需由 DBA 按实际定义处理后再重跑，脚本的 `IF NOT EXISTS` 会跳过同名对象。新库或未应用阅读性能索引的旧库，按同样方式执行随包准备的 `reader_query_indexes.sql`。独立数据库角色环境迁移后应用 [角色授权脚本](cms-backend/db/conversion_role_grants.sql)；生产统一使用具备相应对象权限的 `star_novel` 时无需拆分角色。使用 OSS 正文且存在历史预览缺口时，执行 `dc run --rm --no-deps cms -backfill-chapter-previews` 并核对结果。
 
-# 2. 优雅停止并清理旧容器 (防端口与名称冲突)
-docker stop star_cms_backend 2>/dev/null || true
-docker rm star_cms_backend 2>/dev/null || true
+5. 核对存量订单、协议、收款、回调游标和权益。环境或原账户缺少依据的记录留在支付中心待核对；历史整本权益按原商品和小说证据核验。回传按现场记录判定是否需要历史接管。确认旧服务从未对 Meta 上报时直接部署新链路；如已有历史发送证据，先保持新发送暂停，再按原业务键、事件 ID 和发送证据检查接管范围。 [历史队列接管](conversion-backend/README.md#历史队列接管)
 
-# 3. 启动新容器（接入私网供调用 conversion-api）
-docker run -d \
-  --name star_cms_backend \
-  --restart always \
-  --network "$STAR_NOVEL_PRIVATE_NETWORK" \
-  -p 127.0.0.1:8081:8081 \
-  --env-file .env \
-  star-cms-backend:latest
-
-# 4. 验证健康检查
+```bash
+dc up -d --no-build --wait --wait-timeout 180 redis conversion-api cms
+dc ps
 curl -fsS http://127.0.0.1:8081/healthz
 ```
 
-> [!NOTE]
-> 自动化部署包从 `deploy/linux/config.yaml` 生成 CMS、Reader 和 Conversion 的环境文件。Compose 内置 API、Worker 和 Collector。Worker 默认由同一部署配置启动两个副本。
+Conversion API 在 Compose 中没有 HTTP 健康检查。`dc ps` 后，在 CMS 登录验证回传概要和吞吐查询成功，分别使用 `/api/v1/admin/conversion/summary` 和 `/api/v1/admin/conversion/throughput` 检查私网鉴权、角色与数据库读取。首次新建后台可先发布 CMS 静态产物到受控管理入口，以完成第 4 节配置。
 
-### 5.3 部署独立统一转化回传服务 (`conversion-backend`)
+## 4. 配置业务并启动 Reader
 
-`conversion-backend/Dockerfile` 采用多阶段构建，打包出 `/app/bin/conversion`（常驻服务入口，支持 `--mode=api|worker|collector|callback|partner-worker`）与 `/app/bin/conversion-ops`（运维/接管 CLI）。三个核心生产实例按职责拆分进程运行（当前统一使用 `star_novel` RDS 账号）：
+### 4.1 支付账户、回调与商品
 
-由 `deploy/linux/config.yaml` 统一配置回传，通过 `prepare-config.py` 生成下述环境文件。Worker 每实例使用 16 个数据库连接，Reader 和已注册的 Partner Inbox 各 2 个消费者，合计上限 4。独立测试使用 `conversion-backend/config.test.yaml`，生成到单独目录。批量模式升级先暂停旧发送器、等待在途请求定稿，再执行 CMS `-migrate` 至 `2026111934`，按需刷新受限角色授权后以每请求最多 1 条启动。 [回传配置与切换](conversion-backend/README.md)
+<a id="支付复查修复与商户切换schema-2026111926"></a>
+<a id="支付域收尾与正式环境放行schema-2026111925"></a>
+<a id="stripe-vip-与销售模式扩展schema-2026111924"></a>
 
-1. **准备三份独立环境配置文件**：
-   - 生成共享 Token 与凭据加密主密钥：
-     ```bash
-     # 1. 生成 CMS 与 conversion-api 共享 Bearer Token
-     openssl rand -hex 32
+1. SuperAdmin 在「支付中心 → 渠道与商户」核对现有 PayPal、Stripe 商户、环境、主账户、新单和订阅开关。新商户先建草稿并加密保存凭据，确认账号身份、权限和环境，验证通过后发布。发布对新单生效前，先核对原账户的在途 Checkout、续费、退款与争议。保留旧账户的有效凭据、入口和订单绑定，直到存量售后处理完成。
+2. 动态账户使用 CMS 展示的 `/api/v1/wallet/webhook/channel/<token>` 路径，以实际 Reader HTTPS 域名配置各渠道账户端点。PayPal 记录该应用的 Webhook ID，Stripe 使用该端点的签名密钥。需要在线验证的端点，在 Reader 启动并开放该路径后完成渠道登记与投递测试。已注册的 `/api/v1/wallet/webhook/paypal`、`/api/v1/wallet/webhook/stripe` 和 `/api/v1/wallet/webhook/subscription/<provider>` 按原商户保留。网关保留请求体、签名头及真实协议，Webhook 路径跳过缓存、登录跳转和浏览器挑战。
+3. 按启用能力订阅结账、扣款、订阅变化和失败、退款、冲回、风险与争议事件；使用自动对账时再核对结算和报表事件及账户读取权限。CMS 的渠道校验和真实签名回调分别验收，核对每个账户和环境的回调入库。 [渠道事件与业务确认依据](docs/payment-domain-architecture-and-implementation.md#渠道事件与业务确认依据)
+4. 在「支付中心 → 商品」准备商品版本和目标环境的 PayPal 或 Stripe 绑定。核对价格、USD 币种、单次或订阅周期、市场、Stripe 税务和销售模式，按所需渠道同步并发布。为对应环境的充值模板选择已发布版本，核对推广链接与模板、H5 显示及实际下单快照。Stripe 分别确认一次性购买和 VIP 的账户能力及 Reader 开关；Managed Payments 还需核对获批市场、税务责任和 Link 售后。 [统一商品与定价](docs/payment-domain-architecture-and-implementation.md#37-统一商品与定价)
 
-     # 2. 生成 32 字节 Base64 AES-256-GCM 主密钥 (用于加密 Pixel Access Token)
-     openssl rand -base64 32
-     ```
-   - `conversion-api.env`（私网控制面：配置增改、密钥写入、只读审计、逐单对账与审计重排）：
-     ```ini
-     DATABASE_URL=postgres://star_novel:YOUR_RDS_PASSWORD@pgm-xxxxxx.pgsql.rds.aliyuncs.com:3433/star_novel?sslmode=disable
-     CONVERSION_ENVIRONMENT=production
-     CONVERSION_PRIVATE_ADDR=:8092
-     CONVERSION_PRIVATE_TOKEN=<与 cms-backend 一致的共享 Token>
-     # 新增或轮换 Pixel Token 时必填；版本号须存在于 CONVERSION_CREDENTIAL_KEYS 中
-     CONVERSION_CREDENTIAL_KEY_VERSION=v1
-     CONVERSION_CREDENTIAL_KEYS={"v1":"<Base64 32-byte AES Key>"}
-     ```
-   - `conversion-worker.env`（异步投递面：Outbox 归一化 + Meta Graph API 发送）：
-     ```ini
-     DATABASE_URL=postgres://star_novel:YOUR_RDS_PASSWORD@pgm-xxxxxx.pgsql.rds.aliyuncs.com:3433/star_novel?sslmode=disable
-     CONVERSION_ENVIRONMENT=production
-     # 初次切换上线先设 false 验证入队与心跳，确认无误后再改为 true 放量
-     CONVERSION_META_ENABLED=false
-     META_GRAPH_VERSION=v21.0
-     CONVERSION_WORKER_DB_MAX_CONNS=16
-     CONVERSION_READER_NORMALIZERS=2
-     CONVERSION_INBOX_NORMALIZERS=2
-     CONVERSION_NORMALIZER_LIMIT=4
-     CONVERSION_NORMALIZE_BATCH=20
-     CONVERSION_META_GLOBAL_LIMIT=5
-     CONVERSION_META_CONCURRENCY=5
-     CONVERSION_META_BATCH_SIZE=1
-     CONVERSION_META_PIXEL_INTERVAL=3s
-     CONVERSION_WORKER_POLL_INTERVAL=15s
-     CONVERSION_WORKER_QUEUE_PROBE_INTERVAL=250ms
-     CONVERSION_META_REQUEST_TIMEOUT=5s
-     CONVERSION_SINAN_MOCK_ENABLED=false
-     # 须保留所有仍在使用的历史及当前密钥版本，确保平滑轮换期间可解密旧目标凭据
-     CONVERSION_CREDENTIAL_KEYS={"v1":"<Base64 32-byte AES Key>"}
-     ```
-   - `conversion-collector.env`（独立监控面：每 30s 采集心跳、积压、缺目标与告警）：
-     ```ini
-     DATABASE_URL=postgres://star_novel:YOUR_RDS_PASSWORD@pgm-xxxxxx.pgsql.rds.aliyuncs.com:3433/star_novel?sslmode=disable
-     CONVERSION_ENVIRONMENT=production
-     ```
+### 4.2 Pixel、推广路由与进程启动
 
-2. **构建镜像并启动三模式容器**（**严禁对公网映射 `8092` 端口**）：
-   ```bash
-   docker network create "$STAR_NOVEL_PRIVATE_NETWORK" 2>/dev/null || true
-   docker build -t star-conversion:release conversion-backend
+<a id="付款部分回传schema-2026111915"></a>
 
-   for name in conversion-api conversion-worker conversion-collector; do
-     docker stop "$name" 2>/dev/null || true
-     docker rm "$name" 2>/dev/null || true
-   done
+1. 在 CMS「像素管理」核对同环境 Pixel、Access Token、`source=starnovel` 和 `account_key=reader` 接入及 Pixel 授权。检查启用状态、事件白名单、推广链接绑定和附加目标规则。空白名单会跳过所有事件。部分回传按发布规则生效；需要历史首付覆盖的推广链先验证并留存证据，再启用该链规则。
+2. 启动 Collector、Conversion Worker 和 Reader。Worker 保持暂停 Meta 发送，仍归一化 Outbox、扫描恢复并写心跳。Reader 启动后即执行支付后台任务，启动前先复查账户、凭据和现存队列。
 
-   docker run -d --restart unless-stopped --name conversion-api \
-     --network "$STAR_NOVEL_PRIVATE_NETWORK" \
-     --env-file conversion-api.env star-conversion:release --mode=api
-
-   docker run -d --restart unless-stopped --name conversion-worker \
-     --network "$STAR_NOVEL_PRIVATE_NETWORK" \
-     --env-file conversion-worker.env star-conversion:release --mode=worker
-
-   docker run -d --restart unless-stopped --name conversion-collector \
-     --network "$STAR_NOVEL_PRIVATE_NETWORK" \
-     --env-file conversion-collector.env star-conversion:release --mode=collector
-   ```
-   > 如 `cms-backend` 运行于宿主机网络而非 Docker 自定义网络，可为 `conversion-api` 额外添加 `-p 127.0.0.1:8092:8092`，并将 `cms-backend/.env` 的 `CONVERSION_PRIVATE_URL` 指向 `http://127.0.0.1:8092`。
-
-3. **使用 `conversion-ops` 运维 CLI**：
-   ```bash
-   # 示例：缺行订单对账补建试运行（使用独立维护/retention 凭据环境文件）
-   docker run --rm --entrypoint /app/bin/conversion-ops --env-file conversion-ops.env \
-     star-conversion:release repair-missing --order-id 12345 --event-name Purchase
-   ```
-
----
-
-## 🌐 六、 第四阶段：前端构建与宝塔 Nginx 统一网关配置
-
-在网关机（`ECS-Gateway`）上操作：
-
-### 6.1 前端静态产物编译
 ```bash
-# 1. 编译读者端 H5 前端
-cd reader-front && npm install && npm run build
-
-# 2. 编译 CMS 运营后台前端
-cd ../cms-front && npm install && npm run build
+dc up -d --no-build --wait --wait-timeout 180 conversion-collector conversion-worker reader
+dc ps
+curl -fsS http://127.0.0.1:8080/healthz
 ```
 
-### 6.2 宝塔面板站点创建
-1. **读者端 H5 站点**：
-   - 宝塔【网站】 $\rightarrow$ 【添加站点】 $\rightarrow$ 域名：`h5.star-novel.com` 与 `*.star-novel.com`；
-   - 根目录：`/www/wwwroot/h5.star-novel.com`，将 `reader-front/dist/` 下的文件上传到该目录。
-2. **CMS 运营后台站点**：
-   - 宝塔【网站】 $\rightarrow$ 【添加站点】 $\rightarrow$ 域名：`admin.star-novel.com`；
-   - 根目录：`/www/wwwroot/admin.star-novel.com`，将 `cms-front/dist/` 下的文件上传到该目录。
-   - **架构升级路由说明**：CMS 前端「广告投放」菜单已升级为 `/pixels`（像素管理）和 `/conversions`（回传中心），同时旧链接 `/ad-config/logs` 在前端保留携带 Query 参数自动重定向至 `/conversions`，依赖 Nginx `try_files $uri $uri/ /index.html;` 防止刷新 404。所有转化查询与操作请求均通过 `/api/v1/admin/conversion/*` 经由 `cms-backend` 私网转发，**严禁在 Nginx 中直接暴露 `conversion-api (:8092)`**；仅未来正式上线外部分销 Webhook 时，才另行将对应 `/callbacks/<partner>/...` 白名单路径反代至 `conversion --mode=callback`。
+3. 检查 Reader 支付日志和 CMS 订单、订阅、退款页。在回传中心核对两个 Worker 副本的 `normalize`、`meta` 心跳，以及 Collector 最近采样时间、积压和告警。首轮应看到 Meta 暂停，采样与归一化持续更新。也可在同一库执行以下只读检查。
 
-### 6.3 宝塔 Nginx 网关完整配置文件
-
-#### 1. 读者端 H5 站点配置 (`h5.star-novel.com`)
-```nginx
-# 1. 定义后端多实例负载均衡集群
-upstream reader_backend_cluster {
-    least_conn; # 最少连接数均衡算法
-
-    # 填写所有 reader-backend 节点的 VPC 内网 IP
-    server 172.16.0.11:8080 max_fails=3 fail_timeout=10s weight=1;
-    server 172.16.0.12:8080 max_fails=3 fail_timeout=10s weight=1;
-
-    keepalive 64; # HTTP 长连接复用
-}
-
-server {
-    listen 80;
-    listen 443 ssl http2;
-    server_name h5.star-novel.com *.star-novel.com;
-
-    root /www/wwwroot/h5.star-novel.com;
-    index index.html;
-
-    # 1. SPA 单页路由回退
-    location / {
-        try_files $uri $uri/ /index.html;
-    }
-
-    # 2. index.html 禁用强缓存（保证新发布即时生效）
-    location = /index.html {
-        add_header Cache-Control "no-cache, no-store, must-revalidate";
-    }
-
-    # 3. 静态资源长期强缓存加速
-    location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff2)$ {
-        expires 30d;
-        add_header Cache-Control "public, no-transform";
-    }
-
-    # 4. 动态 API 路由反代至集群
-    location /api/v1/ {
-        proxy_pass http://reader_backend_cluster/api/v1/;
-        proxy_http_version 1.1;
-
-        proxy_set_header Connection "";
-        proxy_set_header Host $host;
-        
-        # 客户端真实 IP 透传 (CAPI 归因与游客注册核心字段)
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-
-        # 故障自动转移（单实例宕机自动重试下一节点）
-        proxy_next_upstream error timeout invalid_header http_500 http_502 http_503 http_504;
-        proxy_next_upstream_tries 3;
-        proxy_next_upstream_timeout 5s;
-
-        proxy_connect_timeout 3s;
-        proxy_read_timeout 60s;
-        proxy_send_timeout 60s;
-    }
-}
-```
-
-#### 2. CMS 运营后台配置 (`admin.star-novel.com`)
-```nginx
-server {
-    listen 80;
-    listen 443 ssl http2;
-    server_name admin.star-novel.com;
-
-    root /www/wwwroot/admin.star-novel.com;
-    index index.html;
-
-    location / {
-        try_files $uri $uri/ /index.html;
-    }
-
-    location = /index.html {
-        add_header Cache-Control "no-cache, no-store, must-revalidate";
-    }
-
-    # CMS API 单实例反代
-    location /api/v1/admin/ {
-        proxy_pass http://127.0.0.1:8081/api/v1/admin/;
-        proxy_http_version 1.1;
-
-        proxy_set_header Connection "";
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
-}
-```
-
-### 6.4 SSL 证书与强制 HTTPS
-- 在宝塔面板对应站点进入 【SSL】 标签页；
-- 选择 Let's Encrypt 申请证书；
-- 勾选右上角 **【强制 HTTPS】** 保存生效。
-
----
-
-## ✅ 七、 第五阶段：全链路联调与上线验收清单
-
-| 验收维度 | 测试操作 | 预期结果 |
-| :--- | :--- | :--- |
-| **1. 读者端游客免密鉴权** | 访问 H5 首页 `https://h5.starsfic.com` | 自动发起 `/auth/guest` 请求，成功生成游客 User，下发 JWT 与迎新赠币 |
-| **2. 负载均衡与健康探测** | 手动停止其中一台 `reader-backend` 节点 | 刷新读者端页面无任何报错，网关自动将请求无缝转发到存活节点 |
-| **3. 行锁扣费与章节解锁** | 连续快速点击“解锁付费章节” | 数据库 `wallets` 余额正常扣减，无负余额，无并发双扣，流水记录完整 |
-| **4. 每日签到防刷** | 模拟并发请求 `/wallet/checkin` 接口 | 首次签到成功，后续并发请求被 Redis 分布式锁与偏唯一索引拦截并提示已签到 |
-| **5. 像素管理与配置审计 (`/pixels`)** | 打开 `/pixels` 新增/编辑测试 Pixel（带 Access Token）、尝试退役绑定了推广链的 Pixel、在接入配置编辑三态路由授权矩阵并查看抽屉「变更审计记录」 | 凭据加密保存（返回无明文）；占用中的 Pixel 退役按钮置灰阻断；矩阵仅提交变更 Diff；变更审计时间线正常加载且无密文泄漏 |
-| **6. 回传中心与监控降级 (`/conversions`)** | 打开 `/conversions`，测试事件列表筛选、详情抽屉时间线与审计重排；使用「逐单对账」输入测试订单；暂停/恢复 `conversion-worker` 检查「监控与告警」；短暂停掉 `conversion-api` 测试降级提示和重新检测 | Outbox → 统一事件 → Meta 投递全链路贯通且真实 `fbtrace_id` 可查；停 Worker 触发告警、恢复后自动解除；`MediaBuyer` 无写权限；`conversion-api` 离线时 UI 给出 503 降级提示且 H5 下单写入 Outbox 不受阻 |
-| **7. CMS 基础运营与权限** | 使用初始化/部署 `SuperAdmin` 账号登录 `https://admin.star-novel.com` | 仪表盘加载正常，小说章节拆分导入、6卡位充值模板修改即时生效 |
-
----
-
-## 🔄 八、 第六阶段：日常运维与平滑滚动更新指南
-
-### 8.1 前端热更新（零停机）
 ```bash
-# 1. 本地执行编译
-npm run build
-
-# 2. 将 dist 目录内容上传覆盖网关机的 /www/wwwroot/h5.star-novel.com/
-# 因为 index.html 配置了 no-cache，线上读者刷新浏览器即可加载最新版本
+PGSERVICE=star_novel_release psql -X -v ON_ERROR_STOP=1 <<'SQL'
+SELECT worker_type, instance_id, heartbeat_at, paused, last_progress_at
+FROM conversion.worker_heartbeats
+WHERE environment = 'production'
+ORDER BY worker_type, heartbeat_at DESC;
+SELECT sampled_at FROM conversion.collector_samples WHERE environment = 'production';
+SQL
 ```
 
-### 8.2 后端服务滚动升级与发版顺序（Zero Downtime）
+### 4.3 维护窗口事件补查与财务操作
 
-> [!IMPORTANT]
-> **升级发版顺序**：涉及数据结构与转化架构变更时，严格遵循 **`Schema 迁移 + 索引授权` $\rightarrow$ `conversion-api` / `conversion-worker` / `conversion-collector` $\rightarrow$ `cms-backend` & `reader-backend` $\rightarrow$ `cms-front` / `reader-front`** 顺序滚动发布。
+<a id="资金流水schema-2026111919"></a>
+<a id="结算与银行对账schema-2026111920"></a>
 
-#### 步骤 0：在本地 Mac 执行交叉编译打包并推送 Git
+记录网关恢复后的渠道重投结果。使用当前发布提交的 `payment-ops`，按账户和环境从维护开始前的安全重叠窗口调度补查，保持原事件 ID 和去重键。默认 Linux 包未包含该 CLI；构建时可在 `reader-backend` 下执行 `GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -o /path/to/artifacts/payment-ops ./cmd/payment-ops`。如在 Compose 上运行，通过受控路径只读挂载可执行文件并继承 Reader 的环境。
+
 ```bash
-# 1. 在本地 Mac 项目根目录验证 Config 与生成后端 Linux 发布包（对应 cms + reader）
-./deploy/scripts/build-linux.sh amd64
-
-# 2. 若本次同时更新了 conversion-backend，请同步在构建机/本地打包 star-conversion 镜像
-docker build -t star-conversion:release conversion-backend
-
-# 3. 推送已提交代码到远端仓库（注：deploy/ 目录含生产配置，已 .gitignore 忽略，仅走私有安全传输）
-git push origin <your-release-branch>
+dc run --rm --no-deps --entrypoint /app/bin/payment-ops \
+  -v "${PAYMENT_OPS_BIN:?请设置已校验的 CLI 绝对路径}:/app/bin/payment-ops:ro" reader \
+  -kind event-recovery -provider "${PAY_PROVIDER:?}" -account "${PAY_ACCOUNT:?}" \
+  -environment "${PAY_CHANNEL_ENV:?使用 live 或 sandbox}" -from "${PAY_RECOVERY_FROM:?使用 RFC3339}"
 ```
 
-#### 步骤 1：登录服务器逐台滚动更新
+核对预览范围后加 `-apply -reason '维护窗口事件回补'`。Reader 执行已调度的任务，按账号跟踪游标、失败项和 Inbox 终态。个别已核实事件用 `event-retry`；超过渠道可查询窗口的记录，按原收款、账单、退款、争议或报表证据核对。出现未知收款时先查询原尝试，保留原幂等键。
+
+财务在「支付中心 → 对账」按同一账户和环境核验交易、退款、余额流水、划拨和银行匹配。PayPal Settlement 保留完整文件分卷，Stripe 关联原 Balance Transaction／Payout，银行流水保留独立参考与审核证据。大文件和专项补查用 `payment-ops` 的 `paypal-ledger`、`stripe-ledger`、`paypal-settlement`、`stripe-payout`、`bank-statement`、`settlement-match` 等入口，先预览再按财务审核结果执行。 [支付域实施与验收](docs/payment-domain-architecture-and-implementation.md#7-验收矩阵)
+
+## 5. 前端、网关与放量
+
+1. 按线上宝塔站点盘点实际域名与根目录。Linux 部署说明中的现有站点包括 `cms.starsfic.com`、`starsfic.com`、`h5.starsfic.com` 和 `www.starnovel.top`。H5 使用同源 `/api/v1`，CMS 使用同源 `/api/v1/admin`。分开上传两个 `dist/` 至版本目录并切换站点根目录，保留上一版产物。若现网使用固定根目录，先上传新版带哈希的资源，再切换 HTML，保留上一版 HTML 引用的资源。
+2. HTTPS 网关应把 CMS 的 `/api/v1/admin/` 转到 `127.0.0.1:8081`，H5 的 `/api/v1/` 转到 `127.0.0.1:8080` 或实际 Reader 内网 upstream，保留 URI 和代理头。SPA 采用 `try_files $uri $uri/ /index.html;`，入口 HTML 禁用强缓存，API、带签名的支付回调及动态响应不走 CDN 缓存。支付写请求保持原幂等路径，网关不配置非幂等请求自动切换重试。改动网关时先执行 `nginx -t`，通过后再重载。
+3. 从受控入口验收后端和两个前端。先恢复支付 Webhook 并检查回补进度，再按账户恢复已验收的新结账和新订阅入口。正式环境按本次批准的账户、市场和销售模式开放。存量续费、售后和对账按原账户处理。
+4. 先关 Meta 发送验证 Reader 事件的原始时间、稳定事件 ID、Outbox 消费、归一化和 Pixel 路由。用指定 Pixel 办理首轮发送验收后，在生产 `config.yaml` 设 `conversion.meta_enabled: true`，保持 `conversion.meta_batch_size: 1`。需要单副本首轮观察时，先把 `worker_instances` 设为 1，验收后恢复到 2。只重建 Conversion Worker。
+
 ```bash
-# 1. 登录 ECS-Reader-1
-cd /path/to/star-novel/reader-backend && git pull origin main
-
-# 2. 构建镜像 (基于预编译二进制，仅耗时 1 秒，0 CPU 开销)
-docker build -t star-reader-backend:latest .
-
-# 3. 优雅重启容器
-docker stop star_reader_backend 2>/dev/null || true
-docker rm star_reader_backend 2>/dev/null || true
-docker run -d \
-  --name star_reader_backend \
-  --restart always \
-  -p 8080:8080 \
-  --env-file .env \
-  star-reader-backend:latest
-
-# 4. 验证健康检查通过 (curl 127.0.0.1:8080/healthz)
-
-# 5. 登录 ECS-Reader-2 重复上述步骤
+python3 prepare-config.py --check
+python3 prepare-config.py
+dc config --quiet
+dc up -d --no-build --no-deps --force-recreate conversion-worker
 ```
-*在更新节点 1 时，网关 Nginx 会自动将所有流量平滑导向节点 2，整个发布过程读者完全无感知。若采用 `deploy/linux/compose.yaml` 整套发布，请按 [deploy/linux/README.md §3](deploy/linux/README.md) 执行 `prepare-config.py` 与 `docker compose up -d --wait`，并单独更新 `conversion-api` / `conversion-worker` / `conversion-collector`。*
 
-### 8.3 转化加密密钥平滑轮换与应急命令
-1. **Pixel 凭据密钥平滑轮换（零中断）**：
-   - **Step 1**：生成新密钥 `v2`（`openssl rand -base64 32`），在 `conversion-worker.env` 中同时保留旧新密钥：`CONVERSION_CREDENTIAL_KEYS={"v1":"...","v2":"..."}`，滚动重启 `conversion-worker`（确保其能读取新旧密文）。
-   - **Step 2**：更新 `conversion-api.env` 中的 `CONVERSION_CREDENTIAL_KEYS={"v1":"...","v2":"..."}` 并将 `CONVERSION_CREDENTIAL_KEY_VERSION=v2`，重启 `conversion-api`。
-   - **Step 3**：在 CMS「像素管理」逐个轮换 Pixel Access Token 后写入 `v2` 密文；确认数据库 `conversion.credentials` 中已无 `key_version='v1'` 的活动/待投递引用后，再将 `v1` 从配置移除。
-2. **数据保留期脱敏清理**：可通过 `conversion-ops retention --keep-days 30 --limit 100 --apply --operator <admin_id> --reason "<reason>"` 分批清理超保留期的敏感快照字段（保留逻辑键、投递终态与审计记录），直至每批处理返回 `0`。
+5. 检查已确认、结果未知、429、凭据暂停、积压、心跳及吞吐分位。后续按 `1 → 10 → 50 → 100` 的候选档逐级灰度，每次先看真实批大小和回执确认率，再看 Outbox 延迟、连接等待及 Pixel 间隔。减小批次后，已领取请求仍按原冻结成员和回执恢复。 [吞吐验收与上线顺序](docs/conversion-throughput-plan.md#6-测量验收与上线顺序)
 
----
-*文档版本：v2.1.0（2026-11-20 更新：统一使用 `star_novel` RDS 账号，精简数据库备份步骤） | 维护团队：STAR NOVEL 架构组*
+## 6. 验收与发版记录
+
+| 链路 | 验收证据 |
+| --- | --- |
+| 服务和基础设施 | 三个后端 schema 一致，CMS/Reader `/healthz` 正常，`/health` 版本与制品一致，Redis、RDS、正文及封面访问正常。两个 SPA 深链接可刷新，CMS `/pixels`、`/conversions`、`/payments` 可访问。 |
+| 交易与权益 | 按渠道和账户验收购买、同步回跳、签名回执、重复 Webhook、查单和一次履约。核对整本权益与原小说、订阅首付及续费账期、期末取消和重新开通、部分退款与全退。风险／争议、退款、对账状态在相应 CMS 权限内可查。 |
+| 回传 | 从真实业务键追溯 Reader Outbox、归一化、目标 Pixel、批次、成员与最终回执。缩小批量、部分接收、未知结果、失租和迟到旧凭据错误在隔离环境演练，确认较新成功回执仍决定后续领取。正式观察积压、最老待处理时间、429、未知成员、凭据暂停和 Collector 告警。 |
+| 分销 | 当前生产保持关闭。隔离环境验证回调验签、相同回调去重、冲突识别、Inbox 消费和回告。正式开放前完成正式契约、鉴权、签名、空值编码、结果未知后的核对规则及正式消费者注册，随后单列公网精确路径及回告验收。 [司南模拟联调](conversion-backend/README.md#司南阶段-c-模拟联调) |
+
+达到放行条件后，从当前成功运行的发布目录更新 `current`。
+
+```bash
+ln -sfn "$(pwd -P)" /www/star-novel-server/current
+```
+
+在 `/www/star-novel-server/DEPLOYMENT_RECORDS.md` 记录提交、归档校验、镜像标签、前端版本、schema、维护窗口、恢复点、补查进度、已开放支付路由和 Meta 配置。保留当前及上一版发布目录与镜像，按运维保留期清理过期目录和本次传输副本。部署记录只存取证编号与配置版本。
+
+## 7. 故障隔离、回退与密钥轮换
+
+| 故障范围 | 操作 |
+| --- | --- |
+| 前端静态发布 | 切回上一套与运行中 API 兼容的 H5 或 CMS 静态目录，验证入口 HTML 和支付返回地址。 |
+| 新结账或渠道配置 | 关闭受影响账户的新单或订阅，必要时关闭对应 Reader Stripe 开关。保留原账户、回调、对账和售后，以核实的上一份有效配置重新发布或以新凭据前滚。 |
+| Meta 投递 | 将 `conversion.meta_enabled` 设为 `false`，重新生成并重建 Worker。保留 Outbox、归一化、Collector、请求账本及在途回执证据。结果未知进入人工核对，重排沿用原事件身份。 |
+| 同 schema 应用故障 | 用已验证支持当前 schema、支付记录和批次账本的上一版镜像与配置恢复。先看仓内 `RequiredSchemaVersion` 和实际发布记录，从对应版本目录重建相关进程并验收，再更新 `current`。 |
+| 跨 schema 迁移或新版本已处理业务 | 优先按当前 schema 前滚。需要恢复数据库时维持维护窗口，协调恢复点、配套的全部应用和前端。恢复前核对恢复点之后已发生的第三方扣款、退款、续费与 Meta 回执，拟定补账、回调回补和去重方案，确认后恢复外部写入。 |
+
+配置变更在 `config.yaml` 中维护，并重新生成服务环境文件。Pixel 加密密钥轮换时先在所有读取方部署新旧密钥，再修改 API 写入版本并逐个轮换 Pixel 凭据；复核存量密文引用后才退役旧密钥。支付密钥环同样先扩充 CMS 与 Reader 的读密钥，再切换 CMS 写入版本并在商户页面按「验证 → 发布」轮换。源数据清理、凭据校验与回传人工重排使用有审计记录的 CMS 或受控运维 CLI。 [Conversion 运维入口](conversion-backend/README.md#运行与运维)
