@@ -152,7 +152,7 @@ func (r *dbRepository) reservePurchaseIntent(ctx context.Context, tx pgx.Tx, eva
 			if loadErr != nil {
 				return nil, loadErr
 			}
-			if err := expireStaleStripeVIPQuoteTx(ctx, tx, &row); err != nil {
+			if err := expireStaleVIPQuoteTx(ctx, tx, &row); err != nil {
 				return nil, err
 			}
 			return buildVIPPurchaseIntentView(ctx, tx, row)

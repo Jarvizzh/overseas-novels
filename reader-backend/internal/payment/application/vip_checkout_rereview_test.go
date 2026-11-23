@@ -59,7 +59,7 @@ func testUnifiedVIPRereview(t *testing.T, svc *service, pool *pgxpool.Pool, pp *
 		exec(`UPDATE product_channel_bindings SET enabled=$3,validation_status=$4,external_price_ref=$5
 			WHERE product_id=$1 AND provider=$2`, row.productID, provider, enabled, validation, price)
 	}
-	exec(`INSERT INTO users(id) SELECT generate_series(630,642)`)
+	exec(`INSERT INTO users(id) SELECT generate_series(630,648)`)
 
 	for _, channel := range []struct {
 		provider, other, price string
@@ -263,4 +263,98 @@ func testUnifiedVIPRereview(t *testing.T, svc *service, pool *pgxpool.Pool, pp *
 			})
 		}
 	})
+	t.Run("a stale PayPal quote releases only a never-sent idle checkout", func(t *testing.T) {
+		for n, first := range []string{"refresh", "request replay", "plan replacement", "creation lease", "channel switch", "first send"} {
+			t.Run(first, func(t *testing.T) {
+				user := int64(643 + n)
+				row, key := month(user)
+				child := reserve(t, row, payment.ProviderPayPal)
+				before := len(pp.agreements)
+				if first == "first send" {
+					pp.createFault = "after"
+					view, err := start(user, row.intentID, payment.ProviderPayPal)
+					if err != nil || view == nil || view.ApprovalURL != "" || len(pp.agreements) != before+1 {
+						t.Fatalf("lost PayPal reply: %+v %v", view, err)
+					}
+				}
+
+				exec(`UPDATE recharge_slots SET template_id=799 WHERE id=605`)
+				defer exec(`UPDATE recharge_slots SET template_id=600 WHERE id=605`)
+				switch first {
+				case "refresh":
+					view, err := svc.GetPurchase(ctx, user, row.intentID, "")
+					if err != nil || view == nil || view.Status != "closed" {
+						t.Fatalf("stale PayPal quote after refresh: %+v %v", view, err)
+					}
+				case "request replay":
+					view, err := prepare(user, 605, key)
+					if err != nil || view == nil || view.Status != "closed" {
+						t.Fatalf("stale PayPal quote after replay: %+v %v", view, err)
+					}
+				case "creation lease":
+					legacy, err := pool.Begin(ctx)
+					if err != nil {
+						t.Fatal(err)
+					}
+					defer legacy.Rollback(ctx)
+					if _, err := legacy.Exec(ctx, `UPDATE paypal_subscription_intents
+						SET lease_until=now()+interval '5 minutes' WHERE intent_id=$1`, child); err != nil {
+						t.Fatal(err)
+					}
+					if _, err := prepare(user, 604, uuid.NewString()); !errors.Is(err, ErrSubscriptionConflict) {
+						t.Fatalf("locked PayPal attempt did not block replacement: %v", err)
+					}
+					if err := legacy.Commit(ctx); err != nil {
+						t.Fatal(err)
+					}
+					if _, err := prepare(user, 604, uuid.NewString()); !errors.Is(err, ErrSubscriptionConflict) {
+						t.Fatalf("leased PayPal attempt did not block replacement: %v", err)
+					}
+					exec(`UPDATE paypal_subscription_intents SET lease_until=now()-interval '1 second' WHERE intent_id=$1`, child)
+				case "channel switch":
+					exec(`UPDATE payment_vip_checkout_intents SET switch_to_provider='stripe' WHERE intent_id=$1`, row.intentID)
+					if _, err := prepare(user, 604, uuid.NewString()); !errors.Is(err, ErrSubscriptionConflict) {
+						t.Fatalf("PayPal switch in progress did not block replacement: %v", err)
+					}
+					exec(`UPDATE payment_vip_checkout_intents SET switch_to_provider=NULL WHERE intent_id=$1`, row.intentID)
+				case "first send":
+					if _, err := prepare(user, 604, uuid.NewString()); !errors.Is(err, ErrSubscriptionConflict) {
+						t.Fatalf("already sent PayPal attempt did not block replacement: %v", err)
+					}
+					view, err := start(user, row.intentID, payment.ProviderPayPal)
+					if err != nil || view == nil || view.Status != "awaiting_approval" ||
+						len(pp.agreements) != before+2 || pp.agreements[before] != pp.agreements[before+1] ||
+						view.ExternalOrderID != pp.subByRequest[child] {
+						t.Fatalf("original PayPal request did not recover: %+v %v", view, err)
+					}
+					return
+				}
+
+				year, err := prepare(user, 604, uuid.NewString())
+				if err != nil {
+					t.Fatal(err)
+				}
+				replay, err := prepare(user, 605, key)
+				if err != nil || replay == nil || replay.ID != row.intentID || replay.Status != "closed" || replay.ApprovalURL != "" {
+					t.Fatalf("expired PayPal quote replay: %+v %v", replay, err)
+				}
+				if _, err := start(user, row.intentID, payment.ProviderPayPal); !errors.Is(err, ErrVIPQuoteChanged) {
+					t.Fatalf("expired PayPal quote could still start: %v", err)
+				}
+				var exists bool
+				if err := pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM paypal_subscription_intents WHERE intent_id=$1)`, child).Scan(&exists); err != nil || exists {
+					t.Fatalf("old PayPal slot is still occupied: exists=%t %v", exists, err)
+				}
+				if len(pp.agreements) != before {
+					t.Fatal("stale PayPal quote sent a create")
+				}
+				view, err := start(user, year.ID, payment.ProviderPayPal)
+				if err != nil || view == nil || view.Status != "awaiting_approval" ||
+					len(pp.agreements) != before+1 || pp.agreements[before].PlanID != "P-SIX-YEAR" {
+					t.Fatalf("replacement PayPal checkout: %+v %v", view, err)
+				}
+			})
+		}
+	})
+
 }

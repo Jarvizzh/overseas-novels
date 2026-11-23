@@ -264,16 +264,42 @@ func lockVIPForChannelReservation(ctx context.Context, tx pgx.Tx, v vipCheckoutI
 	return checkVIPActiveConflictTx(ctx, tx, v.userID, v.environment, v.intentID)
 }
 
-// The caller holds the parent row lock. Settlement locks the Stripe child
-// first, so skip a busy child and let the next read see the committed evidence.
-func expireStaleStripeVIPQuoteTx(ctx context.Context, tx pgx.Tx, row *vipCheckoutIntentRow) error {
-	if row.status != "Pending" || row.activeProvider != payment.ProviderStripe || row.stripeIntentID == "" || row.switchTo != "" {
+func canExpireStaleVIPQuote(row vipCheckoutIntentRow) bool {
+	return row.status == "Pending" && row.switchTo == "" && row.subscriptionID == "" &&
+		((row.activeProvider == payment.ProviderStripe && row.stripeIntentID != "") ||
+			(row.activeProvider == payment.ProviderPayPal && row.paypalIntentID != ""))
+}
+
+// The caller holds the parent row lock. Fulfillment locks the child first,
+// so skip a busy child and let the next read see the committed evidence.
+func expireStaleVIPQuoteTx(ctx context.Context, tx pgx.Tx, row *vipCheckoutIntentRow) error {
+	if !canExpireStaleVIPQuote(*row) {
 		return nil
 	}
 	err := validateVIPQuoteTx(ctx, tx, row.userID, row.productID, row.slotID, row.templateID, row.priceCents, row.cycle)
 	if !errors.Is(err, ErrVIPQuoteChanged) {
 		return err
 	}
+
+	if row.activeProvider == payment.ProviderPayPal {
+		// PayPal intents reserve a unique user/environment slot until deleted.
+		tag, err := tx.Exec(ctx, `DELETE FROM paypal_subscription_intents WHERE intent_id=(
+			SELECT intent_id FROM paypal_subscription_intents
+			WHERE intent_id=$1 AND user_id=$2 AND checkout_environment=$3
+			  AND submitted_at IS NULL AND subscription_id IS NULL AND approval_url IS NULL
+			  AND (lease_until IS NULL OR lease_until<=now())
+			FOR UPDATE SKIP LOCKED)`, row.paypalIntentID, row.userID, row.environment)
+		if err != nil || tag.RowsAffected() == 0 {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `UPDATE payment_vip_checkout_intents
+			SET active_provider=NULL,paypal_intent_id=NULL,status='Expired',updated_at=now() WHERE intent_id=$1`, row.intentID); err != nil {
+			return err
+		}
+		row.activeProvider, row.paypalIntentID, row.status = "", "", "Expired"
+		return nil
+	}
+
 	var child string
 	err = tx.QueryRow(ctx, `SELECT id::text FROM payment_stripe_subscription_intents
 		WHERE id=$1 AND user_id=$2 AND checkout_environment=$3 AND status='creating'
@@ -300,7 +326,7 @@ func lockVIPCheckoutIntent(ctx context.Context, tx pgx.Tx, userID int64, id stri
 		WHERE v.intent_id=$1 AND v.user_id=$2 AND v.checkout_environment=$3 FOR UPDATE`, id, userID, conversion.Environment()))
 }
 
-func expireStaleStripeVIPQuote(ctx context.Context, row vipCheckoutIntentRow) (vipCheckoutIntentRow, error) {
+func expireStaleVIPQuote(ctx context.Context, row vipCheckoutIntentRow) (vipCheckoutIntentRow, error) {
 	tx, err := db.Pool(ctx).Begin(ctx)
 	if err != nil {
 		return row, err
@@ -310,7 +336,7 @@ func expireStaleStripeVIPQuote(ctx context.Context, row vipCheckoutIntentRow) (v
 	if err != nil {
 		return row, err
 	}
-	if err := expireStaleStripeVIPQuoteTx(ctx, tx, &current); err != nil {
+	if err := expireStaleVIPQuoteTx(ctx, tx, &current); err != nil {
 		return row, err
 	}
 	return current, tx.Commit(ctx)
@@ -342,7 +368,7 @@ func reserveVIPCheckoutIntentTx(
 			e.resumed, e.checkoutID = true, row.intentID
 			return buildVIPPurchaseIntentView(ctx, tx, row)
 		}
-		if err := expireStaleStripeVIPQuoteTx(ctx, tx, &row); err != nil {
+		if err := expireStaleVIPQuoteTx(ctx, tx, &row); err != nil {
 			return nil, err
 		}
 		if row.status == "Pending" {
@@ -420,8 +446,8 @@ func (s *service) tryGetVIPPurchaseIntent(ctx context.Context, userID int64, int
 	if err != nil {
 		return nil, true, err
 	}
-	if row.status == "Pending" && row.activeProvider == payment.ProviderStripe && row.switchTo == "" {
-		row, err = expireStaleStripeVIPQuote(ctx, row)
+	if canExpireStaleVIPQuote(row) {
+		row, err = expireStaleVIPQuote(ctx, row)
 		if err != nil {
 			return nil, true, err
 		}
