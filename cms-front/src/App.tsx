@@ -7,6 +7,7 @@ import { apiRequest } from './utils/api';
 import type { AdminUser } from './utils/api';
 import { useThemeMode } from './utils/theme';
 import { ThemeSwitcher } from './components/ThemeSwitcher';
+import { HeaderAccountMenu } from './components/HeaderAccountMenu';
 import { CmsSidebar } from './components/CmsSidebar';
 import {
   CONVERSION_READ_ROLES,
@@ -255,7 +256,6 @@ function AppContent() {
     <div className="min-h-screen flex bg-[var(--cms-bg)] text-[var(--cms-fg)]">
       <CmsSidebar
         navTree={visibleNavTree}
-        admin={admin}
         resolvedTheme={resolvedTheme}
         collapsed={sidebarCollapsed}
         onToggleCollapse={handleToggleCollapse}
@@ -263,7 +263,6 @@ function AppContent() {
         onToggleGroup={handleToggleGroup}
         mobileOpen={mobileNavOpen}
         onCloseMobile={handleCloseMobile}
-        onLogout={handleLogout}
       />
 
       {/* Main Workspace */}
@@ -299,9 +298,10 @@ function AppContent() {
             </nav>
           </div>
 
-          {/* Right Controls: Icon-Only Theme Switcher */}
+          {/* Right Controls: Theme Switcher & Account Menu */}
           <div className="flex items-center gap-2 shrink-0">
             <ThemeSwitcher mode={mode} resolvedTheme={resolvedTheme} onChange={setMode} />
+            <HeaderAccountMenu admin={admin} onLogout={handleLogout} />
           </div>
         </header>
 

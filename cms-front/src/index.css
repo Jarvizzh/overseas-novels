@@ -975,3 +975,65 @@ dialog.cms-nav-drawer::backdrop {
   width: 0;
   height: 0;
 }
+
+.cms-nav-scroll {
+  --cms-nav-scrollbar-thumb: #8290a3;
+  --cms-nav-scrollbar-track: transparent;
+  scrollbar-width: thin;
+  scrollbar-color: var(--cms-nav-scrollbar-thumb) var(--cms-nav-scrollbar-track);
+}
+
+@media (prefers-color-scheme: dark) {
+  .cms-nav-scroll {
+    --cms-nav-scrollbar-thumb: #5a6577;
+  }
+}
+
+[data-theme="dark"] .cms-nav-scroll {
+  --cms-nav-scrollbar-thumb: #5a6577;
+}
+
+[data-theme="light"] .cms-nav-scroll {
+  --cms-nav-scrollbar-thumb: #8290a3;
+}
+
+@media (prefers-contrast: more) {
+  .cms-nav-scroll {
+    --cms-nav-scrollbar-thumb: #000000;
+    --cms-nav-scrollbar-track: #ffffff;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    .cms-nav-scroll {
+      --cms-nav-scrollbar-thumb: #ffffff;
+      --cms-nav-scrollbar-track: #000000;
+    }
+  }
+
+  [data-theme="dark"] .cms-nav-scroll {
+    --cms-nav-scrollbar-thumb: #ffffff;
+    --cms-nav-scrollbar-track: #000000;
+  }
+
+  [data-theme="light"] .cms-nav-scroll {
+    --cms-nav-scrollbar-thumb: #000000;
+    --cms-nav-scrollbar-track: #ffffff;
+  }
+}
+
+@supports not (scrollbar-color: auto) {
+  .cms-nav-scroll {
+    scrollbar-width: auto;
+  }
+  .cms-nav-scroll::-webkit-scrollbar {
+    width: 4px;
+    height: 4px;
+  }
+  .cms-nav-scroll::-webkit-scrollbar-track {
+    background: var(--cms-nav-scrollbar-track);
+  }
+  .cms-nav-scroll::-webkit-scrollbar-thumb {
+    background: var(--cms-nav-scrollbar-thumb);
+    border-radius: 9999px;
+  }
+}
