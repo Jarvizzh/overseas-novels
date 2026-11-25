@@ -977,24 +977,10 @@ dialog.cms-nav-drawer::backdrop {
 }
 
 .cms-nav-scroll {
-  --cms-nav-scrollbar-thumb: #8290a3;
+  --cms-nav-scrollbar-thumb: var(--cms-scrollbar-thumb);
   --cms-nav-scrollbar-track: transparent;
   scrollbar-width: thin;
   scrollbar-color: var(--cms-nav-scrollbar-thumb) var(--cms-nav-scrollbar-track);
-}
-
-@media (prefers-color-scheme: dark) {
-  .cms-nav-scroll {
-    --cms-nav-scrollbar-thumb: #5a6577;
-  }
-}
-
-[data-theme="dark"] .cms-nav-scroll {
-  --cms-nav-scrollbar-thumb: #5a6577;
-}
-
-[data-theme="light"] .cms-nav-scroll {
-  --cms-nav-scrollbar-thumb: #8290a3;
 }
 
 @media (prefers-contrast: more) {
