@@ -74,3 +74,46 @@ export function toggleSpecificNovelScope(
     manual_novel_ids: nextManual,
   };
 }
+
+/**
+ * Resolve the Reader API origin that serves `/api/v1/wallet/webhook/channel/:token`.
+ * Falls back from CMS hostnames (`cms.<domain>`) to `h5.<domain>` and from localhost CMS to `:8080`.
+ */
+export function resolveWebhookOrigin(currentOrigin: string, configuredOrigin?: string): string {
+  const configured = (configuredOrigin ?? '').trim().replace(/\/+$/, '');
+  if (configured) {
+    return configured;
+  }
+  const trimmedOrigin = currentOrigin.trim().replace(/\/+$/, '');
+  if (!trimmedOrigin) {
+    return '';
+  }
+  try {
+    const parsed = new URL(trimmedOrigin);
+    if (parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1') {
+      return `${parsed.protocol}//${parsed.hostname}:8080`;
+    }
+    if (parsed.hostname.startsWith('cms.') && parsed.hostname.length > 4) {
+      return `${parsed.protocol}//h5.${parsed.hostname.slice(4)}${parsed.port ? `:${parsed.port}` : ''}`;
+    }
+    return parsed.origin;
+  } catch {
+    return trimmedOrigin;
+  }
+}
+
+/**
+ * Build the full payment channel webhook URL from a relative `webhook_path` returned by the CMS API.
+ */
+export function buildChannelWebhookUrl(
+  webhookPath: string,
+  currentOrigin: string,
+  configuredOrigin?: string,
+): string {
+  const path = webhookPath.trim();
+  if (!path) return '';
+  if (/^https?:\/\//i.test(path)) return path;
+  const origin = resolveWebhookOrigin(currentOrigin, configuredOrigin);
+  if (!origin) return path;
+  return `${origin}${path.startsWith('/') ? '' : '/'}${path}`;
+}

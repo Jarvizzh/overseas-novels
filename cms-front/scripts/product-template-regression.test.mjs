@@ -135,3 +135,26 @@ test('TC-FE-05 (CMS) & F-12: Promotion URL never appends template_id and legacy 
 
   assert.equal(existsSync(new URL('../src/pages/StripeOfferSettings.tsx', import.meta.url)), false);
 });
+
+test('TC-FE-06: Channel webhook URL resolves CMS host to Reader H5 host and localhost to :8080', () => {
+  assert.equal(
+    prodHelpers.buildChannelWebhookUrl(
+      '/api/v1/wallet/webhook/channel/83ae4c9a-7bbc-49e6-a119-1a6d166ada0a',
+      'https://cms.starsfic.com',
+    ),
+    'https://h5.starsfic.com/api/v1/wallet/webhook/channel/83ae4c9a-7bbc-49e6-a119-1a6d166ada0a',
+  );
+  assert.equal(
+    prodHelpers.buildChannelWebhookUrl('/api/v1/wallet/webhook/channel/abc', 'http://localhost:5173'),
+    'http://localhost:8080/api/v1/wallet/webhook/channel/abc',
+  );
+  assert.equal(
+    prodHelpers.buildChannelWebhookUrl(
+      '/api/v1/wallet/webhook/channel/abc',
+      'https://cms.starsfic.com',
+      'https://reader.custom.example/',
+    ),
+    'https://reader.custom.example/api/v1/wallet/webhook/channel/abc',
+  );
+  assert.equal(prodHelpers.buildChannelWebhookUrl('', 'https://cms.starsfic.com'), '');
+});

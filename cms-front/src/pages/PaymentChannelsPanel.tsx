@@ -22,6 +22,7 @@ import CustomSelect from '../components/CustomSelect';
 import { usePermission } from '../context/PermissionContext';
 import { ToastContext } from '../context/ToastContext';
 import { ApiError } from '../utils/api';
+import { buildChannelWebhookUrl } from '../utils/productCatalogHelpers';
 import {
   CHANNEL_STATUS_META,
   type ChannelAccount,
@@ -225,7 +226,8 @@ export function PaymentChannelsPanel() {
   ];
   const colSpan = 6 + (visibleCols.credentials ? 1 : 0) + (visibleCols.webhook ? 1 : 0);
 
-  const webhookOrigin = typeof window !== 'undefined' ? window.location.origin : '';
+  const currentOrigin = typeof window !== 'undefined' ? window.location.origin : '';
+  const configuredWebhookOrigin = import.meta.env.VITE_WEBHOOK_ORIGIN as string | undefined;
 
   const copyText = async (text: string, label: string) => {
     try {
@@ -608,7 +610,9 @@ export function PaymentChannelsPanel() {
                 pagedChannels.map((ch) => {
                   const statusMeta = CHANNEL_STATUS_META[ch.status] ?? { label: ch.status, tone: 'muted' as const };
                   const pendingDiff = ch.pending_version > ch.active_version;
-                  const fullWebhookUrl = ch.webhook_path ? `${webhookOrigin}${ch.webhook_path}` : '';
+                  const fullWebhookUrl = ch.webhook_path
+                    ? buildChannelWebhookUrl(ch.webhook_path, currentOrigin, configuredWebhookOrigin)
+                    : '';
                   const hintEntries = Object.entries(ch.credential_hints || {});
                   const menuItems: RowActionItem[] = canWriteChannels
                     ? [
