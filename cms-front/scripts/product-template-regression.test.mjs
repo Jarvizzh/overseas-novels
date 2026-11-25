@@ -20,6 +20,7 @@ async function loadTS(relPath) {
 const prodHelpers = await loadTS('../src/utils/productCatalogHelpers.ts');
 const tplHelpers = await loadTS('../src/utils/templateCatalogHelpers.ts');
 const promoHelpers = await loadTS('../src/utils/promotion.ts');
+const stripeCountries = await loadTS('../src/utils/stripeCountries.ts');
 
 test('TC-FE-01: ProductsPage Stripe MoR echo, published-only accounts, and per-account binding switch', () => {
   const echoed = prodHelpers.extractStripeCatalogTax({
@@ -134,6 +135,34 @@ test('TC-FE-05 (CMS) & F-12: Promotion URL never appends template_id and legacy 
   assert.equal(built.payload.recharge_template_id, 77);
 
   assert.equal(existsSync(new URL('../src/pages/StripeOfferSettings.tsx', import.meta.url)), false);
+});
+
+test('TC-FE-06: Stripe country presets default to global (direct) and official MoR supported countries', () => {
+  const directDefault = stripeCountries.getDefaultStripeCountries('direct');
+  const morDefault = stripeCountries.getDefaultStripeCountries('merchant_of_record');
+  assert.equal(directDefault.length, 249);
+  assert.equal(morDefault.length, 242);
+  assert.equal(stripeCountries.detectStripeCountriesPreset(directDefault), 'global');
+  assert.equal(stripeCountries.detectStripeCountriesPreset(morDefault), 'mor_all');
+  for (const restricted of ['CN', 'CU', 'IR', 'KP', 'RU', 'SH', 'SY']) {
+    assert.equal(directDefault.includes(restricted), true);
+    assert.equal(morDefault.includes(restricted), false);
+  }
+
+  // Switching between direct and MoR auto-switches default presets while preserving custom subsets.
+  const directStr = stripeCountries.formatDefaultStripeCountriesInput('direct');
+  const switchedToMor = stripeCountries.resolveCountriesOnSalesModeChange(directStr, 'direct', 'merchant_of_record');
+  assert.equal(stripeCountries.detectStripeCountriesPreset(stripeCountries.parseStripeCountriesInput(switchedToMor)), 'mor_all');
+
+  const switchedBackDirect = stripeCountries.resolveCountriesOnSalesModeChange(switchedToMor, 'merchant_of_record', 'direct');
+  assert.equal(stripeCountries.detectStripeCountriesPreset(stripeCountries.parseStripeCountriesInput(switchedBackDirect)), 'global');
+
+  const preservedCustom = stripeCountries.resolveCountriesOnSalesModeChange('US, CA', 'direct', 'merchant_of_record');
+  assert.equal(preservedCustom, 'US, CA');
+
+  assert.equal(stripeCountries.formatAllowedCountriesSummary(directDefault), '全球（全部 249 个国家/地区）');
+  assert.equal(stripeCountries.formatAllowedCountriesSummary(morDefault), 'Stripe MoR 官方全量（242 个国家/地区）');
+  assert.equal(stripeCountries.formatAllowedCountriesSummary(['US', 'GB']), 'US, GB');
 });
 
 test('TC-FE-06: Channel webhook URL resolves CMS host to Reader H5 host and localhost to :8080', () => {

@@ -1284,8 +1284,9 @@ func normalizeStripeBindingReq(req *bindStripeProductReq) error {
 	if req.SalesMode == "" {
 		req.SalesMode = stripeDirect
 	}
-	if len(req.AllowedCountries) == 0 {
-		req.AllowedCountries = []string{"US"}
+	if len(req.AllowedCountries) == 0 ||
+		(len(req.AllowedCountries) == 1 && (strings.EqualFold(strings.TrimSpace(req.AllowedCountries[0]), "ALL") || strings.TrimSpace(req.AllowedCountries[0]) == "*")) {
+		req.AllowedCountries = defaultStripeCountriesForMode(req.SalesMode)
 	}
 	for i := range req.AllowedCountries {
 		req.AllowedCountries[i] = strings.ToUpper(strings.TrimSpace(req.AllowedCountries[i]))

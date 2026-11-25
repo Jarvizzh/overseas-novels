@@ -45,6 +45,16 @@ import {
   parseSpecificNovelIds as combineSpecificNovelIds,
   toggleSpecificNovelScope,
 } from '../utils/productCatalogHelpers';
+import {
+  ALL_ISO2_COUNTRIES,
+  detectStripeCountriesPreset,
+  formatAllowedCountriesSummary,
+  formatDefaultStripeCountriesInput,
+  parseStripeCountriesInput,
+  resolveCountriesOnSalesModeChange,
+  STRIPE_MOR_RESTRICTED_COUNTRIES,
+  STRIPE_MOR_SUPPORTED_COUNTRIES,
+} from '../utils/stripeCountries';
 
 type ProductFormState = {
   code: string;
@@ -149,7 +159,7 @@ export default function ProductsPage() {
   const [ppForm, setPpForm] = useState<PayPalBindForm>({ account_id: '', external_product_ref: '', external_price_ref: '', enabled: true, reason: '' });
   const [stForm, setStForm] = useState<StripeBindForm>({
     account_id: '', sales_mode: 'direct', tax_liability_account: '', tax_code: 'txcd_10103001',
-    tax_behavior: 'exclusive', countries: 'US', release_evidence: '', market_policy: '', reprovision: false, enabled: true, reason: '',
+    tax_behavior: 'exclusive', countries: formatDefaultStripeCountriesInput('direct'), release_evidence: '', market_policy: '', reprovision: false, enabled: true, reason: '',
   });
 
   const [statusDialog, setStatusDialog] = useState<{ product: ProductView; action: 'publish' | 'pause' | 'retire' } | null>(null);
@@ -330,13 +340,14 @@ export default function ProductsPage() {
       enabled: ppBinding?.enabled ?? true,
       reason: '',
     });
+    const stSalesMode: StripeSalesMode = stBinding?.sales_mode ?? 'direct';
     setStForm({
       account_id: stAccountId,
-      sales_mode: stBinding?.sales_mode ?? 'direct',
+      sales_mode: stSalesMode,
       tax_liability_account: stBinding?.tax_liability_account ?? '',
       tax_code: taxCode,
       tax_behavior: taxBehavior,
-      countries: stBinding?.allowed_countries?.join(', ') || 'US',
+      countries: stBinding?.allowed_countries?.length ? stBinding.allowed_countries.join(', ') : formatDefaultStripeCountriesInput(stSalesMode),
       release_evidence: stBinding?.release_evidence ?? '',
       market_policy: stBinding?.market_policy ?? '',
       reprovision: false,
@@ -398,10 +409,7 @@ export default function ProductsPage() {
     if (!canManageBindings) return;
     if (!bindingProduct || submitting) return;
     setFormError('');
-    const countries = stForm.countries
-      .split(/[\s,，]+/)
-      .map((c) => c.trim().toUpperCase())
-      .filter(Boolean);
+    const countries = parseStripeCountriesInput(stForm.countries);
     if (countries.length === 0 || countries.some((c) => !/^[A-Z]{2}$/.test(c))) {
       setFormError('请输入有效的 2 位 ISO 国家代码（如 US, CA）');
       return;
@@ -1209,7 +1217,9 @@ export default function ProductsPage() {
                               </div>
                               <div>
                                 <dt>允许销售国家/地区</dt>
-                                <dd className="font-mono-code text-[var(--cms-fg)]">{b.allowed_countries?.join(', ') || '—'}</dd>
+                                <dd className="font-mono-code text-[var(--cms-fg)]" title={b.allowed_countries?.join(', ')}>
+                                  {formatAllowedCountriesSummary(b.allowed_countries)}
+                                </dd>
                               </div>
                             </>
                           )}
@@ -1334,13 +1344,16 @@ export default function ProductsPage() {
                     onChange={(v) => {
                       const matched = findBindingForAccount(bindingProduct, 'stripe', v);
                       const { taxCode, taxBehavior } = extractStripeCatalogTax(matched?.validated_catalog);
+                      const nextSalesMode: StripeSalesMode = matched?.sales_mode ?? 'direct';
                       setStForm({
                         account_id: v,
-                        sales_mode: matched?.sales_mode ?? 'direct',
+                        sales_mode: nextSalesMode,
                         tax_liability_account: matched?.tax_liability_account ?? '',
                         tax_code: taxCode,
                         tax_behavior: taxBehavior,
-                        countries: matched?.allowed_countries?.join(', ') || 'US',
+                        countries: matched?.allowed_countries?.length
+                          ? matched.allowed_countries.join(', ')
+                          : formatDefaultStripeCountriesInput(nextSalesMode),
                         release_evidence: matched?.release_evidence ?? '',
                         market_policy: matched?.market_policy ?? '',
                         reprovision: false,
@@ -1361,7 +1374,14 @@ export default function ProductsPage() {
                     id={`${formId}-st-mode`}
                     width="100%"
                     value={stForm.sales_mode}
-                    onChange={(v) => setStForm((prev) => ({ ...prev, sales_mode: v as StripeSalesMode }))}
+                    onChange={(v) => {
+                      const nextMode = v as StripeSalesMode;
+                      setStForm((prev) => ({
+                        ...prev,
+                        sales_mode: nextMode,
+                        countries: resolveCountriesOnSalesModeChange(prev.countries, prev.sales_mode, nextMode),
+                      }));
+                    }}
                     options={[
                       { value: 'direct', label: '直收 (Direct)' },
                       { value: 'merchant_of_record', label: 'Managed Payments (MoR)' },
@@ -1443,32 +1463,91 @@ export default function ProductsPage() {
                 </div>
               )}
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div>
-                  <label htmlFor={`${formId}-st-countries`} className="block text-xs font-medium text-[var(--cms-muted-fg)] mb-1">允许销售国家/地区 (ISO-2 逗号分隔) *</label>
-                  <input
-                    id={`${formId}-st-countries`}
-                    type="text"
-                    required
-                    className="input-field w-full font-mono-code uppercase"
-                    placeholder="US, CA, GB"
-                    value={stForm.countries}
-                    onChange={(e) => setStForm((prev) => ({ ...prev, countries: e.target.value }))}
-                  />
-                </div>
-                <div>
-                  <label htmlFor={`${formId}-st-reason`} className="block text-xs font-medium text-[var(--cms-muted-fg)] mb-1">审计变更原因 *</label>
-                  <input
-                    id={`${formId}-st-reason`}
-                    type="text"
-                    required
-                    className="input-field w-full"
-                    placeholder="例如：首期上线 Stripe 定价验证"
-                    value={stForm.reason}
-                    onChange={(e) => setStForm((prev) => ({ ...prev, reason: e.target.value }))}
-                  />
-                </div>
-              </div>
+              {(() => {
+                const parsedCountries = parseStripeCountriesInput(stForm.countries);
+                const preset = detectStripeCountriesPreset(parsedCountries);
+                const presetLabel =
+                  preset === 'global'
+                    ? `全球 · ${parsedCountries.length} 个`
+                    : preset === 'mor_all'
+                      ? `MoR 官方全量 · ${parsedCountries.length} 个`
+                      : `已选 ${parsedCountries.length} 个`;
+                return (
+                  <div className="space-y-3">
+                    <div className="space-y-1.5">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <label htmlFor={`${formId}-st-countries`} className="text-xs font-medium text-[var(--cms-muted-fg)]">
+                          允许销售国家/地区 (ISO-2 逗号分隔) *
+                          <span className="ml-2 inline-flex items-center rounded bg-[var(--cms-surface-alt)] px-1.5 py-0.5 text-[11px] font-normal text-[var(--cms-fg)]">
+                            {presetLabel}
+                          </span>
+                        </label>
+                        <div className="inline-flex flex-wrap items-center gap-1.5">
+                          {stForm.sales_mode === 'merchant_of_record' && (
+                            <button
+                              type="button"
+                              className="btn-detail text-[11px] px-2 py-0.5"
+                              onClick={() =>
+                                setStForm((prev) => ({
+                                  ...prev,
+                                  countries: formatDefaultStripeCountriesInput('merchant_of_record'),
+                                }))
+                              }
+                            >
+                              MoR 官方全选 ({STRIPE_MOR_SUPPORTED_COUNTRIES.length})
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            className="btn-detail text-[11px] px-2 py-0.5"
+                            onClick={() =>
+                              setStForm((prev) => ({
+                                ...prev,
+                                countries: formatDefaultStripeCountriesInput('direct'),
+                              }))
+                            }
+                          >
+                            全球/全选 ({ALL_ISO2_COUNTRIES.length})
+                          </button>
+                          <button
+                            type="button"
+                            className="btn-ghost text-[11px] px-2 py-0.5"
+                            onClick={() => setStForm((prev) => ({ ...prev, countries: '' }))}
+                          >
+                            清空
+                          </button>
+                        </div>
+                      </div>
+                      <textarea
+                        id={`${formId}-st-countries`}
+                        rows={2}
+                        required
+                        className="input-field w-full font-mono-code text-xs uppercase resize-y"
+                        placeholder="US, CA, GB"
+                        value={stForm.countries}
+                        onChange={(e) => setStForm((prev) => ({ ...prev, countries: e.target.value }))}
+                      />
+                      {stForm.sales_mode === 'merchant_of_record' && (
+                        <p className="text-[11px] text-[var(--cms-muted-fg)] m-0">
+                          MoR 模式默认填入 Stripe Managed Payments 官方支持的 {STRIPE_MOR_SUPPORTED_COUNTRIES.length} 个国家/地区（已排除受限地区：{STRIPE_MOR_RESTRICTED_COUNTRIES.join(', ')}）。
+                        </p>
+                      )}
+                    </div>
+                    <div>
+                      <label htmlFor={`${formId}-st-reason`} className="block text-xs font-medium text-[var(--cms-muted-fg)] mb-1">审计变更原因 *</label>
+                      <input
+                        id={`${formId}-st-reason`}
+                        type="text"
+                        required
+                        className="input-field w-full"
+                        placeholder="例如：首期上线 Stripe 定价验证"
+                        value={stForm.reason}
+                        onChange={(e) => setStForm((prev) => ({ ...prev, reason: e.target.value }))}
+                      />
+                    </div>
+                  </div>
+                );
+              })()}
 
               {env === 'live' && (
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
