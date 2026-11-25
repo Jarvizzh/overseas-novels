@@ -19,9 +19,16 @@ var (
 	ErrOperationConflict = errors.New("state_conflict")
 )
 
+const (
+	PermissionAdsPixelsWrite      = "ads.pixels:write"
+	PermissionAdsConversionsWrite = "ads.conversions:write"
+)
+
 type Operator struct {
-	ID   string
-	Role string
+	ID                string
+	Role              string
+	Permission        string
+	RequireSuperAdmin bool
 }
 
 type OperationResult struct {
@@ -44,15 +51,43 @@ func cleanReason(reason string) (string, error) {
 	return value, nil
 }
 
+func requireBusinessPermission(actor Operator, required string) (Operator, error) {
+	if actor.RequireSuperAdmin {
+		return Operator{}, ErrOperatorForbidden
+	}
+	if actor.Permission == "" {
+		actor.Permission = required
+	} else if actor.Permission != required {
+		return Operator{}, ErrOperatorForbidden
+	}
+	return actor, nil
+}
+
 func verifyOperatorTx(ctx context.Context, tx pgx.Tx, operator Operator) (Operator, error) {
+	if strings.TrimSpace(operator.ID) == "" {
+		return Operator{}, ErrOperatorForbidden
+	}
 	var role string
-	err := tx.QueryRow(ctx, "SELECT role FROM conversion.lock_active_admin($1)", operator.ID).Scan(&role)
-	if errors.Is(err, pgx.ErrNoRows) || (err == nil && role != "SuperAdmin" && role != "Admin") ||
-		(err == nil && operator.Role != "" && operator.Role != role) {
+	var err error
+	if operator.RequireSuperAdmin {
+		err = tx.QueryRow(ctx, "SELECT role_code FROM conversion.lock_active_super_admin($1)", operator.ID).Scan(&role)
+	} else {
+		if strings.TrimSpace(operator.Permission) == "" {
+			return Operator{}, ErrOperatorForbidden
+		}
+		err = tx.QueryRow(ctx, "SELECT role_code FROM conversion.lock_active_admin_for_permission($1, $2)", operator.ID, operator.Permission).Scan(&role)
+	}
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Operator{}, ErrOperatorForbidden
+	}
+	if err != nil {
+		return Operator{}, err
+	}
+	if operator.Role != "" && operator.Role != role {
 		return Operator{}, ErrOperatorForbidden
 	}
 	operator.Role = role
-	return operator, err
+	return operator, nil
 }
 
 func (s Service) operate(ctx context.Context, operator Operator, reason string,
@@ -108,6 +143,10 @@ type retryState struct {
 func (s Service) RetryDelivery(ctx context.Context, operator Operator, id int64, expected int, reason string, acknowledge bool) (OperationResult, error) {
 	if id <= 0 || expected < 0 {
 		return OperationResult{}, ErrInvalidOperation
+	}
+	operator, err := requireBusinessPermission(operator, PermissionAdsConversionsWrite)
+	if err != nil {
+		return OperationResult{}, err
 	}
 	return s.operate(ctx, operator, reason, func(tx pgx.Tx, actor Operator, reason string) (OperationResult, error) {
 		if result, handled, err := s.retryPendingPaymentTx(ctx, tx, actor, id, expected, reason); handled || err != nil {
@@ -201,6 +240,10 @@ func (s Service) AppendTarget(ctx context.Context, operator Operator, eventID, d
 	if eventID <= 0 || destinationID <= 0 {
 		return OperationResult{}, ErrInvalidOperation
 	}
+	operator, err := requireBusinessPermission(operator, PermissionAdsConversionsWrite)
+	if err != nil {
+		return OperationResult{}, err
+	}
 	return s.operate(ctx, operator, reason, func(tx pgx.Tx, actor Operator, reason string) (OperationResult, error) {
 		var p Payload
 		var now time.Time
@@ -277,6 +320,10 @@ func deliveryDeadline(ingress, occurred time.Time) time.Time {
 func (s Service) RetryPartnerReport(ctx context.Context, operator Operator, id int64, reason string) (OperationResult, error) {
 	if id <= 0 {
 		return OperationResult{}, ErrInvalidOperation
+	}
+	operator, err := requireBusinessPermission(operator, PermissionAdsConversionsWrite)
+	if err != nil {
+		return OperationResult{}, err
 	}
 	return s.operate(ctx, operator, reason, func(tx pgx.Tx, actor Operator, reason string) (OperationResult, error) {
 		var state, cause string

@@ -21,7 +21,9 @@ func TestAftercarePrincipalAndEntitlementLifecycle(t *testing.T) {
 		}
 	}
 	exec(`SELECT assert_paypal_identity('aftercare-paypal','sandbox');
-		INSERT INTO admins(id,username,password_hash,role) VALUES('reviewer','reviewer','test','Finance'),('finance','finance','test','Finance');
+		INSERT INTO admins(id,username,password_hash,role,role_id) VALUES
+			('reviewer','reviewer','test','FinanceManager',(SELECT id FROM roles WHERE code='FinanceManager')),
+			('finance','finance','test','FinanceManager',(SELECT id FROM roles WHERE code='FinanceManager'));
 		INSERT INTO payment_aftercare_policies(account_id,hold_fulfillment,reviewer_id,finance_id,review_seconds,refund_seconds,reminder_seconds)
 			SELECT id,true,'reviewer','finance',120,240,3600 FROM payment_channel_accounts WHERE account_key='aftercare-paypal';
 		INSERT INTO users(id) VALUES(100);
@@ -179,5 +181,33 @@ func TestAftercarePrincipalAndEntitlementLifecycle(t *testing.T) {
 	var debits int
 	if err := pool.QueryRow(ctx, `SELECT COALESCE(sum(amount),0) FROM transactions WHERE user_id=100 AND biz_type='refund'`).Scan(&debits); err != nil || debits != 0 {
 		t.Fatalf("refund deducted a second principal amount: net=%d err=%v", debits, err)
+	}
+
+	// Revoking reviewer/finance permissions must keep risk hold pending while leaving owner_id NULL,
+	// and skip assigning dispute owner_id to an unauthorized admin.
+	exec(`UPDATE admins SET status=2 WHERE id IN ('reviewer','finance')`)
+	revokedRisk := base
+	revokedRisk.Kind = payment.CaseRiskReview
+	revokedRisk.ExternalID, revokedRisk.SourceRef, revokedRisk.Status = "risk-revoked", "wh-risk-revoked", "open"
+	revokedRisk.Open, revokedRisk.ReceiptRefs = true, []string{"CAPTURE-HELD"}
+	if err := repo.Record(ctx, revokedRisk); err != nil {
+		t.Fatal(err)
+	}
+	var workState string
+	var ownerID *string
+	var workDueAt *time.Time
+	if err := pool.QueryRow(ctx, `SELECT work_state,owner_id,work_due_at FROM payment_cases WHERE external_id='risk-revoked'`).Scan(&workState, &ownerID, &workDueAt); err != nil ||
+		workState != "pending" || ownerID != nil || workDueAt == nil {
+		t.Fatalf("revoked reviewer risk hold: state=%q owner=%v due=%v err=%v", workState, ownerID, workDueAt, err)
+	}
+	revokedDispute := base
+	revokedDispute.Kind, revokedDispute.Open = payment.CaseDispute, true
+	revokedDispute.ExternalID, revokedDispute.SourceRef, revokedDispute.Status = "PP-DISPUTE-REVOKED", "wh-dispute-revoked", "OPEN"
+	revokedDispute.ReceiptRefs = []string{"CAPTURE-ORIGINAL"}
+	if err := repo.Record(ctx, revokedDispute); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT owner_id FROM payment_cases WHERE external_id='PP-DISPUTE-REVOKED'`).Scan(&ownerID); err != nil || ownerID != nil {
+		t.Fatalf("revoked finance dispute owner=%v err=%v", ownerID, err)
 	}
 }

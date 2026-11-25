@@ -31,48 +31,51 @@ func NewHandler(service NovelService) *Handler {
 const maxBulkImportBytes int64 = 50 << 20
 
 func (h *Handler) RegisterRoutes(rg *gin.RouterGroup) {
-	editorRoles := auth.RoleMiddleware("SuperAdmin", "Admin", "Editor")
-	settingsWriteRoles := auth.RoleMiddleware("SuperAdmin", "Admin")
-	promoWriteRoles := auth.RoleMiddleware("SuperAdmin", "Admin", "Editor", "MediaBuyer")
+	novelsRead := auth.RequirePermission(auth.PermContentNovelsRead)
+	novelsWrite := auth.RequirePermission(auth.PermContentNovelsWrite)
+	promoRead := auth.RequirePermission(auth.PermAdsPromotionsRead)
+	promoWrite := auth.RequirePermission(auth.PermAdsPromotionsWrite)
+	pixelsRead := auth.RequirePermission(auth.PermAdsPixelsRead)
 
 	novels := rg.Group("/novels", auth.AuthMiddleware())
 	{
-		novels.GET("", h.ListNovels)
-		novels.POST("/cover-upload", editorRoles, h.UploadCover)
-		novels.POST("/batch-import", editorRoles, h.BatchImportNovels)
-		novels.PATCH("/batch-publish-status", editorRoles, h.BatchUpdatePublishStatus)
-		novels.GET("/:id", h.GetNovel)
-		novels.POST("", editorRoles, h.CreateNovel)
-		novels.PUT("/:id", editorRoles, h.UpdateNovel)
-		novels.PATCH("/:id/publish-status", editorRoles, h.UpdatePublishStatus)
-		novels.DELETE("/:id", editorRoles, h.DeleteNovel)
+		novels.GET("", novelsRead, h.ListNovels)
+		novels.POST("/cover-upload", novelsWrite, h.UploadCover)
+		novels.POST("/batch-import", novelsWrite, h.BatchImportNovels)
+		novels.PATCH("/batch-publish-status", novelsWrite, h.BatchUpdatePublishStatus)
+		novels.GET("/:id", novelsRead, h.GetNovel)
+		novels.POST("", novelsWrite, h.CreateNovel)
+		novels.PUT("/:id", novelsWrite, h.UpdateNovel)
+		novels.PATCH("/:id/publish-status", novelsWrite, h.UpdatePublishStatus)
+		novels.DELETE("/:id", novelsWrite, h.DeleteNovel)
 
 		// Chapters sub-routes
-		novels.GET("/:id/chapters", h.ListChapters)
-		novels.GET("/:id/chapters/:index", h.GetChapterDetail)
-		novels.GET("/:id/chapters/identities", editorRoles, h.ListChapterIdentities)
-		novels.POST("/:id/chapters", editorRoles, h.CreateChapter)
-		novels.PUT("/:id/chapters/:index", editorRoles, h.UpdateChapter)
-		novels.POST("/:id/chapters/bulk-import", editorRoles, h.BulkImportChapters)
+		novels.GET("/:id/chapters", novelsRead, h.ListChapters)
+		novels.GET("/:id/chapters/:index", novelsRead, h.GetChapterDetail)
+		novels.GET("/:id/chapters/identities", novelsWrite, h.ListChapterIdentities)
+		novels.POST("/:id/chapters", novelsWrite, h.CreateChapter)
+		novels.PUT("/:id/chapters/:index", novelsWrite, h.UpdateChapter)
+		novels.POST("/:id/chapters/bulk-import", novelsWrite, h.BulkImportChapters)
 	}
 
 	settings := rg.Group("/settings", auth.AuthMiddleware())
 	{
-		settings.GET("", h.GetSettings)
-		settings.POST("", settingsWriteRoles, h.UpdateSettings)
+		settings.GET("", novelsRead, h.GetSettings)
+		settings.POST("", novelsWrite, h.UpdateSettings)
 	}
 
 	promo := rg.Group("/promotion-links", auth.AuthMiddleware())
 	{
-		promo.GET("", h.ListPromotionLinks)
-		promo.POST("", promoWriteRoles, h.CreatePromotionLink)
-		promo.PUT("/:id", promoWriteRoles, h.UpdatePromotionLink)
-		promo.DELETE("/:id", promoWriteRoles, h.DeletePromotionLink)
+		promo.GET("", promoRead, h.ListPromotionLinks)
+		promo.GET("/options", promoRead, h.GetPromotionLinkOptions)
+		promo.POST("", promoWrite, h.CreatePromotionLink)
+		promo.PUT("/:id", promoWrite, h.UpdatePromotionLink)
+		promo.DELETE("/:id", promoWrite, h.DeletePromotionLink)
 	}
 
 	pixels := rg.Group("/fb-pixels", auth.AuthMiddleware())
 	{
-		pixels.GET("", h.ListFBPixels)
+		pixels.GET("", pixelsRead, h.ListFBPixels)
 	}
 }
 
@@ -933,6 +936,15 @@ func (h *Handler) ListPromotionLinks(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, links)
+}
+
+func (h *Handler) GetPromotionLinkOptions(c *gin.Context) {
+	options, err := h.service.GetPromotionLinkOptions(c.Request.Context())
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch promotion link options: " + err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, options)
 }
 
 type CreatePromotionLinkReq struct {

@@ -46,7 +46,7 @@ func (r *Repository) ScheduleStripeNotice(ctx context.Context, account payment.W
 		SELECT $1,$1,s.actor_id,$2,a.id,a.environment,'Stripe event '||$3::text,
 			jsonb_build_object('reference',$4::text,'source_event',$3::text),$3::text
 		FROM payment_channel_accounts a JOIN payment_ledger_sync_settings s ON s.account_id=a.id AND s.enabled
-		JOIN admins u ON u.id=s.actor_id AND u.status=1 AND u.role IN ('SuperAdmin','Finance')
+		JOIN admins u ON u.id = s.actor_id AND public.admin_has_permission(u.id, 'payments.reconciliation:write')
 		WHERE a.provider='stripe' AND a.account_key=$5 AND a.environment=$6 ON CONFLICT DO NOTHING`,
 		id, kind, eventID, reference, account.AccountKey, account.Environment)
 	return err

@@ -18,7 +18,7 @@ func testReaderPaymentPolicy(t *testing.T, ctx context.Context, base Service) {
 	s := Service{Store{Pool: base.Pool, Environment: "reader-policy"}}
 	pool := s.Pool
 	mustExec(t, ctx, pool, `
-		INSERT INTO admins(id,username,password_hash,role) VALUES ('policy-ops','policy-ops','fixture','Admin');
+		INSERT INTO admins(id,username,password_hash,role,role_id) VALUES ('policy-ops','policy-ops','fixture','Admin',(SELECT id FROM roles WHERE code='Admin'));
 		INSERT INTO users(id) VALUES (81);
 		INSERT INTO conversion.integrations(source,account_key,environment,contract_version,enabled,allowed_events)
 		VALUES ('starnovel','reader','reader-policy','v1',true,ARRAY['CompleteRegistration','InitiateCheckout','Purchase','Subscribe']);

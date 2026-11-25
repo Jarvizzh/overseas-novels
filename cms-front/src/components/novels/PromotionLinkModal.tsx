@@ -1,14 +1,19 @@
 import React, { useId } from 'react';
 import CustomSelect from '../CustomSelect';
 import { CmsDialog } from '../ui/CmsDialog';
-import type { SystemDomain } from '../../utils/api';
+import type {
+  PromotionLinkDomainOption,
+  PromotionLinkPixelOption,
+  PromotionLinkTemplateOption,
+  SystemDomain,
+} from '../../utils/api';
 import { filterLivePromotionTemplates } from '../../utils/templateCatalogHelpers';
 
 export interface FBPixel {
   id: number;
   name: string;
   pixel_id: string;
-  access_token: string;
+  access_token?: string;
 }
 
 export interface RechargeTemplate {
@@ -38,9 +43,9 @@ interface PromotionLinkModalProps {
   submitting?: boolean;
   promotionForm: PromotionFormData;
   setPromotionForm: (form: PromotionFormData) => void;
-  pixels: FBPixel[];
-  templates: RechargeTemplate[];
-  domains?: SystemDomain[];
+  pixels: Array<FBPixel | PromotionLinkPixelOption>;
+  templates: Array<RechargeTemplate | PromotionLinkTemplateOption>;
+  domains?: Array<SystemDomain | PromotionLinkDomainOption>;
   onGenerateLink: () => void;
   generatedLink: string;
   onCopyLink: () => void;
@@ -70,7 +75,7 @@ export const PromotionLinkModal: React.FC<PromotionLinkModalProps> = ({
   onConfigureRule,
 }) => {
   const policyId = useId();
-  const activeDomains = (domains || []).filter((d) => d.status === 1);
+  const activeDomains = (domains || []).filter((d) => d.status === undefined || d.status === 1);
   const defaultDomain =
     activeDomains.find((d) => d.is_default) ||
     activeDomains.find((d) => d.type === 'main') ||

@@ -50,6 +50,10 @@ func (s Service) ConfigureDestination(ctx context.Context, actor Operator, id in
 			return OperationResult{}, err
 		}
 	}
+	actor, err := requireBusinessPermission(actor, PermissionAdsPixelsWrite)
+	if err != nil {
+		return OperationResult{}, err
+	}
 	return s.operate(ctx, actor, input.Reason, func(tx pgx.Tx, operator Operator, reason string) (OperationResult, error) {
 		// Keep the lock order shared with the historical Pixel importer.
 		if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock(1930717)"); err != nil {
@@ -200,6 +204,10 @@ func (s Service) ConfigureIntegration(ctx context.Context, actor Operator, id in
 	}
 	if input.ContractVersion != "" && !validConfigField(input.ContractVersion, 100) {
 		return OperationResult{}, ErrInvalidOperation
+	}
+	actor, err := requireBusinessPermission(actor, PermissionAdsPixelsWrite)
+	if err != nil {
+		return OperationResult{}, err
 	}
 	return s.operate(ctx, actor, input.Reason, func(tx pgx.Tx, operator Operator, reason string) (OperationResult, error) {
 		var before map[string]any

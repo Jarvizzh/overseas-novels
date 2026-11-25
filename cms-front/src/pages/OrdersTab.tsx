@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { CreditCard, SlidersHorizontal } from 'lucide-react';
 import { Link, useSearchParams } from 'react-router-dom';
+import { usePermission } from '../context/PermissionContext';
 import { apiRequest } from '../utils/api';
 import CustomSelect from '../components/CustomSelect';
 import { ThirdPartyPaymentModal, type ThirdPartyPaymentDetail } from '../components/ThirdPartyPaymentModal';
@@ -95,7 +96,12 @@ function getOrderTypeLabel(orderType?: string): string {
   return '金币充值';
 }
 
-export default function OrdersTab({ finance = false }: { finance?: boolean }) {
+export default function OrdersTab() {
+  const { canRead, canWrite } = usePermission();
+  const canReadReconciliation = canRead('payments.reconciliation');
+  const canReadRisk = canRead('payments.risk');
+  const canReadDisputes = canRead('payments.disputes');
+  const canWriteRefunds = canWrite('payments.refunds');
   const searchFormId = useId();
   const [params, setParams] = useSearchParams();
   const { provider, environment, account_id } = paymentScope(params, '');
@@ -564,19 +570,17 @@ export default function OrdersTab({ finance = false }: { finance?: boolean }) {
                       <div className="text-[var(--cms-muted-fg)] mt-0.5">UID {o.user_id}</div>
                     </td>
                     <td>
-                      {finance ? (
-                        <button
-                          type="button"
-                          onClick={() => void handleOpenPaymentDetails(o.id)}
-                          className="focus-ring inline-flex items-center gap-1.5 text-[var(--cms-fg)] hover:underline cursor-pointer tabular-nums"
-                          title="点击查看第三方支付凭据"
-                        >
-                          <CreditCard size={13} className="text-[var(--cms-muted-fg)] shrink-0" aria-hidden="true" />
-                          <span>
-                            {providerLabels[o.payment_provider || ''] || '渠道待核对'} · {o.external_ref_id || '凭证待确认'}
-                          </span>
-                        </button>
-                      ) : <span>{providerLabels[o.payment_provider || ''] || '渠道待核对'}</span>}
+                      <button
+                        type="button"
+                        onClick={() => void handleOpenPaymentDetails(o.id)}
+                        className="focus-ring inline-flex items-center gap-1.5 text-[var(--cms-fg)] hover:underline cursor-pointer tabular-nums"
+                        title="点击查看第三方支付凭据"
+                      >
+                        <CreditCard size={13} className="text-[var(--cms-muted-fg)] shrink-0" aria-hidden="true" />
+                        <span>
+                          {providerLabels[o.payment_provider || ''] || '渠道待核对'} · {o.external_ref_id || '凭证待确认'}
+                        </span>
+                      </button>
                       <div className="mt-0.5 text-[var(--cms-muted-fg)]">
                         {environmentLabels[o.payment_environment || ''] || '环境待核对'}
                         {o.payment_account_id && ` · 商户 #${o.payment_account_id}`}
@@ -621,23 +625,36 @@ export default function OrdersTab({ finance = false }: { finance?: boolean }) {
                       <StatusDot tone={statusMeta.tone} label={statusMeta.label} />
                     </td>
                     <td className="text-right whitespace-nowrap">
-                      {finance ? (
-                        <>
-                          <button type="button" onClick={() => void handleOpenPaymentDetails(o.id)} className="btn-detail">
-                            详情
-                          </button>
-                          {o.payment_environment ? (
-                            [['reconciliation', '流水'], ['risk', '风控'], ['disputes', '争议'], ['refunds', '退款']].map(([view, label]) => (
-                              <Link key={view} to={`/payments/${view}?${paymentParams({
-                                order_id: String(o.id), environment: o.payment_environment,
-                                provider: providerLabels[o.payment_provider ?? ''] ? o.payment_provider : undefined,
-                                account_id: o.payment_account_id,
-                              })}`}
-                                className="btn-detail">{label}</Link>
+                      <button type="button" onClick={() => void handleOpenPaymentDetails(o.id)} className="btn-detail">
+                        详情
+                      </button>
+                      {(canReadReconciliation || canReadRisk || canReadDisputes || canWriteRefunds) && (
+                        o.payment_environment ? (
+                          ([
+                            ['reconciliation', '流水', canReadReconciliation],
+                            ['risk', '风控', canReadRisk],
+                            ['disputes', '争议', canReadDisputes],
+                            ['refunds', '退款', canWriteRefunds],
+                          ] as const)
+                            .filter(([, , allowed]) => allowed)
+                            .map(([view, label]) => (
+                              <Link
+                                key={view}
+                                to={`/payments/${view}?${paymentParams({
+                                  order_id: String(o.id),
+                                  environment: o.payment_environment,
+                                  provider: providerLabels[o.payment_provider ?? ''] ? o.payment_provider : undefined,
+                                  account_id: o.payment_account_id,
+                                })}`}
+                                className="btn-detail"
+                              >
+                                {label}
+                              </Link>
                             ))
-                          ) : <span>渠道环境待核对</span>}
-                        </>
-                      ) : '—'}
+                        ) : (
+                          <span>渠道环境待核对</span>
+                        )
+                      )}
                     </td>
                   </tr>
                 );

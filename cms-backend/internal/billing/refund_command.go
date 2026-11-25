@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"star-novel-cms/internal/auth"
 	"star-novel-cms/internal/db"
 )
 
@@ -56,7 +57,7 @@ func submitRefundCommand(ctx context.Context, actor string, input refundCommandI
 		return RefundCommand{}, err
 	}
 	defer tx.Rollback(context.WithoutCancel(ctx))
-	if err := requireFinancialAdmin(ctx, tx, actor); err != nil {
+	if err := requirePermissionTx(ctx, tx, actor, ErrRefundForbidden, auth.PermPaymentsRefundsWrite); err != nil {
 		return RefundCommand{}, err
 	}
 
@@ -216,7 +217,7 @@ func linkConfirmedPayPalRefund(ctx context.Context, actor, id, refundRef, reason
 		return RefundCommand{}, err
 	}
 	defer tx.Rollback(context.WithoutCancel(ctx))
-	if err := requireFinancialAdmin(ctx, tx, actor); err != nil {
+	if err := requirePermissionTx(ctx, tx, actor, ErrRefundForbidden, auth.PermPaymentsRefundsWrite); err != nil {
 		return RefundCommand{}, err
 	}
 	var capture string

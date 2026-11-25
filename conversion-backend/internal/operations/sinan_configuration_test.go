@@ -20,7 +20,7 @@ import (
 func TestSinanMockConfiguration(t *testing.T) {
 	ctx, pool := operationsTestPool(t)
 	mustExec(t, ctx, pool, `
-		INSERT INTO admins(id,username,password_hash,role,status) VALUES('ops','ops','fixture','Admin',1);
+		INSERT INTO admins(id,username,password_hash,role,role_id,status) VALUES('ops','ops','fixture','Admin',(SELECT id FROM roles WHERE code='Admin'),1);
 		INSERT INTO conversion.integrations(source,account_key,environment,contract_version)
 		VALUES('sinan','fixture','test','sinan-mock-v1'),('sinan','fixture','production','sinan-mock-v1');
 	`)
@@ -36,12 +36,16 @@ func TestSinanMockConfiguration(t *testing.T) {
 	const token = "fixture-inbound-credential"
 	config := fmt.Sprintf(`{"config":{"app_pixels":{"1":["123"]},"endpoint":"http://127.0.0.1:8080/final",
 		"max_age_seconds":3600},"inbound_token":%q,"signing_seed":%q,"reason":"integration fixture"}`, token, seed)
-	request := func(handler http.Handler, id, auth, role, input string, status int) {
+	request := func(handler http.Handler, id, auth, role, access, perm, input string, status int) {
 		t.Helper()
 		req := httptest.NewRequest(http.MethodPut, "/internal/conversion/integrations/"+id+"/sinan-mock", strings.NewReader(input))
 		req.Header.Set("Authorization", "Bearer "+auth)
 		req.Header.Set("X-Operator-ID", "ops")
 		req.Header.Set("X-Operator-Role", role)
+		req.Header.Set("X-Operator-Access", access)
+		if perm != "" {
+			req.Header.Set("X-Operator-Permission", perm)
+		}
 		w := httptest.NewRecorder()
 		handler.ServeHTTP(w, req)
 		if w.Code != status || strings.Contains(w.Body.String(), token) || strings.Contains(w.Body.String(), seed) {
@@ -49,13 +53,14 @@ func TestSinanMockConfiguration(t *testing.T) {
 		}
 	}
 	handler := NewHandler(repo, "private-fixture")
-	request(handler, "1", "wrong", "Admin", config, 401)
-	request(handler, "1", "private-fixture", "MediaBuyer", config, 403)
-	request(handler, "1", "private-fixture", "Admin", strings.Replace(config, "127.0.0.1", "example.com", 1), 400)
-	request(handler, "2", "private-fixture", "Admin", config, 404)
-	request(handler, "1", "private-fixture", "Admin", config, 200)
+	request(handler, "1", "wrong", "Admin", "write", "ads.pixels:write", config, 401)
+	request(handler, "1", "private-fixture", "FinanceManager", "read", "", config, 403)
+	request(handler, "1", "private-fixture", "Admin", "write", "ads.conversions:write", config, 403)
+	request(handler, "1", "private-fixture", "Admin", "write", "ads.pixels:write", strings.Replace(config, "127.0.0.1", "example.com", 1), 400)
+	request(handler, "2", "private-fixture", "Admin", "write", "ads.pixels:write", config, 404)
+	request(handler, "1", "private-fixture", "Admin", "write", "ads.pixels:write", config, 200)
 	repo.Environment = "production"
-	request(NewHandler(repo, "private-fixture"), "2", "private-fixture", "Admin", config, 404)
+	request(NewHandler(repo, "private-fixture"), "2", "private-fixture", "Admin", "write", "ads.pixels:write", config, 404)
 
 	var ciphertext []byte
 	var version string
@@ -90,7 +95,8 @@ func TestConfigurationAuditQueryValidation(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/internal/conversion/audit"+tc.query, nil)
 		req.Header.Set("Authorization", "Bearer private-fixture")
 		req.Header.Set("X-Operator-ID", "ops")
-		req.Header.Set("X-Operator-Role", "Finance")
+		req.Header.Set("X-Operator-Role", "FinanceManager")
+		req.Header.Set("X-Operator-Access", "read")
 		res := httptest.NewRecorder()
 		handler.ServeHTTP(res, req)
 		if res.Code != http.StatusBadRequest || !strings.Contains(res.Body.String(), tc.code) {
@@ -102,7 +108,7 @@ func TestConfigurationAuditQueryValidation(t *testing.T) {
 func TestConfigurationAuditQueryAndRestrictedRole(t *testing.T) {
 	ctx, pool := operationsTestPool(t)
 	mustExec(t, ctx, pool, `
-		INSERT INTO admins(id,username,password_hash,role,status) VALUES('ops','ops','fixture','Admin',1);
+		INSERT INTO admins(id,username,password_hash,role,role_id,status) VALUES('ops','ops','fixture','Admin',(SELECT id FROM roles WHERE code='Admin'),1);
 		INSERT INTO conversion.integrations(source,account_key,environment,contract_version,enabled)
 		VALUES('starnovel','reader','test','v1',true),('sinan','partner-a','test','sinan-mock-v1',false);
 	`)
@@ -156,6 +162,12 @@ func TestConfigurationAuditQueryAndRestrictedRole(t *testing.T) {
 		req.Header.Set("Authorization", "Bearer private-fixture")
 		req.Header.Set("X-Operator-ID", "ops")
 		req.Header.Set("X-Operator-Role", role)
+		if method == http.MethodGet {
+			req.Header.Set("X-Operator-Access", "read")
+		} else {
+			req.Header.Set("X-Operator-Access", "write")
+			req.Header.Set("X-Operator-Permission", "ads.pixels:write")
+		}
 		res := httptest.NewRecorder()
 		handler.ServeHTTP(res, req)
 		return res
@@ -171,7 +183,7 @@ func TestConfigurationAuditQueryAndRestrictedRole(t *testing.T) {
 		`{"display_name":"Main Pixel v2","reason":"rename pixel"}`); res.Code != http.StatusOK {
 		t.Fatalf("patch destination: %d %s", res.Code, res.Body.String())
 	}
-	if res := doReq(http.MethodGet, "/destinations", "MediaBuyer", ""); res.Code != http.StatusOK || !strings.Contains(res.Body.String(), `"Main Pixel v2"`) {
+	if res := doReq(http.MethodGet, "/destinations", "AdOptimizer", ""); res.Code != http.StatusOK || !strings.Contains(res.Body.String(), `"Main Pixel v2"`) {
 		t.Fatalf("get destinations: %d %s", res.Code, res.Body.String())
 	}
 
@@ -184,7 +196,7 @@ func TestConfigurationAuditQueryAndRestrictedRole(t *testing.T) {
 			t.Fatalf("accepts incomplete enabled configuration: %d %s", res.Code, res.Body.String())
 		}
 	}
-	if res := doReq(http.MethodGet, "/throughput?minutes=1", "Finance", ""); res.Code != http.StatusOK {
+	if res := doReq(http.MethodGet, "/throughput?minutes=1", "FinanceManager", ""); res.Code != http.StatusOK {
 		t.Fatalf("restricted API role cannot read throughput: %d %s", res.Code, res.Body.String())
 	}
 
@@ -216,7 +228,7 @@ func TestConfigurationAuditQueryAndRestrictedRole(t *testing.T) {
 		HasMore bool `json:"has_more"`
 	}
 
-	res := doReq(http.MethodGet, "/audit?subject_type=destination&subject_id=1&limit=1", "Finance", "")
+	res := doReq(http.MethodGet, "/audit?subject_type=destination&subject_id=1&limit=1", "FinanceManager", "")
 	if res.Code != http.StatusOK || strings.Contains(res.Body.String(), secretToken) {
 		t.Fatalf("audit dest page 1: %d %s", res.Code, res.Body.String())
 	}
@@ -229,7 +241,7 @@ func TestConfigurationAuditQueryAndRestrictedRole(t *testing.T) {
 		t.Fatalf("unexpected dest page 1: %+v", p1)
 	}
 
-	res = doReq(http.MethodGet, "/audit?subject_type=destination&subject_id=1&limit=1&before_id="+p1.Records[0].ID, "Finance", "")
+	res = doReq(http.MethodGet, "/audit?subject_type=destination&subject_id=1&limit=1&before_id="+p1.Records[0].ID, "FinanceManager", "")
 	if res.Code != http.StatusOK || strings.Contains(res.Body.String(), secretToken) {
 		t.Fatalf("audit dest page 2: %d %s", res.Code, res.Body.String())
 	}
@@ -242,7 +254,7 @@ func TestConfigurationAuditQueryAndRestrictedRole(t *testing.T) {
 	}
 
 	// Query integration audit (returns both configure_sinan_mock and configure_integration)
-	res = doReq(http.MethodGet, "/audit?subject_type=integration&subject_id=2", "Finance", "")
+	res = doReq(http.MethodGet, "/audit?subject_type=integration&subject_id=2", "FinanceManager", "")
 	if res.Code != http.StatusOK || strings.Contains(res.Body.String(), "inbound-secret-fixture-token-01") || strings.Contains(res.Body.String(), seed) {
 		t.Fatalf("audit integration: %d %s", res.Code, res.Body.String())
 	}

@@ -137,6 +137,7 @@ type NovelService interface {
 	UpdateSettings(ctx context.Context, configs map[string]string) error
 
 	ListPromotionLinks(ctx context.Context) ([]PromotionLink, error)
+	GetPromotionLinkOptions(ctx context.Context) (*PromotionLinkOptions, error)
 	CreatePromotionLink(ctx context.Context, link *PromotionLink) (*PromotionLink, error)
 	UpdatePromotionLink(ctx context.Context, id int, name string, chapterIndex int, source, campaign, url string, pixelID, templateID, domainID, coinCost, startPayIndex *int, domain string) error
 	DeletePromotionLink(ctx context.Context, id int) error
@@ -1452,6 +1453,66 @@ func appendLinkIDToURL(rawURL string, linkID int) string {
 
 func (s *novelService) ListPromotionLinks(ctx context.Context) ([]PromotionLink, error) {
 	return s.repo.ListPromotionLinks(ctx)
+}
+
+func (s *novelService) GetPromotionLinkOptions(ctx context.Context) (*PromotionLinkOptions, error) {
+	novels, err := s.repo.ListPublishedNovelOptionsForPromo(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if novels == nil {
+		novels = []PromotionLinkNovelOption{}
+	}
+	fbPixels, err := s.repo.ListFBPixels(ctx)
+	if err != nil {
+		return nil, err
+	}
+	pixels := make([]PromotionLinkPixelOption, 0, len(fbPixels))
+	for _, p := range fbPixels {
+		pixels = append(pixels, PromotionLinkPixelOption{
+			ID:      p.ID,
+			Name:    p.Name,
+			PixelID: p.PixelID,
+		})
+	}
+	templates, err := s.repo.ListLiveTemplateOptionsForPromo(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if templates == nil {
+		templates = []PromotionLinkTemplateOption{}
+	}
+	domains, err := s.repo.ListActiveDomainOptionsForPromo(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if domains == nil {
+		domains = []PromotionLinkDomainOption{}
+	}
+	configs, err := s.repo.GetSettings(ctx)
+	if err != nil {
+		return nil, err
+	}
+	coinCost, err := pricingSetting(configs, "global_coin_cost_per_thousand", 0, 500)
+	if err != nil {
+		coinCost = 500
+	}
+	startPay, err := pricingSetting(configs, "global_start_pay_chapter_index", 1, 3)
+	if err != nil {
+		startPay = 3
+	}
+	return &PromotionLinkOptions{
+		Novels:                     novels,
+		Pixels:                     pixels,
+		Templates:                  templates,
+		Domains:                    domains,
+		GlobalCoinCostPerThousand:  coinCost,
+		GlobalStartPayChapterIndex: startPay,
+		Defaults: PromotionLinkDefaults{
+			GlobalCoinCostPerThousand:  coinCost,
+			GlobalStartPayChapterIndex: startPay,
+		},
+	}, nil
 }
 
 func (s *novelService) CreatePromotionLink(ctx context.Context, link *PromotionLink) (*PromotionLink, error) {

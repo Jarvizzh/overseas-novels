@@ -121,6 +121,11 @@ func main() {
 		authHandler := auth.NewAuthHandler(authService)
 		authHandler.RegisterRoutes(api)
 
+		roleRepo := auth.NewRoleRepository()
+		roleService := auth.NewRoleService(roleRepo)
+		roleHandler := auth.NewRoleHandler(roleService)
+		roleHandler.RegisterRoutes(api)
+
 		contentStorage, err := storage.NewContentStorage(config.AppConfig, db.DB)
 		if err != nil {
 			log.Fatalf("Failed to initialize content storage: %v", err)

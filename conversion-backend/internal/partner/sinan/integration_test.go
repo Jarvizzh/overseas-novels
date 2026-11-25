@@ -506,12 +506,12 @@ func TestReportWorkerNoConfirmationAndLeaseRecovery(t *testing.T) {
 	defer server.Close()
 	server.Client().Timeout = 150 * time.Millisecond
 	f.configureReport(t, server.URL+"/final", false, "omit")
-	exec(t, f.ctx, f.owner, "INSERT INTO admins(id,username,password_hash,role,status) VALUES('sinan-ops','sinan-ops','hash','Admin',1)")
+	exec(t, f.ctx, f.owner, "INSERT INTO admins(id,username,password_hash,role,role_id,status) VALUES('sinan-ops','sinan-ops','hash','Admin',(SELECT id FROM roles WHERE code='Admin'),1)")
 	var reportID int64
 	if err := f.owner.QueryRow(f.ctx, "SELECT id FROM conversion.partner_reports").Scan(&reportID); err != nil {
 		t.Fatal(err)
 	}
-	operator := delivery.Operator{ID: "sinan-ops", Role: "Admin"}
+	operator := delivery.Operator{ID: "sinan-ops", Role: "Admin", Permission: delivery.PermissionAdsConversionsWrite}
 	asOwner := delivery.Service{Store: delivery.Store{Pool: f.owner, Environment: TestEnvironment}}
 	if _, err := asOwner.RetryPartnerReport(f.ctx, operator, reportID, "mock contract now accepts omitted trace"); err != nil {
 		t.Fatal(err)

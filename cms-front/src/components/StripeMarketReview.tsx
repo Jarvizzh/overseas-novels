@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { usePermission } from '../context/PermissionContext';
 import { apiRequest } from '../utils/api';
 
 type Review = {
@@ -11,6 +12,8 @@ type Review = {
 };
 
 export function StripeMarketReview({ orderID }: { orderID: string | number }) {
+  const { canWrite } = usePermission();
+  const canApproveReview = canWrite('payments.orders');
   const [review, setReview] = useState<Review | null>(null);
   const [reason, setReason] = useState('');
   const [saving, setSaving] = useState(false);
@@ -28,7 +31,7 @@ export function StripeMarketReview({ orderID }: { orderID: string | number }) {
   if (!review) return error ? <p role="alert">{error}</p> : null;
 
   const approve = async () => {
-    if (saving || !reason.trim()) return;
+    if (!canApproveReview || saving || !reason.trim()) return;
     setSaving(true);
     setError('');
     try {
@@ -49,7 +52,7 @@ export function StripeMarketReview({ orderID }: { orderID: string | number }) {
       <p>渠道凭证 {review.evidence.reference} · 实际地区 {review.evidence.country || '待确认'} · 预计地区 {review.evidence.expected_country || '待确认'}</p>
       <p>税务责任账户 {review.evidence.tax_account || '待确认'} · 客户税务状态 {review.evidence.customer_tax_status || '待确认'}</p>
       {review.approved_at && <p role="status">复核已批准。Reader 将重新核验款项及履约条件。</p>}
-      {review.can_approve && <form className="space-y-2" onSubmit={(event) => { event.preventDefault(); void approve(); }}>
+      {canApproveReview && review.can_approve && <form className="space-y-2" onSubmit={(event) => { event.preventDefault(); void approve(); }}>
         <label className="grid gap-1">核实依据、税务责任以及批准原因
           <textarea className="input-field" required maxLength={500} value={reason} onChange={(event) => setReason(event.target.value)} />
         </label>

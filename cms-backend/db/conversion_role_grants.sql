@@ -48,7 +48,12 @@ GRANT INSERT ON conversion.events,conversion.deliveries,conversion.delivery_atte
 GRANT UPDATE (next_claim_at) ON conversion.destinations TO :"worker_role";
 GRANT UPDATE ON conversion.deliveries,conversion.delivery_attempts,conversion.worker_heartbeats TO :"worker_role";
 
-GRANT EXECUTE ON FUNCTION conversion.lock_active_admin(text),conversion.lock_repair_order(bigint) TO :"api_role";
+GRANT SELECT ON public.roles, public.role_permissions TO :"reader_role";
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.roles, public.role_permissions TO :"cms_role";
+GRANT USAGE, SELECT ON SEQUENCE public.roles_id_seq TO :"cms_role";
+GRANT EXECUTE ON FUNCTION public.admin_has_permission(text, text) TO :"reader_role", :"cms_role";
+
+GRANT EXECUTE ON FUNCTION conversion.lock_active_admin_for_permission(text,text),conversion.lock_repair_order(bigint) TO :"api_role";
 GRANT SELECT (id,status,order_type,subscription_id,fulfilled_at,paid_at,capi_expectation,reconciliation_note)
     ON recharge_orders TO :"api_role";
 GRANT SELECT (subscription_id,capi_subscribe_state,capi_subscribe_order_id) ON user_subscriptions TO :"api_role";
@@ -94,7 +99,7 @@ GRANT SELECT (integration_id,created_at,state,next_attempt_at) ON conversion.par
 GRANT SELECT ON conversion.worker_heartbeats TO :"collector_role";
 GRANT SELECT,INSERT,UPDATE ON conversion.alerts TO :"collector_role";
 
-GRANT EXECUTE ON FUNCTION conversion.lock_active_admin(text) TO :"retention_role";
+GRANT EXECUTE ON FUNCTION conversion.lock_active_super_admin(text) TO :"retention_role";
 GRANT SELECT,UPDATE (snapshot) ON reader_conversion_outbox,reader_conversion_repair_facts TO :"retention_role";
 GRANT SELECT (id,environment,source,account_key) ON conversion.integrations TO :"retention_role";
 GRANT SELECT ON conversion.events TO :"retention_role";

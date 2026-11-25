@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"star-novel-cms/internal/auth"
 	"star-novel-cms/internal/db"
 )
 
@@ -47,8 +48,8 @@ func approveStripeMarketEvidence(ctx context.Context, orderID int64, actor, key,
 		return err
 	}
 	defer tx.Rollback(context.WithoutCancel(ctx))
-	if err := requireFinancialAdmin(ctx, tx, actor); err != nil {
-		return errCaseForbidden
+	if err := requirePermissionTx(ctx, tx, actor, errCaseForbidden, auth.PermPaymentsOrdersWrite); err != nil {
+		return err
 	}
 	var method string
 	var current bool

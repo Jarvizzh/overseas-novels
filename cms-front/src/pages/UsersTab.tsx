@@ -9,6 +9,7 @@ import {
   Wallet,
 } from 'lucide-react';
 import { apiRequest } from '../utils/api';
+import { usePermission } from '../context/PermissionContext';
 import CustomSelect from '../components/CustomSelect';
 import { FALLBACK_COVER } from '../components/operations/operationsUtils';
 import { CmsDialog } from '../components/ui/CmsDialog';
@@ -87,7 +88,13 @@ function formatVipCycleShort(cycle?: string): string {
   return cycle || '会员';
 }
 
-export default function UsersTab({ showPaymentLinks = false }: { showPaymentLinks?: boolean }) {
+export default function UsersTab() {
+  const { canRead, canWrite } = usePermission();
+  const canEditUsers = canWrite('revenue.users');
+  const canReadOrders = canRead('payments.orders');
+  const canReadSubscriptions = canRead('payments.subscriptions');
+  const showPaymentLinks = canReadOrders || canReadSubscriptions;
+
   const [users, setUsers] = useState<User[]>([]);
   const [total, setTotal] = useState(0);
   const [searchDraft, setSearchDraft] = useState('');
@@ -168,6 +175,7 @@ export default function UsersTab({ showPaymentLinks = false }: { showPaymentLink
   };
 
   const handleToggleStatus = (user: UserDetail) => {
+    if (!canEditUsers) return;
     const nextStatus = user.status === 1 ? 2 : 1;
     const confirmMsg =
       nextStatus === 2
@@ -188,7 +196,7 @@ export default function UsersTab({ showPaymentLinks = false }: { showPaymentLink
 
   const handleAdjustWallet = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!selectedUser || adjustSubmitting) return;
+    if (!canEditUsers || !selectedUser || adjustSubmitting) return;
     const trimmedAmount = adjustAmount.trim();
     const parsedAmount = Number(trimmedAmount);
     if (!trimmedAmount || !Number.isInteger(parsedAmount) || parsedAmount === 0) {
@@ -455,15 +463,17 @@ export default function UsersTab({ showPaymentLinks = false }: { showPaymentLink
                 label={selectedUser.status === 1 ? '账号正常' : '已封禁'}
                 className="hidden sm:inline-flex mr-1"
               />
-              <button
-                type="button"
-                onClick={() => handleToggleStatus(selectedUser)}
-                className="btn-secondary h-8 px-3 text-xs"
-                style={{ color: selectedUser.status === 1 ? 'var(--cms-error)' : 'var(--cms-success)' }}
-              >
-                <Ban size={13} aria-hidden="true" />
-                <span>{selectedUser.status === 1 ? '封禁账号' : '解封账号'}</span>
-              </button>
+              {canEditUsers && (
+                <button
+                  type="button"
+                  onClick={() => handleToggleStatus(selectedUser)}
+                  className="btn-secondary h-8 px-3 text-xs"
+                  style={{ color: selectedUser.status === 1 ? 'var(--cms-error)' : 'var(--cms-success)' }}
+                >
+                  <Ban size={13} aria-hidden="true" />
+                  <span>{selectedUser.status === 1 ? '封禁账号' : '解封账号'}</span>
+                </button>
+              )}
             </div>
           )
         }
@@ -480,12 +490,16 @@ export default function UsersTab({ showPaymentLinks = false }: { showPaymentLink
               {/* Drawer Internal Sub-Tabs */}
               {showPaymentLinks && (
                 <div className="flex flex-wrap gap-2 border-b border-[var(--cms-border)] bg-[var(--cms-card)] px-6 py-2 shrink-0">
-                  <Link className="btn-detail" to={`/payments/orders?user_id=${selectedUser.id}`}>
-                    该用户的订单
-                  </Link>
-                  <Link className="btn-detail" to={`/payments/subscriptions?user_id=${selectedUser.id}`}>
-                    该用户的订阅
-                  </Link>
+                  {canReadOrders && (
+                    <Link className="btn-detail" to={`/payments/orders?user_id=${selectedUser.id}`}>
+                      该用户的订单
+                    </Link>
+                  )}
+                  {canReadSubscriptions && (
+                    <Link className="btn-detail" to={`/payments/subscriptions?user_id=${selectedUser.id}`}>
+                      该用户的订阅
+                    </Link>
+                  )}
                 </div>
               )}
               <div className="px-6 border-b border-[var(--cms-border)] bg-[var(--cms-card)] flex items-center justify-between gap-4 shrink-0">
@@ -516,19 +530,21 @@ export default function UsersTab({ showPaymentLinks = false }: { showPaymentLink
                   >
                     VIP 订阅与书架 ({selectedUser.bookshelf?.length || 0})
                   </button>
-                  <button
-                    type="button"
-                    role="tab"
-                    aria-selected={detailTab === 'adjust'}
-                    onClick={() => setDetailTab('adjust')}
-                    className={`focus-ring py-2.5 text-xs font-medium whitespace-nowrap cursor-pointer transition-colors ${
-                      detailTab === 'adjust'
-                        ? 'text-[var(--cms-fg)]'
-                        : 'text-[var(--cms-muted-fg)] hover:text-[var(--cms-fg)]'
-                    }`}
-                  >
-                    资产调币
-                  </button>
+                  {canEditUsers && (
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={detailTab === 'adjust'}
+                      onClick={() => setDetailTab('adjust')}
+                      className={`focus-ring py-2.5 text-xs font-medium whitespace-nowrap cursor-pointer transition-colors ${
+                        detailTab === 'adjust'
+                          ? 'text-[var(--cms-fg)]'
+                          : 'text-[var(--cms-muted-fg)] hover:text-[var(--cms-fg)]'
+                      }`}
+                    >
+                      资产调币
+                    </button>
+                  )}
                 </div>
 
                 <div className="hidden sm:flex items-center gap-2 text-xs text-[var(--cms-muted-fg)]">
@@ -609,7 +625,7 @@ export default function UsersTab({ showPaymentLinks = false }: { showPaymentLink
                     </div>
                   </div>
                 </div>
-              ) : detailTab === 'adjust' ? (
+              ) : detailTab === 'adjust' && canEditUsers ? (
                 <div className="flex-1 overflow-y-auto p-6 space-y-5 text-xs">
                   {/* Live Balance Snapshot for Reference */}
                   <div className="grid grid-cols-3 gap-3">

@@ -44,6 +44,10 @@ func (s Service) RepairMissing(ctx context.Context, operator Operator, input Rep
 		return OperationResult{}, err
 	}
 	input.Evidence = evidence
+	operator, err = requireBusinessPermission(operator, PermissionAdsConversionsWrite)
+	if err != nil {
+		return OperationResult{}, err
+	}
 	return s.operate(ctx, operator, input.Reason, func(tx pgx.Tx, actor Operator, reason string) (OperationResult, error) {
 		input.Reason = reason
 		return s.repairTx(ctx, tx, actor, input)

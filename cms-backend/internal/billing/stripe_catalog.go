@@ -93,12 +93,12 @@ func createStripeCatalogProduct(
 	ctx context.Context, key, idemKey, name, desc, env, code string, productID int64, productType, taxCode string,
 ) (string, error) {
 	form := url.Values{
-		"name":                            {name},
-		"active":                          {"true"},
-		"metadata[starnovel_product_id]":  {strconv.FormatInt(productID, 10)},
-		"metadata[starnovel_product_code]":{code},
-		"metadata[starnovel_product_type]":{productType},
-		"metadata[starnovel_environment]": {env},
+		"name":                             {name},
+		"active":                           {"true"},
+		"metadata[starnovel_product_id]":   {strconv.FormatInt(productID, 10)},
+		"metadata[starnovel_product_code]": {code},
+		"metadata[starnovel_product_type]": {productType},
+		"metadata[starnovel_environment]":  {env},
 	}
 	if strings.TrimSpace(desc) != "" {
 		form.Set("description", strings.TrimSpace(desc))
@@ -127,14 +127,14 @@ func createStripeCatalogPrice(
 	ctx context.Context, key, idemKey, prodID string, priceCents int, productType, vipCycle, env, code string, productID int64, taxBehavior string,
 ) (string, error) {
 	form := url.Values{
-		"product":                         {prodID},
-		"currency":                        {"usd"},
-		"unit_amount":                     {strconv.Itoa(priceCents)},
-		"active":                          {"true"},
-		"metadata[starnovel_product_id]":  {strconv.FormatInt(productID, 10)},
-		"metadata[starnovel_product_code]":{code},
-		"metadata[starnovel_product_type]":{productType},
-		"metadata[starnovel_environment]": {env},
+		"product":                          {prodID},
+		"currency":                         {"usd"},
+		"unit_amount":                      {strconv.Itoa(priceCents)},
+		"active":                           {"true"},
+		"metadata[starnovel_product_id]":   {strconv.FormatInt(productID, 10)},
+		"metadata[starnovel_product_code]": {code},
+		"metadata[starnovel_product_type]": {productType},
+		"metadata[starnovel_environment]":  {env},
 	}
 	if productType == productTypeVIP {
 		form.Set("recurring[interval]", vipCycle)

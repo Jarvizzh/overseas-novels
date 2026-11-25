@@ -17,11 +17,13 @@ func NewHandler(service Service) *Handler {
 }
 
 func (h *Handler) RegisterRoutes(r *gin.RouterGroup) {
+	fbRead := auth.RequirePermission(auth.PermSupportFeedbackRead)
+	fbWrite := auth.RequirePermission(auth.PermSupportFeedbackWrite)
 	fb := r.Group("/feedback", auth.AuthMiddleware())
 	{
-		fb.GET("", h.List)
-		fb.GET("/:id", h.GetByID)
-		fb.PUT("/:id", h.Update)
+		fb.GET("", fbRead, h.List)
+		fb.GET("/:id", fbRead, h.GetByID)
+		fb.PUT("/:id", fbWrite, h.Update)
 	}
 }
 

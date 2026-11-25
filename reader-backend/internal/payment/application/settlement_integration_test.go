@@ -316,7 +316,7 @@ func TestPaymentSettlementIntegration(t *testing.T) {
 			t.Fatalf("unproven earlier backfill bypassed service: %v", err)
 		}
 		exec(`UPDATE recharge_orders SET fulfilled_at=NULL WHERE external_ref_id='legacy-book'`)
-		exec(`INSERT INTO admins(id,username,password_hash,role,status) VALUES('legacy-auditor','legacy-auditor','none','Finance',1)`)
+		exec(`INSERT INTO admins(id,username,password_hash,role,role_id,status) VALUES('legacy-auditor','legacy-auditor','none','FinanceManager',(SELECT id FROM roles WHERE code='FinanceManager'),1)`)
 		exec(`INSERT INTO legacy_whole_book_proofs(order_id,novel_id,evidence_reference,verified_by)
             SELECT id,101,'archived merchant item record #1','legacy-auditor' FROM recharge_orders WHERE external_ref_id='legacy-book'`)
 		if _, err := r.settleCheckout(ctx, receipt.OrderID, receipt); err != nil {

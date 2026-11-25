@@ -29,7 +29,170 @@ export interface AdminUser {
   id: string;
   username: string;
   nickname: string;
+  role_id: number;
   role: string;
+  role_name: string;
+  is_super_admin: boolean;
+  permissions: string[];
+}
+
+export interface PermissionActionMeta {
+  code: string;
+  action: 'read' | 'write' | string;
+  label: string;
+  super_admin_only: boolean;
+}
+
+export interface PermissionModuleMeta {
+  resource: string;
+  label: string;
+  description?: string;
+  read?: PermissionActionMeta;
+  write?: PermissionActionMeta;
+  actions: PermissionActionMeta[];
+}
+
+export interface PermissionGroupMeta {
+  group: string;
+  label: string;
+  modules: PermissionModuleMeta[];
+}
+
+export interface PermissionCatalogResponse {
+  groups: PermissionGroupMeta[];
+}
+
+export interface RoleItem {
+  id: number;
+  code: string;
+  name: string;
+  description: string;
+  is_system: boolean;
+  is_super_admin: boolean;
+  status: number; // 1-Active, 2-Disabled
+  admin_count: number;
+  permissions: string[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateRolePayload {
+  code: string;
+  name: string;
+  description?: string;
+  status?: number;
+  permissions: string[];
+}
+
+export interface UpdateRolePayload {
+  name?: string;
+  description?: string;
+  status?: number;
+  permissions: string[];
+}
+
+export interface AdminListItem {
+  id: string;
+  username: string;
+  nickname: string;
+  role_id: number;
+  role: string;
+  role_name: string;
+  is_super_admin: boolean;
+  status: number; // 1-Active, 2-Disabled
+  created_at: string;
+}
+
+export interface CreateAdminPayload {
+  username: string;
+  password: string;
+  nickname: string;
+  role_id: number;
+  status?: number;
+}
+
+export interface UpdateAdminPayload {
+  nickname?: string;
+  password?: string;
+  role_id?: number;
+  status?: number;
+}
+
+export interface PromotionLinkNovelOption {
+  id: number;
+  title: string;
+  coin_cost_per_thousand?: number | null;
+  start_pay_chapter_index?: number | null;
+}
+
+export interface PromotionLinkPixelOption {
+  id: number;
+  name: string;
+  pixel_id: string;
+}
+
+export interface PromotionLinkTemplateOption {
+  id: number;
+  name: string;
+  is_default: boolean;
+  environment?: string;
+}
+
+export interface PromotionLinkDomainOption {
+  id: number;
+  name: string;
+  domain: string;
+  type: 'main' | 'sub';
+  status?: number;
+  is_default: boolean;
+}
+
+export interface PromotionLinkOptionsResponse {
+  novels: PromotionLinkNovelOption[];
+  pixels: PromotionLinkPixelOption[];
+  templates: PromotionLinkTemplateOption[];
+  domains: PromotionLinkDomainOption[];
+  defaults?: {
+    global_coin_cost_per_thousand: number;
+    global_start_pay_chapter_index: number;
+  };
+}
+
+export interface RechargeTemplateProductOption {
+  id: number;
+  code: string;
+  name: string;
+  product_type: 'single' | 'whole_book' | 'vip';
+  price_cents: number;
+  price?: string;
+  currency: string;
+  coins: number;
+  bonus: number;
+  vip_cycle?: 'day' | 'week' | 'month' | 'year' | '';
+  novel_scope_type: 'none' | 'all_published' | 'promoted_novel' | 'specific_novels';
+  novel_scope_ids: number[];
+  publication_status: 'draft' | 'published' | 'paused' | 'retired';
+  dual_channel_ready: boolean;
+  readiness_reasons: string[];
+}
+
+export interface RechargeTemplateProductOptionsResponse {
+  sandbox: RechargeTemplateProductOption[];
+  live: RechargeTemplateProductOption[];
+}
+
+export interface ConversionPromotionOption {
+  id: number;
+  name: string;
+  novel_title: string;
+  fb_pixel_id: number | null;
+}
+
+export type PaymentCaseOwnerScope = 'risk' | 'disputes' | 'aftercare_finance';
+
+export interface PaymentCaseOwner {
+  id: string;
+  name: string;
 }
 
 export async function apiRequest(
@@ -243,17 +406,72 @@ export const operationsApi = {
     apiRequest('PUT', `/operations/groups/${group}`, { items }),
   preview: (data: OperationsPreviewRequest, signal?: AbortSignal): Promise<OperationsPreviewResponse> =>
     apiRequest('POST', '/operations/preview', data, false, signal),
-  searchPublishedNovels: (query: PublishedNovelsQuery) => {
-    const params = new URLSearchParams({
-      publish_status: 'published',
-      page: String(query.page ?? 1),
-      page_size: String(query.pageSize ?? 20),
-    });
-    if (query.search?.trim()) params.set('search', query.search.trim());
-    if (query.author?.trim()) params.set('author', query.author.trim());
-    if (query.genre?.trim()) params.set('genre', query.genre.trim());
-    if (query.status?.trim()) params.set('status', query.status.trim());
-    if (query.sort?.trim()) params.set('sort', query.sort.trim());
-    return apiRequest('GET', `/novels?${params.toString()}`, undefined, false, query.signal);
-  },
+  searchPublishedNovels: (query: PublishedNovelsQuery) => getOperationsNovelOptions(query),
+  getNovelOptions: (query: PublishedNovelsQuery) => getOperationsNovelOptions(query),
 };
+
+export const authApi = {
+  me: (signal?: AbortSignal): Promise<AdminUser> =>
+    apiRequest('GET', '/auth/me', undefined, false, signal),
+  getPermissions: (signal?: AbortSignal): Promise<PermissionCatalogResponse> =>
+    apiRequest('GET', '/auth/permissions', undefined, false, signal),
+  listAdmins: (signal?: AbortSignal): Promise<AdminListItem[]> =>
+    apiRequest('GET', '/auth/admins', undefined, false, signal),
+  createAdmin: (data: CreateAdminPayload) =>
+    apiRequest('POST', '/auth/admins', data),
+  updateAdmin: (id: string, data: UpdateAdminPayload) =>
+    apiRequest('PUT', `/auth/admins/${id}`, data),
+  deleteAdmin: (id: string) =>
+    apiRequest('DELETE', `/auth/admins/${id}`),
+  listRoles: (signal?: AbortSignal): Promise<RoleItem[]> =>
+    apiRequest('GET', '/auth/roles', undefined, false, signal),
+  createRole: (data: CreateRolePayload): Promise<RoleItem> =>
+    apiRequest('POST', '/auth/roles', data),
+  updateRole: (id: number, data: UpdateRolePayload): Promise<RoleItem> =>
+    apiRequest('PUT', `/auth/roles/${id}`, data),
+  deleteRole: (id: number) =>
+    apiRequest('DELETE', `/auth/roles/${id}`),
+};
+
+export interface OperationsNovelOptionsResponse {
+  novels: RecommendationNovel[];
+  total: number;
+}
+
+export function getOperationsNovelOptions(query: PublishedNovelsQuery): Promise<OperationsNovelOptionsResponse> {
+  const params = new URLSearchParams({
+    page: String(query.page ?? 1),
+    page_size: String(query.pageSize ?? 20),
+  });
+  if (query.search?.trim()) params.set('search', query.search.trim());
+  if (query.author?.trim()) params.set('author', query.author.trim());
+  if (query.genre?.trim()) params.set('genre', query.genre.trim());
+  if (query.status?.trim()) params.set('status', query.status.trim());
+  if (query.sort?.trim()) params.set('sort', query.sort.trim());
+  return apiRequest('GET', `/operations/novel-options?${params.toString()}`, undefined, false, query.signal);
+}
+
+export function getPromotionLinkOptions(signal?: AbortSignal): Promise<PromotionLinkOptionsResponse> {
+  return apiRequest('GET', '/promotion-links/options', undefined, false, signal);
+}
+
+export function getRechargeTemplateProductOptions(
+  signal?: AbortSignal,
+): Promise<RechargeTemplateProductOptionsResponse> {
+  return apiRequest('GET', '/recharge-templates/product-options', undefined, false, signal);
+}
+
+export function getConversionPromotionOptions(signal?: AbortSignal): Promise<ConversionPromotionOption[]> {
+  return apiRequest('GET', '/conversion/promotion-options', undefined, false, signal);
+}
+
+export function paymentCaseOwnersPath(roleScope?: PaymentCaseOwnerScope): string {
+  return roleScope ? `/payments/cases/owners?role_scope=${encodeURIComponent(roleScope)}` : '/payments/cases/owners';
+}
+
+export function getPaymentCaseOwners(
+  roleScope?: PaymentCaseOwnerScope,
+  signal?: AbortSignal,
+): Promise<PaymentCaseOwner[]> {
+  return apiRequest('GET', paymentCaseOwnersPath(roleScope), undefined, false, signal);
+}

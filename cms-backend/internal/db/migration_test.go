@@ -3,11 +3,14 @@ package db
 import (
 	"context"
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"golang.org/x/crypto/bcrypt"
 	dbassets "star-novel-cms/db"
 )
 
@@ -178,17 +181,17 @@ func TestReaderPaymentReviewUpgrade(t *testing.T) {
 			pool, _ := migrationPool(t)
 			reviewSQL, recoverySQL := dbassets.ReaderPaymentReviewSQL, dbassets.ReaderPaymentRecoverySQL
 			evidenceSQL := dbassets.ReaderSubscriptionEvidenceSQL
-			reviewFixesSQL, catalogSQL, switchSQL, templateFixesSQL, conversionReviewSQL, batchSQL, rereviewSQL, credentialHealthSQL := dbassets.PaymentReviewFixesSQL, dbassets.PaymentCatalogAndChannelSQL, dbassets.PaymentVIPSwitchSQL, dbassets.PaymentTemplateCatalogFixesSQL, dbassets.ConversionCenterReviewSQL, dbassets.ConversionBatchSQL, dbassets.ConversionThroughputRereviewSQL, dbassets.ConversionCredentialHealthSQL
+			reviewFixesSQL, catalogSQL, switchSQL, templateFixesSQL, conversionReviewSQL, batchSQL, rereviewSQL, credentialHealthSQL, rbacSQL := dbassets.PaymentReviewFixesSQL, dbassets.PaymentCatalogAndChannelSQL, dbassets.PaymentVIPSwitchSQL, dbassets.PaymentTemplateCatalogFixesSQL, dbassets.ConversionCenterReviewSQL, dbassets.ConversionBatchSQL, dbassets.ConversionThroughputRereviewSQL, dbassets.ConversionCredentialHealthSQL, dbassets.RBACPermissionsSQL
 			paymentSQL, checkoutSQL, vipSQL, ledgerSQL, settlementSQL, decisionSQL, aftercareSQL, stripeCheckoutSQL, stripeVIPSQL, completionSQL, paymentRecoverySQL := dbassets.PaymentDomainFoundationSQL, dbassets.PaymentCheckoutSQL, dbassets.VIPOfferVersionsSQL, dbassets.PaymentLedgerSQL, dbassets.PaymentSettlementSQL, dbassets.PaymentCheckoutDecisionsSQL, dbassets.PaymentAftercareSQL, dbassets.StripeOneTimeCheckoutSQL, dbassets.StripeVIPCheckoutSQL, dbassets.PaymentCompletionSQL, dbassets.PaymentRecoverySQL
 			t.Cleanup(func() {
 				dbassets.ReaderPaymentReviewSQL, dbassets.ReaderPaymentRecoverySQL = reviewSQL, recoverySQL
 				dbassets.ReaderSubscriptionEvidenceSQL = evidenceSQL
 				dbassets.PaymentDomainFoundationSQL, dbassets.PaymentCheckoutSQL, dbassets.VIPOfferVersionsSQL, dbassets.PaymentLedgerSQL, dbassets.PaymentSettlementSQL, dbassets.PaymentCheckoutDecisionsSQL, dbassets.PaymentAftercareSQL, dbassets.StripeOneTimeCheckoutSQL, dbassets.StripeVIPCheckoutSQL, dbassets.PaymentCompletionSQL, dbassets.PaymentRecoverySQL = paymentSQL, checkoutSQL, vipSQL, ledgerSQL, settlementSQL, decisionSQL, aftercareSQL, stripeCheckoutSQL, stripeVIPSQL, completionSQL, paymentRecoverySQL
-				dbassets.PaymentReviewFixesSQL, dbassets.PaymentCatalogAndChannelSQL, dbassets.PaymentVIPSwitchSQL, dbassets.PaymentTemplateCatalogFixesSQL, dbassets.ConversionCenterReviewSQL, dbassets.ConversionBatchSQL, dbassets.ConversionThroughputRereviewSQL, dbassets.ConversionCredentialHealthSQL = reviewFixesSQL, catalogSQL, switchSQL, templateFixesSQL, conversionReviewSQL, batchSQL, rereviewSQL, credentialHealthSQL
+				dbassets.PaymentReviewFixesSQL, dbassets.PaymentCatalogAndChannelSQL, dbassets.PaymentVIPSwitchSQL, dbassets.PaymentTemplateCatalogFixesSQL, dbassets.ConversionCenterReviewSQL, dbassets.ConversionBatchSQL, dbassets.ConversionThroughputRereviewSQL, dbassets.ConversionCredentialHealthSQL, dbassets.RBACPermissionsSQL = reviewFixesSQL, catalogSQL, switchSQL, templateFixesSQL, conversionReviewSQL, batchSQL, rereviewSQL, credentialHealthSQL, rbacSQL
 			})
 			dbassets.ReaderSubscriptionEvidenceSQL = ""
 			dbassets.PaymentDomainFoundationSQL, dbassets.PaymentCheckoutSQL, dbassets.VIPOfferVersionsSQL, dbassets.PaymentLedgerSQL, dbassets.PaymentSettlementSQL, dbassets.PaymentCheckoutDecisionsSQL, dbassets.PaymentAftercareSQL, dbassets.StripeOneTimeCheckoutSQL, dbassets.StripeVIPCheckoutSQL, dbassets.PaymentCompletionSQL, dbassets.PaymentRecoverySQL = "", "", "", "", "", "", "", "", "", "", ""
-			dbassets.PaymentReviewFixesSQL, dbassets.PaymentCatalogAndChannelSQL, dbassets.PaymentVIPSwitchSQL, dbassets.PaymentTemplateCatalogFixesSQL, dbassets.ConversionCenterReviewSQL, dbassets.ConversionBatchSQL, dbassets.ConversionThroughputRereviewSQL, dbassets.ConversionCredentialHealthSQL = "", "", "", "", "", "", "", ""
+			dbassets.PaymentReviewFixesSQL, dbassets.PaymentCatalogAndChannelSQL, dbassets.PaymentVIPSwitchSQL, dbassets.PaymentTemplateCatalogFixesSQL, dbassets.ConversionCenterReviewSQL, dbassets.ConversionBatchSQL, dbassets.ConversionThroughputRereviewSQL, dbassets.ConversionCredentialHealthSQL, dbassets.RBACPermissionsSQL = "", "", "", "", "", "", "", "", ""
 			if baseline.version < readerPaymentRecoveryVersion {
 				dbassets.ReaderPaymentRecoverySQL = ""
 			}
@@ -201,7 +204,7 @@ func TestReaderPaymentReviewUpgrade(t *testing.T) {
 			dbassets.ReaderPaymentReviewSQL, dbassets.ReaderPaymentRecoverySQL = reviewSQL, recoverySQL
 			dbassets.ReaderSubscriptionEvidenceSQL = evidenceSQL
 			dbassets.PaymentDomainFoundationSQL, dbassets.PaymentCheckoutSQL, dbassets.VIPOfferVersionsSQL, dbassets.PaymentLedgerSQL, dbassets.PaymentSettlementSQL, dbassets.PaymentCheckoutDecisionsSQL, dbassets.PaymentAftercareSQL, dbassets.StripeOneTimeCheckoutSQL, dbassets.StripeVIPCheckoutSQL, dbassets.PaymentCompletionSQL, dbassets.PaymentRecoverySQL = paymentSQL, checkoutSQL, vipSQL, ledgerSQL, settlementSQL, decisionSQL, aftercareSQL, stripeCheckoutSQL, stripeVIPSQL, completionSQL, paymentRecoverySQL
-			dbassets.PaymentReviewFixesSQL, dbassets.PaymentCatalogAndChannelSQL, dbassets.PaymentVIPSwitchSQL, dbassets.PaymentTemplateCatalogFixesSQL, dbassets.ConversionCenterReviewSQL, dbassets.ConversionBatchSQL, dbassets.ConversionThroughputRereviewSQL, dbassets.ConversionCredentialHealthSQL = reviewFixesSQL, catalogSQL, switchSQL, templateFixesSQL, conversionReviewSQL, batchSQL, rereviewSQL, credentialHealthSQL
+			dbassets.PaymentReviewFixesSQL, dbassets.PaymentCatalogAndChannelSQL, dbassets.PaymentVIPSwitchSQL, dbassets.PaymentTemplateCatalogFixesSQL, dbassets.ConversionCenterReviewSQL, dbassets.ConversionBatchSQL, dbassets.ConversionThroughputRereviewSQL, dbassets.ConversionCredentialHealthSQL, dbassets.RBACPermissionsSQL = reviewFixesSQL, catalogSQL, switchSQL, templateFixesSQL, conversionReviewSQL, batchSQL, rereviewSQL, credentialHealthSQL, rbacSQL
 			var version int64
 			if err := pool.QueryRow(ctx, "SELECT max(version) FROM reader_schema_migrations").Scan(&version); err != nil || version != baseline.version {
 				t.Fatalf("upgrade fixture schema=%d, err=%v", version, err)
@@ -309,13 +312,13 @@ func TestPaymentDomainFoundationUpgrade(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	migration, checkout, vipSQL, ledgerSQL, settlementSQL, decisionSQL, aftercareSQL, stripeCheckoutSQL, stripeVIPSQL, completionSQL, paymentRecoverySQL := dbassets.PaymentDomainFoundationSQL, dbassets.PaymentCheckoutSQL, dbassets.VIPOfferVersionsSQL, dbassets.PaymentLedgerSQL, dbassets.PaymentSettlementSQL, dbassets.PaymentCheckoutDecisionsSQL, dbassets.PaymentAftercareSQL, dbassets.StripeOneTimeCheckoutSQL, dbassets.StripeVIPCheckoutSQL, dbassets.PaymentCompletionSQL, dbassets.PaymentRecoverySQL
-	reviewFixesSQL, catalogSQL, switchSQL, templateFixesSQL, conversionReviewSQL, batchSQL, rereviewSQL, credentialHealthSQL := dbassets.PaymentReviewFixesSQL, dbassets.PaymentCatalogAndChannelSQL, dbassets.PaymentVIPSwitchSQL, dbassets.PaymentTemplateCatalogFixesSQL, dbassets.ConversionCenterReviewSQL, dbassets.ConversionBatchSQL, dbassets.ConversionThroughputRereviewSQL, dbassets.ConversionCredentialHealthSQL
+	reviewFixesSQL, catalogSQL, switchSQL, templateFixesSQL, conversionReviewSQL, batchSQL, rereviewSQL, credentialHealthSQL, rbacSQL := dbassets.PaymentReviewFixesSQL, dbassets.PaymentCatalogAndChannelSQL, dbassets.PaymentVIPSwitchSQL, dbassets.PaymentTemplateCatalogFixesSQL, dbassets.ConversionCenterReviewSQL, dbassets.ConversionBatchSQL, dbassets.ConversionThroughputRereviewSQL, dbassets.ConversionCredentialHealthSQL, dbassets.RBACPermissionsSQL
 	t.Cleanup(func() {
 		dbassets.PaymentDomainFoundationSQL, dbassets.PaymentCheckoutSQL, dbassets.VIPOfferVersionsSQL, dbassets.PaymentLedgerSQL, dbassets.PaymentSettlementSQL, dbassets.PaymentCheckoutDecisionsSQL, dbassets.PaymentAftercareSQL, dbassets.StripeOneTimeCheckoutSQL, dbassets.StripeVIPCheckoutSQL, dbassets.PaymentCompletionSQL, dbassets.PaymentRecoverySQL = migration, checkout, vipSQL, ledgerSQL, settlementSQL, decisionSQL, aftercareSQL, stripeCheckoutSQL, stripeVIPSQL, completionSQL, paymentRecoverySQL
-		dbassets.PaymentReviewFixesSQL, dbassets.PaymentCatalogAndChannelSQL, dbassets.PaymentVIPSwitchSQL, dbassets.PaymentTemplateCatalogFixesSQL, dbassets.ConversionCenterReviewSQL, dbassets.ConversionBatchSQL, dbassets.ConversionThroughputRereviewSQL, dbassets.ConversionCredentialHealthSQL = reviewFixesSQL, catalogSQL, switchSQL, templateFixesSQL, conversionReviewSQL, batchSQL, rereviewSQL, credentialHealthSQL
+		dbassets.PaymentReviewFixesSQL, dbassets.PaymentCatalogAndChannelSQL, dbassets.PaymentVIPSwitchSQL, dbassets.PaymentTemplateCatalogFixesSQL, dbassets.ConversionCenterReviewSQL, dbassets.ConversionBatchSQL, dbassets.ConversionThroughputRereviewSQL, dbassets.ConversionCredentialHealthSQL, dbassets.RBACPermissionsSQL = reviewFixesSQL, catalogSQL, switchSQL, templateFixesSQL, conversionReviewSQL, batchSQL, rereviewSQL, credentialHealthSQL, rbacSQL
 	})
 	dbassets.PaymentDomainFoundationSQL, dbassets.PaymentCheckoutSQL, dbassets.VIPOfferVersionsSQL, dbassets.PaymentLedgerSQL, dbassets.PaymentSettlementSQL, dbassets.PaymentCheckoutDecisionsSQL, dbassets.PaymentAftercareSQL, dbassets.StripeOneTimeCheckoutSQL, dbassets.StripeVIPCheckoutSQL, dbassets.PaymentCompletionSQL, dbassets.PaymentRecoverySQL = "", "", "", "", "", "", "", "", "", "", ""
-	dbassets.PaymentReviewFixesSQL, dbassets.PaymentCatalogAndChannelSQL, dbassets.PaymentVIPSwitchSQL, dbassets.PaymentTemplateCatalogFixesSQL, dbassets.ConversionCenterReviewSQL, dbassets.ConversionBatchSQL, dbassets.ConversionThroughputRereviewSQL, dbassets.ConversionCredentialHealthSQL = "", "", "", "", "", "", "", ""
+	dbassets.PaymentReviewFixesSQL, dbassets.PaymentCatalogAndChannelSQL, dbassets.PaymentVIPSwitchSQL, dbassets.PaymentTemplateCatalogFixesSQL, dbassets.ConversionCenterReviewSQL, dbassets.ConversionBatchSQL, dbassets.ConversionThroughputRereviewSQL, dbassets.ConversionCredentialHealthSQL, dbassets.RBACPermissionsSQL = "", "", "", "", "", "", "", "", ""
 	if err := autoMigrate(ctx, pool); err != nil {
 		t.Fatal(err)
 	}
@@ -357,7 +360,7 @@ func TestPaymentDomainFoundationUpgrade(t *testing.T) {
 	}
 
 	dbassets.PaymentDomainFoundationSQL, dbassets.PaymentCheckoutSQL, dbassets.VIPOfferVersionsSQL, dbassets.PaymentLedgerSQL, dbassets.PaymentSettlementSQL, dbassets.PaymentCheckoutDecisionsSQL, dbassets.PaymentAftercareSQL, dbassets.StripeOneTimeCheckoutSQL, dbassets.StripeVIPCheckoutSQL, dbassets.PaymentCompletionSQL, dbassets.PaymentRecoverySQL = migration, checkout, vipSQL, ledgerSQL, settlementSQL, decisionSQL, aftercareSQL, stripeCheckoutSQL, stripeVIPSQL, completionSQL, paymentRecoverySQL
-	dbassets.PaymentReviewFixesSQL, dbassets.PaymentCatalogAndChannelSQL, dbassets.PaymentVIPSwitchSQL, dbassets.PaymentTemplateCatalogFixesSQL, dbassets.ConversionCenterReviewSQL, dbassets.ConversionBatchSQL, dbassets.ConversionThroughputRereviewSQL, dbassets.ConversionCredentialHealthSQL = reviewFixesSQL, catalogSQL, switchSQL, templateFixesSQL, conversionReviewSQL, batchSQL, rereviewSQL, credentialHealthSQL
+	dbassets.PaymentReviewFixesSQL, dbassets.PaymentCatalogAndChannelSQL, dbassets.PaymentVIPSwitchSQL, dbassets.PaymentTemplateCatalogFixesSQL, dbassets.ConversionCenterReviewSQL, dbassets.ConversionBatchSQL, dbassets.ConversionThroughputRereviewSQL, dbassets.ConversionCredentialHealthSQL, dbassets.RBACPermissionsSQL = reviewFixesSQL, catalogSQL, switchSQL, templateFixesSQL, conversionReviewSQL, batchSQL, rereviewSQL, credentialHealthSQL, rbacSQL
 	for range 2 {
 		if err := autoMigrate(ctx, pool); err != nil {
 			t.Fatal(err)
@@ -442,13 +445,13 @@ func TestCheckoutDecisionUpgradeFromSettlement(t *testing.T) {
 	defer cancel()
 
 	migration, aftercare, stripeCheckoutSQL, stripeVIPSQL, completionSQL, paymentRecoverySQL := dbassets.PaymentCheckoutDecisionsSQL, dbassets.PaymentAftercareSQL, dbassets.StripeOneTimeCheckoutSQL, dbassets.StripeVIPCheckoutSQL, dbassets.PaymentCompletionSQL, dbassets.PaymentRecoverySQL
-	reviewFixesSQL, catalogSQL, switchSQL, templateFixesSQL, conversionReviewSQL, batchSQL, rereviewSQL, credentialHealthSQL := dbassets.PaymentReviewFixesSQL, dbassets.PaymentCatalogAndChannelSQL, dbassets.PaymentVIPSwitchSQL, dbassets.PaymentTemplateCatalogFixesSQL, dbassets.ConversionCenterReviewSQL, dbassets.ConversionBatchSQL, dbassets.ConversionThroughputRereviewSQL, dbassets.ConversionCredentialHealthSQL
+	reviewFixesSQL, catalogSQL, switchSQL, templateFixesSQL, conversionReviewSQL, batchSQL, rereviewSQL, credentialHealthSQL, rbacSQL := dbassets.PaymentReviewFixesSQL, dbassets.PaymentCatalogAndChannelSQL, dbassets.PaymentVIPSwitchSQL, dbassets.PaymentTemplateCatalogFixesSQL, dbassets.ConversionCenterReviewSQL, dbassets.ConversionBatchSQL, dbassets.ConversionThroughputRereviewSQL, dbassets.ConversionCredentialHealthSQL, dbassets.RBACPermissionsSQL
 	t.Cleanup(func() {
 		dbassets.PaymentCheckoutDecisionsSQL, dbassets.PaymentAftercareSQL, dbassets.StripeOneTimeCheckoutSQL, dbassets.StripeVIPCheckoutSQL, dbassets.PaymentCompletionSQL, dbassets.PaymentRecoverySQL = migration, aftercare, stripeCheckoutSQL, stripeVIPSQL, completionSQL, paymentRecoverySQL
-		dbassets.PaymentReviewFixesSQL, dbassets.PaymentCatalogAndChannelSQL, dbassets.PaymentVIPSwitchSQL, dbassets.PaymentTemplateCatalogFixesSQL, dbassets.ConversionCenterReviewSQL, dbassets.ConversionBatchSQL, dbassets.ConversionThroughputRereviewSQL, dbassets.ConversionCredentialHealthSQL = reviewFixesSQL, catalogSQL, switchSQL, templateFixesSQL, conversionReviewSQL, batchSQL, rereviewSQL, credentialHealthSQL
+		dbassets.PaymentReviewFixesSQL, dbassets.PaymentCatalogAndChannelSQL, dbassets.PaymentVIPSwitchSQL, dbassets.PaymentTemplateCatalogFixesSQL, dbassets.ConversionCenterReviewSQL, dbassets.ConversionBatchSQL, dbassets.ConversionThroughputRereviewSQL, dbassets.ConversionCredentialHealthSQL, dbassets.RBACPermissionsSQL = reviewFixesSQL, catalogSQL, switchSQL, templateFixesSQL, conversionReviewSQL, batchSQL, rereviewSQL, credentialHealthSQL, rbacSQL
 	})
 	dbassets.PaymentCheckoutDecisionsSQL, dbassets.PaymentAftercareSQL, dbassets.StripeOneTimeCheckoutSQL, dbassets.StripeVIPCheckoutSQL, dbassets.PaymentCompletionSQL, dbassets.PaymentRecoverySQL = "", "", "", "", "", ""
-	dbassets.PaymentReviewFixesSQL, dbassets.PaymentCatalogAndChannelSQL, dbassets.PaymentVIPSwitchSQL, dbassets.PaymentTemplateCatalogFixesSQL, dbassets.ConversionCenterReviewSQL, dbassets.ConversionBatchSQL, dbassets.ConversionThroughputRereviewSQL, dbassets.ConversionCredentialHealthSQL = "", "", "", "", "", "", "", ""
+	dbassets.PaymentReviewFixesSQL, dbassets.PaymentCatalogAndChannelSQL, dbassets.PaymentVIPSwitchSQL, dbassets.PaymentTemplateCatalogFixesSQL, dbassets.ConversionCenterReviewSQL, dbassets.ConversionBatchSQL, dbassets.ConversionThroughputRereviewSQL, dbassets.ConversionCredentialHealthSQL, dbassets.RBACPermissionsSQL = "", "", "", "", "", "", "", "", ""
 	if err := autoMigrate(ctx, pool); err != nil {
 		t.Fatal(err)
 	}
@@ -462,7 +465,7 @@ func TestCheckoutDecisionUpgradeFromSettlement(t *testing.T) {
 		t.Fatal(err)
 	}
 	dbassets.PaymentCheckoutDecisionsSQL, dbassets.PaymentAftercareSQL, dbassets.StripeOneTimeCheckoutSQL, dbassets.StripeVIPCheckoutSQL, dbassets.PaymentCompletionSQL, dbassets.PaymentRecoverySQL = migration, aftercare, stripeCheckoutSQL, stripeVIPSQL, completionSQL, paymentRecoverySQL
-	dbassets.PaymentReviewFixesSQL, dbassets.PaymentCatalogAndChannelSQL, dbassets.PaymentVIPSwitchSQL, dbassets.PaymentTemplateCatalogFixesSQL, dbassets.ConversionCenterReviewSQL, dbassets.ConversionBatchSQL, dbassets.ConversionThroughputRereviewSQL, dbassets.ConversionCredentialHealthSQL = reviewFixesSQL, catalogSQL, switchSQL, templateFixesSQL, conversionReviewSQL, batchSQL, rereviewSQL, credentialHealthSQL
+	dbassets.PaymentReviewFixesSQL, dbassets.PaymentCatalogAndChannelSQL, dbassets.PaymentVIPSwitchSQL, dbassets.PaymentTemplateCatalogFixesSQL, dbassets.ConversionCenterReviewSQL, dbassets.ConversionBatchSQL, dbassets.ConversionThroughputRereviewSQL, dbassets.ConversionCredentialHealthSQL, dbassets.RBACPermissionsSQL = reviewFixesSQL, catalogSQL, switchSQL, templateFixesSQL, conversionReviewSQL, batchSQL, rereviewSQL, credentialHealthSQL, rbacSQL
 	if err := autoMigrate(ctx, pool); err != nil {
 		t.Fatal(err)
 	}
@@ -484,11 +487,11 @@ func TestCheckoutDecisionUpgradeFromSettlement(t *testing.T) {
 func TestPaymentReviewFixesUpgradeFromRecovery(t *testing.T) {
 	pool, _ := migrationPool(t)
 	ctx := t.Context()
-	migration, catalogSQL, switchSQL, templateFixesSQL, conversionReviewSQL, batchSQL, rereviewSQL, credentialHealthSQL := dbassets.PaymentReviewFixesSQL, dbassets.PaymentCatalogAndChannelSQL, dbassets.PaymentVIPSwitchSQL, dbassets.PaymentTemplateCatalogFixesSQL, dbassets.ConversionCenterReviewSQL, dbassets.ConversionBatchSQL, dbassets.ConversionThroughputRereviewSQL, dbassets.ConversionCredentialHealthSQL
+	migration, catalogSQL, switchSQL, templateFixesSQL, conversionReviewSQL, batchSQL, rereviewSQL, credentialHealthSQL, rbacSQL := dbassets.PaymentReviewFixesSQL, dbassets.PaymentCatalogAndChannelSQL, dbassets.PaymentVIPSwitchSQL, dbassets.PaymentTemplateCatalogFixesSQL, dbassets.ConversionCenterReviewSQL, dbassets.ConversionBatchSQL, dbassets.ConversionThroughputRereviewSQL, dbassets.ConversionCredentialHealthSQL, dbassets.RBACPermissionsSQL
 	t.Cleanup(func() {
-		dbassets.PaymentReviewFixesSQL, dbassets.PaymentCatalogAndChannelSQL, dbassets.PaymentVIPSwitchSQL, dbassets.PaymentTemplateCatalogFixesSQL, dbassets.ConversionCenterReviewSQL, dbassets.ConversionBatchSQL, dbassets.ConversionThroughputRereviewSQL, dbassets.ConversionCredentialHealthSQL = migration, catalogSQL, switchSQL, templateFixesSQL, conversionReviewSQL, batchSQL, rereviewSQL, credentialHealthSQL
+		dbassets.PaymentReviewFixesSQL, dbassets.PaymentCatalogAndChannelSQL, dbassets.PaymentVIPSwitchSQL, dbassets.PaymentTemplateCatalogFixesSQL, dbassets.ConversionCenterReviewSQL, dbassets.ConversionBatchSQL, dbassets.ConversionThroughputRereviewSQL, dbassets.ConversionCredentialHealthSQL, dbassets.RBACPermissionsSQL = migration, catalogSQL, switchSQL, templateFixesSQL, conversionReviewSQL, batchSQL, rereviewSQL, credentialHealthSQL, rbacSQL
 	})
-	dbassets.PaymentReviewFixesSQL, dbassets.PaymentCatalogAndChannelSQL, dbassets.PaymentVIPSwitchSQL, dbassets.PaymentTemplateCatalogFixesSQL, dbassets.ConversionCenterReviewSQL, dbassets.ConversionBatchSQL, dbassets.ConversionThroughputRereviewSQL, dbassets.ConversionCredentialHealthSQL = "", "", "", "", "", "", "", ""
+	dbassets.PaymentReviewFixesSQL, dbassets.PaymentCatalogAndChannelSQL, dbassets.PaymentVIPSwitchSQL, dbassets.PaymentTemplateCatalogFixesSQL, dbassets.ConversionCenterReviewSQL, dbassets.ConversionBatchSQL, dbassets.ConversionThroughputRereviewSQL, dbassets.ConversionCredentialHealthSQL, dbassets.RBACPermissionsSQL = "", "", "", "", "", "", "", "", ""
 	if err := autoMigrate(ctx, pool); err != nil {
 		t.Fatal(err)
 	}
@@ -509,7 +512,7 @@ func TestPaymentReviewFixesUpgradeFromRecovery(t *testing.T) {
 		FROM payment_channel_accounts WHERE account_key='upgrade-sandbox'`); err != nil {
 		t.Fatal(err)
 	}
-	dbassets.PaymentReviewFixesSQL, dbassets.PaymentCatalogAndChannelSQL, dbassets.PaymentVIPSwitchSQL, dbassets.PaymentTemplateCatalogFixesSQL, dbassets.ConversionCenterReviewSQL, dbassets.ConversionBatchSQL, dbassets.ConversionThroughputRereviewSQL, dbassets.ConversionCredentialHealthSQL = migration, catalogSQL, switchSQL, templateFixesSQL, conversionReviewSQL, batchSQL, rereviewSQL, credentialHealthSQL
+	dbassets.PaymentReviewFixesSQL, dbassets.PaymentCatalogAndChannelSQL, dbassets.PaymentVIPSwitchSQL, dbassets.PaymentTemplateCatalogFixesSQL, dbassets.ConversionCenterReviewSQL, dbassets.ConversionBatchSQL, dbassets.ConversionThroughputRereviewSQL, dbassets.ConversionCredentialHealthSQL, dbassets.RBACPermissionsSQL = migration, catalogSQL, switchSQL, templateFixesSQL, conversionReviewSQL, batchSQL, rereviewSQL, credentialHealthSQL, rbacSQL
 	if err := autoMigrate(ctx, pool); err != nil {
 		t.Fatal(err)
 	}
@@ -529,11 +532,11 @@ func TestPaymentReviewFixesUpgradeFromRecovery(t *testing.T) {
 func TestVIPSwitchUpgradePreservesPendingCheckout(t *testing.T) {
 	pool, _ := migrationPool(t)
 	ctx := t.Context()
-	switchSQL, templateFixesSQL, conversionReviewSQL, batchSQL, rereviewSQL, credentialHealthSQL := dbassets.PaymentVIPSwitchSQL, dbassets.PaymentTemplateCatalogFixesSQL, dbassets.ConversionCenterReviewSQL, dbassets.ConversionBatchSQL, dbassets.ConversionThroughputRereviewSQL, dbassets.ConversionCredentialHealthSQL
+	switchSQL, templateFixesSQL, conversionReviewSQL, batchSQL, rereviewSQL, credentialHealthSQL, rbacSQL := dbassets.PaymentVIPSwitchSQL, dbassets.PaymentTemplateCatalogFixesSQL, dbassets.ConversionCenterReviewSQL, dbassets.ConversionBatchSQL, dbassets.ConversionThroughputRereviewSQL, dbassets.ConversionCredentialHealthSQL, dbassets.RBACPermissionsSQL
 	t.Cleanup(func() {
-		dbassets.PaymentVIPSwitchSQL, dbassets.PaymentTemplateCatalogFixesSQL, dbassets.ConversionCenterReviewSQL, dbassets.ConversionBatchSQL, dbassets.ConversionThroughputRereviewSQL, dbassets.ConversionCredentialHealthSQL = switchSQL, templateFixesSQL, conversionReviewSQL, batchSQL, rereviewSQL, credentialHealthSQL
+		dbassets.PaymentVIPSwitchSQL, dbassets.PaymentTemplateCatalogFixesSQL, dbassets.ConversionCenterReviewSQL, dbassets.ConversionBatchSQL, dbassets.ConversionThroughputRereviewSQL, dbassets.ConversionCredentialHealthSQL, dbassets.RBACPermissionsSQL = switchSQL, templateFixesSQL, conversionReviewSQL, batchSQL, rereviewSQL, credentialHealthSQL, rbacSQL
 	})
-	dbassets.PaymentVIPSwitchSQL, dbassets.PaymentTemplateCatalogFixesSQL, dbassets.ConversionCenterReviewSQL, dbassets.ConversionBatchSQL, dbassets.ConversionThroughputRereviewSQL, dbassets.ConversionCredentialHealthSQL = "", "", "", "", "", ""
+	dbassets.PaymentVIPSwitchSQL, dbassets.PaymentTemplateCatalogFixesSQL, dbassets.ConversionCenterReviewSQL, dbassets.ConversionBatchSQL, dbassets.ConversionThroughputRereviewSQL, dbassets.ConversionCredentialHealthSQL, dbassets.RBACPermissionsSQL = "", "", "", "", "", "", ""
 	if err := autoMigrate(ctx, pool); err != nil {
 		t.Fatal(err)
 	}
@@ -545,7 +548,7 @@ func TestVIPSwitchUpgradePreservesPendingCheckout(t *testing.T) {
 		VALUES(1929,1929,999,'month','sandbox','{}','paypal','df09db5f-9c72-4a32-a2c3-cd19bfdf4c21','I-UPGRADE')`); err != nil {
 		t.Fatal(err)
 	}
-	dbassets.PaymentVIPSwitchSQL, dbassets.PaymentTemplateCatalogFixesSQL, dbassets.ConversionCenterReviewSQL, dbassets.ConversionBatchSQL, dbassets.ConversionThroughputRereviewSQL, dbassets.ConversionCredentialHealthSQL = switchSQL, templateFixesSQL, conversionReviewSQL, batchSQL, rereviewSQL, credentialHealthSQL
+	dbassets.PaymentVIPSwitchSQL, dbassets.PaymentTemplateCatalogFixesSQL, dbassets.ConversionCenterReviewSQL, dbassets.ConversionBatchSQL, dbassets.ConversionThroughputRereviewSQL, dbassets.ConversionCredentialHealthSQL, dbassets.RBACPermissionsSQL = switchSQL, templateFixesSQL, conversionReviewSQL, batchSQL, rereviewSQL, credentialHealthSQL, rbacSQL
 	if err := autoMigrate(ctx, pool); err != nil {
 		t.Fatal(err)
 	}
@@ -564,10 +567,13 @@ func TestConversionRereviewUpgradeFromBatchLedger(t *testing.T) {
 	ctx := t.Context()
 	rereview := dbassets.ConversionThroughputRereviewSQL
 	credentialHealth := dbassets.ConversionCredentialHealthSQL
+	rbacSQL := dbassets.RBACPermissionsSQL
 	t.Cleanup(func() {
 		dbassets.ConversionThroughputRereviewSQL = rereview
 		dbassets.ConversionCredentialHealthSQL = credentialHealth
+		dbassets.RBACPermissionsSQL = rbacSQL
 	})
+	dbassets.RBACPermissionsSQL = ""
 	dbassets.ConversionCredentialHealthSQL = ""
 	dbassets.ConversionThroughputRereviewSQL = ""
 	if err := autoMigrate(ctx, pool); err != nil {
@@ -601,6 +607,7 @@ func TestConversionRereviewUpgradeFromBatchLedger(t *testing.T) {
 		t.Fatal(err)
 	}
 	dbassets.ConversionCredentialHealthSQL = credentialHealth
+	dbassets.RBACPermissionsSQL = rbacSQL
 	if err := autoMigrate(ctx, pool); err != nil {
 		t.Fatal(err)
 	}
@@ -614,5 +621,148 @@ func TestConversionRereviewUpgradeFromBatchLedger(t *testing.T) {
          WHERE x.pixel_id='103' AND x.blocked_credential_id IS NULL)`).
 		Scan(&version, &blocked, &unknown, &recovered); err != nil || version != RequiredSchemaVersion || blocked != "101" || !unknown || !recovered {
 		t.Fatalf("upgrade gate=%d blocked=%q historical time unknown=%v recovered=%v: %v", version, blocked, unknown, recovered, err)
+	}
+}
+
+func TestRBACMigrationSQLAssetIntegrity(t *testing.T) {
+	if RequiredSchemaVersion != 2026111935 {
+		t.Fatalf("RequiredSchemaVersion = %d, want 2026111935", RequiredSchemaVersion)
+	}
+	if strings.Contains(dbassets.SeedSQL, "INSERT INTO admins") || strings.Contains(dbassets.SeedSQL, "admin123") {
+		t.Fatal("seed.sql must not contain hardcoded admin/admin123 inserts")
+	}
+	for _, want := range []string{
+		"CREATE TABLE IF NOT EXISTS roles",
+		"CREATE TABLE IF NOT EXISTS role_permissions",
+		"ALTER TABLE admins ADD COLUMN IF NOT EXISTS role_id BIGINT REFERENCES roles(id)",
+		"ALTER TABLE admins ALTER COLUMN role_id SET NOT NULL",
+		"public.admin_has_permission",
+		"conversion.lock_active_admin_for_permission",
+		"conversion.lock_active_super_admin",
+		"'Admin'",
+		"'Leader'",
+		"'AdOptimizer'",
+		"'ContentOperations'",
+		"'FinanceManager'",
+		"AND r.code = a.role",
+		"2026111935",
+	} {
+		if !strings.Contains(dbassets.RBACPermissionsSQL, want) {
+			t.Fatalf("2026111935.sql missing expected statement/token: %s", want)
+		}
+	}
+	for _, forbidden := range []string{
+		"CASE a.role",
+		"WHEN 'SuperAdmin'",
+		"WHEN 'AdOps'",
+		"WHEN 'Operations'",
+		"WHEN 'Finance'",
+	} {
+		if strings.Contains(dbassets.RBACPermissionsSQL, forbidden) {
+			t.Fatalf("2026111935.sql must not contain legacy role alias mapping: %s", forbidden)
+		}
+	}
+
+	grantsBytes, err := os.ReadFile(filepath.Join("..", "..", "db", "conversion_role_grants.sql"))
+	if err != nil {
+		t.Fatalf("read conversion_role_grants.sql: %v", err)
+	}
+	grantsSQL := string(grantsBytes)
+	for _, want := range []string{
+		`GRANT SELECT ON public.roles, public.role_permissions TO :"reader_role";`,
+		`GRANT SELECT, INSERT, UPDATE, DELETE ON public.roles, public.role_permissions TO :"cms_role";`,
+		`GRANT USAGE, SELECT ON SEQUENCE public.roles_id_seq TO :"cms_role";`,
+		`GRANT EXECUTE ON FUNCTION public.admin_has_permission(text, text) TO :"reader_role", :"cms_role";`,
+	} {
+		if !strings.Contains(grantsSQL, want) {
+			t.Fatalf("conversion_role_grants.sql missing expected grant: %s", want)
+		}
+	}
+}
+
+func TestRBACMigrationAndBootstrapSuperAdmin(t *testing.T) {
+	pool, _ := migrationPool(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Missing password on empty DB must be rejected and rolled back.
+	if err := autoMigrateAndBootstrap(ctx, pool, BootstrapAdminConfig{Username: "admin", Password: ""}); err == nil {
+		t.Fatal("expected empty bootstrap password to fail")
+	}
+	// Weak password must be rejected and rolled back.
+	if err := autoMigrateAndBootstrap(ctx, pool, BootstrapAdminConfig{Username: "admin", Password: "admin123"}); err == nil {
+		t.Fatal("expected weak bootstrap password to fail")
+	}
+
+	strongPass := "StarNovel!2026#Bootstrap"
+	if err := autoMigrateAndBootstrap(ctx, pool, BootstrapAdminConfig{
+		Username: "rootadmin",
+		Password: strongPass,
+		Nickname: "初始超管",
+	}); err != nil {
+		t.Fatalf("bootstrap migration failed: %v", err)
+	}
+
+	var roleCount, leaderPerms, optimizerPerms, contentPerms, financePerms int
+	if err := pool.QueryRow(ctx, `SELECT
+		(SELECT count(*) FROM roles WHERE is_system = TRUE),
+		(SELECT count(*) FROM role_permissions rp JOIN roles r ON r.id = rp.role_id WHERE r.code = 'Leader'),
+		(SELECT count(*) FROM role_permissions rp JOIN roles r ON r.id = rp.role_id WHERE r.code = 'AdOptimizer'),
+		(SELECT count(*) FROM role_permissions rp JOIN roles r ON r.id = rp.role_id WHERE r.code = 'ContentOperations'),
+		(SELECT count(*) FROM role_permissions rp JOIN roles r ON r.id = rp.role_id WHERE r.code = 'FinanceManager')
+	`).Scan(&roleCount, &leaderPerms, &optimizerPerms, &contentPerms, &financePerms); err != nil {
+		t.Fatal(err)
+	}
+	if roleCount != 5 || leaderPerms != 26 || optimizerPerms != 10 || contentPerms != 12 || financePerms != 22 {
+		t.Fatalf("unexpected built-in role matrix: roles=%d leader=%d optimizer=%d content=%d finance=%d",
+			roleCount, leaderPerms, optimizerPerms, contentPerms, financePerms)
+	}
+
+	var adminID, passwordHash, roleCode string
+	var isSuper bool
+	var auditCount int
+	if err := pool.QueryRow(ctx, `
+		SELECT a.id, a.password_hash, r.code, r.is_super_admin,
+		       (SELECT count(*) FROM admin_audit_logs WHERE action = 'bootstrap_super_admin' AND target_id = a.id)
+		FROM admins a
+		JOIN roles r ON r.id = a.role_id
+		WHERE a.username = 'rootadmin'
+	`).Scan(&adminID, &passwordHash, &roleCode, &isSuper, &auditCount); err != nil {
+		t.Fatal(err)
+	}
+	if roleCode != "Admin" || !isSuper || auditCount != 1 {
+		t.Fatalf("unexpected bootstrap admin: role=%s super=%v audit=%d", roleCode, isSuper, auditCount)
+	}
+	if err := bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(strongPass)); err != nil {
+		t.Fatalf("bootstrap password hash mismatch: %v", err)
+	}
+
+	// Re-running with empty password or different password must be idempotent and never reset password.
+	if err := autoMigrateAndBootstrap(ctx, pool, BootstrapAdminConfig{Username: "rootadmin", Password: ""}); err != nil {
+		t.Fatalf("idempotent re-migrate with empty password failed: %v", err)
+	}
+	if err := autoMigrateAndBootstrap(ctx, pool, BootstrapAdminConfig{Username: "rootadmin", Password: "Another!2026#Password"}); err != nil {
+		t.Fatalf("idempotent re-migrate with new password failed: %v", err)
+	}
+	var afterHash string
+	if err := pool.QueryRow(ctx, `SELECT password_hash FROM admins WHERE id = $1`, adminID).Scan(&afterHash); err != nil {
+		t.Fatal(err)
+	}
+	if afterHash != passwordHash {
+		t.Fatal("idempotent re-migrate must not overwrite existing super admin password")
+	}
+
+	// Verify SQL permission helper functions for super admin.
+	var hasPerm bool
+	var lockedRole, lockedSuperRole string
+	if err := pool.QueryRow(ctx, `SELECT
+		public.admin_has_permission($1, 'payments.refunds:write'),
+		(SELECT role_code FROM conversion.lock_active_admin_for_permission($1, 'ads.conversions:write')),
+		(SELECT role_code FROM conversion.lock_active_super_admin($1))
+	`, adminID).Scan(&hasPerm, &lockedRole, &lockedSuperRole); err != nil {
+		t.Fatal(err)
+	}
+	if !hasPerm || lockedRole != "Admin" || lockedSuperRole != "Admin" {
+		t.Fatalf("unexpected SQL function results: hasPerm=%v locked=%q super=%q", hasPerm, lockedRole, lockedSuperRole)
 	}
 }

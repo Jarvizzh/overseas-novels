@@ -1,6 +1,6 @@
 import { type FormEvent, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { ApiError, apiRequest } from '../../utils/api';
+import { ApiError, apiRequest, getConversionPromotionOptions, type ConversionPromotionOption } from '../../utils/api';
 import { getErrorMessage } from '../../utils/conversionStatus';
 import CustomSelect from '../CustomSelect';
 import { SkeletonRows, TableRegion } from '../ui/Primitives';
@@ -86,6 +86,7 @@ export function PaymentPolicyPanel({
   });
   const [promotionMode, setPromotionMode] = useState(Boolean(initialPromotion));
   const [promotionInput, setPromotionInput] = useState(initialPromotion);
+  const [promotionOptions, setPromotionOptions] = useState<ConversionPromotionOption[]>([]);
   const [view, setView] = useState<PaymentPolicyView | null>(null);
   const [edit, setEdit] = useState<BandEdit | null>(null);
   const [bands, setBands] = useState<BandChange[]>([]);
@@ -131,6 +132,19 @@ export function PaymentPolicyPanel({
     onState(dirty || Boolean(uncertain), busy);
   }, [dirty, uncertain, busy, onState]);
   useEffect(() => () => onState(false, false), [onState]);
+
+  useEffect(() => {
+    if (fixedLink || !promotionMode || !isReader) return;
+    const controller = new AbortController();
+    void getConversionPromotionOptions(controller.signal)
+      .then((list) => {
+        if (!controller.signal.aborted) {
+          setPromotionOptions(Array.isArray(list) ? list : []);
+        }
+      })
+      .catch(() => {});
+    return () => controller.abort();
+  }, [fixedLink, promotionMode, isReader]);
 
   useEffect(() => {
     if (!active) return;
@@ -590,29 +604,56 @@ export function PaymentPolicyPanel({
             {promotionMode && (
               <div className="space-y-1 min-w-0">
                 <label htmlFor={`${id}-promotion`} className="block text-[var(--cms-muted-fg)]">
-                  推广链接 ID
+                  {isReader && promotionOptions.length > 0 ? '选择推广链接' : '推广链接 ID'}
                 </label>
-                <div className="flex gap-2">
-                  <input
+                {isReader && promotionOptions.length > 0 ? (
+                  <CustomSelect
                     id={`${id}-promotion`}
                     name="promotion_id"
-                    value={promotionInput}
-                    className="input-field min-w-0 tabular-nums"
-                    inputMode="numeric"
-                    maxLength={19}
-                    aria-invalid={error.field === 'promotion_id'}
-                    data-policy-field="promotion_id"
-                    aria-describedby={error.field === 'promotion_id' ? `${id}-error` : undefined}
-                    onChange={(e) => {
-                      setPromotionInput(e.target.value);
-                      if (error.field === 'promotion_id') setError({ message: '' });
-                    }}
+                    width="100%"
+                    value={scope.promotion}
                     disabled={busy}
+                    options={[
+                      { value: '', label: '请选择推广链接…' },
+                      ...(scope.promotion && !promotionOptions.some((p) => String(p.id) === scope.promotion)
+                        ? [{ value: scope.promotion, label: `推广链接 #${scope.promotion}` }]
+                        : []),
+                      ...promotionOptions.map((p) => ({
+                        value: String(p.id),
+                        label: `#${p.id} · ${p.name || '未命名'}${p.novel_title ? ` (${p.novel_title})` : ''}`,
+                      })),
+                    ]}
+                    onChange={(value) => {
+                      setPromotionInput(value);
+                      if (error.field === 'promotion_id') setError({ message: '' });
+                      if (value !== scope.promotion) {
+                        changeScope(() => setScope({ ...scope, promotion: value }));
+                      }
+                    }}
                   />
-                  <button type="submit" className="btn-secondary shrink-0" disabled={busy}>
-                    查询
-                  </button>
-                </div>
+                ) : (
+                  <div className="flex gap-2">
+                    <input
+                      id={`${id}-promotion`}
+                      name="promotion_id"
+                      value={promotionInput}
+                      className="input-field min-w-0 tabular-nums"
+                      inputMode="numeric"
+                      maxLength={19}
+                      aria-invalid={error.field === 'promotion_id'}
+                      data-policy-field="promotion_id"
+                      aria-describedby={error.field === 'promotion_id' ? `${id}-error` : undefined}
+                      onChange={(e) => {
+                        setPromotionInput(e.target.value);
+                        if (error.field === 'promotion_id') setError({ message: '' });
+                      }}
+                      disabled={busy}
+                    />
+                    <button type="submit" className="btn-secondary shrink-0" disabled={busy}>
+                      查询
+                    </button>
+                  </div>
+                )}
               </div>
             )}
           </>

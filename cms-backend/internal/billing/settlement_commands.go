@@ -15,6 +15,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"star-novel-cms/internal/auth"
 	"star-novel-cms/internal/db"
 )
 
@@ -117,8 +118,8 @@ func saveSettlementCommand(ctx context.Context, actor string, input settlementCo
 		return nil, err
 	}
 	defer tx.Rollback(context.WithoutCancel(ctx))
-	if err := requireFinancialAdmin(ctx, tx, actor); err != nil {
-		return nil, errCaseForbidden
+	if err := requirePermissionTx(ctx, tx, actor, errCaseForbidden, auth.PermPaymentsReconciliationWrite); err != nil {
+		return nil, err
 	}
 	if input.AccountID != 0 {
 		var provider string
@@ -269,8 +270,8 @@ func saveAutomaticLedger(ctx context.Context, id int64, actor string, enabled bo
 		return err
 	}
 	defer tx.Rollback(context.WithoutCancel(ctx))
-	if err := requireFinancialAdmin(ctx, tx, actor); err != nil {
-		return errCaseForbidden
+	if err := requirePermissionTx(ctx, tx, actor, errCaseForbidden, auth.PermPaymentsReconciliationWrite); err != nil {
+		return err
 	}
 	var account int64
 	if err := tx.QueryRow(ctx, `SELECT id FROM payment_channel_accounts WHERE id=$1 FOR UPDATE`, id).Scan(&account); err != nil {

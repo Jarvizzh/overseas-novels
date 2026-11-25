@@ -139,14 +139,17 @@ func testRestrictedRoles(t *testing.T, ctx context.Context, s Service) {
 		 WHERE source_event_id='payment:400:Purchase';
 		UPDATE conversion.delivery_diagnostics SET recorded_at=now()-interval '45 days' WHERE delivery_id=3;`)
 	retention := roleService("retention")
-	batch, err := retention.RedactExpired(ctx, Operator{ID: "ops"}, 30, 100, "retention fixture")
+	if _, err := retention.RedactExpired(ctx, Operator{ID: "optimizer", RequireSuperAdmin: true}, 30, 100, "non-super retention"); !errors.Is(err, ErrOperatorForbidden) {
+		t.Fatalf("non-super-admin retention guard: %v", err)
+	}
+	batch, err := retention.RedactExpired(ctx, Operator{ID: "ops", RequireSuperAdmin: true}, 30, 100, "retention fixture")
 	if err != nil || batch.Outbox != 1 || batch.RepairFacts != 1 || batch.Events != 1 || batch.Diagnostics != 1 {
 		t.Fatalf("redaction: %+v %v", batch, err)
 	}
 	assertString(t, ctx, s.Pool, "SELECT (snapshot='{}' AND original_send_started_at IS NOT NULL)::text FROM reader_conversion_repair_facts WHERE business_key='payment:400:Purchase'", "true")
 	assertString(t, ctx, s.Pool, "SELECT (snapshot<>'{}' AND original_send_started_at IS NOT NULL)::text FROM reader_conversion_repair_facts WHERE business_key='payment:500:Purchase'", "true")
 	assertString(t, ctx, s.Pool, "SELECT state FROM conversion.deliveries WHERE id=3", "succeeded")
-	if batch, err := retention.RedactExpired(ctx, Operator{ID: "ops"}, 30, 100, "repeat"); err != nil || batch != (RetentionResult{}) {
+	if batch, err := retention.RedactExpired(ctx, Operator{ID: "ops", RequireSuperAdmin: true}, 30, 100, "repeat"); err != nil || batch != (RetentionResult{}) {
 		t.Fatalf("retention replay: %+v %v", batch, err)
 	}
 	t.Run("historical renewal recovery", func(t *testing.T) {

@@ -8,8 +8,8 @@ type SystemDomain struct {
 	ID        int       `json:"id"`
 	Name      string    `json:"name"`
 	Domain    string    `json:"domain"`
-	Type      string    `json:"type"`       // "main" or "sub"
-	Status    int16     `json:"status"`     // 1-Enabled, 2-Disabled
+	Type      string    `json:"type"`   // "main" or "sub"
+	Status    int16     `json:"status"` // 1-Enabled, 2-Disabled
 	IsDefault bool      `json:"is_default"`
 	CreatedAt time.Time `json:"created_at"`
 }

@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	"star-novel-cms/internal/auth"
 )
 
 func testPaymentReconciliation(t *testing.T, service BillingService, exec func(string, ...any)) {
@@ -74,12 +75,16 @@ func testPaymentReconciliation(t *testing.T, service BillingService, exec func(s
 	`)
 
 	router := gin.New()
-	router.Use(func(c *gin.Context) { c.Set("admin_id", c.GetHeader("X-Test-Actor")); c.Next() })
-	NewHandler(service).registerReconciliationRoutes(router.Group("/payments"), paymentRoles("SuperAdmin", "Finance"))
+	payments := router.Group("/payments", auth.AuthMiddleware())
+	NewHandler(service).registerReconciliationRoutes(payments)
 	get := func(actor, path string, want int) string {
 		t.Helper()
 		req := httptest.NewRequest(http.MethodGet, "/payments/reconciliation/"+path, nil)
-		req.Header.Set("X-Test-Actor", actor)
+		tok, err := auth.GenerateToken(actor, "test")
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Authorization", "Bearer "+tok)
 		out := httptest.NewRecorder()
 		router.ServeHTTP(out, req)
 		if out.Code != want || strings.Contains(out.Body.String(), "private-fin03") {
@@ -88,9 +93,10 @@ func testPaymentReconciliation(t *testing.T, service BillingService, exec func(s
 		return out.Body.String()
 	}
 	for _, path := range []string{"movements", "payouts", "report-issues", "activity"} {
-		for _, actor := range []string{"test-editor", "test-support", "test-disabled"} {
+		for _, actor := range []string{"test-editor", "test-support"} {
 			get(actor, path, http.StatusForbidden)
 		}
+		get("test-disabled", path, http.StatusUnauthorized)
 	}
 	get("test-super", "activity", http.StatusOK)
 	get("test-finance", "movements?payout_id=-2", http.StatusBadRequest)
@@ -193,7 +199,11 @@ func testPaymentReconciliation(t *testing.T, service BillingService, exec func(s
 		}
 		req := httptest.NewRequest(http.MethodPost, "/payments/reconciliation/commands", &body)
 		req.Header.Set("Content-Type", form.FormDataContentType())
-		req.Header.Set("X-Test-Actor", "test-finance")
+		tok, err := auth.GenerateToken("test-finance", "FinanceManager")
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Authorization", "Bearer "+tok)
 		out := httptest.NewRecorder()
 		router.ServeHTTP(out, req)
 		if out.Code != status {

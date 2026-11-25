@@ -9,10 +9,16 @@ import {
   Settings,
   SlidersHorizontal,
 } from 'lucide-react';
-import { apiRequest, domainApi } from '../utils/api';
-import type { SystemDomain } from '../utils/api';
+import {
+  apiRequest,
+  getPromotionLinkOptions,
+  type PromotionLinkDomainOption,
+  type PromotionLinkPixelOption,
+  type PromotionLinkTemplateOption,
+} from '../utils/api';
+import { usePermission } from '../context/PermissionContext';
 import { copyTextToClipboard } from '../utils/clipboard';
-import { canWritePromotions, getCurrentAdminRole, validateAndBuildPromotionPayload } from '../utils/promotion';
+import { validateAndBuildPromotionPayload } from '../utils/promotion';
 import { FALLBACK_COVER } from '../components/operations/operationsUtils';
 import { DEFAULT_CHAPTER_DELIMITER_REGEX } from '../components/novels/ChapterUploadFields';
 import { MAX_GENRES_LENGTH, NovelFormModal, type NovelFormData } from '../components/novels/NovelFormModal';
@@ -82,20 +88,6 @@ interface Chapter {
   price: number;
 }
 
-interface FBPixel {
-  id: number;
-  name: string;
-  pixel_id: string;
-  access_token: string;
-}
-
-interface RechargeTemplate {
-  id: number;
-  name: string;
-  environment?: string;
-  is_default: boolean;
-}
-
 const EMPTY_NOVEL_FILTER: NovelListFilterDraft = {
   titleOrId: '',
   author: '',
@@ -146,10 +138,12 @@ function getPublishStatusMeta(publishStatus?: string): {
 }
 
 export default function NovelsTab() {
-  const currentAdminRole = getCurrentAdminRole();
-  const canEditNovels = ['SuperAdmin', 'Admin', 'Editor'].includes(currentAdminRole);
-  const canEditGlobalSettings = ['SuperAdmin', 'Admin'].includes(currentAdminRole);
-  const canCreatePromo = canWritePromotions(currentAdminRole);
+  const { canRead, canWrite } = usePermission();
+  const canEditNovels = canWrite('content.novels');
+  const canEditGlobalSettings = canWrite('content.novels');
+  const canCreatePromo = canWrite('ads.promotions');
+  const canReadConversions = canRead('ads.conversions');
+  const canWriteConversions = canWrite('ads.conversions');
 
   const [novels, setNovels] = useState<Novel[]>([]);
   const [totalNovels, setTotalNovels] = useState(0);
@@ -264,9 +258,9 @@ export default function NovelsTab() {
   // Promo builder states
   const [isPromoModalOpen, setIsPromoModalOpen] = useState(false);
   const [promoSubmitting, setPromoSubmitting] = useState(false);
-  const [pixels, setPixels] = useState<FBPixel[]>([]);
-  const [templates, setTemplates] = useState<RechargeTemplate[]>([]);
-  const [domains, setDomains] = useState<SystemDomain[]>([]);
+  const [pixels, setPixels] = useState<PromotionLinkPixelOption[]>([]);
+  const [templates, setTemplates] = useState<PromotionLinkTemplateOption[]>([]);
+  const [domains, setDomains] = useState<PromotionLinkDomainOption[]>([]);
   const [promotionForm, setPromotionForm] = useState<{
     name: string;
     novelId: number;
@@ -302,7 +296,7 @@ export default function NovelsTab() {
   const promoWriteRef = useRef(false);
 
   useEffect(() => {
-    if (!isPromoModalOpen || !['Admin', 'SuperAdmin', 'MediaBuyer', 'Finance'].includes(currentAdminRole)) return;
+    if (!isPromoModalOpen || !canReadConversions) return;
     const controller = new AbortController();
     setPromoIntegration(null);
     setPromoDefaultPolicy(null);
@@ -319,7 +313,7 @@ export default function NovelsTab() {
       }
     })();
     return () => controller.abort();
-  }, [isPromoModalOpen, currentAdminRole]);
+  }, [isPromoModalOpen, canReadConversions]);
 
   // Global pricing / chapter settings
   const [globalCoinCost, setGlobalCoinCost] = useState(500);
@@ -357,17 +351,25 @@ export default function NovelsTab() {
 
   useEffect(() => {
     void fetchGlobalConfig();
-    void apiRequest('GET', '/fb-pixels')
-      .then((data) => setPixels(data || []))
-      .catch((err) => console.error('加载像素列表失败:', err));
-    void apiRequest('GET', '/recharge-templates')
-      .then((data) => setTemplates(data || []))
-      .catch((err) => console.error('加载充值模板列表失败:', err));
-    void domainApi
-      .getDomains()
-      .then((data) => setDomains(data || []))
-      .catch((err) => console.error('加载域名列表失败:', err));
   }, []);
+
+  useEffect(() => {
+    if (!canCreatePromo) return;
+    const controller = new AbortController();
+    void getPromotionLinkOptions(controller.signal)
+      .then((opts) => {
+        if (controller.signal.aborted) return;
+        setPixels(opts.pixels || []);
+        setTemplates(opts.templates || []);
+        setDomains(opts.domains || []);
+      })
+      .catch((err) => {
+        if (!controller.signal.aborted) {
+          console.error('加载推广选项失败:', err);
+        }
+      });
+    return () => controller.abort();
+  }, [canCreatePromo]);
 
   const fetchNovels = useCallback(async (targetQuery: NovelListFilterDraft & { page: number; pageSize: number }) => {
     novelsAbortRef.current?.abort();
@@ -1092,7 +1094,7 @@ export default function NovelsTab() {
       setGeneratedLink(created?.generated_url || resolvedUrl);
       const createdId = created?.id ? String(created.id) : '';
       setPromoLinkId(createdId);
-      if (promoRuleChoice === 'own' && createdId && promoIntegration && canEditGlobalSettings) setIsPromoRuleOpen(true);
+      if (promoRuleChoice === 'own' && createdId && promoIntegration && canWriteConversions) setIsPromoRuleOpen(true);
       window.showToast?.('推广链接已成功生成并记录！', 'success');
     } catch (err: unknown) {
       window.showToast?.(`保存推广链接失败：${err instanceof Error ? err.message : ''}`, 'error');
@@ -2152,8 +2154,8 @@ export default function NovelsTab() {
           : promoLinkPolicy ? defaultPolicySummary(promoLinkPolicy)
             : promoDefaultPolicy ? defaultPolicySummary(promoDefaultPolicy) : '继承接入默认'}
         onRuleChoice={setPromoRuleChoice}
-        canConfigureRule={canEditGlobalSettings && Boolean(promoIntegration)}
-        onConfigureRule={canEditGlobalSettings && promoIntegration && promoLinkId ? () => setIsPromoRuleOpen(true) : undefined}
+        canConfigureRule={canWriteConversions && Boolean(promoIntegration)}
+        onConfigureRule={canWriteConversions && promoIntegration && promoLinkId ? () => setIsPromoRuleOpen(true) : undefined}
       />
       {isPromoRuleOpen && promoIntegration && (
         <IntegrationConfigDrawer
@@ -2162,7 +2164,6 @@ export default function NovelsTab() {
           initialTab="policy"
           initialPolicyPromotion={promoLinkId}
           destinations={[]}
-          canWrite={canEditGlobalSettings}
           onClose={() => setIsPromoRuleOpen(false)}
           onSuccess={() => {}}
           onPolicyPublished={(policy) => {

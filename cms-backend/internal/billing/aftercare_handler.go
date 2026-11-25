@@ -5,19 +5,32 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"star-novel-cms/internal/auth"
 )
 
-func (h *Handler) registerAftercareRoutes(payments *gin.RouterGroup, role gin.HandlerFunc) {
-	cases := payments.Group("/cases", role)
-	cases.GET("", h.listPaymentCases)
-	cases.GET("/owners", h.listCaseOwners)
-	cases.GET("/decisions", h.listCheckoutDecisions)
-	cases.GET("/:id", h.getPaymentCase)
-	cases.POST("/:id/actions", h.actOnPaymentCase)
+func (h *Handler) registerAftercareRoutes(payments *gin.RouterGroup) {
+	caseRead := auth.RequireAnyPermission(auth.PermPaymentsRiskRead, auth.PermPaymentsDisputesRead)
+	caseWrite := auth.RequireAnyPermission(auth.PermPaymentsRiskWrite, auth.PermPaymentsDisputesWrite)
+	ownersRead := auth.RequireAnyPermission(auth.PermPaymentsRiskRead, auth.PermPaymentsDisputesRead, auth.PermPaymentsChannelsRead)
+
+	cases := payments.Group("/cases")
+	cases.GET("", caseRead, h.listPaymentCases)
+	cases.GET("/owners", ownersRead, h.listCaseOwners)
+	cases.GET("/decisions", auth.RequirePermission(auth.PermPaymentsRiskRead), h.listCheckoutDecisions)
+	cases.GET("/:id", caseRead, h.getPaymentCase)
+	cases.POST("/:id/actions", caseWrite, h.actOnPaymentCase)
+}
+
+func resolvePrincipal(c *gin.Context) (*auth.Principal, error) {
+	if p, ok := auth.PrincipalFromContext(c); ok && p != nil {
+		return p, nil
+	}
+	return auth.LoadPrincipal(c.Request.Context(), c.GetString("admin_id"))
 }
 
 type caseFilter struct {
@@ -40,6 +53,29 @@ func (h *Handler) listPaymentCases(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid payment case filters"})
 		return
 	}
+	principal, err := resolvePrincipal(c)
+	if err != nil {
+		if errors.Is(err, auth.ErrAccountInactive) {
+			c.JSON(http.StatusUnauthorized, gin.H{"code": "account_inactive", "error": "Account is disabled or does not exist"})
+			return
+		}
+		writeCaseResult(c, nil, err)
+		return
+	}
+	requiredPerm := auth.PermPaymentsRiskRead
+	if filter.View == "disputes" {
+		requiredPerm = auth.PermPaymentsDisputesRead
+	}
+	if !principal.HasPermission(requiredPerm) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Payment case access denied"})
+		return
+	}
+	if filter.Kind != "" {
+		if kindPerm := caseReadPermission(filter.Kind); kindPerm != "" && !principal.HasPermission(kindPerm) {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Payment case access denied"})
+			return
+		}
+	}
 	value, err := listCases(c.Request.Context(), filter)
 	writeCaseResult(c, value, err)
 }
@@ -50,8 +86,26 @@ func (h *Handler) getPaymentCase(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid payment case ID"})
 		return
 	}
-	value, err := getCase(c.Request.Context(), id)
-	writeCaseResult(c, value, err)
+	principal, err := resolvePrincipal(c)
+	if err != nil {
+		if errors.Is(err, auth.ErrAccountInactive) {
+			c.JSON(http.StatusUnauthorized, gin.H{"code": "account_inactive", "error": "Account is disabled or does not exist"})
+			return
+		}
+		writeCaseResult(c, nil, err)
+		return
+	}
+	kind, value, err := getCase(c.Request.Context(), id)
+	if err != nil {
+		writeCaseResult(c, nil, err)
+		return
+	}
+	reqPerm := caseReadPermission(kind)
+	if reqPerm == "" || !principal.HasPermission(reqPerm) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Payment case access denied"})
+		return
+	}
+	c.JSON(http.StatusOK, value)
 }
 
 type caseAction struct {
@@ -107,6 +161,13 @@ func (h *Handler) listCheckoutDecisions(c *gin.Context) {
 }
 
 func (h *Handler) listCaseOwners(c *gin.Context) {
-	data, err := listFinanceOwners(c.Request.Context())
+	roleScope := strings.TrimSpace(c.Query("role_scope"))
+	switch roleScope {
+	case "", "risk", "disputes", "aftercare_finance":
+	default:
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid role_scope"})
+		return
+	}
+	data, err := listCaseOwnersByScope(c.Request.Context(), roleScope)
 	writeCaseResult(c, data, err)
 }

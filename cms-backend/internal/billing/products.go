@@ -19,6 +19,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"star-novel-cms/internal/auth"
 	"star-novel-cms/internal/db"
 )
 
@@ -208,6 +209,78 @@ func normalizeAndValidateProductSpec(in *productSpecInput) error {
 	return nil
 }
 
+type TemplateProductOption struct {
+	ID                int64    `json:"id"`
+	Code              string   `json:"code"`
+	Name              string   `json:"name"`
+	ProductType       string   `json:"product_type"`
+	PriceCents        int      `json:"price_cents"`
+	PriceDisplay      string   `json:"price"`
+	Currency          string   `json:"currency"`
+	Coins             int      `json:"coins"`
+	Bonus             int      `json:"bonus"`
+	VipCycle          string   `json:"vip_cycle,omitempty"`
+	NovelScopeType    string   `json:"novel_scope_type"`
+	NovelScopeIDs     []int64  `json:"novel_scope_ids"`
+	PublicationStatus string   `json:"publication_status"`
+	DualChannelReady  bool     `json:"dual_channel_ready"`
+	ReadinessReasons  []string `json:"readiness_reasons"`
+}
+
+func toTemplateProductOptions(items []ProductView, env string) []TemplateProductOption {
+	out := make([]TemplateProductOption, 0, len(items))
+	for _, item := range items {
+		pubStatus := pubStatusPublished
+		if pub, ok := item.Publications[env]; ok && pub.Status != "" {
+			pubStatus = pub.Status
+		}
+		scopeIDs := item.NovelScopeIDs
+		if scopeIDs == nil {
+			scopeIDs = []int64{}
+		}
+		reasons := item.ReadinessReasons
+		if reasons == nil {
+			reasons = []string{}
+		}
+		out = append(out, TemplateProductOption{
+			ID:                item.ID,
+			Code:              item.Code,
+			Name:              item.Name,
+			ProductType:       item.ProductType,
+			PriceCents:        item.PriceCents,
+			PriceDisplay:      item.PriceDisplay,
+			Currency:          item.Currency,
+			Coins:             item.Coins,
+			Bonus:             item.Bonus,
+			VipCycle:          item.VipCycle,
+			NovelScopeType:    item.NovelScopeType,
+			NovelScopeIDs:     scopeIDs,
+			PublicationStatus: pubStatus,
+			DualChannelReady:  item.DualChannelReady,
+			ReadinessReasons:  reasons,
+		})
+	}
+	return out
+}
+
+func (h *Handler) ListTemplateProductOptions(c *gin.Context) {
+	ctx := c.Request.Context()
+	sandboxItems, err := loadProductViews(ctx, 0, "sandbox", "", pubStatusPublished, "")
+	if err != nil {
+		writeProductError(c, err)
+		return
+	}
+	liveItems, err := loadProductViews(ctx, 0, "live", "", pubStatusPublished, "")
+	if err != nil {
+		writeProductError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"sandbox": toTemplateProductOptions(sandboxItems, "sandbox"),
+		"live":    toTemplateProductOptions(liveItems, "live"),
+	})
+}
+
 func (h *Handler) ListProducts(c *gin.Context) {
 	env := c.DefaultQuery("environment", "sandbox")
 	if env != "sandbox" && env != "live" {
@@ -236,8 +309,9 @@ func (h *Handler) ListProducts(c *gin.Context) {
 	if items == nil {
 		items = []ProductView{}
 	}
+	principal, _ := resolvePrincipal(c)
 	for i := range items {
-		items[i] = productForRole(items[i], c.GetString("payment_role"))
+		items[i] = productForPrincipal(items[i], principal)
 	}
 	c.JSON(http.StatusOK, gin.H{"products": items, "environment": env})
 }
@@ -262,20 +336,17 @@ func (h *Handler) GetProduct(c *gin.Context) {
 		writeProductError(c, errProductNotFound)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"product": productForRole(items[0], c.GetString("payment_role")), "environment": env})
+	principal, _ := resolvePrincipal(c)
+	c.JSON(http.StatusOK, gin.H{"product": productForPrincipal(items[0], principal), "environment": env})
 }
 
-func productForRole(item ProductView, role string) ProductView {
-	if role == "SuperAdmin" {
+func productForPrincipal(item ProductView, principal *auth.Principal) ProductView {
+	if principal != nil && principal.HasPermission(auth.PermPaymentsChannelsRead) {
 		return item
 	}
 	item.PayPalBinding = nil
 	item.StripeBinding = nil
 	item.AllBindings = nil
-	item.CreatedBy = ""
-	if role != "Finance" {
-		item.ReadinessReasons = []string{}
-	}
 	return item
 }
 
@@ -660,7 +731,7 @@ func createProductRecord(ctx context.Context, actor string, sourceID *int64, in 
 		return 0, "", err
 	}
 	defer tx.Rollback(context.WithoutCancel(ctx))
-	if err := requireFinancialAdmin(ctx, tx, actor); err != nil {
+	if err := requirePermissionTx(ctx, tx, actor, ErrRefundForbidden, auth.PermPaymentsProductsWrite); err != nil {
 		return 0, "", err
 	}
 	if in.NovelScopeType == scopeSpecificNovels {
@@ -740,7 +811,7 @@ func (h *Handler) UpsertProductPayPalBinding(c *gin.Context) {
 
 	ctx := c.Request.Context()
 	actor := c.GetString("admin_id")
-	if err := verifyProductSuperAdmin(ctx, actor); err != nil {
+	if err := verifyProductChannelWrite(c); err != nil {
 		writeProductError(c, err)
 		return
 	}
@@ -888,15 +959,16 @@ func (h *Handler) UpsertProductPayPalBinding(c *gin.Context) {
 	})
 }
 
-func verifyProductSuperAdmin(ctx context.Context, actor string) error {
-	var allowed bool
-	if err := db.DB.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM admins WHERE id=$1 AND status=1 AND role='SuperAdmin')`, actor).Scan(&allowed); err != nil {
-		return err
-	}
-	if !allowed {
-		return errCaseForbidden
-	}
-	return nil
+func verifyProductChannelWrite(c *gin.Context) error {
+	return verifyContextPermissions(c, errCaseForbidden, auth.PermPaymentsProductsWrite, auth.PermPaymentsChannelsWrite)
+}
+
+func requireProductWriteTx(ctx context.Context, tx pgx.Tx, actor string) error {
+	return requirePermissionTx(ctx, tx, actor, ErrRefundForbidden, auth.PermPaymentsProductsWrite)
+}
+
+func requireProductChannelWriteTx(ctx context.Context, tx pgx.Tx, actor string) error {
+	return requirePermissionTx(ctx, tx, actor, errCaseForbidden, auth.PermPaymentsProductsWrite, auth.PermPaymentsChannelsWrite)
 }
 
 func preparePayPalBindingWriteTx(ctx context.Context, productID, accountID int64, env, actor string) (reqKey string, reviewRequired bool, existingPlan, existingProd string, err error) {
@@ -905,7 +977,7 @@ func preparePayPalBindingWriteTx(ctx context.Context, productID, accountID int64
 		return "", false, "", "", err
 	}
 	defer tx.Rollback(context.WithoutCancel(ctx))
-	if err := requireSuperAdminTx(ctx, tx, actor); err != nil {
+	if err := requireProductChannelWriteTx(ctx, tx, actor); err != nil {
 		return "", false, "", "", err
 	}
 	err = tx.QueryRow(ctx, `
@@ -1148,7 +1220,7 @@ func savePayPalBindingResultTx(
 		return err
 	}
 	defer tx.Rollback(context.WithoutCancel(ctx))
-	if err := requireSuperAdminTx(ctx, tx, actor); err != nil {
+	if err := requireProductChannelWriteTx(ctx, tx, actor); err != nil {
 		return err
 	}
 	var valAt any
@@ -1267,7 +1339,7 @@ func (h *Handler) UpsertProductStripeBinding(c *gin.Context) {
 
 	ctx := c.Request.Context()
 	actor := c.GetString("admin_id")
-	if err := verifyProductSuperAdmin(ctx, actor); err != nil {
+	if err := verifyProductChannelWrite(c); err != nil {
 		writeProductError(c, err)
 		return
 	}
@@ -1396,7 +1468,7 @@ func prepareStripeBindingWriteTx(
 		return "", 0, "", "", "", err
 	}
 	defer tx.Rollback(context.WithoutCancel(ctx))
-	if err := requireSuperAdminTx(ctx, tx, actor); err != nil {
+	if err := requireProductChannelWriteTx(ctx, tx, actor); err != nil {
 		return "", 0, "", "", "", err
 	}
 	err = tx.QueryRow(ctx, `
@@ -1435,7 +1507,7 @@ func advanceStripePriceRevisionTx(ctx context.Context, productID, accountID int6
 		return 0, err
 	}
 	defer tx.Rollback(context.WithoutCancel(ctx))
-	if err := requireSuperAdminTx(ctx, tx, actor); err != nil {
+	if err := requireProductChannelWriteTx(ctx, tx, actor); err != nil {
 		return 0, err
 	}
 	var rev int
@@ -1458,7 +1530,7 @@ func reprovisionStripeRefsTx(ctx context.Context, productID, accountID int64, ac
 		return "", 0, err
 	}
 	defer tx.Rollback(context.WithoutCancel(ctx))
-	if err := requireSuperAdminTx(ctx, tx, actor); err != nil {
+	if err := requireProductChannelWriteTx(ctx, tx, actor); err != nil {
 		return "", 0, err
 	}
 	var oldProd, oldPrice string
@@ -1501,7 +1573,7 @@ func saveStripeBindingResultTx(
 		return err
 	}
 	defer tx.Rollback(context.WithoutCancel(ctx))
-	if err := requireSuperAdminTx(ctx, tx, actor); err != nil {
+	if err := requireProductChannelWriteTx(ctx, tx, actor); err != nil {
 		return err
 	}
 	var valAt any
@@ -1702,7 +1774,7 @@ func (h *Handler) PublishProduct(c *gin.Context) {
 	ctx := c.Request.Context()
 	actor := c.GetString("admin_id")
 	if req.Environment == "live" {
-		if err := verifyProductSuperAdmin(ctx, actor); err != nil {
+		if err := verifyProductChannelWrite(c); err != nil {
 			writeProductError(c, err)
 			return
 		}
@@ -1738,9 +1810,9 @@ func (h *Handler) PublishProduct(c *gin.Context) {
 		return
 	}
 	defer tx.Rollback(context.WithoutCancel(ctx))
-	authorize := requireFinancialAdmin
+	authorize := requireProductWriteTx
 	if req.Environment == "live" {
-		authorize = requireSuperAdminTx
+		authorize = requireProductChannelWriteTx
 	}
 	if err := authorize(ctx, tx, actor); err != nil {
 		writeProductError(c, err)
@@ -1849,9 +1921,15 @@ func (h *Handler) transitionProductStatus(c *gin.Context, targetStatus, auditAct
 	}
 	ctx := c.Request.Context()
 	actor := c.GetString("admin_id")
-	if req.Environment == "live" && strings.TrimSpace(req.Reason) == "" {
-		writeProductError(c, fmt.Errorf("%w: a reason is required for live status transitions", errProductInvalid))
-		return
+	if req.Environment == "live" {
+		if err := verifyProductChannelWrite(c); err != nil {
+			writeProductError(c, err)
+			return
+		}
+		if strings.TrimSpace(req.Reason) == "" {
+			writeProductError(c, fmt.Errorf("%w: a reason is required for live status transitions", errProductInvalid))
+			return
+		}
 	}
 	tx, err := db.DB.Begin(ctx)
 	if err != nil {
@@ -1859,9 +1937,9 @@ func (h *Handler) transitionProductStatus(c *gin.Context, targetStatus, auditAct
 		return
 	}
 	defer tx.Rollback(context.WithoutCancel(ctx))
-	authorize := requireFinancialAdmin
+	authorize := requireProductWriteTx
 	if req.Environment == "live" {
-		authorize = requireSuperAdminTx
+		authorize = requireProductChannelWriteTx
 	}
 	if err := authorize(ctx, tx, actor); err != nil {
 		writeProductError(c, err)
@@ -1974,9 +2052,9 @@ func stringOrNilJSON(raw []byte) any {
 func writeProductError(c *gin.Context, err error) {
 	switch {
 	case errors.Is(err, errCaseForbidden):
-		c.JSON(http.StatusForbidden, gin.H{"error": "SuperAdmin permission required"})
+		c.JSON(http.StatusForbidden, gin.H{"error": "Product and payment channel write permissions are required"})
 	case errors.Is(err, ErrRefundForbidden):
-		c.JSON(http.StatusForbidden, gin.H{"error": "Finance or SuperAdmin permission required"})
+		c.JSON(http.StatusForbidden, gin.H{"error": "Product write permission required"})
 	case errors.Is(err, errProductNotFound):
 		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
 	case errors.Is(err, errProductInvalid):

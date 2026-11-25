@@ -6,12 +6,48 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"time"
 
 	"conversion-backend/internal/delivery"
 
 	"github.com/jackc/pgx/v5"
 )
+
+const (
+	operatorAccessRead  = "read"
+	operatorAccessWrite = "write"
+)
+
+func requiredWritePermission(method, path string) (string, bool) {
+	rel, ok := strings.CutPrefix(path, "/internal/conversion/")
+	if !ok || rel == "" {
+		return "", false
+	}
+	parts := strings.Split(rel, "/")
+	switch {
+	case method == http.MethodPost && len(parts) == 1 && parts[0] == "destinations":
+		return delivery.PermissionAdsPixelsWrite, true
+	case method == http.MethodPatch && len(parts) == 2 && parts[0] == "destinations" && parts[1] != "":
+		return delivery.PermissionAdsPixelsWrite, true
+	case method == http.MethodPost && len(parts) == 1 && parts[0] == "integrations":
+		return delivery.PermissionAdsPixelsWrite, true
+	case method == http.MethodPatch && len(parts) == 2 && parts[0] == "integrations" && parts[1] != "":
+		return delivery.PermissionAdsPixelsWrite, true
+	case method == http.MethodPut && len(parts) == 3 && parts[0] == "integrations" && parts[1] != "" && parts[2] == "sinan-mock":
+		return delivery.PermissionAdsPixelsWrite, true
+	case method == http.MethodPost && len(parts) == 4 && parts[0] == "integrations" && parts[1] != "" &&
+		parts[2] == "payment-policy" && (parts[3] == "preview" || parts[3] == "publish"):
+		return delivery.PermissionAdsConversionsWrite, true
+	case method == http.MethodPost && len(parts) == 3 && parts[0] == "events" && parts[1] != "" && parts[2] == "deliveries":
+		return delivery.PermissionAdsConversionsWrite, true
+	case method == http.MethodPost && len(parts) == 3 && (parts[0] == "deliveries" || parts[0] == "partner-reports") &&
+		parts[1] != "" && parts[2] == "retry":
+		return delivery.PermissionAdsConversionsWrite, true
+	default:
+		return "", false
+	}
+}
 
 func NewHandler(repo Repository, token string) http.Handler {
 	mux := http.NewServeMux()
@@ -55,11 +91,23 @@ func NewHandler(repo Repository, token string) http.Handler {
 			writeError(w, http.StatusUnauthorized, "service_auth_required")
 			return
 		}
-		role := r.Header.Get("X-Operator-Role")
-		if r.Header.Get("X-Operator-ID") == "" || ((role != "Admin" && role != "SuperAdmin") &&
-			(r.Method != http.MethodGet || (role != "MediaBuyer" && role != "Finance"))) {
+		operatorID := strings.TrimSpace(r.Header.Get("X-Operator-ID"))
+		access := r.Header.Get("X-Operator-Access")
+		if operatorID == "" {
 			writeError(w, http.StatusForbidden, "operator_forbidden")
 			return
+		}
+		if r.Method == http.MethodGet {
+			if access != operatorAccessRead && access != operatorAccessWrite {
+				writeError(w, http.StatusForbidden, "operator_forbidden")
+				return
+			}
+		} else {
+			requiredPerm, ok := requiredWritePermission(r.Method, r.URL.Path)
+			if !ok || access != operatorAccessWrite || r.Header.Get("X-Operator-Permission") != requiredPerm {
+				writeError(w, http.StatusForbidden, "operator_forbidden")
+				return
+			}
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), 4*time.Second)
 		defer cancel()

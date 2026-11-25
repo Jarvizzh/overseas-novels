@@ -13,8 +13,12 @@ func (s Service) PublishPaymentPolicy(ctx context.Context, actor Operator, id in
 	if draft.PublicationID != "" && !paymentpolicy.ValidPublicationID(draft.PublicationID) {
 		return paymentpolicy.View{}, &paymentpolicy.ValidationError{Code: "invalid_payment_policy_request", Field: "publication_id"}
 	}
+	actor, err := requireBusinessPermission(actor, PermissionAdsConversionsWrite)
+	if err != nil {
+		return paymentpolicy.View{}, err
+	}
 	var out paymentpolicy.View
-	_, err := s.withOperatorTx(ctx, actor, func(tx pgx.Tx, actor Operator) (OperationResult, error) {
+	_, err = s.withOperatorTx(ctx, actor, func(tx pgx.Tx, actor Operator) (OperationResult, error) {
 		scope := paymentpolicy.Scope{Environment: s.Environment, IntegrationID: id, App: draft.App, Promotion: draft.Promotion}
 		before, after, err := paymentpolicy.PublishTx(ctx, tx, scope, draft, actor.ID)
 		if err != nil {

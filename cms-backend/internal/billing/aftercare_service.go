@@ -6,13 +6,36 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5"
+	"star-novel-cms/internal/auth"
 	"star-novel-cms/internal/db"
 )
 
 var (
 	errCaseConflict  = errors.New("payment case action is stale or inconsistent")
-	errCaseForbidden = errors.New("payment case action requires finance permission")
+	errCaseForbidden = errors.New("payment case action permission denied")
 )
+
+func caseReadPermission(kind string) string {
+	switch kind {
+	case "risk_review", "risk_signal":
+		return auth.PermPaymentsRiskRead
+	case "dispute", "reversal":
+		return auth.PermPaymentsDisputesRead
+	default:
+		return ""
+	}
+}
+
+func caseWritePermission(kind string) string {
+	switch kind {
+	case "risk_review", "risk_signal":
+		return auth.PermPaymentsRiskWrite
+	case "dispute", "reversal":
+		return auth.PermPaymentsDisputesWrite
+	default:
+		return ""
+	}
+}
 
 // These predicates are used both to project available actions and to recheck
 // eligibility under the case lock at submission time.
@@ -21,8 +44,11 @@ const caseCanApproveSQL = `c.kind='risk_review' AND c.work_state IN ('pending','
 		JOIN payment_cases dc ON dc.id=d.case_id AND dc.kind='dispute' AND dc.is_open WHERE r.case_id=c.id)`
 
 const caseCanRejectSQL = `c.kind='risk_review' AND c.work_state='pending'
-	AND EXISTS(SELECT 1 FROM payment_aftercare_policies p JOIN admins finance ON finance.id=p.finance_id AND finance.status=1
-		AND finance.role IN ('SuperAdmin','Finance') WHERE p.account_id=c.account_id AND p.refund_seconds IS NOT NULL)
+	AND EXISTS(SELECT 1 FROM payment_aftercare_policies p
+		WHERE p.account_id=c.account_id AND p.refund_seconds IS NOT NULL
+		  AND p.finance_id IS NOT NULL
+		  AND public.admin_has_permission(p.finance_id, 'payments.refunds:write')
+		  AND public.admin_has_permission(p.finance_id, 'payments.disputes:write'))
 	AND EXISTS(SELECT 1 FROM payment_deferred_fulfillment h JOIN recharge_orders o ON o.id=h.order_id
 		WHERE h.case_id=c.id AND h.resolved_at IS NULL AND o.fulfilled_at IS NULL AND o.status IN ('Success','Paid'))`
 
@@ -40,13 +66,24 @@ func applyCaseAction(ctx context.Context, actor string, id int64, input caseActi
 		return err
 	}
 	defer tx.Rollback(context.WithoutCancel(ctx))
-	if err = lockCaseOperator(ctx, tx, actor); err != nil {
+	principal, err := auth.LockPrincipalTx(ctx, tx, actor)
+	if err != nil {
+		if errors.Is(err, auth.ErrAccountInactive) || errors.Is(err, auth.ErrPermissionDenied) {
+			return errCaseForbidden
+		}
 		return err
+	}
+	if !principal.HasAnyPermission(auth.PermPaymentsRiskWrite, auth.PermPaymentsDisputesWrite) {
+		return errCaseForbidden
 	}
 	var kind string
 	err = tx.QueryRow(ctx, `SELECT kind FROM payment_cases WHERE id=$1 FOR UPDATE`, id).Scan(&kind)
 	if err != nil {
 		return err
+	}
+	reqPerm := caseWritePermission(kind)
+	if reqPerm == "" || !principal.HasPermission(reqPerm) {
+		return errCaseForbidden
 	}
 	var priorAction, priorActor, priorReason string
 	var matches bool
@@ -63,7 +100,7 @@ func applyCaseAction(ctx context.Context, actor string, id int64, input caseActi
 	}
 	switch input.Action {
 	case "assign":
-		if err = lockCaseOperator(ctx, tx, input.Owner); err != nil {
+		if err = requirePermissionTx(ctx, tx, input.Owner, errCaseForbidden, reqPerm); err != nil {
 			return err
 		}
 		_, err = tx.Exec(ctx, `UPDATE payment_cases SET owner_id=$2,updated_at=now() WHERE id=$1`, id, input.Owner)
@@ -86,15 +123,6 @@ func applyCaseAction(ctx context.Context, actor string, id int64, input caseActi
 		return err
 	}
 	return tx.Commit(ctx)
-}
-
-func lockCaseOperator(ctx context.Context, tx pgx.Tx, actor string) error {
-	var active bool
-	err := tx.QueryRow(ctx, `SELECT true FROM admins WHERE id=$1 AND status=1 AND role IN ('SuperAdmin','Finance') FOR SHARE`, actor).Scan(&active)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return errCaseForbidden
-	}
-	return err
 }
 
 func reviewCase(ctx context.Context, tx pgx.Tx, id int64, decision string) error {

@@ -12,9 +12,9 @@ import (
 )
 
 var (
-	ErrOrderNotFound               = errors.New("Order not found")
-	ErrOrderAlreadyRefunded        = errors.New("Order has already been refunded")
-	ErrOrderNotRefundable          = errors.New("Only successfully completed orders can be refunded")
+	ErrOrderNotFound                  = errors.New("Order not found")
+	ErrOrderAlreadyRefunded           = errors.New("Order has already been refunded")
+	ErrOrderNotRefundable             = errors.New("Only successfully completed orders can be refunded")
 	ErrTemplateSlotCountInvalid       = errors.New("Each recharge template slot count must be between 4 and 8")
 	ErrTemplateSlotBonusTooHigh       = errors.New("Bonus coins cannot exceed 1.5 times of standard coins for single slots")
 	ErrTemplateSlotInvalid            = errors.New("Each template slot must reference a distinct published product with slot_index 1..8")

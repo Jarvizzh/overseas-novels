@@ -23,7 +23,7 @@ import (
 func TestPaymentPolicyAPIAndConcurrentDecisions(t *testing.T) {
 	ctx, owner := operationsTestPool(t)
 	mustExec(t, ctx, owner, `
-		INSERT INTO admins(id,username,password_hash,role) VALUES ('ops','ops','fixture','Admin');
+		INSERT INTO admins(id,username,password_hash,role,role_id) VALUES ('ops','ops','fixture','Admin',(SELECT id FROM roles WHERE code='Admin'));
 		INSERT INTO conversion.integrations(environment,source,account_key,contract_version,allowed_apps)
 		VALUES ('test','starnovel','reader','v1','{}'),('test','sinan','partner','v1','{9}'),
 		       ('other','starnovel','reader','v1','{}');
@@ -40,6 +40,14 @@ func TestPaymentPolicyAPIAndConcurrentDecisions(t *testing.T) {
 		req.Header.Set("Authorization", "Bearer service-fixture")
 		req.Header.Set("X-Operator-ID", "ops")
 		req.Header.Set("X-Operator-Role", role)
+		if role == "FinanceManager" {
+			req.Header.Set("X-Operator-Access", "read")
+		} else {
+			req.Header.Set("X-Operator-Access", "write")
+			if method != http.MethodGet {
+				req.Header.Set("X-Operator-Permission", "ads.conversions:write")
+			}
+		}
 		rec := httptest.NewRecorder()
 		handler.ServeHTTP(rec, req)
 		if rec.Code != status || !strings.Contains(rec.Body.String(), want) {
@@ -49,15 +57,15 @@ func TestPaymentPolicyAPIAndConcurrentDecisions(t *testing.T) {
 	}
 	const policyPath = "/integrations/1/payment-policy"
 	const firstPaid = `{"app_id":"reader","expected_version":null,"payment_range":"first_paid_on_promotion","reason":"fixture"}`
-	call(http.MethodGet, policyPath+"?app_id=reader", "Finance", "", 200, "implicit_all")
-	call(http.MethodGet, "/integrations/3/payment-policy?app_id=reader", "Finance", "", 404, "resource_not_found")
-	call(http.MethodPost, policyPath+"/preview", "Finance", firstPaid, 403, "operator_forbidden")
+	call(http.MethodGet, policyPath+"?app_id=reader", "FinanceManager", "", 200, "implicit_all")
+	call(http.MethodGet, "/integrations/3/payment-policy?app_id=reader", "FinanceManager", "", 404, "resource_not_found")
+	call(http.MethodPost, policyPath+"/preview", "FinanceManager", firstPaid, 403, "operator_forbidden")
 	call(http.MethodPost, policyPath+"/publish", "Admin", firstPaid, 400, "payment_policy_first_requires_promotion")
 	call(http.MethodPost, policyPath+"/preview", "Admin",
 		strings.Replace(firstPaid, `"app_id":"reader"`, `"app_id":"reader","promotion_id":"13"`, 1), 400, "payment_policy_first_coverage_unverified")
 	call(http.MethodPost, "/integrations/2/payment-policy/publish", "Admin",
 		strings.Replace(firstPaid, `"reader"`, `"9"`, 1), 400, "payment_policy_first_source_unsupported")
-	call(http.MethodGet, "/integrations/2/payment-policy?app_id=8", "Finance", "", 400, "invalid_payment_policy_app")
+	call(http.MethodGet, "/integrations/2/payment-policy?app_id=8", "FinanceManager", "", 400, "invalid_payment_policy_app")
 
 	link := paymentpolicy.Scope{Environment: "test", IntegrationID: 1, App: paymentpolicy.ReaderApp, Promotion: "13"}
 	makeFacts := func(scope paymentpolicy.Scope, key string) paymentpolicy.Facts {

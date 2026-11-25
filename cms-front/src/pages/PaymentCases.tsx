@@ -6,7 +6,8 @@ import { CmsDialog } from '../components/ui/CmsDialog';
 import { CursorPagination } from '../components/ui/Pagination';
 import { FilterChipsBar, SearchInput, SkeletonRows, StatusDot, TableRegion } from '../components/ui/Primitives';
 import { PaymentLoadError, PaymentScopeBar, PaymentTabs } from '../components/payments/PaymentWorkspace';
-import { apiRequest } from '../utils/api';
+import { usePermission } from '../context/PermissionContext';
+import { apiRequest, paymentCaseOwnersPath, type PaymentCaseOwnerScope } from '../utils/api';
 import { copyTextToClipboard } from '../utils/clipboard';
 import {
   paymentError,
@@ -133,12 +134,14 @@ const workTone = (state: string) =>
 function CaseActionForm({
   detail,
   action,
+  roleScope,
   target,
   onClose,
   onDone,
 }: {
   detail: Detail;
   action: Action;
+  roleScope: PaymentCaseOwnerScope;
   target?: Receipt;
   onClose: () => void;
   onDone: () => void;
@@ -150,7 +153,10 @@ function CaseActionForm({
   const [error, setError] = useState('');
   const [ownersRevision, setOwnersRevision] = useState(0);
   const request = useRef<{ body: string; id: string } | undefined>(undefined);
-  const owners = usePaymentQuery<Owner[]>(action === 'assign' ? '/payments/cases/owners' : '', ownersRevision);
+  const owners = usePaymentQuery<Owner[]>(
+    action === 'assign' ? paymentCaseOwnersPath(roleScope) : '',
+    ownersRevision,
+  );
 
   async function submit(event: FormEvent) {
     event.preventDefault();
@@ -209,7 +215,7 @@ function CaseActionForm({
               value={owner}
               onChange={setOwner}
               options={[
-                { value: '', label: '选择财务账号' },
+                { value: '', label: '选择负责人' },
                 ...(owners?.data ?? []).map((entry) => ({ value: entry.id, label: entry.name })),
               ]}
             />
@@ -268,11 +274,23 @@ function providerConsole(row: CaseRow) {
 
 function CaseDetail({
   detail,
+  roleScope,
+  canWriteCases,
+  canReadOrders,
+  canReadReconciliation,
+  canReadRefunds,
+  canReadDisputes,
   refreshing,
   onRefresh,
   onDone,
 }: {
   detail: Detail;
+  roleScope: PaymentCaseOwnerScope;
+  canWriteCases: boolean;
+  canReadOrders: boolean;
+  canReadReconciliation: boolean;
+  canReadRefunds: boolean;
+  canReadDisputes: boolean;
   refreshing: boolean;
   onRefresh: () => void;
   onDone: () => void;
@@ -330,7 +348,7 @@ function CaseDetail({
         <button type="button" className="btn-secondary" disabled={refreshing} onClick={onRefresh}>
           {refreshing ? '刷新中…' : '刷新案件'}
         </button>
-        {detail.available_actions.map((name) => (
+        {canWriteCases && detail.available_actions.map((name) => (
           <button
             key={name}
             type="button"
@@ -357,29 +375,39 @@ function CaseDetail({
             相关章节解锁 {receipt.usage_count} 次 · 已确认本金损失 {usd(receipt.loss_minor)}
             {receipt.blocked && ' · 权益已冲回'}
           </p>
-          <div className="flex flex-wrap gap-2">
-            <Link className="btn-detail" to={`/payments/orders?order_id=${receipt.order_id}`}>
-              订单 #{receipt.order_id}
-            </Link>
-            <Link
-              className="btn-detail"
-              to={`/payments/reconciliation?${paymentParams({ ...scope, order_id: receipt.order_id })}`}
-            >
-              流水与结算
-            </Link>
-            <Link
-              className="btn-detail"
-              to={`/payments/refunds?${paymentParams({ ...scope, order_id: receipt.order_id, receipt_id: receipt.id })}`}
-            >
-              退款
-            </Link>
-            <Link
-              className="btn-detail"
-              to={`/payments/disputes?${paymentParams({ ...scope, receipt: receipt.receipt })}`}
-            >
-              关联争议和冲回
-            </Link>
-          </div>
+          {(canReadOrders || canReadReconciliation || canReadRefunds || canReadDisputes) && (
+            <div className="flex flex-wrap gap-2">
+              {canReadOrders && (
+                <Link className="btn-detail" to={`/payments/orders?order_id=${receipt.order_id}`}>
+                  订单 #{receipt.order_id}
+                </Link>
+              )}
+              {canReadReconciliation && (
+                <Link
+                  className="btn-detail"
+                  to={`/payments/reconciliation?${paymentParams({ ...scope, order_id: receipt.order_id })}`}
+                >
+                  流水与结算
+                </Link>
+              )}
+              {canReadRefunds && (
+                <Link
+                  className="btn-detail"
+                  to={`/payments/refunds?${paymentParams({ ...scope, order_id: receipt.order_id, receipt_id: receipt.id })}`}
+                >
+                  退款
+                </Link>
+              )}
+              {canReadDisputes && (
+                <Link
+                  className="btn-detail"
+                  to={`/payments/disputes?${paymentParams({ ...scope, receipt: receipt.receipt })}`}
+                >
+                  关联争议和冲回
+                </Link>
+              )}
+            </div>
+          )}
           {receipt.refunds.length > 0 && (
             <ul>
               {receipt.refunds.map((refund) => (
@@ -402,7 +430,7 @@ function CaseDetail({
           {receipt.adjustment_pending && receipt.entitlement_result?.status !== 'pending' && (
             <p role="status">关联案件已有权益处置等待执行</p>
           )}
-          {receipt.entitlement_action && (
+          {canWriteCases && receipt.entitlement_action && (
             <button
               type="button"
               className="btn-secondary"
@@ -416,18 +444,20 @@ function CaseDetail({
           )}
         </article>
       ))}
-      {detail.receipts.length === 0 &&
+      {canReadOrders &&
+        detail.receipts.length === 0 &&
         detail.order_ids.map((order) => (
           <Link key={order} className="btn-detail" to={`/payments/orders?order_id=${order}`}>
             订单 #{order}
           </Link>
         ))}
       {detail.receipts.length === 0 && <p>暂无同账户已验证原收款。</p>}
-      {action && (
+      {canWriteCases && action && (
         <CaseActionForm
           key={`${action.name}/${action.target?.id ?? ''}`}
           detail={detail}
           action={action.name}
+          roleScope={roleScope}
           target={action.target}
           onClose={() => setAction(undefined)}
           onDone={confirm}
@@ -498,6 +528,13 @@ const signalEmptyStates = {
 type CasePage = CursorPage<CaseRow> & { signal_state?: keyof typeof signalEmptyStates | null };
 
 export default function PaymentCases({ view }: { view: View }) {
+  const { canRead, canWrite } = usePermission();
+  const roleScope: PaymentCaseOwnerScope = view === 'risk' ? 'risk' : 'disputes';
+  const canWriteCases = view === 'risk' ? canWrite('payments.risk') : canWrite('payments.disputes');
+  const canReadOrders = canRead('payments.orders');
+  const canReadReconciliation = canRead('payments.reconciliation');
+  const canReadRefunds = canRead('payments.refunds');
+  const canReadDisputes = canRead('payments.disputes');
   const [params, setParams] = useSearchParams();
   const [revision, setRevision] = useState(0);
   const [detailRevision, setDetailRevision] = useState(0);
@@ -556,7 +593,7 @@ export default function PaymentCases({ view }: { view: View }) {
     (['provider', 'environment', 'account_id'] as const).every(
       (key) => !params.get(key) || detail.data?.[key] === params.get(key),
     );
-  const owners = usePaymentQuery<Owner[]>(decisions ? '' : '/payments/cases/owners', revision);
+  const owners = usePaymentQuery<Owner[]>(decisions ? '' : paymentCaseOwnersPath(roleScope), revision);
   const data = decisions ? decisionsPage : cases;
   const signalState = cases?.data?.signal_state;
   const headers = decisions
@@ -767,9 +804,13 @@ export default function PaymentCases({ view }: { view: View }) {
                       </td>
                       <td>
                         {row.order_id ? (
-                          <Link className="btn-detail" to={`/payments/orders?order_id=${row.order_id}`}>
-                            #{row.order_id}
-                          </Link>
+                          canReadOrders ? (
+                            <Link className="btn-detail" to={`/payments/orders?order_id=${row.order_id}`}>
+                              #{row.order_id}
+                            </Link>
+                          ) : (
+                            `#${row.order_id}`
+                          )
                         ) : (
                           '—'
                         )}
@@ -851,6 +892,12 @@ export default function PaymentCases({ view }: { view: View }) {
           <CaseDetail
             key={detail.data.id}
             detail={detail.data}
+            roleScope={roleScope}
+            canWriteCases={canWriteCases}
+            canReadOrders={canReadOrders}
+            canReadReconciliation={canReadReconciliation}
+            canReadRefunds={canReadRefunds}
+            canReadDisputes={canReadDisputes}
             refreshing={detail.refreshing}
             onRefresh={refreshDetail}
             onDone={() => {

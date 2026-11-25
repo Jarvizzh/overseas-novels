@@ -70,18 +70,30 @@ func RecordTx(ctx context.Context, tx pgx.Tx, f payment.CaseFact) error {
 	if err != nil {
 		return err
 	}
-	_, err = tx.Exec(ctx, `UPDATE payment_cases c SET work_state='pending',owner_id=p.reviewer_id,
-		work_due_at=COALESCE(c.due_at,now()+make_interval(secs=>p.review_seconds))
-		FROM payment_aftercare_policies p WHERE c.id=$1 AND p.account_id=c.account_id AND c.kind='risk_review'
-		 AND c.is_open AND c.work_state='observed' AND p.hold_fulfillment`, caseID)
+	_, err = tx.Exec(ctx, `UPDATE payment_cases c
+		SET work_state = 'pending',
+		    owner_id = CASE
+		        WHEN p.reviewer_id IS NOT NULL
+		         AND public.admin_has_permission(p.reviewer_id, 'payments.risk:write')
+		        THEN p.reviewer_id
+		        ELSE NULL
+		    END,
+		    work_due_at = COALESCE(c.due_at, now() + make_interval(secs => p.review_seconds))
+		FROM payment_aftercare_policies p
+		WHERE c.id = $1
+		  AND p.account_id = c.account_id
+		  AND c.kind = 'risk_review'
+		  AND c.is_open
+		  AND c.work_state = 'observed'
+		  AND p.hold_fulfillment`, caseID)
 	if err != nil {
 		return err
 	}
 	if f.Kind == payment.CaseDispute {
-		_, err = tx.Exec(ctx, `UPDATE payment_cases c SET owner_id=p.finance_id
-			FROM payment_aftercare_policies p JOIN admins finance ON finance.id=p.finance_id AND finance.status=1
-			  AND finance.role IN ('SuperAdmin','Finance')
-			WHERE c.id=$1 AND c.account_id=p.account_id AND c.owner_id IS NULL`, caseID)
+		_, err = tx.Exec(ctx, `UPDATE payment_cases c SET owner_id = p.finance_id
+			FROM payment_aftercare_policies p
+			JOIN admins finance ON finance.id = p.finance_id AND public.admin_has_permission(finance.id, 'payments.disputes:write')
+			WHERE c.id = $1 AND c.account_id = p.account_id AND c.owner_id IS NULL`, caseID)
 	}
 
 	return err

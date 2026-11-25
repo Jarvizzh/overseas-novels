@@ -1,5 +1,6 @@
 import { type FormEvent, type KeyboardEvent, lazy, Suspense, useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { AlertTriangle, Check, Plus, Radio, Search, ShieldCheck, ShieldOff } from 'lucide-react';
+import { usePermission } from '../../context/PermissionContext';
 import { ApiError, apiRequest } from '../../utils/api';
 import {
   getErrorMessage,
@@ -77,7 +78,10 @@ export function IntegrationConfigDrawer({
   editingIntegration,
   initialTab,
   destinations,
-  canWrite,
+  canWriteIntegration,
+  canReadPolicy,
+  canWritePolicy,
+  canReadAudit,
   onClose,
   onSuccess,
   initialPolicyPromotion,
@@ -87,12 +91,23 @@ export function IntegrationConfigDrawer({
   editingIntegration: ConversionIntegration | null;
   initialTab: IntegrationDrawerTab;
   destinations: ConversionDestination[];
-  canWrite: boolean;
+  canWriteIntegration?: boolean;
+  canReadPolicy?: boolean;
+  canWritePolicy?: boolean;
+  canReadAudit?: boolean;
+  /** @deprecated Prefer split permission props; ignored to preserve strict pixel vs conversion separation */
+  canWrite?: boolean;
   onClose: () => void;
   onSuccess: (message: string) => Promise<void> | void;
   initialPolicyPromotion?: string;
   onPolicyPublished?: (view: PaymentPolicyView) => void;
 }) {
+  const perm = usePermission();
+  const effectiveCanWriteIntegration = canWriteIntegration ?? perm.canWrite('ads.pixels');
+  const effectiveCanReadPolicy = canReadPolicy ?? perm.canRead('ads.conversions');
+  const effectiveCanWritePolicy = canWritePolicy ?? perm.canWrite('ads.conversions');
+  const effectiveCanReadAudit = canReadAudit ?? perm.canRead('ads.conversions');
+
   const formId = useId();
   const accountErrId = useId();
   const contractErrId = useId();
@@ -146,10 +161,29 @@ export function IntegrationConfigDrawer({
     [destinations],
   );
 
+  const showConfig = !initialPolicyPromotion;
+  const showPolicy = Boolean(
+    editingIntegration &&
+      ['starnovel', 'sinan'].includes(editingIntegration.source) &&
+      effectiveCanReadPolicy,
+  );
+  const showAudit = Boolean(editingIntegration && effectiveCanReadAudit);
+
   useEffect(() => {
     if (!open) return;
 
-    setDrawerTab(editingIntegration ? initialTab : 'config');
+    if (editingIntegration) {
+      const allowedTabs: IntegrationDrawerTab[] = [
+        ...(showConfig ? (['config'] as const) : []),
+        ...(showPolicy ? (['policy'] as const) : []),
+        ...(showAudit ? (['audit'] as const) : []),
+      ];
+      setDrawerTab(
+        allowedTabs.includes(initialTab) ? initialTab : (allowedTabs[0] ?? 'config'),
+      );
+    } else {
+      setDrawerTab('config');
+    }
     setPixelSearch('');
     setShowUnavailablePixels(false);
     setAccountError('');
@@ -189,7 +223,7 @@ export function IntegrationConfigDrawer({
       setInitialBindingModes({});
       setBindingModes({});
     }
-  }, [open, editingIntegration, initialTab]);
+  }, [open, editingIntegration, initialTab, showConfig, showPolicy, showAudit]);
 
   const activeSource = editingIntegration ? editingIntegration.source : source;
   const sourcePresets = useMemo(() => EVENT_PRESETS[activeSource] ?? [], [activeSource]);
@@ -213,7 +247,7 @@ export function IntegrationConfigDrawer({
   };
 
   const togglePresetEvent = (eventVal: string) => {
-    if (!canWrite) return;
+    if (!effectiveCanWriteIntegration) return;
     setEventsError('');
     setSelectedEvents((prev) =>
       prev.includes(eventVal) ? prev.filter((item) => item !== eventVal) : [...prev, eventVal],
@@ -308,7 +342,7 @@ export function IntegrationConfigDrawer({
   }, [destinations, initialBindingModes, bindingModes, showUnavailablePixels]);
 
   const handleSetBindingMode = (dest: ConversionDestination, nextMode: RouteMode) => {
-    if (!canWrite) return;
+    if (!effectiveCanWriteIntegration) return;
     const isUnavailable = Boolean(dest.retired_at) || !dest.enabled;
     const wasBound = (initialBindingModes[dest.id] ?? 'none') !== 'none';
     if (isUnavailable) {
@@ -324,7 +358,7 @@ export function IntegrationConfigDrawer({
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
-    if (!canWrite || submitting || inFlightRef.current) return;
+    if (!effectiveCanWriteIntegration || submitting || inFlightRef.current) return;
 
     const trimmedAccount = activeSource === 'starnovel' ? 'reader' : accountKey.trim();
     const trimmedContract = contractVersion.trim();
@@ -428,11 +462,10 @@ export function IntegrationConfigDrawer({
     }
   };
 
-  const showPolicy = editingIntegration && ['starnovel', 'sinan'].includes(editingIntegration.source);
   const tabs: { id: IntegrationDrawerTab; label: string }[] = [
-    ...(!initialPolicyPromotion ? [{ id: 'config' as const, label: '接入与路由矩阵' }] : []),
-    ...(showPolicy ? [{ id: 'policy' as const, label: '回传规则' }] : []),
-    { id: 'audit', label: '变更审计记录' },
+    ...(showConfig ? [{ id: 'config' as const, label: '接入配置' }] : []),
+    ...(showPolicy ? [{ id: 'policy' as const, label: '付款回传规则' }] : []),
+    ...(showAudit ? [{ id: 'audit' as const, label: '配置审计' }] : []),
   ];
   const isBusy = submitting || policyBusy;
   const requestClose = () => {
@@ -478,9 +511,9 @@ export function IntegrationConfigDrawer({
           : '定义来源账户、事件白名单及可路由的 Meta Pixel 授权矩阵'
       }
       footer={
-        drawerTab === 'policy' ? (
+        drawerTab === 'policy' && showPolicy ? (
           <div ref={setPolicyFooter} className="flex flex-wrap justify-end items-center gap-2" />
-        ) : drawerTab === 'config' && canWrite ? (
+        ) : drawerTab === 'config' && showConfig && effectiveCanWriteIntegration ? (
           <>
             <button type="button" onClick={requestClose} disabled={isBusy} className="btn-secondary">
               取消
@@ -528,15 +561,15 @@ export function IntegrationConfigDrawer({
           </div>
         )}
 
-        {drawerTab === 'config' && (
+        {showConfig && drawerTab === 'config' && (
           <div
             role={editingIntegration ? 'tabpanel' : undefined}
             id={editingIntegration ? `${formId}-panel-config` : undefined}
             aria-labelledby={editingIntegration ? `${formId}-tab-config` : undefined}
           >
-            {!canWrite && (
+            {!effectiveCanWriteIntegration && (
               <div className="mb-4 p-3 rounded-xl bg-[var(--cms-content)] border border-[var(--cms-border)] text-xs text-[var(--cms-muted-fg)]">
-                当前账号仅有只读查看权限，可查阅事件白名单与 Pixel 路由授权状态，无法修改配置。
+                当前账号仅有接入配置只读查看权限，可查阅事件白名单与 Pixel 路由授权状态，无法修改配置。
               </div>
             )}
 
@@ -557,7 +590,7 @@ export function IntegrationConfigDrawer({
                       type="button"
                       role="switch"
                       aria-checked={enabled}
-                      disabled={!canWrite || submitting}
+                      disabled={!effectiveCanWriteIntegration || submitting}
                       onClick={() => setEnabled((prev) => !prev)}
                       className={`focus-ring inline-flex items-center gap-2 h-8 px-3 rounded-full border text-xs font-medium transition-colors cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed ${
                         enabled
@@ -585,7 +618,7 @@ export function IntegrationConfigDrawer({
                       <CustomSelect
                         id={`${formId}-source`}
                         width="100%"
-                        disabled={!canWrite || submitting}
+                        disabled={!effectiveCanWriteIntegration || submitting}
                         options={SOURCE_CREATE_OPTIONS}
                         value={source}
                         onChange={handleSourceChange}
@@ -612,7 +645,7 @@ export function IntegrationConfigDrawer({
                       type="text"
                       maxLength={100}
                       readOnly={!isCreate || activeSource === 'starnovel'}
-                      disabled={!isCreate || activeSource === 'starnovel' || !canWrite || submitting}
+                      disabled={!isCreate || activeSource === 'starnovel' || !effectiveCanWriteIntegration || submitting}
                       value={activeSource === 'starnovel' ? 'reader' : accountKey}
                       placeholder="例如：partner-a"
                       aria-invalid={accountError ? 'true' : 'false'}
@@ -647,7 +680,7 @@ export function IntegrationConfigDrawer({
                       id={`${formId}-contract`}
                       type="text"
                       maxLength={100}
-                      disabled={!canWrite || submitting}
+                      disabled={!effectiveCanWriteIntegration || submitting}
                       value={contractVersion}
                       placeholder={activeSource === 'starnovel' ? 'v1' : 'sinan-v1 / sinan-mock-v1'}
                       aria-invalid={contractError ? 'true' : 'false'}
@@ -697,7 +730,7 @@ export function IntegrationConfigDrawer({
                       ref={appsRef}
                       id={`${formId}-allowed-apps`}
                       type="text"
-                      disabled={!canWrite || submitting}
+                      disabled={!effectiveCanWriteIntegration || submitting}
                       value={appsInput}
                       placeholder="例如：1001, 1002"
                       aria-invalid={appsError ? 'true' : 'false'}
@@ -737,7 +770,7 @@ export function IntegrationConfigDrawer({
                           <button
                             key={preset.value}
                             type="button"
-                            disabled={!canWrite || submitting}
+                            disabled={!effectiveCanWriteIntegration || submitting}
                             aria-pressed={active}
                             onClick={() => togglePresetEvent(preset.value)}
                             className={`focus-ring inline-flex items-center gap-1.5 h-8 px-3 rounded-lg border text-xs transition-colors cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed ${
@@ -767,7 +800,7 @@ export function IntegrationConfigDrawer({
                       ref={customEventsRef}
                       id={`${formId}-custom-events`}
                       type="text"
-                      disabled={!canWrite || submitting}
+                      disabled={!effectiveCanWriteIntegration || submitting}
                       value={customEventsInput}
                       placeholder="如有预设之外的事件标识可在此补充"
                       aria-invalid={eventsError ? 'true' : 'false'}
@@ -924,7 +957,7 @@ export function IntegrationConfigDrawer({
                             ).map((option, idx, allOptions) => {
                               const selected = currMode === option.mode;
                               const Icon = option.icon;
-                              const optionDisabled = !canWrite || submitting || !option.allowed;
+                              const optionDisabled = !effectiveCanWriteIntegration || submitting || !option.allowed;
 
                               const handleRadioKeyDown = (e: KeyboardEvent<HTMLButtonElement>) => {
                                 if (
@@ -940,7 +973,7 @@ export function IntegrationConfigDrawer({
                                 for (let offset = 1; offset <= allOptions.length; offset += 1) {
                                   const candidate =
                                     allOptions[(idx + step * offset + allOptions.length) % allOptions.length];
-                                  if (canWrite && !submitting && candidate.allowed) {
+                                  if (effectiveCanWriteIntegration && !submitting && candidate.allowed) {
                                     handleSetBindingMode(dest, candidate.mode);
                                     const container = e.currentTarget.parentElement;
                                     const buttons = container?.querySelectorAll<HTMLButtonElement>('[role="radio"]');
@@ -984,7 +1017,7 @@ export function IntegrationConfigDrawer({
                 </div>
               </div>
 
-              {canWrite && (
+              {effectiveCanWriteIntegration && (
                 <div className="space-y-1.5">
                   <label htmlFor={`${formId}-reason`} className="block font-medium text-[var(--cms-fg)]">
                     变更原因（必填，1-500 字） <span className="text-[var(--cms-error)]">*</span>
@@ -1032,13 +1065,13 @@ export function IntegrationConfigDrawer({
           </div>
         )}
 
-        {editingIntegration && drawerTab === 'policy' && (
+        {showPolicy && editingIntegration && drawerTab === 'policy' && (
           <div role="tabpanel" id={`${formId}-panel-policy`} aria-labelledby={`${formId}-tab-policy`}>
             <Suspense fallback={<div className="skeleton-bar h-32 rounded-xl" role="status" aria-label="正在加载回传规则" />}>
             <PaymentPolicyPanel
               key={`${editingIntegration.id}:${initialPolicyPromotion ?? ''}`}
               integration={editingIntegration}
-              canWrite={canWrite}
+              canWrite={effectiveCanWritePolicy}
               initialPromotion={initialPolicyPromotion}
               footer={policyFooter}
               onClose={requestClose}
@@ -1052,7 +1085,7 @@ export function IntegrationConfigDrawer({
           </div>
         )}
 
-        {editingIntegration && drawerTab === 'audit' && (
+        {showAudit && editingIntegration && drawerTab === 'audit' && (
           <div
             role="tabpanel"
             id={`${formId}-panel-audit`}

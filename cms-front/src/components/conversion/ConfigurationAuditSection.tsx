@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
 import { History, RefreshCw } from 'lucide-react';
-import { ROLE_LABELS } from '../../config/navigation';
 import { apiRequest } from '../../utils/api';
 import {
   auditActionLabel,
@@ -142,9 +141,7 @@ export function ConfigurationAuditSection({
               record.after_state,
               destinationById,
             );
-            const roleText = record.operator_role
-              ? ROLE_LABELS[record.operator_role] || record.operator_role
-              : '';
+            const roleText = record.operator_role || '';
             const hasSnapshots =
               record.before_state !== undefined || record.after_state !== undefined;
 

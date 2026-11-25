@@ -1,6 +1,6 @@
 import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ExternalLink, RefreshCw, SlidersHorizontal } from 'lucide-react';
-import { apiRequest } from '../../utils/api';
+import { apiRequest, type ConversionPromotionOption } from '../../utils/api';
 import CustomSelect from '../CustomSelect';
 import {
   type ColumnOption,
@@ -145,6 +145,7 @@ function summarizeDeliveries(event: ConversionEvent) {
 export function ConversionEventsTab({
   integrations,
   destinations,
+  promotionOptions = [],
   integrationMap,
   destinationByPixel,
   selectedEventId,
@@ -156,6 +157,7 @@ export function ConversionEventsTab({
 }: {
   integrations: ConversionIntegration[];
   destinations: ConversionDestination[];
+  promotionOptions?: ConversionPromotionOption[];
   integrationMap: Map<string, ConversionIntegration>;
   destinationByPixel: Map<string, ConversionDestination>;
   selectedEventId: string | null;
@@ -404,9 +406,11 @@ export function ConversionEventsTab({
       });
     }
     if (committed.promotionId.trim()) {
+      const pid = committed.promotionId.trim();
+      const matchedPromo = promotionOptions.find((p) => String(p.id) === pid);
       chips.push({
         key: 'promotionId',
-        label: `推广链: ${committed.promotionId.trim()}`,
+        label: `推广链: ${matchedPromo ? `#${matchedPromo.id} ${matchedPromo.name}` : pid}`,
         onClear: () => {
           setDraft((prev) => ({ ...prev, promotionId: '' }));
           commitFilters({ ...committed, promotionId: '' });
@@ -429,7 +433,7 @@ export function ConversionEventsTab({
       });
     }
     return chips;
-  }, [committed, draft, integrationMap, commitFilters]);
+  }, [committed, draft, integrationMap, promotionOptions, commitFilters]);
 
   const columnOptions: ColumnOption[] = [
     { key: 'promotion_id', label: '推广链 ID', visible: visibleCols.promotion_id },
@@ -594,14 +598,33 @@ export function ConversionEventsTab({
                   </div>
 
                   <label className="block space-y-1">
-                    <span className="block text-[var(--cms-muted-fg)]">推广链 ID</span>
-                    <input
-                      type="text"
-                      className="input-field font-mono-code"
-                      placeholder="输入 promotion_id..."
-                      value={draft.promotionId}
-                      onChange={(e) => setDraft((prev) => ({ ...prev, promotionId: e.target.value }))}
-                    />
+                    <span className="block text-[var(--cms-muted-fg)]">推广链接</span>
+                    {promotionOptions.length > 0 ? (
+                      <CustomSelect
+                        aria-label="筛选推广链接"
+                        width="100%"
+                        value={draft.promotionId}
+                        onChange={(val) => setDraft((prev) => ({ ...prev, promotionId: val }))}
+                        options={[
+                          { value: '', label: '全部推广链接' },
+                          ...(draft.promotionId && !promotionOptions.some((p) => String(p.id) === draft.promotionId)
+                            ? [{ value: draft.promotionId, label: `推广链接 #${draft.promotionId}` }]
+                            : []),
+                          ...promotionOptions.map((p) => ({
+                            value: String(p.id),
+                            label: `#${p.id} · ${p.name || '未命名'}${p.novel_title ? ` (${p.novel_title})` : ''}`,
+                          })),
+                        ]}
+                      />
+                    ) : (
+                      <input
+                        type="text"
+                        className="input-field font-mono-code"
+                        placeholder="输入 promotion_id..."
+                        value={draft.promotionId}
+                        onChange={(e) => setDraft((prev) => ({ ...prev, promotionId: e.target.value }))}
+                      />
+                    )}
                   </label>
 
                   <label className="block space-y-1">

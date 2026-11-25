@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"star-novel-cms/internal/auth"
 	"star-novel-cms/internal/db"
 )
 
@@ -60,14 +61,17 @@ func saveAftercarePolicy(ctx context.Context, id int64, actor string, input afte
 		return err
 	}
 	defer tx.Rollback(context.WithoutCancel(ctx))
-	if err := requireSuperAdminTx(ctx, tx, actor); err != nil {
+	if err := requirePermissionTx(ctx, tx, actor, errCaseForbidden, auth.PermPaymentsChannelsWrite); err != nil {
 		return err
 	}
-	for _, owner := range []string{input.ReviewerID, input.FinanceID} {
-		if owner != "" {
-			if err := lockCaseOperator(ctx, tx, owner); err != nil {
-				return err
-			}
+	if input.ReviewerID != "" {
+		if err := requirePermissionTx(ctx, tx, input.ReviewerID, errCaseForbidden, auth.PermPaymentsRiskWrite); err != nil {
+			return err
+		}
+	}
+	if input.FinanceID != "" {
+		if err := requirePermissionTx(ctx, tx, input.FinanceID, errCaseForbidden, auth.PermPaymentsDisputesWrite, auth.PermPaymentsRefundsWrite); err != nil {
+			return err
 		}
 	}
 	var accountID int64

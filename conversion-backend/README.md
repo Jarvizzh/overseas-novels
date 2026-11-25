@@ -1,6 +1,6 @@
 # Star Novel 转化服务
 
-转化服务消费 Reader 事务 Outbox，创建统一事件与各 Pixel 投递任务。迁移由 CMS 的 `-migrate` 入口管理，启动时要求 schema `2026111934`。应用架构、实施顺序与验收标准见 [统一转化回传架构升级与开发文档](../docs/conversion-reporting-architecture.md)。
+转化服务消费 Reader 事务 Outbox，创建统一事件与各 Pixel 投递任务。迁移由 CMS 的 `-migrate` 入口管理，启动时要求 schema `2026111935`。应用架构、实施顺序与验收标准见 [统一转化回传架构升级与开发文档](../docs/conversion-reporting-architecture.md)。
 
 从本目录运行 `go run ./cmd/conversion`。配置如下。
 
@@ -74,7 +74,7 @@ psql -X -f cms-backend/db/conversion_sinan_mock_grants.sql \
 ```
 
 1. 在 CMS 接入配置中新增 `source=sinan`、`contract_version=sinan-mock-v1` 的测试账户，填写账户键、允许的应用和事件类型。事件类型使用 `attribution-succeeded`、`order-created`、`recharge-paid`。绑定允许的 Pixel，勾选「附加目标」的 Pixel 还须出现在对应应用的 `app_pixels` 中。
-2. 在独立测试 API 上，由 Admin 或 SuperAdmin 调用 `PUT /internal/conversion/integrations/{id}/sinan-mock`。凭据由私网 API 加密保存，审计保留配置和凭据是否轮换。首次配置提供测试回调 Bearer Token 和 Base64 编码的 32 字节 Ed25519 seed。后续配置可省略任一凭据以沿用现有值。请求体从受控文件或部署密钥注入。
+2. 在独立测试 API 上，由具备 `ads.pixels:write` 权限的启用管理员调用 `PUT /internal/conversion/integrations/{id}/sinan-mock`。凭据由私网 API 加密保存，审计保留配置和凭据是否轮换。首次配置提供测试回调 Bearer Token 和 Base64 编码的 32 字节 Ed25519 seed。后续配置可省略任一凭据以沿用现有值。请求体从受控文件或部署密钥注入。
 3. 启动 `conversion --mode=callback`。设置 `CONVERSION_SINAN_MOCK_ENABLED=true` 和密钥配置。入口默认 `127.0.0.1:8093`，可通过 `CONVERSION_CALLBACK_ADDR` 换成其他回环地址。启动 `--mode=worker` 归一化 Inbox。模拟验收保持 `CONVERSION_META_ENABLED=false`，使用自动测试中的 Meta 接收证据。
 4. 独立启动 `conversion --mode=partner-worker`。沿用测试环境及密钥，设置 `CONVERSION_PARTNER_REPORT_ENABLED=true` 开启回告发送。回告目标使用同一网络命名空间内的回环 IP。队列和租约独立于 Meta。Collector 监测 `normalize_inbox`、`partner_report` 心跳、回告阻塞和结果未知。
 

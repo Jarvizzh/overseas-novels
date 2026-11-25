@@ -14,6 +14,7 @@ import {
 import { CmsDialog } from '../components/ui/CmsDialog';
 import CustomSelect from '../components/CustomSelect';
 import { PaymentLoadError, PaymentScopeBar, PaymentTabs } from '../components/payments/PaymentWorkspace';
+import { usePermission } from '../context/PermissionContext';
 import {
   PAYMENT_PAGE_SIZE,
   paymentMoney,
@@ -334,7 +335,19 @@ function DetailFields({ fields }: { fields: [string, string][] }) {
   );
 }
 
-function ReconciliationDetail({ entry, onOperate }: { entry: Entry; onOperate: (value: SettlementOrigin) => void }) {
+function ReconciliationDetail({
+  entry,
+  canWrite,
+  canReadOrders,
+  canReadDisputes,
+  onOperate,
+}: {
+  entry: Entry;
+  canWrite: boolean;
+  canReadOrders: boolean;
+  canReadDisputes: boolean;
+  onOperate: (value: SettlementOrigin) => void;
+}) {
   switch (entry.view) {
     case 'movements': {
       const row = entry.row;
@@ -352,15 +365,16 @@ function ReconciliationDetail({ entry, onOperate }: { entry: Entry; onOperate: (
           />
           {row.review_required && <StatusDot tone="warning" label="证据待核对" />}
           <div className="flex flex-wrap gap-2">
-            {row.order_ids.map((id) => (
-              <Link
-                key={id}
-                className="btn-detail"
-                to={`/payments/orders?${paymentParams({ order_id: id, environment: row.environment, provider: row.provider })}`}
-              >
-                订单 #{id}
-              </Link>
-            ))}
+            {canReadOrders &&
+              row.order_ids.map((id) => (
+                <Link
+                  key={id}
+                  className="btn-detail"
+                  to={`/payments/orders?${paymentParams({ order_id: id, environment: row.environment, provider: row.provider })}`}
+                >
+                  订单 #{id}
+                </Link>
+              ))}
             {row.payouts.map((payout) => (
               <Link
                 key={payout.id}
@@ -377,7 +391,7 @@ function ReconciliationDetail({ entry, onOperate }: { entry: Entry; onOperate: (
               <ul className="mt-2 space-y-1">
                 {row.refs.map((ref) => (
                   <li key={`${ref.type}/${ref.id}`}>
-                    {['stripe_dispute', 'paypal_reversal'].includes(ref.type) ? (
+                    {canReadDisputes && ['stripe_dispute', 'paypal_reversal'].includes(ref.type) ? (
                       <Link
                         className="btn-detail"
                         to={`/payments/disputes?${paymentParams({
@@ -436,7 +450,7 @@ function ReconciliationDetail({ entry, onOperate }: { entry: Entry; onOperate: (
             <Link className="btn-secondary" to={reconciliationLink('movements', row, { payout_id: row.id })}>
               查看批次流水
             </Link>
-            {row.status !== 'matched' && (
+            {canWrite && row.status !== 'matched' && (
               <button
                 type="button"
                 className="btn-primary"
@@ -479,7 +493,7 @@ function ReconciliationDetail({ entry, onOperate }: { entry: Entry; onOperate: (
               查看关联流水
             </Link>
           )}
-          {kind && (
+          {canWrite && kind && (
             <button
               className="btn-secondary"
               type="button"
@@ -613,7 +627,12 @@ const reconciliationFilters = {
   differences_only: '',
 };
 
-export default function PaymentReconciliation({ actor }: { actor: string }) {
+export default function PaymentReconciliation({ actor }: { actor?: string }) {
+  const { admin, canRead, canWrite } = usePermission();
+  const effectiveActor = actor || admin?.id || '';
+  const canWriteRecon = canWrite('payments.reconciliation');
+  const canReadOrders = canRead('payments.orders');
+  const canReadDisputes = canRead('payments.disputes');
   const [params, setParams] = useSearchParams();
   const view = tabs.find((tab) => tab.value === params.get('view'))?.value ?? 'movements';
   const scope = paymentScope(params);
@@ -747,14 +766,14 @@ export default function PaymentReconciliation({ actor }: { actor: string }) {
       />
       <SettlementCommands
         key={`${scope.environment}/${scope.provider}/${scope.account_id}`}
-        actor={actor}
+        actor={effectiveActor}
         scope={scope}
         history={view === 'commands'}
         page={page}
         onPageChange={(value) => {
           if (view === 'commands') update({ page: String(value) }, false);
         }}
-        origin={origin}
+        origin={canWriteRecon ? origin : undefined}
         onOriginClose={() => setOrigin(undefined)}
         onSettled={() => setRetry((value) => value + 1)}
       />
@@ -899,7 +918,15 @@ export default function PaymentReconciliation({ actor }: { actor: string }) {
         variant="drawer"
         size="lg"
       >
-        {entry && <ReconciliationDetail entry={entry} onOperate={setOrigin} />}
+        {entry && (
+          <ReconciliationDetail
+            entry={entry}
+            canWrite={canWriteRecon}
+            canReadOrders={canReadOrders}
+            canReadDisputes={canReadDisputes}
+            onOperate={setOrigin}
+          />
+        )}
         {detailId &&
           !entry &&
           (detail?.error ? (

@@ -21,6 +21,10 @@ func (s Service) ConfigureSinanMock(ctx context.Context, actor Operator, id int6
 	if s.Environment != "test" || id <= 0 || !json.Valid(input.Config) {
 		return OperationResult{}, ErrInvalidOperation
 	}
+	actor, err := requireBusinessPermission(actor, PermissionAdsPixelsWrite)
+	if err != nil {
+		return OperationResult{}, err
+	}
 	return s.operate(ctx, actor, reason, func(tx pgx.Tx, operator Operator, reason string) (OperationResult, error) {
 		var inbound, report *int64
 		var before json.RawMessage

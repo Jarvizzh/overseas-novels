@@ -72,7 +72,7 @@ func Open(t *testing.T) *pgxpool.Pool {
 
 func applyMigrations(t *testing.T, pool *pgxpool.Pool, schema, cmsDB string) {
 	t.Helper()
-	for _, version := range []string{"2026111702", "2026111703", "2026111704", "2026111901", "2026111902", "2026111903", "2026111904", "2026111905", "2026111906", "2026111907", "2026111908", "2026111909", "2026111910", "2026111911", "2026111912", "2026111913", "2026111914", "2026111915", "2026111916", "2026111917", "2026111918", "2026111919", "2026111920", "2026111921", "2026111922", "2026111923", "2026111924", "2026111925", "2026111926", "2026111927", "2026111928", "2026111929", "2026111930", "2026111931", "2026111932", "2026111933", "2026111934"} {
+	for _, version := range []string{"2026111702", "2026111703", "2026111704", "2026111901", "2026111902", "2026111903", "2026111904", "2026111905", "2026111906", "2026111907", "2026111908", "2026111909", "2026111910", "2026111911", "2026111912", "2026111913", "2026111914", "2026111915", "2026111916", "2026111917", "2026111918", "2026111919", "2026111920", "2026111921", "2026111922", "2026111923", "2026111924", "2026111925", "2026111926", "2026111927", "2026111928", "2026111929", "2026111930", "2026111931", "2026111932", "2026111933", "2026111934", "2026111935"} {
 		sql, err := os.ReadFile(filepath.Join(cmsDB, "migrations", version+".sql"))
 		if err != nil {
 			t.Fatal(err)
@@ -80,7 +80,7 @@ func applyMigrations(t *testing.T, pool *pgxpool.Pool, schema, cmsDB string) {
 		migration := string(sql)
 		if version >= "2026111901" {
 			// Preserve schema isolation for tests that share a database.
-			migration = strings.NewReplacer("CREATE SCHEMA conversion;", "CREATE SCHEMA "+schema+"_conversion;", "conversion.", schema+"_conversion.", "public.admins", schema+".admins", "public.recharge_orders", schema+".recharge_orders", "public.payment_event_outbox", schema+".payment_event_outbox",
+			migration = strings.NewReplacer("CREATE SCHEMA conversion;", "CREATE SCHEMA "+schema+"_conversion;", "conversion.", schema+"_conversion.", "public.admins", schema+".admins", "public.roles", schema+".roles", "public.role_permissions", schema+".role_permissions", "public.admin_has_permission", schema+".admin_has_permission", "public.recharge_orders", schema+".recharge_orders", "public.payment_event_outbox", schema+".payment_event_outbox",
 				"public.promotion_links", schema+".promotion_links", "public.fb_pixels", schema+".fb_pixels",
 				"public.user_subscriptions", schema+".user_subscriptions",
 				"public.paypal_subscription_intents", schema+".paypal_subscription_intents",
@@ -98,6 +98,47 @@ func applyMigrations(t *testing.T, pool *pgxpool.Pool, schema, cmsDB string) {
 		if _, err := pool.Exec(context.Background(), migration); err != nil {
 			t.Fatal(err)
 		}
+	}
+	// Route schema-qualified public.admin_has_permission calls to the connection's isolated test schema.
+	if _, err := pool.Exec(context.Background(), `
+		DO $$
+		BEGIN
+			PERFORM pg_advisory_xact_lock(2026111935);
+			CREATE OR REPLACE FUNCTION public.admin_has_permission(p_admin_id text, p_permission text)
+			RETURNS boolean
+			LANGUAGE plpgsql STABLE AS $fn$
+			DECLARE
+				allowed boolean;
+				target_schema text := current_schema();
+			BEGIN
+				IF target_schema IS NULL OR target_schema = 'public' THEN
+					RETURN EXISTS (
+						SELECT 1
+						FROM public.admins a
+						JOIN public.roles r ON r.id = a.role_id
+						WHERE a.id = p_admin_id
+						  AND a.status = 1
+						  AND r.status = 1
+						  AND (
+							  r.is_super_admin = TRUE
+							  OR EXISTS (
+								  SELECT 1
+								  FROM public.role_permissions rp
+								  WHERE rp.role_id = r.id
+								    AND rp.permission_code = p_permission
+							  )
+						  )
+					);
+				END IF;
+				EXECUTE format('SELECT %I.admin_has_permission($1, $2)', target_schema)
+				INTO allowed
+				USING p_admin_id, p_permission;
+				RETURN allowed;
+			END
+			$fn$;
+		END
+		$$;`); err != nil {
+		t.Fatal(err)
 	}
 }
 

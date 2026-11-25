@@ -5,24 +5,31 @@ import (
 	"errors"
 	"strconv"
 
+	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5"
+	"star-novel-cms/internal/auth"
 )
 
-func requireFinancialAdmin(ctx context.Context, tx pgx.Tx, adminID string) error {
-	if adminID == "" {
-		return ErrRefundForbidden
-	}
-	var role string
-	var status int
-	err := tx.QueryRow(ctx, `SELECT role,status FROM admins WHERE id=$1 FOR SHARE`, adminID).Scan(&role, &status)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return ErrRefundForbidden
-	}
-	if err != nil {
+func requirePermissionTx(ctx context.Context, tx pgx.Tx, adminID string, forbiddenErr error, perms ...string) error {
+	if err := auth.RequirePermissionTx(ctx, tx, adminID, perms...); err != nil {
+		if errors.Is(err, auth.ErrAccountInactive) || errors.Is(err, auth.ErrPermissionDenied) {
+			return forbiddenErr
+		}
 		return err
 	}
-	if status != 1 || (role != "Finance" && role != "SuperAdmin") {
-		return ErrRefundForbidden
+	return nil
+}
+
+func verifyContextPermissions(c *gin.Context, forbiddenErr error, perms ...string) error {
+	principal, err := resolvePrincipal(c)
+	if err != nil {
+		if errors.Is(err, auth.ErrAccountInactive) {
+			return forbiddenErr
+		}
+		return err
+	}
+	if !principal.HasAllPermissions(perms...) {
+		return forbiddenErr
 	}
 	return nil
 }
@@ -32,7 +39,7 @@ func (s *billingService) beginTemplateChange(ctx context.Context, adminID string
 	if err != nil {
 		return nil, err
 	}
-	if err := requireFinancialAdmin(ctx, tx, adminID); err != nil {
+	if err := requirePermissionTx(ctx, tx, adminID, ErrRefundForbidden, auth.PermAdsTemplatesWrite); err != nil {
 		tx.Rollback(context.WithoutCancel(ctx))
 		return nil, err
 	}

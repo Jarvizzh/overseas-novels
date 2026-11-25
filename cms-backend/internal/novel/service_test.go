@@ -393,8 +393,29 @@ func (r *fakeNovelRepo) UpdatePromotionLinkURL(_ context.Context, id int, genera
 func (r *fakeNovelRepo) UpdatePromotionLink(context.Context, int, string, int, string, string, string, *int, *int, *int, *int, *int, string) error {
 	return nil
 }
-func (r *fakeNovelRepo) DeletePromotionLink(context.Context, int) error       { return nil }
-func (r *fakeNovelRepo) ListFBPixels(context.Context) ([]FBPixel, error)      { return nil, nil }
+func (r *fakeNovelRepo) DeletePromotionLink(context.Context, int) error  { return nil }
+func (r *fakeNovelRepo) ListFBPixels(context.Context) ([]FBPixel, error) { return nil, nil }
+func (r *fakeNovelRepo) ListPublishedNovelOptionsForPromo(context.Context) ([]PromotionLinkNovelOption, error) {
+	out := make([]PromotionLinkNovelOption, 0)
+	for _, n := range r.novels {
+		if n.Status == "archived" || n.PublishStatus != "published" {
+			continue
+		}
+		out = append(out, PromotionLinkNovelOption{
+			ID:                   n.ID,
+			Title:                n.Title,
+			CoinCostPerThousand:  n.CoinCostPerThousand,
+			StartPayChapterIndex: n.StartPayChapterIndex,
+		})
+	}
+	return out, nil
+}
+func (r *fakeNovelRepo) ListLiveTemplateOptionsForPromo(context.Context) ([]PromotionLinkTemplateOption, error) {
+	return []PromotionLinkTemplateOption{}, nil
+}
+func (r *fakeNovelRepo) ListActiveDomainOptionsForPromo(context.Context) ([]PromotionLinkDomainOption, error) {
+	return []PromotionLinkDomainOption{}, nil
+}
 func (r *fakeNovelRepo) CreateFBPixel(context.Context, *FBPixel) (int, error) { return 0, nil }
 func (r *fakeNovelRepo) UpdateFBPixel(context.Context, int, string, string, string) error {
 	return nil
@@ -734,12 +755,36 @@ func TestBulkImportOSSAtomicRollbackAndSettingsPropagation(t *testing.T) {
 	}
 }
 
+func stubNovelPrincipals(t *testing.T, principals map[string]*auth.Principal) {
+	t.Helper()
+	restore := auth.SetPrincipalLoaderForTest(func(_ context.Context, adminID string) (*auth.Principal, error) {
+		p, ok := principals[adminID]
+		if !ok || p == nil || !p.IsActive() {
+			return nil, auth.ErrAccountInactive
+		}
+		return p, nil
+	})
+	t.Cleanup(restore)
+}
+
 func TestHandlerRBACAndBulkImportLimit(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	config.AppConfig = &config.Config{JWTSecret: "unit-test-secret"}
 
+	stubNovelPrincipals(t, map[string]*auth.Principal{
+		"dash-only":     auth.NewPrincipal("dash-only", "dash", "Dash", 10, "Dash", "仅总览", false, auth.StatusActive, auth.StatusActive, []string{auth.PermDashboardRead}),
+		"novel-reader":  auth.NewPrincipal("novel-reader", "nr", "NR", 3, "AdOptimizer", "优化师", false, auth.StatusActive, auth.StatusActive, []string{auth.PermContentNovelsRead}),
+		"novel-writer":  auth.NewPrincipal("novel-writer", "nw", "NW", 4, "ContentOperations", "内容运营", false, auth.StatusActive, auth.StatusActive, []string{auth.PermContentNovelsWrite}),
+		"promo-reader":  auth.NewPrincipal("promo-reader", "pr", "PR", 11, "PromoRead", "推广只读", false, auth.StatusActive, auth.StatusActive, []string{auth.PermAdsPromotionsRead}),
+		"promo-writer":  auth.NewPrincipal("promo-writer", "pw", "PW", 12, "PromoWrite", "推广读写", false, auth.StatusActive, auth.StatusActive, []string{auth.PermAdsPromotionsWrite}),
+		"pixels-reader": auth.NewPrincipal("pixels-reader", "px", "PX", 13, "PixelsRead", "像素只读", false, auth.StatusActive, auth.StatusActive, []string{auth.PermAdsPixelsRead}),
+	})
+
 	repo := newFakeNovelRepo()
-	repo.novels[10000001] = &Novel{ID: 10000001, Title: "Book", Author: "A", CoverURL: "oss://covers/2026/11/abc.png", Status: "Ongoing", PublishStatus: "draft"}
+	repo.settings["global_coin_cost_per_thousand"] = "500"
+	repo.settings["global_start_pay_chapter_index"] = "3"
+	repo.novels[10000001] = &Novel{ID: 10000001, Title: "Draft Book", Author: "A", CoverURL: "oss://covers/2026/11/abc.png", Status: "Ongoing", PublishStatus: "draft"}
+	repo.novels[10000002] = &Novel{ID: 10000002, Title: "Live Book", Author: "B", CoverURL: "oss://covers/2026/11/abc.png", Status: "Ongoing", PublishStatus: "published", StartPayChapterIndex: 4}
 	svc := NewNovelService(repo, nil, fakeCoverStore{})
 	h := NewHandler(svc)
 
@@ -747,33 +792,110 @@ func TestHandlerRBACAndBulkImportLimit(t *testing.T) {
 	api := r.Group("/api/v1/admin")
 	h.RegisterRoutes(api)
 
-	buyerToken, _ := auth.GenerateToken("buyer-1", "MediaBuyer")
-	editorToken, _ := auth.GenerateToken("editor-1", "Editor")
+	tokenFor := func(id string) string {
+		tok, err := auth.GenerateToken(id, "Any")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return tok
+	}
 
-	// MediaBuyer can read novels list but cannot delete novel or change settings
+	// dashboard:read and ads.promotions:read MUST NOT access novels/chapters/settings
+	for _, id := range []string{"dash-only", "promo-reader"} {
+		for _, path := range []string{"/api/v1/admin/novels", "/api/v1/admin/novels/10000002", "/api/v1/admin/novels/10000002/chapters", "/api/v1/admin/settings"} {
+			req := httptest.NewRequest(http.MethodGet, path, nil)
+			req.Header.Set("Authorization", "Bearer "+tokenFor(id))
+			w := httptest.NewRecorder()
+			r.ServeHTTP(w, req)
+			if w.Code != http.StatusForbidden {
+				t.Fatalf("expected %s GET %s=403, got %d", id, path, w.Code)
+			}
+		}
+	}
+
+	// content.novels:read can read novels/settings, cannot delete, write settings, or read chapter identities
 	reqRead := httptest.NewRequest(http.MethodGet, "/api/v1/admin/novels", nil)
-	reqRead.Header.Set("Authorization", "Bearer "+buyerToken)
+	reqRead.Header.Set("Authorization", "Bearer "+tokenFor("novel-reader"))
 	wRead := httptest.NewRecorder()
 	r.ServeHTTP(wRead, reqRead)
 	if wRead.Code != http.StatusOK {
-		t.Fatalf("expected MediaBuyer GET /novels=200, got %d: %s", wRead.Code, wRead.Body.String())
+		t.Fatalf("expected novel-reader GET /novels=200, got %d: %s", wRead.Code, wRead.Body.String())
 	}
 
 	reqDel := httptest.NewRequest(http.MethodDelete, "/api/v1/admin/novels/10000001", nil)
-	reqDel.Header.Set("Authorization", "Bearer "+buyerToken)
+	reqDel.Header.Set("Authorization", "Bearer "+tokenFor("novel-reader"))
 	wDel := httptest.NewRecorder()
 	r.ServeHTTP(wDel, reqDel)
 	if wDel.Code != http.StatusForbidden {
-		t.Fatalf("expected MediaBuyer DELETE /novels=403, got %d", wDel.Code)
+		t.Fatalf("expected novel-reader DELETE /novels=403, got %d", wDel.Code)
 	}
 
-	reqSettings := httptest.NewRequest(http.MethodPost, "/api/v1/admin/settings", strings.NewReader(`{"global_coin_cost_per_thousand":"500"}`))
-	reqSettings.Header.Set("Authorization", "Bearer "+editorToken)
-	reqSettings.Header.Set("Content-Type", "application/json")
-	wSettings := httptest.NewRecorder()
-	r.ServeHTTP(wSettings, reqSettings)
-	if wSettings.Code != http.StatusForbidden {
-		t.Fatalf("expected Editor POST /settings=403, got %d", wSettings.Code)
+	reqIdents := httptest.NewRequest(http.MethodGet, "/api/v1/admin/novels/10000002/chapters/identities", nil)
+	reqIdents.Header.Set("Authorization", "Bearer "+tokenFor("novel-reader"))
+	wIdents := httptest.NewRecorder()
+	r.ServeHTTP(wIdents, reqIdents)
+	if wIdents.Code != http.StatusForbidden {
+		t.Fatalf("expected novel-reader GET /chapters/identities=403, got %d", wIdents.Code)
+	}
+
+	reqSettingsForbidden := httptest.NewRequest(http.MethodPost, "/api/v1/admin/settings", strings.NewReader(`{"global_coin_cost_per_thousand":"500"}`))
+	reqSettingsForbidden.Header.Set("Authorization", "Bearer "+tokenFor("novel-reader"))
+	reqSettingsForbidden.Header.Set("Content-Type", "application/json")
+	wSettingsForbidden := httptest.NewRecorder()
+	r.ServeHTTP(wSettingsForbidden, reqSettingsForbidden)
+	if wSettingsForbidden.Code != http.StatusForbidden {
+		t.Fatalf("expected novel-reader POST /settings=403, got %d", wSettingsForbidden.Code)
+	}
+
+	// content.novels:write can update settings
+	reqSettingsOK := httptest.NewRequest(http.MethodPost, "/api/v1/admin/settings", strings.NewReader(`{"global_coin_cost_per_thousand":"500"}`))
+	reqSettingsOK.Header.Set("Authorization", "Bearer "+tokenFor("novel-writer"))
+	reqSettingsOK.Header.Set("Content-Type", "application/json")
+	wSettingsOK := httptest.NewRecorder()
+	r.ServeHTTP(wSettingsOK, reqSettingsOK)
+	if wSettingsOK.Code != http.StatusOK {
+		t.Fatalf("expected novel-writer POST /settings=200, got %d: %s", wSettingsOK.Code, wSettingsOK.Body.String())
+	}
+
+	// ads.promotions:read can fetch GET /promotion-links/options (only published novels) but cannot create
+	reqPromoOpts := httptest.NewRequest(http.MethodGet, "/api/v1/admin/promotion-links/options", nil)
+	reqPromoOpts.Header.Set("Authorization", "Bearer "+tokenFor("promo-reader"))
+	wPromoOpts := httptest.NewRecorder()
+	r.ServeHTTP(wPromoOpts, reqPromoOpts)
+	if wPromoOpts.Code != http.StatusOK {
+		t.Fatalf("expected promo-reader GET /promotion-links/options=200, got %d: %s", wPromoOpts.Code, wPromoOpts.Body.String())
+	}
+	var opts PromotionLinkOptions
+	if err := json.Unmarshal(wPromoOpts.Body.Bytes(), &opts); err != nil {
+		t.Fatalf("unmarshal promotion options: %v", err)
+	}
+	if len(opts.Novels) != 1 || opts.Novels[0].ID != 10000002 || opts.GlobalCoinCostPerThousand != 500 || opts.Defaults.GlobalStartPayChapterIndex != 3 {
+		t.Fatalf("unexpected promotion options: %+v", opts)
+	}
+
+	reqPromoCreate := httptest.NewRequest(http.MethodPost, "/api/v1/admin/promotion-links", strings.NewReader(`{}`))
+	reqPromoCreate.Header.Set("Authorization", "Bearer "+tokenFor("promo-reader"))
+	reqPromoCreate.Header.Set("Content-Type", "application/json")
+	wPromoCreate := httptest.NewRecorder()
+	r.ServeHTTP(wPromoCreate, reqPromoCreate)
+	if wPromoCreate.Code != http.StatusForbidden {
+		t.Fatalf("expected promo-reader POST /promotion-links=403, got %d", wPromoCreate.Code)
+	}
+
+	// GET /fb-pixels requires ads.pixels:read
+	reqPxForb := httptest.NewRequest(http.MethodGet, "/api/v1/admin/fb-pixels", nil)
+	reqPxForb.Header.Set("Authorization", "Bearer "+tokenFor("promo-writer"))
+	wPxForb := httptest.NewRecorder()
+	r.ServeHTTP(wPxForb, reqPxForb)
+	if wPxForb.Code != http.StatusForbidden {
+		t.Fatalf("expected promo-writer GET /fb-pixels=403, got %d", wPxForb.Code)
+	}
+	reqPxOK := httptest.NewRequest(http.MethodGet, "/api/v1/admin/fb-pixels", nil)
+	reqPxOK.Header.Set("Authorization", "Bearer "+tokenFor("pixels-reader"))
+	wPxOK := httptest.NewRecorder()
+	r.ServeHTTP(wPxOK, reqPxOK)
+	if wPxOK.Code != http.StatusOK {
+		t.Fatalf("expected pixels-reader GET /fb-pixels=200, got %d", wPxOK.Code)
 	}
 }
 
@@ -911,8 +1033,13 @@ func TestListNovelsFiltersAndBatchPublishStatus(t *testing.T) {
 	r := gin.New()
 	h.RegisterRoutes(r.Group("/api/v1/admin"))
 
-	buyerToken, _ := auth.GenerateToken("buyer-1", "MediaBuyer")
-	editorToken, _ := auth.GenerateToken("editor-1", "Editor")
+	stubNovelPrincipals(t, map[string]*auth.Principal{
+		"buyer-1":  auth.NewPrincipal("buyer-1", "buyer", "Buyer", 3, "AdOptimizer", "优化师", false, auth.StatusActive, auth.StatusActive, []string{auth.PermContentNovelsRead}),
+		"editor-1": auth.NewPrincipal("editor-1", "editor", "Editor", 4, "ContentOperations", "内容运营", false, auth.StatusActive, auth.StatusActive, []string{auth.PermContentNovelsWrite}),
+	})
+
+	buyerToken, _ := auth.GenerateToken("buyer-1", "AdOptimizer")
+	editorToken, _ := auth.GenerateToken("editor-1", "ContentOperations")
 
 	// Structured filters on GET /novels build expected SQL predicates
 	reqFilter := httptest.NewRequest(http.MethodGet, "/api/v1/admin/novels?title_or_id=Alpha&author=WriterA&publish_status=draft&created_start=2026-11-01&created_end=2026-11-17", nil)
@@ -1005,8 +1132,13 @@ func TestBatchImportNovelsEndpoint(t *testing.T) {
 	r := gin.New()
 	h.RegisterRoutes(r.Group("/api/v1/admin"))
 
-	buyerToken, _ := auth.GenerateToken("buyer-1", "MediaBuyer")
-	editorToken, _ := auth.GenerateToken("editor-1", "Editor")
+	stubNovelPrincipals(t, map[string]*auth.Principal{
+		"buyer-1":  auth.NewPrincipal("buyer-1", "buyer", "Buyer", 3, "AdOptimizer", "优化师", false, auth.StatusActive, auth.StatusActive, []string{auth.PermContentNovelsRead}),
+		"editor-1": auth.NewPrincipal("editor-1", "editor", "Editor", 4, "ContentOperations", "内容运营", false, auth.StatusActive, auth.StatusActive, []string{auth.PermContentNovelsWrite}),
+	})
+
+	buyerToken, _ := auth.GenerateToken("buyer-1", "AdOptimizer")
+	editorToken, _ := auth.GenerateToken("editor-1", "ContentOperations")
 
 	buildReq := func(manifestJSON string, files map[string][]byte, filenames map[string]string, token string) *http.Request {
 		var body bytes.Buffer

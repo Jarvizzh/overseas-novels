@@ -4,6 +4,7 @@ import { PaymentLoadError } from '../components/payments/PaymentWorkspace';
 import { CmsDialog } from '../components/ui/CmsDialog';
 import { Pagination } from '../components/ui/Pagination';
 import { SkeletonRows, StatusDot, TableRegion } from '../components/ui/Primitives';
+import { usePermission } from '../context/PermissionContext';
 import { ApiError, apiRequest } from '../utils/api';
 import {
   readSettlementDraft,
@@ -431,6 +432,8 @@ export function SettlementCommands({
   onOriginClose: () => void;
   onSettled: () => void;
 }) {
+  const { canWrite } = usePermission();
+  const canWriteRecon = canWrite('payments.reconciliation');
   const [kind, setKind] = useState<Kind>();
   const [draft, setDraft] = useState(() => readSettlementDraft(actor));
   const currentOrigin = useRef<SettlementOrigin | undefined>(undefined);
@@ -495,7 +498,7 @@ export function SettlementCommands({
   }, [draft, origin, onOriginClose]);
 
   useEffect(() => {
-    if (!draft || kind || (origin && origin === currentOrigin.current) || resume) return;
+    if (!canWriteRecon || !draft || kind || (origin && origin === currentOrigin.current) || resume) return;
     const controller = new AbortController();
     void paymentGet<Command>(`${base}/commands/request/${encodeURIComponent(draft.key)}`, controller.signal)
       .then((command) => {
@@ -513,7 +516,7 @@ export function SettlementCommands({
         });
       });
     return () => controller.abort();
-  }, [actor, draft, kind, origin, resume, lookupRevision]);
+  }, [actor, canWriteRecon, draft, kind, origin, resume, lookupRevision]);
 
   const recovered = resume && draft && Object.hasOwn(kinds, draft.kind) ? draft : undefined;
   const recoveredOrigin: SettlementOrigin | undefined =
@@ -534,32 +537,34 @@ export function SettlementCommands({
   const lookupState = draft && lookup?.key === draft.key ? lookup.state : undefined;
   return (
     <div className="space-y-3">
-      <div className="flex flex-wrap items-center gap-2">
-        {provider === 'paypal' && (
-          <button className="btn-secondary" disabled={Boolean(draft)} onClick={() => setKind('paypal_report')}>
-            导入 PayPal 报表分卷
-          </button>
-        )}
-        {provider === 'stripe' && (
-          <>
-            <button className="btn-secondary" disabled={Boolean(draft)} onClick={() => setKind('stripe_payout')}>
-              拉取 Stripe 划拨
+      {canWriteRecon && (
+        <div className="flex flex-wrap items-center gap-2">
+          {provider === 'paypal' && (
+            <button className="btn-secondary" disabled={Boolean(draft)} onClick={() => setKind('paypal_report')}>
+              导入 PayPal 报表分卷
             </button>
-            <button className="btn-secondary" disabled={Boolean(draft)} onClick={() => setKind('stripe_report')}>
-              导入 Stripe 报表
-            </button>
-          </>
-        )}
-        <button className="btn-secondary" disabled={Boolean(draft)} onClick={() => setKind('bank_statement')}>
-          导入银行流水
-        </button>
-        {provider && (
-          <button className="btn-secondary" onClick={() => setAutomatic(true)}>
-            定期拉取设置
+          )}
+          {provider === 'stripe' && (
+            <>
+              <button className="btn-secondary" disabled={Boolean(draft)} onClick={() => setKind('stripe_payout')}>
+                拉取 Stripe 划拨
+              </button>
+              <button className="btn-secondary" disabled={Boolean(draft)} onClick={() => setKind('stripe_report')}>
+                导入 Stripe 报表
+              </button>
+            </>
+          )}
+          <button className="btn-secondary" disabled={Boolean(draft)} onClick={() => setKind('bank_statement')}>
+            导入银行流水
           </button>
-        )}
-      </div>
-      {draft && !activeKind && (
+          {provider && (
+            <button className="btn-secondary" onClick={() => setAutomatic(true)}>
+              定期拉取设置
+            </button>
+          )}
+        </div>
+      )}
+      {canWriteRecon && draft && !activeKind && (
         <div className="cms-card flex flex-wrap items-center justify-between gap-2 px-4 py-3 text-sm">
           <p role="status">
             {lookupState === 'missing'
@@ -701,7 +706,7 @@ export function SettlementCommands({
           </div>
         )}
       </CmsDialog>
-      {activeKind && (
+      {canWriteRecon && activeKind && (
         <SettlementForm
           key={activeKind}
           kind={activeKind}
@@ -737,7 +742,7 @@ export function SettlementCommands({
           }}
         />
       )}
-      {automatic && (
+      {canWriteRecon && automatic && (
         <AutomaticPull
           scope={scope}
           accounts={scopedAccounts}

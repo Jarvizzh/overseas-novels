@@ -3,7 +3,6 @@ package billing
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"regexp"
 	"slices"
@@ -12,6 +11,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5"
+	"star-novel-cms/internal/auth"
 	"star-novel-cms/internal/db"
 )
 
@@ -91,12 +91,7 @@ func saveStripeOneTimeOffer(ctx context.Context, account int64, slot int, actor 
 }
 
 func lockStripeOfferConfig(ctx context.Context, tx pgx.Tx, account int64, actor string) error {
-	var auth bool
-	err := tx.QueryRow(ctx, `SELECT true FROM admins WHERE id=$1 AND role='SuperAdmin' AND status=1 FOR SHARE`, actor).Scan(&auth)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return errCaseForbidden
-	}
-	if err != nil {
+	if err := requirePermissionTx(ctx, tx, actor, errCaseForbidden, auth.PermPaymentsProductsWrite, auth.PermPaymentsChannelsWrite); err != nil {
 		return err
 	}
 	var id int64

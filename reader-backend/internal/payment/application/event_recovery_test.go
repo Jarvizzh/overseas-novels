@@ -159,7 +159,7 @@ func TestPaymentEventRecoveryKeepsScopeAndPageAcrossLeases(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM payment_settlement_commands`).Scan(&commands); err != nil || commands != 0 {
 		t.Fatalf("disabled account accepted settlement command: %d %v", commands, err)
 	}
-	if _, err := pool.Exec(ctx, `INSERT INTO admins(id,username,password_hash,role,status) VALUES('ledger-event','ledger-event','test','Finance',1)`); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO admins(id,username,password_hash,role,role_id,status) VALUES('ledger-event','ledger-event','test','FinanceManager',(SELECT id FROM roles WHERE code='FinanceManager'),1)`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := pool.Exec(ctx, `INSERT INTO payment_ledger_sync_settings(account_id,actor_id,reason,enabled,window_start,window_end)

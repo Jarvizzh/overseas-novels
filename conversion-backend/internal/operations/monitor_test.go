@@ -54,7 +54,8 @@ func TestCollectorAndSummaryWithoutWorker(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/internal/conversion"+tt.route, nil)
 		req.Header.Set("Authorization", "Bearer fixture")
 		req.Header.Set("X-Operator-ID", "test-admin")
-		req.Header.Set("X-Operator-Role", "Finance")
+		req.Header.Set("X-Operator-Role", "FinanceManager")
+		req.Header.Set("X-Operator-Access", "read")
 		w := httptest.NewRecorder()
 		handler.ServeHTTP(w, req)
 		if w.Code != 200 || !strings.Contains(w.Body.String(), tt.body) {

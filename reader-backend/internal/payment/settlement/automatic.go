@@ -57,7 +57,7 @@ func (r *Repository) claimAutomaticLedgerPage(ctx context.Context, environment s
 	err := r.pool.QueryRow(ctx, `WITH due AS (
 		SELECT s.account_id,a.provider,a.account_key,a.environment FROM payment_ledger_sync_settings s
 		JOIN payment_channel_accounts a ON a.id=s.account_id
-		JOIN admins u ON u.id=s.actor_id AND u.status=1 AND u.role IN ('SuperAdmin','Finance')
+		JOIN admins u ON u.id = s.actor_id AND public.admin_has_permission(u.id, 'payments.reconciliation:write')
 		WHERE s.enabled AND a.environment=$1 AND s.next_attempt_at<=now() AND (s.lease_until IS NULL OR s.lease_until<=now())
 		ORDER BY s.next_attempt_at,s.account_id FOR UPDATE OF s SKIP LOCKED LIMIT 1
 	)

@@ -6,6 +6,7 @@ import { CmsDialog } from '../components/ui/CmsDialog';
 import { Pagination } from '../components/ui/Pagination';
 import { FilterChipsBar, SearchInput, SkeletonRows, StatusDot, TableRegion } from '../components/ui/Primitives';
 import { PaymentLoadError, PaymentScopeBar, PaymentTabs } from '../components/payments/PaymentWorkspace';
+import { usePermission } from '../context/PermissionContext';
 import { ApiError, apiRequest } from '../utils/api';
 import {
   PAYMENT_PAGE_SIZE,
@@ -79,12 +80,16 @@ function RefundReceipt({
   actor,
   order,
   receipt,
+  canWriteRefunds,
+  canReadDisputes,
   balanceRefreshing,
   onUpdated,
 }: {
   actor: string;
   order: string;
   receipt: Receipt;
+  canWriteRefunds: boolean;
+  canReadDisputes: boolean;
   balanceRefreshing: boolean;
   onUpdated: () => void;
 }) {
@@ -143,7 +148,7 @@ function RefundReceipt({
   }
 
   async function submit(request: RefundDraft, retry: boolean) {
-    if (lock.current) return;
+    if (!canWriteRefunds || lock.current) return;
     lock.current = true;
     setBusy(true);
     setError('');
@@ -187,7 +192,7 @@ function RefundReceipt({
   }
 
   async function reconcile() {
-    if (!reconciliation || lock.current) return;
+    if (!canWriteRefunds || !reconciliation || lock.current) return;
     lock.current = true;
     setBusy(true);
     setError('');
@@ -242,7 +247,7 @@ function RefundReceipt({
         {receipt.funds_entitlement ? '此收款用于履约' : '此收款未用于履约'}
         {receipt.note ? ` · ${receipt.note}` : ''}
       </p>
-      {receipt.environment && (
+      {canReadDisputes && receipt.environment && (
         <Link
           className="btn-detail"
           to={`/payments/disputes?${paymentParams({ provider: receipt.provider, environment: receipt.environment, account_id: receipt.account_id, order_id: order, receipt: receipt.receipt_ref })}`}
@@ -250,51 +255,59 @@ function RefundReceipt({
           查看关联争议与冲回
         </Link>
       )}
-      <form
-        className="flex flex-wrap items-end gap-2"
-        onSubmit={(event) => {
-          event.preventDefault();
-          if (canRefund && !busy)
-            setConfirm({
-              receipt_id: receipt.id,
-              amount_minor: requestedMinor,
-              currency: receipt.currency,
-              request_key: crypto.randomUUID(),
-            });
-        }}
-      >
-        <label className="grid gap-1 text-xs">
-          退款金额（{receipt.currency}）
-          <input
-            className="input-field"
-            inputMode="decimal"
-            value={amount}
-            disabled={!!draft || busy}
-            onChange={(event) => setAmount(event.target.value)}
-          />
-        </label>
-        <button type="submit" className="btn-primary" disabled={!canRefund || busy}>
-          发起退款
-        </button>
-        <button type="button" className="btn-secondary" disabled={busy} onClick={refresh}>
-          刷新状态
-        </button>
-        {draft && !tracked && (
-          <button
-            type="button"
-            className="btn-secondary"
-            disabled={busy || !operation}
-            onClick={() => void submit(draft, true)}
-          >
-            重试同一请求
+      {canWriteRefunds ? (
+        <form
+          className="flex flex-wrap items-end gap-2"
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (canRefund && !busy)
+              setConfirm({
+                receipt_id: receipt.id,
+                amount_minor: requestedMinor,
+                currency: receipt.currency,
+                request_key: crypto.randomUUID(),
+              });
+          }}
+        >
+          <label className="grid gap-1 text-xs">
+            退款金额（{receipt.currency}）
+            <input
+              className="input-field"
+              inputMode="decimal"
+              value={amount}
+              disabled={!!draft || busy}
+              onChange={(event) => setAmount(event.target.value)}
+            />
+          </label>
+          <button type="submit" className="btn-primary" disabled={!canRefund || busy}>
+            发起退款
           </button>
-        )}
-        {terminal && (
-          <button type="button" className="btn-secondary" onClick={forgetDraft}>
-            结束跟踪
+          <button type="button" className="btn-secondary" disabled={busy} onClick={refresh}>
+            刷新状态
           </button>
-        )}
-      </form>
+          {draft && !tracked && (
+            <button
+              type="button"
+              className="btn-secondary"
+              disabled={busy || !operation}
+              onClick={() => void submit(draft, true)}
+            >
+              重试同一请求
+            </button>
+          )}
+          {terminal && (
+            <button type="button" className="btn-secondary" onClick={forgetDraft}>
+              结束跟踪
+            </button>
+          )}
+        </form>
+      ) : (
+        <div className="flex flex-wrap items-center gap-2">
+          <button type="button" className="btn-secondary" disabled={busy} onClick={refresh}>
+            刷新状态
+          </button>
+        </div>
+      )}
       {error && !reconciliation && (
         <p role="alert" className="text-[var(--cms-error)]">
           {error}
@@ -337,7 +350,7 @@ function RefundReceipt({
                       {refund.result_note && <div>{refund.result_note}</div>}
                     </td>
                     <td>
-                      {receipt.provider === 'paypal' && refund.can_reconcile && (
+                      {canWriteRefunds && receipt.provider === 'paypal' && refund.can_reconcile && (
                         <button
                           type="button"
                           className="btn-detail"
@@ -498,6 +511,8 @@ function RefundDrawer({
   actor,
   order,
   params,
+  canWriteRefunds,
+  canReadDisputes,
   onClose,
   onUpdated,
   onSelect,
@@ -505,6 +520,8 @@ function RefundDrawer({
   actor: string;
   order: string;
   params: URLSearchParams;
+  canWriteRefunds: boolean;
+  canReadDisputes: boolean;
   onClose: () => void;
   onUpdated: () => void;
   onSelect: (receipt: string) => void;
@@ -595,6 +612,8 @@ function RefundDrawer({
                 actor={actor}
                 order={order}
                 receipt={receipt}
+                canWriteRefunds={canWriteRefunds}
+                canReadDisputes={canReadDisputes}
                 balanceRefreshing={Boolean(source.refreshing)}
                 onUpdated={refreshReceipt}
               />
@@ -606,7 +625,11 @@ function RefundDrawer({
   );
 }
 
-export function PaymentRefunds({ actor }: { actor: string }) {
+export function PaymentRefunds({ actor }: { actor?: string }) {
+  const { admin, canRead, canWrite } = usePermission();
+  const effectiveActor = actor || admin?.id || '';
+  const canWriteRefunds = canWrite('payments.refunds');
+  const canReadDisputes = canRead('payments.disputes');
   const [params, setParams] = useSearchParams();
   const [search, setSearch] = useState('');
   const [searchField, setSearchField] = useState<'order' | 'command'>('order');
@@ -878,9 +901,11 @@ export function PaymentRefunds({ actor }: { actor: string }) {
       {order && (
         <RefundDrawer
           key={`${order}/${params.get('receipt_id') ?? ''}/${scope.provider}/${scope.environment}/${scope.account_id}`}
-          actor={actor}
+          actor={effectiveActor}
           order={order}
           params={params}
+          canWriteRefunds={canWriteRefunds}
+          canReadDisputes={canReadDisputes}
           onSelect={(receipt_id) => update({ receipt_id })}
           onClose={() =>
             update({

@@ -1,6 +1,6 @@
 # STAR NOVEL 生产部署 SOP
 
-适用于 Reader H5、CMS、支付域和回传中心的首次部署及协调升级。当前发布线要求 CMS、Reader 和 Conversion 使用同一数据库版本 **`2026111934`**。发下一版时，以该次发布提交中的三个 schema 检查和 CMS 内嵌迁移为准。回传首发批量上限为 **1**。
+适用于 Reader H5、CMS、支付域和回传中心的首次部署及协调升级。当前发布线要求 CMS、Reader 和 Conversion 使用同一数据库版本 **`2026111935`**。发下一版时，以该次发布提交中的三个 schema 检查和 CMS 内嵌迁移为准。回传首发批量上限为 **1**。
 
 **发布顺序**　同一提交打包 → 网关进入维护并停旧写入及发送 → CMS 单次迁移 → 补并发索引和授权 → Redis、Conversion API、CMS → 核对支付账户和回传路由 → Collector、Conversion Worker（暂停发送）、Reader → 发布两个前端和验证 Webhook → 恢复业务并回补维护窗口事件 → 单独启用 Meta 发送。
 
@@ -39,7 +39,7 @@ flowchart LR
 1. 选定已审核的提交和服务器 CPU 架构。确认 CMS、Reader、Conversion 和两个前端来自同一提交，检查工作区，避免将未审核的本地改动打入发布包。记录各环境当前 schema、容器镜像、前端版本和网关 upstream。
 2. 核对 RDS 恢复点可用性并记录恢复时间，保留上一版发布目录、镜像和两套前端。首次建库确认 UTF8、业务账号、迁移所需对象权限和 `pg_trgm`。现有生产按统一 `star_novel` 业务账号执行，确认能够迁移及访问 `public`、`conversion`、支付与目录对象。所有 Reader 节点使用同一 Reader JWT 密钥，CMS 使用独立的 `cms.jwt_secret`。
 3. 记录待处理的支付和回传状态。按账户和环境保存支付恢复游标、待处理回调、存量协议、收款与退款待核对项，以及待发、发送中、未知和已确认的转化。记下维护窗口起止时间及其时区，供 Webhook 补查。
-4. 确认网关维护切换方式、渠道控制台访问权限和回退负责人。新库初始化后先更换种子管理员凭据，再开放 CMS 入口。
+4. 确认网关维护切换方式、渠道控制台访问权限和回退负责人。空库首次发布不再内置固定密码超管账号，需在执行 `cms -migrate` 前通过 `CMS_BOOTSTRAP_ADMIN_PASSWORD`（可选配 `CMS_BOOTSTRAP_ADMIN_USERNAME` 默认 `admin`、`CMS_BOOTSTRAP_ADMIN_NICKNAME` 默认 `管理员`）注入强密码（长度 ≥ 12，至少包含大小写字母、数字、特殊字符中的 3 类，禁止 `admin123`/`password`/`changeme`/`<...>` 等弱口令或占位符）以安全引导首个超级管理员；初始化完成后可从环境文件中移除 `CMS_BOOTSTRAP_ADMIN_PASSWORD`，后续重跑 `-migrate` 会自动跳过且不会重置已有超管密码。
 
 ### 2.1 构建与装载
 
@@ -110,10 +110,10 @@ dc build cms
 
 1. 网关进入维护，停止新结账、履约、CMS 写入和配置发布。支付 Webhook 暂时不可接收时返回可重试的 `503`，保留渠道重投和事件补查的证据。
 2. 停止旧 Meta Worker 的新领取，等待在途请求和回执收尾。单独记录失租、结果未知和待核对任务。停止全部旧 Reader 实例及其支付任务、CMS、Conversion API、Worker 和 Collector。已运行的分销 Callback 与回告 Worker 一并停用。已有 Compose 部署从旧 `current` 目录用该版本的 Compose 文件停服务；首次从独立容器切换时核对实际容器名再停用。保留旧镜像、配置及 Redis 数据卷。
-3. 确认迁移连接指向正确 RDS。只由新包中的 CMS 执行迁移。新库会初始化基线和种子，旧库按版本执行待应用的迁移。用接近生产数据量的库预演，当前进程迁移时限为 90 秒，单条 SQL 上限 60 秒，业务表锁等待上限 3 秒。迁移失败时检查退出码、账本和锁等待，解除阻塞后再重试。
+3. 确认迁移连接指向正确 RDS。只由新包中的 CMS 执行迁移。新库会初始化基线、基础种子、5 个内置 RBAC 角色并通过 `CMS_BOOTSTRAP_ADMIN_*` 环境变量创建首个超级管理员（空库缺少或传入弱 `CMS_BOOTSTRAP_ADMIN_PASSWORD` 将直接拒绝迁移）；旧库按版本执行待应用的迁移（若已存在启用态超级管理员则自动跳过引导）。用接近生产数据量的库预演，当前进程迁移时限为 90 秒，单条 SQL 上限 60 秒，业务表锁等待上限 3 秒。迁移失败时检查退出码、账本和锁等待，解除阻塞后再重试。
 
 ```bash
-# 从新版 releases 目录执行
+# 从新版 releases 目录执行（空库首次发布需在 cms.env 或本次命令中传入强密码 CMS_BOOTSTRAP_ADMIN_PASSWORD）
 dc run --rm --no-deps cms -migrate
 ```
 
@@ -126,7 +126,7 @@ PGSERVICE=star_novel_release psql -X -v ON_ERROR_STOP=1 \
   -f migrations/conversion_query_indexes.sql
 ```
 
-   当前应返回 `2026111934`。并发索引脚本使用自动提交。核对脚本中的索引均存在且 `pg_index.indisvalid=true`；失败留下的无效索引需由 DBA 按实际定义处理后再重跑，脚本的 `IF NOT EXISTS` 会跳过同名对象。新库或未应用阅读性能索引的旧库，按同样方式执行随包准备的 `reader_query_indexes.sql`。独立数据库角色环境迁移后应用 [角色授权脚本](cms-backend/db/conversion_role_grants.sql)；生产统一使用具备相应对象权限的 `star_novel` 时无需拆分角色。使用 OSS 正文且存在历史预览缺口时，执行 `dc run --rm --no-deps cms -backfill-chapter-previews` 并核对结果。
+   当前应返回 `2026111935`。并发索引脚本使用自动提交。核对脚本中的索引均存在且 `pg_index.indisvalid=true`；失败留下的无效索引需由 DBA 按实际定义处理后再重跑，脚本的 `IF NOT EXISTS` 会跳过同名对象。新库或未应用阅读性能索引的旧库，按同样方式执行随包准备的 `reader_query_indexes.sql`。独立数据库角色环境迁移后应用 [角色授权脚本](cms-backend/db/conversion_role_grants.sql)；生产统一使用具备相应对象权限的 `star_novel` 时无需拆分角色。使用 OSS 正文且存在历史预览缺口时，执行 `dc run --rm --no-deps cms -backfill-chapter-previews` 并核对结果。
 
 5. 核对存量订单、协议、收款、回调游标和权益。环境或原账户缺少依据的记录留在支付中心待核对；历史整本权益按原商品和小说证据核验。回传按现场记录判定是否需要历史接管。确认旧服务从未对 Meta 上报时直接部署新链路；如已有历史发送证据，先保持新发送暂停，再按原业务键、事件 ID 和发送证据检查接管范围。 [历史队列接管](conversion-backend/README.md#历史队列接管)
 

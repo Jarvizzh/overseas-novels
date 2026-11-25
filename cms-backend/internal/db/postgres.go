@@ -2,14 +2,18 @@ package db
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"golang.org/x/crypto/bcrypt"
 	dbassets "star-novel-cms/db"
 	"star-novel-cms/internal/config"
 )
@@ -44,7 +48,8 @@ func InitDB(migrate bool) {
 
 	check := CheckSchema
 	if migrate {
-		check = func(ctx context.Context) error { return autoMigrate(ctx, pool) }
+		bootstrapCfg := bootstrapConfigFromAppConfig()
+		check = func(ctx context.Context) error { return autoMigrateAndBootstrap(ctx, pool, bootstrapCfg) }
 	}
 	if err := check(ctx); err != nil {
 		pool.Close()
@@ -90,10 +95,41 @@ const (
 	conversionCenterReviewVersion     int64 = 2026111931
 	conversionBatchVersion            int64 = 2026111932
 	conversionRereviewVersion         int64 = 2026111933
-	RequiredSchemaVersion             int64 = 2026111934
+	conversionCredentialHealthVersion int64 = 2026111934
+	RequiredSchemaVersion             int64 = 2026111935
 )
 
+// BootstrapAdminConfig holds environment-injected credentials for initializing
+// the first super admin on an empty database during `-migrate`.
+type BootstrapAdminConfig struct {
+	Username string
+	Password string
+	Nickname string
+}
+
+func bootstrapConfigFromAppConfig() BootstrapAdminConfig {
+	if config.AppConfig == nil {
+		return BootstrapAdminConfig{
+			Username: "admin",
+			Nickname: "管理员",
+		}
+	}
+	return BootstrapAdminConfig{
+		Username: config.AppConfig.BootstrapAdminUsername,
+		Password: config.AppConfig.BootstrapAdminPassword,
+		Nickname: config.AppConfig.BootstrapAdminNickname,
+	}
+}
+
 func autoMigrate(ctx context.Context, pool *pgxpool.Pool) error {
+	return autoMigrateInternal(ctx, pool, nil)
+}
+
+func autoMigrateAndBootstrap(ctx context.Context, pool *pgxpool.Pool, bootstrap BootstrapAdminConfig) error {
+	return autoMigrateInternal(ctx, pool, &bootstrap)
+}
+
+func autoMigrateInternal(ctx context.Context, pool *pgxpool.Pool, bootstrap *BootstrapAdminConfig) error {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return err
@@ -123,6 +159,11 @@ func autoMigrate(ctx context.Context, pool *pgxpool.Pool) error {
 	}
 
 	if version == RequiredSchemaVersion {
+		if bootstrap != nil {
+			if err := ensureBootstrapSuperAdmin(ctx, tx, *bootstrap); err != nil {
+				return err
+			}
+		}
 		return tx.Commit(ctx)
 	}
 	if version < baselineSchemaVersion {
@@ -310,10 +351,99 @@ func autoMigrate(ctx context.Context, pool *pgxpool.Pool) error {
 			return fmt.Errorf("schema migration %d: %w", conversionRereviewVersion, err)
 		}
 	}
-	if _, err := tx.Exec(ctx, dbassets.ConversionCredentialHealthSQL); err != nil {
+	if version < conversionCredentialHealthVersion {
+		if _, err := tx.Exec(ctx, dbassets.ConversionCredentialHealthSQL); err != nil {
+			return fmt.Errorf("schema migration %d: %w", conversionCredentialHealthVersion, err)
+		}
+	}
+	if _, err := tx.Exec(ctx, dbassets.RBACPermissionsSQL); err != nil {
 		return fmt.Errorf("schema migration %d: %w", RequiredSchemaVersion, err)
 	}
+	if bootstrap != nil {
+		if err := ensureBootstrapSuperAdmin(ctx, tx, *bootstrap); err != nil {
+			return err
+		}
+	}
 	return tx.Commit(ctx)
+}
+
+func ensureBootstrapSuperAdmin(ctx context.Context, tx pgx.Tx, cfg BootstrapAdminConfig) error {
+	var hasActiveSuperAdmin bool
+	err := tx.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM admins a
+			JOIN roles r ON r.id = a.role_id
+			WHERE r.is_super_admin = TRUE
+			  AND a.status = 1
+			  AND r.status = 1
+		)
+	`).Scan(&hasActiveSuperAdmin)
+	if err != nil {
+		return fmt.Errorf("check active super admin: %w", err)
+	}
+	if hasActiveSuperAdmin {
+		return nil
+	}
+
+	username := strings.TrimSpace(cfg.Username)
+	if username == "" {
+		username = "admin"
+	}
+	nickname := strings.TrimSpace(cfg.Nickname)
+	if nickname == "" {
+		nickname = "管理员"
+	}
+	if err := config.ValidateBootstrapAdminConfig(username, cfg.Password, nickname); err != nil {
+		return fmt.Errorf("bootstrap super admin: %w", err)
+	}
+
+	var roleID int64
+	var roleCode string
+	err = tx.QueryRow(ctx, `
+		SELECT id, code
+		FROM roles
+		WHERE is_super_admin = TRUE AND status = 1
+		ORDER BY id ASC
+		LIMIT 1
+	`).Scan(&roleID, &roleCode)
+	if err != nil {
+		return fmt.Errorf("resolve super admin role: %w", err)
+	}
+
+	hashed, err := bcrypt.GenerateFromPassword([]byte(cfg.Password), bcrypt.DefaultCost)
+	if err != nil {
+		return fmt.Errorf("hash bootstrap super admin password: %w", err)
+	}
+
+	adminID := uuid.New().String()
+	_, err = tx.Exec(ctx, `
+		INSERT INTO admins (id, username, password_hash, nickname, role, role_id, status)
+		VALUES ($1, $2, $3, $4, $5, $6, 1)
+	`, adminID, username, string(hashed), nickname, roleCode, roleID)
+	if err != nil {
+		return fmt.Errorf("create bootstrap super admin %q: %w", username, err)
+	}
+
+	afterJSON, err := json.Marshal(map[string]any{
+		"username": username,
+		"nickname": nickname,
+		"role_id":  roleID,
+		"role":     roleCode,
+		"status":   1,
+	})
+	if err != nil {
+		return fmt.Errorf("marshal bootstrap audit payload: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO admin_audit_logs (admin_id, action, target_id, after_data)
+		VALUES ($1, 'bootstrap_super_admin', $2, $3::jsonb)
+	`, adminID, adminID, string(afterJSON)); err != nil {
+		return fmt.Errorf("write bootstrap super admin audit log: %w", err)
+	}
+
+	log.Printf("Bootstrapped initial super admin account: username=%s role=%s", username, roleCode)
+	return nil
 }
 
 func applyBaseline(ctx context.Context, tx pgx.Tx) error {
@@ -329,30 +459,27 @@ func applyBaseline(ctx context.Context, tx pgx.Tx) error {
 		}
 	}
 
-	// 2. Seed initial data if tables are empty (admin account, configs, domains, templates, novels)
-	var adminCount int
-	err := tx.QueryRow(ctx, "SELECT COUNT(*) FROM admins").Scan(&adminCount)
+	// 2. Seed initial data if tables are empty (configs, domains, templates, novels)
+	var configCount int
+	err := tx.QueryRow(ctx, "SELECT COUNT(*) FROM system_configs").Scan(&configCount)
 	if err != nil {
-		return fmt.Errorf("read admins: %w", err)
+		return fmt.Errorf("read system_configs: %w", err)
 	}
-	if adminCount == 0 {
-		log.Println("Database is newly initialized. Seeding initial superadmin, configs, and sample novels...")
+	if configCount == 0 {
+		log.Println("Database is newly initialized. Seeding initial configs, templates, and sample novels...")
 		if dbassets.SeedSQL != "" {
 			_, err = tx.Exec(ctx, dbassets.SeedSQL)
 			if err != nil {
 				return fmt.Errorf("seed: %w", err)
 			} else {
-				log.Println("Initial seed data inserted successfully (Admin: admin / admin123)")
+				log.Println("Initial seed data inserted successfully")
 			}
 		}
 	} else {
-		// Ensure system configs and default recharge templates are present (idempotent)
+		// Ensure system configs are present (idempotent); super admin is never hardcoded.
 		_, err = tx.Exec(ctx, `
 			INSERT INTO system_configs (key, value) VALUES ('global_coin_cost_per_thousand', '500') ON CONFLICT (key) DO NOTHING;
 			INSERT INTO system_configs (key, value) VALUES ('global_start_pay_chapter_index', '3') ON CONFLICT (key) DO NOTHING;
-			INSERT INTO admins (id, username, password_hash, nickname, role, status) 
-			VALUES ('10000000-0000-0000-0000-000000000001', 'admin', '$2a$10$F18fKqJSG4r6zPEp3EokNesCxK005I2a66WHrWhwopOOBA./liWqa', '超级管理员', 'SuperAdmin', 1) 
-			ON CONFLICT (username) DO UPDATE SET password_hash = '$2a$10$F18fKqJSG4r6zPEp3EokNesCxK005I2a66WHrWhwopOOBA./liWqa' WHERE admins.username = 'admin' AND admins.password_hash = '$2a$10$N.zmdr9k7uOCQb376NoUnuTJ8iAt6Z5EHsM8lE9lBOsl7iKTVKIUi';
 		`)
 		if err != nil {
 			return fmt.Errorf("ensure defaults: %w", err)

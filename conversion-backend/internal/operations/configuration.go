@@ -290,7 +290,11 @@ func configurationID(r *http.Request) (int64, bool) {
 }
 
 func operatorFrom(r *http.Request) delivery.Operator {
-	return delivery.Operator{ID: r.Header.Get("X-Operator-ID"), Role: r.Header.Get("X-Operator-Role")}
+	return delivery.Operator{
+		ID:         r.Header.Get("X-Operator-ID"),
+		Role:       r.Header.Get("X-Operator-Role"),
+		Permission: r.Header.Get("X-Operator-Permission"),
+	}
 }
 
 func decodeConfiguration(w http.ResponseWriter, r *http.Request, value any) bool {

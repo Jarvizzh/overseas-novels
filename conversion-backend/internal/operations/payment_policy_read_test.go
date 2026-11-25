@@ -17,7 +17,7 @@ import (
 func TestPaymentPolicyReconciliationAndMetrics(t *testing.T) {
 	ctx, pool := operationsTestPool(t)
 	mustExec(t, ctx, pool, `
-		INSERT INTO admins(id,username,password_hash,role) VALUES('ops','ops','fixture','Admin');
+		INSERT INTO admins(id,username,password_hash,role,role_id) VALUES('ops','ops','fixture','Admin',(SELECT id FROM roles WHERE code='Admin'));
 		INSERT INTO users(id) VALUES(1);
 		INSERT INTO recharge_orders(id,user_id,amount_cents,payment_method,status,fulfilled_at,subscription_id)
 		VALUES (900,1,5000,'paypal','Success',now(),'I-METRICS'),(901,1,5000,'paypal','Success',now(),NULL);
@@ -88,7 +88,8 @@ func TestPaymentPolicyReconciliationAndMetrics(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/internal/conversion"+path, nil)
 		req.Header.Set("Authorization", "Bearer test-token")
 		req.Header.Set("X-Operator-ID", "reader")
-		req.Header.Set("X-Operator-Role", "Finance")
+		req.Header.Set("X-Operator-Role", "FinanceManager")
+		req.Header.Set("X-Operator-Access", "read")
 		res := httptest.NewRecorder()
 		handler.ServeHTTP(res, req)
 		if res.Code != 200 {

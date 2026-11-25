@@ -1,6 +1,5 @@
 import { ChevronDown, LogOut } from 'lucide-react';
 import type { AdminUser } from '../utils/api';
-import { ROLE_LABELS } from '../config/navigation';
 import { ToolbarPopover } from './ui/Primitives';
 
 interface HeaderAccountMenuProps {
@@ -10,7 +9,7 @@ interface HeaderAccountMenuProps {
 
 export function HeaderAccountMenu({ admin, onLogout }: HeaderAccountMenuProps) {
   const displayName = admin.nickname || admin.username;
-  const roleLabel = ROLE_LABELS[admin.role] || admin.role;
+  const roleLabel = admin.role_name || admin.role;
   const initial = (displayName || 'A').charAt(0).toUpperCase();
 
   return (

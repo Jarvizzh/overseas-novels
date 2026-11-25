@@ -19,13 +19,15 @@ func NewHandler(service Service) *Handler {
 }
 
 func (h *Handler) RegisterRoutes(r *gin.RouterGroup) {
+	domainsRead := auth.RequirePermission(auth.PermSystemDomainsRead)
+	domainsWrite := auth.RequirePermission(auth.PermSystemDomainsWrite)
 	domainsGroup := r.Group("/domains", auth.AuthMiddleware())
 	{
-		domainsGroup.GET("", h.ListDomains)
-		domainsGroup.POST("", h.CreateDomain)
-		domainsGroup.PUT("/:id/status", h.UpdateDomainStatus)
-		domainsGroup.POST("/:id/set-default", h.SetDefaultDomain)
-		domainsGroup.DELETE("/:id", h.DeleteDomain)
+		domainsGroup.GET("", domainsRead, h.ListDomains)
+		domainsGroup.POST("", domainsWrite, h.CreateDomain)
+		domainsGroup.PUT("/:id/status", domainsWrite, h.UpdateDomainStatus)
+		domainsGroup.POST("/:id/set-default", domainsWrite, h.SetDefaultDomain)
+		domainsGroup.DELETE("/:id", domainsWrite, h.DeleteDomain)
 	}
 }
 

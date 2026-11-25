@@ -19,7 +19,7 @@ import (
 func TestPublicationAuditMatchesCommittedScope(t *testing.T) {
 	ctx, owner := operationsTestPool(t)
 	mustExec(t, ctx, owner, `
-		INSERT INTO admins(id,username,password_hash,role) VALUES ('ops','ops','fixture','Admin');
+		INSERT INTO admins(id,username,password_hash,role,role_id) VALUES ('ops','ops','fixture','Admin',(SELECT id FROM roles WHERE code='Admin'));
 		INSERT INTO conversion.integrations(environment,source,account_key,contract_version)
 		VALUES ('test','starnovel','reader','v1'),('other','starnovel','reader','v1');
 		INSERT INTO conversion.integrations(environment,source,account_key,contract_version,allowed_apps)
@@ -45,6 +45,12 @@ func TestPublicationAuditMatchesCommittedScope(t *testing.T) {
 		req.Header.Set("Authorization", "Bearer service-fixture")
 		req.Header.Set("X-Operator-ID", actor)
 		req.Header.Set("X-Operator-Role", "Admin")
+		if method == http.MethodGet {
+			req.Header.Set("X-Operator-Access", "read")
+		} else {
+			req.Header.Set("X-Operator-Access", "write")
+			req.Header.Set("X-Operator-Permission", "ads.conversions:write")
+		}
 		rec := httptest.NewRecorder()
 		handler.ServeHTTP(rec, req)
 		if rec.Code != want {
@@ -143,6 +149,7 @@ func TestPublicationAuditMatchesCommittedScope(t *testing.T) {
 		req.Header.Set("Authorization", "Bearer service-fixture")
 		req.Header.Set("X-Operator-ID", "ops")
 		req.Header.Set("X-Operator-Role", "Admin")
+		req.Header.Set("X-Operator-Access", "read")
 		response := make(chan *httptest.ResponseRecorder, 1)
 		go func() {
 			rec := httptest.NewRecorder()

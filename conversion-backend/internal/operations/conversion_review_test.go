@@ -19,7 +19,8 @@ func TestConversionReviewReadPaths(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/internal/conversion"+path, nil)
 		req.Header.Set("Authorization", "Bearer fixture")
 		req.Header.Set("X-Operator-ID", "fixture")
-		req.Header.Set("X-Operator-Role", "Finance")
+		req.Header.Set("X-Operator-Role", "FinanceManager")
+		req.Header.Set("X-Operator-Access", "read")
 		res := httptest.NewRecorder()
 		handler.ServeHTTP(res, req)
 		if res.Code != status || !strings.Contains(res.Body.String(), want) {

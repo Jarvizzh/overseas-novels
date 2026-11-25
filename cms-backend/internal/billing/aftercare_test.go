@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	"star-novel-cms/internal/auth"
 )
 
 func testAftercareRoutes(t *testing.T, service BillingService, exec func(string, ...any)) {
@@ -17,12 +18,16 @@ func testAftercareRoutes(t *testing.T, service BillingService, exec func(string,
 	exec(`INSERT INTO payment_cases(id,account_id,kind,external_id,receipt_refs,provider_status,is_open,observed_at)
 		OVERRIDING SYSTEM VALUE VALUES (5101,901,'dispute','du_CMS',ARRAY['ch_fin03']::text[],'lost',false,now());`)
 	router := gin.New()
-	router.Use(func(c *gin.Context) { c.Set("admin_id", c.GetHeader("X-Test-Actor")); c.Next() })
-	NewHandler(service).registerAftercareRoutes(router.Group("/payments"), paymentRoles("SuperAdmin", "Finance"))
+	payments := router.Group("/payments", auth.AuthMiddleware())
+	NewHandler(service).registerAftercareRoutes(payments)
 	check := func(actor, method, path, body string, status int) string {
 		t.Helper()
 		req := httptest.NewRequest(method, "/payments/cases"+path, strings.NewReader(body))
-		req.Header.Set("X-Test-Actor", actor)
+		tok, err := auth.GenerateToken(actor, "test")
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Authorization", "Bearer "+tok)
 		req.Header.Set("Content-Type", "application/json")
 		res := httptest.NewRecorder()
 		router.ServeHTTP(res, req)
@@ -119,8 +124,22 @@ func testAftercareRoutes(t *testing.T, service BillingService, exec func(string,
 		t.Fatalf("approval with no open dispute and no refund policy: %+v", detail.AvailableActions)
 	}
 	exec(`UPDATE payment_cases SET is_open=true,due_at=now()+interval '5 hours' WHERE id=5101;
+		INSERT INTO roles(code,name,description,is_system,is_super_admin,status)
+			VALUES('RefundOnly','RefundOnly','refunds write without disputes write',false,false,1);
+		INSERT INTO role_permissions(role_id,permission_code)
+			SELECT id,'payments.refunds:write' FROM roles WHERE code='RefundOnly';
+		INSERT INTO admins(id,username,password_hash,role,role_id,status)
+			VALUES('test-refund-only','test-refund-only','none','RefundOnly',(SELECT id FROM roles WHERE code='RefundOnly'),1);
 		INSERT INTO payment_aftercare_policies(account_id,finance_id,refund_seconds)
-			VALUES(901,'test-finance',600);`)
+			VALUES(901,'test-refund-only',600);`)
+	loadDetail("/5102")
+	if !slices.Equal(detail.AvailableActions, []string{"assign"}) {
+		t.Fatalf("finance_id without payments.disputes:write must block reject: %+v", detail.AvailableActions)
+	}
+	check("test-finance", http.MethodPost, "/5102/actions", `{"request_id":"50000000-0000-4000-8000-000000000009","action":"reject","reason":"missing disputes write"}`, http.StatusConflict)
+	exec(`UPDATE payment_aftercare_policies SET finance_id='test-finance' WHERE account_id=901;
+		DELETE FROM admins WHERE id='test-refund-only';
+		DELETE FROM roles WHERE code='RefundOnly';`)
 	loadDetail("/5102")
 	if !slices.Equal(detail.AvailableActions, []string{"assign", "reject"}) {
 		t.Fatalf("open dispute blocks approval: %+v", detail.AvailableActions)

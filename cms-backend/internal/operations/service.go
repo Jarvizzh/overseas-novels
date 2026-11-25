@@ -10,15 +10,16 @@ import (
 )
 
 var (
-	ErrInvalidGroup          = errors.New("invalid recommendation group")
-	ErrInvalidRankingSort    = errors.New("invalid ranking sort_rule; expected views, rating, latest, or manual")
-	ErrInvalidRankingLimit   = errors.New("ranking limit must be between 1 and 100")
-	ErrDuplicateNovelInGroup = errors.New("duplicate novel_id in group")
-	ErrInvalidNovelID        = errors.New("novel_id must be a positive integer")
-	ErrInvalidScheduleRange  = errors.New("scheduled_end must be after scheduled_start")
-	ErrNovelNotFound         = errors.New("novel not found or archived")
-	ErrEmptyRankingUpdate    = errors.New("at least one of ranking_config or items is required")
-	ErrInvalidCheckInRewards = errors.New("checkin rewards must contain 7 integers between 1 and 10000")
+	ErrInvalidGroup              = errors.New("invalid recommendation group")
+	ErrInvalidRankingSort        = errors.New("invalid ranking sort_rule; expected views, rating, latest, or manual")
+	ErrInvalidRankingLimit       = errors.New("ranking limit must be between 1 and 100")
+	ErrDuplicateNovelInGroup     = errors.New("duplicate novel_id in group")
+	ErrInvalidNovelID            = errors.New("novel_id must be a positive integer")
+	ErrInvalidScheduleRange      = errors.New("scheduled_end must be after scheduled_start")
+	ErrNovelNotFound             = errors.New("novel not found or archived")
+	ErrEmptyRankingUpdate        = errors.New("at least one of ranking_config or items is required")
+	ErrInvalidCheckInRewards     = errors.New("checkin rewards must contain 7 integers between 1 and 10000")
+	ErrInvalidNovelOptionsFilter = errors.New("invalid novel options filter")
 )
 
 type Service interface {
@@ -28,6 +29,7 @@ type Service interface {
 	SaveRanking(ctx context.Context, req SaveRankingRequest) (*SaveRankingResponse, error)
 	SaveCheckInConfig(ctx context.Context, req CheckInConfig) (CheckInConfig, error)
 	Preview(ctx context.Context, req PreviewRequest) (*PreviewResponse, error)
+	ListNovelOptions(ctx context.Context, page, pageSize int, filter NovelOptionsFilter) (*NovelOptionsResponse, error)
 }
 
 type service struct {
@@ -456,5 +458,45 @@ func (s *service) Preview(ctx context.Context, req PreviewRequest) (*PreviewResp
 		CuratedIsOverride:     curatedIsOverride,
 		Rankings:              rankings,
 		RankingManualFallback: rankingManualFallback,
+	}, nil
+}
+
+func (s *service) ListNovelOptions(ctx context.Context, page, pageSize int, filter NovelOptionsFilter) (*NovelOptionsResponse, error) {
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 {
+		pageSize = 20
+	} else if pageSize > 200 {
+		pageSize = 200
+	}
+	filter.Status = strings.TrimSpace(filter.Status)
+	if filter.Status != "" && filter.Status != "Ongoing" && filter.Status != "Completed" {
+		return nil, ErrInvalidNovelOptionsFilter
+	}
+	filter.Sort = strings.TrimSpace(filter.Sort)
+	switch filter.Sort {
+	case "", "views", "rating", "latest", "updated":
+	default:
+		return nil, ErrInvalidNovelOptionsFilter
+	}
+
+	novels, total, err := s.repo.ListPublishedNovelOptions(ctx, page, pageSize, filter)
+	if err != nil {
+		return nil, err
+	}
+	if novels == nil {
+		novels = []NovelOption{}
+	}
+	if s.coverStore != nil {
+		for i := range novels {
+			novels[i].CoverURL = s.coverStore.SignCoverURL(novels[i].CoverURL)
+		}
+	}
+	return &NovelOptionsResponse{
+		Novels:   novels,
+		Total:    total,
+		Page:     page,
+		PageSize: pageSize,
 	}, nil
 }

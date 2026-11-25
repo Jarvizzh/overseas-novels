@@ -82,7 +82,7 @@ func TestStripeVIPInvoiceLifecycle(t *testing.T) {
 	access(false)
 	first.Status, first.RemainingMinor = "paid", 0
 	first.Allocations = append(first.Allocations, capture("Remainder", 600))
-	exec(`INSERT INTO admins(id,username,password_hash,role,status) VALUES('vip-risk-finance','vip-risk-finance','test','Finance',1);
+	exec(`INSERT INTO admins(id,username,password_hash,role,role_id,status) VALUES('vip-risk-finance','vip-risk-finance','test','FinanceManager',(SELECT id FROM roles WHERE code='FinanceManager'),1);
 		INSERT INTO payment_aftercare_policies(account_id,hold_fulfillment,reviewer_id,finance_id,review_seconds,refund_seconds,reminder_seconds)
 		SELECT id,true,'vip-risk-finance','vip-risk-finance',120,240,3600 FROM payment_channel_accounts WHERE account_key='acct_StripeTest'`)
 	for i := range first.Allocations {

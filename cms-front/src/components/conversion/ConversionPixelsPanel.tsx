@@ -10,6 +10,7 @@ import {
   Plus,
   RefreshCw,
 } from 'lucide-react';
+import { usePermission } from '../../context/PermissionContext';
 import { ApiError, apiRequest } from '../../utils/api';
 import {
   getErrorMessage,
@@ -100,6 +101,7 @@ function PixelConfigDrawer({
   editingDest,
   initialTab,
   canWrite,
+  canReadAudit,
   boundIntegrations,
   onClose,
   onSuccess,
@@ -108,6 +110,7 @@ function PixelConfigDrawer({
   editingDest: ConversionDestination | null;
   initialTab: PixelDrawerTab;
   canWrite: boolean;
+  canReadAudit: boolean;
   boundIntegrations: BoundIntegrationBadge[];
   onClose: () => void;
   onSuccess: (message: string) => Promise<void> | void;
@@ -149,7 +152,7 @@ function PixelConfigDrawer({
 
   useEffect(() => {
     if (!open) return;
-    setDrawerTab(editingDest ? initialTab : 'config');
+    setDrawerTab(editingDest && initialTab === 'audit' && canReadAudit ? 'audit' : 'config');
     setPixelId(editingDest?.pixel_id ?? '');
     setDisplayName(editingDest?.name ?? '');
     setAccessToken('');
@@ -160,7 +163,7 @@ function PixelConfigDrawer({
     setTokenError('');
     setReasonError('');
     setSubmitError('');
-  }, [open, editingDest, initialTab]);
+  }, [open, editingDest, initialTab, canReadAudit]);
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
@@ -225,7 +228,7 @@ function PixelConfigDrawer({
   };
 
   const handleTabKeyDown = (e: React.KeyboardEvent, current: PixelDrawerTab) => {
-    if (!editingDest) return;
+    if (!editingDest || !canReadAudit) return;
     if (e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.key === 'Home' || e.key === 'End') {
       e.preventDefault();
       const next: PixelDrawerTab =
@@ -301,23 +304,25 @@ function PixelConfigDrawer({
               >
                 配置与凭据
               </button>
-              <button
-                ref={(el) => {
-                  tabRefs.current.audit = el;
-                }}
-                type="button"
-                role="tab"
-                id={`${formId}-tab-audit`}
-                aria-selected={drawerTab === 'audit'}
-                onKeyDown={(e) => handleTabKeyDown(e, 'audit')}
-                onClick={() => setDrawerTab('audit')}
-                className={`focus-ring pb-2.5 text-xs font-medium whitespace-nowrap cursor-pointer transition-colors ${drawerTab === 'audit'
-                    ? 'text-[var(--cms-fg)]'
-                    : 'text-[var(--cms-muted-fg)] hover:text-[var(--cms-fg)]'
-                  }`}
-              >
-                变更审计记录
-              </button>
+              {canReadAudit && (
+                <button
+                  ref={(el) => {
+                    tabRefs.current.audit = el;
+                  }}
+                  type="button"
+                  role="tab"
+                  id={`${formId}-tab-audit`}
+                  aria-selected={drawerTab === 'audit'}
+                  onKeyDown={(e) => handleTabKeyDown(e, 'audit')}
+                  onClick={() => setDrawerTab('audit')}
+                  className={`focus-ring pb-2.5 text-xs font-medium whitespace-nowrap cursor-pointer transition-colors ${drawerTab === 'audit'
+                      ? 'text-[var(--cms-fg)]'
+                      : 'text-[var(--cms-muted-fg)] hover:text-[var(--cms-fg)]'
+                    }`}
+                >
+                  配置审计
+                </button>
+              )}
             </div>
 
             <div className="pb-2 flex items-center gap-2 text-xs">
@@ -615,7 +620,7 @@ function PixelConfigDrawer({
           </div>
         )}
 
-        {editingDest && drawerTab === 'audit' && (
+        {canReadAudit && editingDest && drawerTab === 'audit' && (
           <div
             role="tabpanel"
             id={`${formId}-panel-audit`}
@@ -786,6 +791,8 @@ export function ConversionPixelsPanel({
   hasLoadedOnce,
   loadError = '',
   canWrite,
+  canReadAudit,
+  canReadConversions,
   onRefresh,
 }: {
   destinations: ConversionDestination[];
@@ -794,8 +801,14 @@ export function ConversionPixelsPanel({
   hasLoadedOnce: boolean;
   loadError?: string;
   canWrite: boolean;
+  canReadAudit?: boolean;
+  canReadConversions?: boolean;
   onRefresh: () => Promise<void> | void;
 }) {
+  const { canRead } = usePermission();
+  const effectiveCanReadAudit = canReadAudit ?? canRead('ads.conversions');
+  const effectiveCanReadConversions = canReadConversions ?? canRead('ads.conversions');
+  const canReadPromotions = canRead('ads.promotions');
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<PixelStatusFilter>('');
   const [density, setDensity] = useState<TableDensity>('comfortable');
@@ -1063,14 +1076,23 @@ export function ConversionPixelsPanel({
 
                     <td>
                       {dest.promotion_dependencies > 0 ? (
-                        <Link
-                          to="/promotions"
-                          className="badge badge-blue inline-flex items-center gap-1 hover:opacity-85 no-underline"
-                          title="该 Pixel 正被推广链接引用，解除全部推广绑定后方可退役"
-                        >
-                          <span className="tabular-nums">{dest.promotion_dependencies} 个推广绑定</span>
-                          <ExternalLink size={11} aria-hidden="true" />
-                        </Link>
+                        canReadPromotions ? (
+                          <Link
+                            to="/promotions"
+                            className="badge badge-blue inline-flex items-center gap-1 hover:opacity-85 no-underline"
+                            title="该 Pixel 正被推广链接引用，解除全部推广绑定后方可退役"
+                          >
+                            <span className="tabular-nums">{dest.promotion_dependencies} 个推广绑定</span>
+                            <ExternalLink size={11} aria-hidden="true" />
+                          </Link>
+                        ) : (
+                          <span
+                            className="badge badge-blue inline-flex items-center gap-1"
+                            title="该 Pixel 正被推广链接引用，解除全部推广绑定后方可退役"
+                          >
+                            <span className="tabular-nums">{dest.promotion_dependencies} 个推广绑定</span>
+                          </span>
+                        )
                       ) : (
                         <span className="text-[var(--cms-muted-fg)]">无绑定</span>
                       )}
@@ -1084,21 +1106,33 @@ export function ConversionPixelsPanel({
 
                     <td className="text-right whitespace-nowrap">
                       <div className="inline-flex items-center justify-end gap-1 whitespace-nowrap">
-                        <Link
-                          to={`/conversions?pixel_id=${encodeURIComponent(dest.pixel_id)}`}
-                          className="btn-ghost text-xs whitespace-nowrap no-underline inline-flex items-center gap-1"
-                          title={`在回传中心查看 Pixel ${dest.pixel_id} 的回传事件`}
-                        >
-                          <FileSearch size={12} aria-hidden="true" />
-                          <span>回传记录</span>
-                        </Link>
+                        {effectiveCanReadConversions && (
+                          <Link
+                            to={`/conversions?pixel_id=${encodeURIComponent(dest.pixel_id)}`}
+                            className="btn-ghost text-xs whitespace-nowrap no-underline inline-flex items-center gap-1"
+                            title={`在回传中心查看 Pixel ${dest.pixel_id} 的回传事件`}
+                          >
+                            <FileSearch size={12} aria-hidden="true" />
+                            <span>回传记录</span>
+                          </Link>
+                        )}
+
+                        {effectiveCanReadAudit && (!canWrite || isRetired) && (
+                          <button
+                            type="button"
+                            onClick={() => openDestDrawer(dest, 'audit')}
+                            className="btn-ghost text-xs whitespace-nowrap"
+                          >
+                            审计
+                          </button>
+                        )}
 
                         <button
                           type="button"
-                          onClick={() => openDestDrawer(dest, canWrite && !isRetired ? 'config' : 'audit')}
+                          onClick={() => openDestDrawer(dest, 'config')}
                           className="btn-detail whitespace-nowrap"
                         >
-                          {canWrite && !isRetired ? '编辑' : '审计'}
+                          {canWrite && !isRetired ? '编辑' : '查看详情'}
                         </button>
 
                         {canWrite && !isRetired && (
@@ -1109,10 +1143,14 @@ export function ConversionPixelsPanel({
                                 label: '修改名称 / 轮换 Token',
                                 onClick: () => openDestDrawer(dest, 'config'),
                               },
-                              {
-                                label: '查看变更审计记录',
-                                onClick: () => openDestDrawer(dest, 'audit'),
-                              },
+                              ...(effectiveCanReadAudit
+                                ? [
+                                    {
+                                      label: '查看配置审计',
+                                      onClick: () => openDestDrawer(dest, 'audit'),
+                                    },
+                                  ]
+                                : []),
                               {
                                 label:
                                   dest.promotion_dependencies > 0
@@ -1141,6 +1179,7 @@ export function ConversionPixelsPanel({
         editingDest={editingDest}
         initialTab={drawerInitialTab}
         canWrite={canWrite}
+        canReadAudit={effectiveCanReadAudit}
         boundIntegrations={editingDest ? integrationsByDestId.get(editingDest.id) ?? [] : []}
         onClose={() => setDrawerOpen(false)}
         onSuccess={async (msg) => {

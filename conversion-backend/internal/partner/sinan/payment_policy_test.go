@@ -209,8 +209,8 @@ func TestSinanPaymentMigrationPreservesHistoricIdentity(t *testing.T) {
 
 func (f fixture) paymentOperator(t *testing.T) delivery.Operator {
 	t.Helper()
-	exec(t, f.ctx, f.owner, "INSERT INTO admins(id,username,password_hash,role) VALUES('policy-ops','policy-ops','fixture','Admin')")
-	return delivery.Operator{ID: "policy-ops", Role: "Admin"}
+	exec(t, f.ctx, f.owner, "INSERT INTO admins(id,username,password_hash,role,role_id) VALUES('policy-ops','policy-ops','fixture','Admin',(SELECT id FROM roles WHERE code='Admin'))")
+	return delivery.Operator{ID: "policy-ops", Role: "Admin", Permission: delivery.PermissionAdsConversionsWrite}
 }
 
 func (f fixture) postPayment(t *testing.T, body string) {

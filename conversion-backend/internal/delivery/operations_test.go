@@ -10,7 +10,10 @@ import (
 func testAuditedOperations(t *testing.T, ctx context.Context, s Service) {
 	t.Helper()
 	mustExec(t, ctx, s.Pool, `
-		INSERT INTO admins(id,username,password_hash,role,status) VALUES ('ops','ops','fixture','Admin',1),('reader','reader','fixture','Finance',1);
+		INSERT INTO admins(id,username,password_hash,role,role_id,status) VALUES
+			('ops','ops','fixture','Admin',(SELECT id FROM roles WHERE code='Admin'),1),
+			('optimizer','optimizer','fixture','AdOptimizer',(SELECT id FROM roles WHERE code='AdOptimizer'),1),
+			('reader','reader','fixture','FinanceManager',(SELECT id FROM roles WHERE code='FinanceManager'),1);
 		INSERT INTO recharge_orders(id,user_id,amount_cents,payment_method,status,fulfilled_at,fb_lead_metadata)
 		VALUES(400,10,999,'paypal','Success',now(),
 		  '{"pixel_id":"123","source_url":"https://example.invalid/checkout","user_agent":"fixture"}');
@@ -20,7 +23,7 @@ func testAuditedOperations(t *testing.T, ctx context.Context, s Service) {
 		SELECT record_reader_payment_conversion(400,now()-interval '20 seconds','paypal_capture_create_time','test',false,false);
 		DROP TRIGGER omit_reader_outbox_fixture ON reader_conversion_outbox;
 		DROP FUNCTION omit_reader_outbox_fixture();`)
-	operator := Operator{ID: "ops"}
+	operator := Operator{ID: "ops", Permission: PermissionAdsConversionsWrite}
 	req := RepairRequest{OrderID: 400, EventName: "Purchase"}
 	dry, err := s.RepairMissing(ctx, operator, req)
 	if err != nil || dry.Action != "restore_outbox" || !dry.DryRun {
@@ -29,12 +32,13 @@ func testAuditedOperations(t *testing.T, ctx context.Context, s Service) {
 	assertString(t, ctx, s.Pool, "SELECT count(*)::text FROM conversion.operation_audit", "0")
 	assertString(t, ctx, s.Pool, "SELECT count(*)::text FROM reader_conversion_outbox WHERE business_key='payment:400:Purchase'", "0")
 	req.Apply, req.Reason, req.Evidence = true, "  original settlement proof  ", "receipt fixture"
-	if _, err = s.RepairMissing(ctx, Operator{ID: "reader"}, req); !errors.Is(err, ErrOperatorForbidden) {
+	if _, err = s.RepairMissing(ctx, Operator{ID: "reader", Permission: PermissionAdsConversionsWrite}, req); !errors.Is(err, ErrOperatorForbidden) {
 		t.Fatalf("role guard: %v", err)
 	}
-	if result, err := s.RepairMissing(ctx, operator, req); err != nil || result.Existing {
-		t.Fatalf("repair: %+v %v", result, err)
+	if result, err := s.RepairMissing(ctx, Operator{ID: "optimizer", Permission: PermissionAdsConversionsWrite}, req); err != nil || result.Existing {
+		t.Fatalf("optimizer repair: %+v %v", result, err)
 	}
+	assertString(t, ctx, s.Pool, "SELECT operator_role FROM conversion.operation_audit ORDER BY id DESC LIMIT 1", "AdOptimizer")
 	if result, err := s.RepairMissing(ctx, operator, req); err != nil || !result.Existing {
 		t.Fatalf("replay: %+v %v", result, err)
 	}

@@ -1,10 +1,13 @@
 package config
 
 import (
+	"errors"
+	"fmt"
 	"log"
 	"os"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/joho/godotenv"
 )
@@ -14,6 +17,9 @@ type Config struct {
 	DatabaseURL             string
 	RedisURL                string
 	JWTSecret               string
+	BootstrapAdminUsername  string
+	BootstrapAdminPassword  string
+	BootstrapAdminNickname  string
 	PayPalClientID          string
 	PayPalClientSecret      string
 	DefaultDomain           string
@@ -58,6 +64,9 @@ func LoadConfig() {
 		DatabaseURL:             getEnv("DATABASE_URL", "postgres://postgres:password@localhost:5432/novel_db?sslmode=disable"),
 		RedisURL:                getEnv("REDIS_URL", "localhost:6379"),
 		JWTSecret:               adminJWTSecret,
+		BootstrapAdminUsername:  getEnv("CMS_BOOTSTRAP_ADMIN_USERNAME", "admin"),
+		BootstrapAdminPassword:  os.Getenv("CMS_BOOTSTRAP_ADMIN_PASSWORD"),
+		BootstrapAdminNickname:  getEnv("CMS_BOOTSTRAP_ADMIN_NICKNAME", "管理员"),
 		PayPalClientID:          getEnv("PAYPAL_CLIENT_ID", ""),
 		PayPalClientSecret:      getEnv("PAYPAL_CLIENT_SECRET", ""),
 		DefaultDomain:           getEnv("DEFAULT_DOMAIN", "https://h5.starsfic.com"),
@@ -149,4 +158,79 @@ func validAdminJWTSecret(secret, readerSecret string) bool {
 		!strings.Contains(lower, "change_me") && !strings.Contains(lower, "changeme") &&
 		!strings.Contains(lower, "random_string") && !strings.Contains(lower, "development-only") &&
 		!strings.HasPrefix(secret, "<")
+}
+
+// ValidateBootstrapAdminConfig validates CMS_BOOTSTRAP_ADMIN_* values used when
+// bootstrapping the first super admin on an empty database. Error messages never
+// include the plaintext password.
+func ValidateBootstrapAdminConfig(username, password, nickname string) error {
+	username = strings.TrimSpace(username)
+	if len(username) < 4 || len(username) > 50 {
+		return errors.New("CMS_BOOTSTRAP_ADMIN_USERNAME must be between 4 and 50 characters")
+	}
+	nickname = strings.TrimSpace(nickname)
+	if len(nickname) > 50 {
+		return errors.New("CMS_BOOTSTRAP_ADMIN_NICKNAME must not exceed 50 characters")
+	}
+	if err := ValidateStrongBootstrapPassword(password); err != nil {
+		return err
+	}
+	return nil
+}
+
+// ValidateStrongBootstrapPassword enforces the strong-password policy for
+// CMS_BOOTSTRAP_ADMIN_PASSWORD (§3.2).
+func ValidateStrongBootstrapPassword(password string) error {
+	trimmed := strings.TrimSpace(password)
+	if trimmed == "" {
+		return errors.New("CMS_BOOTSTRAP_ADMIN_PASSWORD is required when no active super admin exists")
+	}
+	if trimmed != password {
+		return errors.New("CMS_BOOTSTRAP_ADMIN_PASSWORD must not have leading or trailing whitespace")
+	}
+	if len(password) < 12 {
+		return errors.New("CMS_BOOTSTRAP_ADMIN_PASSWORD must be at least 12 characters long")
+	}
+	lower := strings.ToLower(password)
+	if strings.HasPrefix(trimmed, "<") && strings.HasSuffix(trimmed, ">") {
+		return errors.New("CMS_BOOTSTRAP_ADMIN_PASSWORD must not be a placeholder value")
+	}
+	for _, weak := range []string{
+		"admin123",
+		"password",
+		"changeme",
+		"change_me",
+		"replace_me",
+		"123456",
+		"qwerty",
+		"superadmin",
+		"your_password",
+	} {
+		if strings.Contains(lower, weak) {
+			return fmt.Errorf("CMS_BOOTSTRAP_ADMIN_PASSWORD must not contain weak or placeholder patterns")
+		}
+	}
+	var hasUpper, hasLower, hasDigit, hasSpecial bool
+	for _, r := range password {
+		switch {
+		case unicode.IsUpper(r):
+			hasUpper = true
+		case unicode.IsLower(r):
+			hasLower = true
+		case unicode.IsDigit(r):
+			hasDigit = true
+		default:
+			hasSpecial = true
+		}
+	}
+	classes := 0
+	for _, ok := range []bool{hasUpper, hasLower, hasDigit, hasSpecial} {
+		if ok {
+			classes++
+		}
+	}
+	if classes < 3 {
+		return errors.New("CMS_BOOTSTRAP_ADMIN_PASSWORD must contain at least 3 character types (uppercase, lowercase, digit, special)")
+	}
+	return nil
 }

@@ -1,7 +1,8 @@
 import { type KeyboardEvent, useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { Activity, FileSearch, ListChecks } from 'lucide-react';
-import { apiRequest } from '../utils/api';
+import { usePermission } from '../context/PermissionContext';
+import { apiRequest, getConversionPromotionOptions, type ConversionPromotionOption } from '../utils/api';
 import { getErrorMessage } from '../utils/conversionStatus';
 import { InlineErrorBanner } from '../components/conversion/ConversionShared';
 import { ConversionEventDrawer } from '../components/conversion/ConversionEventDrawer';
@@ -27,7 +28,9 @@ function resolveTabKey(raw: string | null): ConversionTabKey {
   return 'events';
 }
 
-export default function ConversionCenterTab({ canWrite }: { canWrite: boolean }) {
+export default function ConversionCenterTab() {
+  const { canWrite: hasWrite } = usePermission();
+  const canWrite = hasWrite('ads.conversions');
   const baseId = useId();
   const [searchParams, setSearchParams] = useSearchParams();
   const tabListRef = useRef<HTMLDivElement>(null);
@@ -41,6 +44,7 @@ export default function ConversionCenterTab({ canWrite }: { canWrite: boolean })
 
   const [integrations, setIntegrations] = useState<ConversionIntegration[]>([]);
   const [destinations, setDestinations] = useState<ConversionDestination[]>([]);
+  const [promotionOptions, setPromotionOptions] = useState<ConversionPromotionOption[]>([]);
   const [alertsCount, setAlertsCount] = useState<number | null>(0);
   const [metaError, setMetaError] = useState('');
   const [metaNonce, setMetaNonce] = useState(0);
@@ -93,7 +97,8 @@ export default function ConversionCenterTab({ canWrite }: { canWrite: boolean })
     Promise.allSettled([
       apiRequest('GET', '/conversion/integrations', undefined, false, controller.signal),
       apiRequest('GET', '/conversion/destinations', undefined, false, controller.signal),
-    ]).then(([integrationResult, destinationResult]) => {
+      getConversionPromotionOptions(controller.signal),
+    ]).then(([integrationResult, destinationResult, promotionResult]) => {
       if (controller.signal.aborted) return;
       const errors: string[] = [];
       if (integrationResult.status === 'fulfilled') {
@@ -105,6 +110,9 @@ export default function ConversionCenterTab({ canWrite }: { canWrite: boolean })
         setDestinations(destinationResult.value || []);
       } else {
         errors.push(getErrorMessage(destinationResult.reason, '加载 Pixel 目标列表'));
+      }
+      if (promotionResult.status === 'fulfilled') {
+        setPromotionOptions(Array.isArray(promotionResult.value) ? promotionResult.value : []);
       }
       setMetaError(errors.join('；'));
     });
@@ -306,6 +314,7 @@ export default function ConversionCenterTab({ canWrite }: { canWrite: boolean })
           <ConversionEventsTab
             integrations={integrations}
             destinations={destinations}
+            promotionOptions={promotionOptions}
             integrationMap={integrationMap}
             destinationByPixel={destinationByPixel}
             initialPixelId={urlPixelId}

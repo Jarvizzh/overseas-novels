@@ -1,5 +1,5 @@
 import React, { useCallback, useContext, useEffect, useId, useMemo, useState } from 'react';
-import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
+import { Link, Navigate, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import {
   ArrowDown,
   ArrowUp,
@@ -20,13 +20,14 @@ import CustomSelect from '../components/CustomSelect';
 import { Pagination } from '../components/ui/Pagination';
 import { SearchInput, SkeletonRows, StatusDot, TableRegion } from '../components/ui/Primitives';
 import { ConfirmContext } from '../context/ConfirmContext';
+import { usePermission } from '../context/PermissionContext';
 import { ToastContext } from '../context/ToastContext';
+import { getRechargeTemplateProductOptions, type RechargeTemplateProductOption } from '../utils/api';
 import {
+  formatUSD,
   NOVEL_SCOPE_LABELS,
   type PaymentEnvironment,
   PRODUCT_TYPE_LABELS,
-  productsApi,
-  type ProductView,
   type RechargeTemplateDTO,
   templatesApi,
   type TemplateSlotDTO,
@@ -37,7 +38,6 @@ import {
 import {
   canDeleteTemplate,
   canSetDefaultTemplate,
-  filterEligibleTemplateProducts,
   shouldLockDefaultTemplate,
 } from '../utils/templateCatalogHelpers';
 
@@ -83,6 +83,9 @@ function summarizeSlots(slots: TemplateSlotDTO[]) {
 }
 
 export default function TemplatesTab() {
+  const { canRead, canWrite } = usePermission();
+  const canWriteTemplates = canWrite('ads.templates');
+  const canReadProducts = canRead('payments.products');
   const navigate = useNavigate();
   const location = useLocation();
   const { templateId } = useParams<{ templateId?: string }>();
@@ -111,8 +114,8 @@ export default function TemplatesTab() {
   const [pageSize, setPageSize] = useState(10);
 
   // Published product catalog for editor dropdown grouped by environment
-  const [liveProducts, setLiveProducts] = useState<ProductView[]>([]);
-  const [sandboxProducts, setSandboxProducts] = useState<ProductView[]>([]);
+  const [liveProducts, setLiveProducts] = useState<RechargeTemplateProductOption[]>([]);
+  const [sandboxProducts, setSandboxProducts] = useState<RechargeTemplateProductOption[]>([]);
   const [productsLoading, setProductsLoading] = useState(false);
 
   // Editor state
@@ -138,13 +141,10 @@ export default function TemplatesTab() {
   const loadPublishedCatalog = useCallback(async (signal?: AbortSignal) => {
     setProductsLoading(true);
     try {
-      const [sbx, live] = await Promise.all([
-        productsApi.list({ environment: 'sandbox', status: 'published' }, signal),
-        productsApi.list({ environment: 'live', status: 'published' }, signal),
-      ]);
+      const res = await getRechargeTemplateProductOptions(signal);
       if (signal?.aborted) return;
-      setLiveProducts(live.products ?? []);
-      setSandboxProducts(sbx.products ?? []);
+      setSandboxProducts(res?.sandbox ?? []);
+      setLiveProducts(res?.live ?? []);
     } catch {
       if (!signal?.aborted) {
         setLiveProducts([]);
@@ -158,9 +158,9 @@ export default function TemplatesTab() {
   useEffect(() => {
     const controller = new AbortController();
     void loadTemplates(controller.signal);
-    if (isEditor) void loadPublishedCatalog(controller.signal);
+    if (isEditor && canWriteTemplates) void loadPublishedCatalog(controller.signal);
     return () => controller.abort();
-  }, [loadTemplates, loadPublishedCatalog, isEditor]);
+  }, [loadTemplates, loadPublishedCatalog, isEditor, canWriteTemplates]);
 
   // Populate editor form when templates finish loading
   useEffect(() => {
@@ -217,16 +217,16 @@ export default function TemplatesTab() {
     [tplEnv, liveProducts, sandboxProducts],
   );
   const eligibleProducts = useMemo(
-    () => filterEligibleTemplateProducts(envPublishedProducts),
+    () => envPublishedProducts.filter((p) => p.dual_channel_ready),
     [envPublishedProducts],
   );
   const eligibleProductMap = useMemo(() => {
-    const map = new Map<number, ProductView>();
+    const map = new Map<number, RechargeTemplateProductOption>();
     for (const p of eligibleProducts) map.set(p.id, p);
     return map;
   }, [eligibleProducts]);
   const productMap = useMemo(() => {
-    const map = new Map<number, ProductView>();
+    const map = new Map<number, RechargeTemplateProductOption>();
     for (const p of [...sandboxProducts, ...liveProducts]) map.set(p.id, p);
     for (const p of envPublishedProducts) map.set(p.id, p);
     return map;
@@ -260,6 +260,7 @@ export default function TemplatesTab() {
   }, [filteredTemplates, page, pageSize]);
 
   const handleSetDefault = async (tpl: RechargeTemplateDTO) => {
+    if (!canWriteTemplates) return;
     try {
       await templatesApi.setDefault(tpl.id);
       showToast(`已将「${tpl.name}」设为默认模板`, 'success');
@@ -270,6 +271,7 @@ export default function TemplatesTab() {
   };
 
   const handleDelete = (tpl: RechargeTemplateDTO) => {
+    if (!canWriteTemplates) return;
     if (tpl.is_default) {
       showToast('默认模板不可删除，请先设置其他模板为默认', 'error');
       return;
@@ -353,7 +355,7 @@ export default function TemplatesTab() {
 
   const handleSaveTemplate = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (saving) return;
+    if (!canWriteTemplates || saving) return;
     if (editorValidationError) {
       setEditorError(editorValidationError);
       return;
@@ -390,7 +392,7 @@ export default function TemplatesTab() {
         name: p.name,
         code: p.code,
         type: p.product_type,
-        price: p.price,
+        price: p.price || formatUSD(p.price_cents),
         coins: p.coins,
         bonus: p.bonus,
         vipCycle: p.vip_cycle,
@@ -417,6 +419,9 @@ export default function TemplatesTab() {
   };
 
   if (isEditor) {
+    if (!canWriteTemplates) {
+      return <Navigate to="/recharge-templates" replace />;
+    }
     return (
       <div className="space-y-5">
         <div className="flex flex-wrap items-center justify-between gap-3">
@@ -436,7 +441,9 @@ export default function TemplatesTab() {
           </div>
 
           <div className="flex items-center gap-2">
-            <Link to="/payments/products" className="btn-secondary text-xs">管理 / 新建商品</Link>
+            {canReadProducts && (
+              <Link to="/payments/products" className="btn-secondary text-xs">管理 / 新建商品</Link>
+            )}
             <button type="submit" form={`${formId}-editor`} className="btn-primary inline-flex items-center gap-1.5" disabled={saving}>
               <Save size={15} aria-hidden="true" />
               {saving ? '保存中…' : '保存模板'}
@@ -525,7 +532,13 @@ export default function TemplatesTab() {
 
               {eligibleProducts.length === 0 && !productsLoading && (
                 <div role="alert" className="p-3 rounded-xl border border-[var(--cms-warning)] bg-[var(--cms-warning-soft)] text-xs text-[var(--cms-warning)]">
-                  当前尚未有在 {tplEnv === 'live' ? 'Live' : 'Sandbox'} 环境下「已上架且双渠道就绪」的商品，请先前往 <Link to={`/payments/products?environment=${tplEnv}`} className="underline font-medium">商品与定价</Link> 完成 PayPal / Stripe 绑定并上架。
+                  当前尚未有在 {tplEnv === 'live' ? 'Live' : 'Sandbox'} 环境下「已上架且双渠道就绪」的商品，请先前往{' '}
+                  {canReadProducts ? (
+                    <Link to={`/payments/products?environment=${tplEnv}`} className="underline font-medium">商品与定价</Link>
+                  ) : (
+                    <span className="font-medium">商品与定价</span>
+                  )}{' '}
+                  完成 PayPal / Stripe 绑定并上架。
                 </div>
               )}
 
@@ -537,7 +550,7 @@ export default function TemplatesTab() {
                     .filter((p) => p.id === draft.product_id || !selectedProductIds.has(p.id))
                     .map((p) => ({
                       value: String(p.id),
-                      label: `[${tplEnv === 'live' ? 'Live 已上架' : 'Sandbox 已上架'} · ${PRODUCT_TYPE_LABELS[p.product_type]}] ${p.name} · ${p.price} (${p.code})`,
+                      label: `[${tplEnv === 'live' ? 'Live 已上架' : 'Sandbox 已上架'} · ${PRODUCT_TYPE_LABELS[p.product_type]}] ${p.name} · ${p.price || formatUSD(p.price_cents)} (${p.code})`,
                     }));
                   if (draft.product_id > 0 && !eligibleProductMap.has(draft.product_id) && summary) {
                     const sbxOnly = tplEnv === 'live' && sandboxProducts.some((sp) => sp.id === draft.product_id);
@@ -744,15 +757,19 @@ export default function TemplatesTab() {
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <Link to="/payments/products" className="btn-secondary text-sm">商品与定价</Link>
+          {canReadProducts && (
+            <Link to="/payments/products" className="btn-secondary text-sm">商品与定价</Link>
+          )}
           <button type="button" className="btn-secondary inline-flex items-center gap-1.5" onClick={() => void loadTemplates()}>
             <RefreshCw size={14} aria-hidden="true" />
             刷新
           </button>
-          <button type="button" className="btn-primary inline-flex items-center gap-1.5" onClick={() => navigate('/recharge-templates/new')}>
-            <Plus size={15} aria-hidden="true" />
-            新建模板
-          </button>
+          {canWriteTemplates && (
+            <button type="button" className="btn-primary inline-flex items-center gap-1.5" onClick={() => navigate('/recharge-templates/new')}>
+              <Plus size={15} aria-hidden="true" />
+              新建模板
+            </button>
+          )}
         </div>
       </div>
 
@@ -842,40 +859,44 @@ export default function TemplatesTab() {
                       {new Date(t.updated_at).toLocaleString()}
                     </td>
                     <td className="text-right">
-                      <div className="inline-flex flex-wrap justify-end gap-1.5">
-                        <button type="button" className="btn-detail" onClick={() => navigate(`/recharge-templates/${t.id}/edit`)}>
-                          编辑
-                        </button>
-                        <button
-                          type="button"
-                          className="btn-detail inline-flex items-center gap-1"
-                          onClick={() => navigate(`/recharge-templates/new?copyFrom=${t.id}`)}
-                        >
-                          <Copy size={12} aria-hidden="true" />
-                          复制
-                        </button>
-                        {canSetDefaultTemplate(t) && (
+                      {canWriteTemplates ? (
+                        <div className="inline-flex flex-wrap justify-end gap-1.5">
+                          <button type="button" className="btn-detail" onClick={() => navigate(`/recharge-templates/${t.id}/edit`)}>
+                            编辑
+                          </button>
                           <button
                             type="button"
                             className="btn-detail inline-flex items-center gap-1"
-                            onClick={() => void handleSetDefault(t)}
+                            onClick={() => navigate(`/recharge-templates/new?copyFrom=${t.id}`)}
                           >
-                            <Star size={12} aria-hidden="true" />
-                            设为默认
+                            <Copy size={12} aria-hidden="true" />
+                            复制
                           </button>
-                        )}
-                        {!t.is_default && (
-                          <button
-                            type="button"
-                            className="btn-ghost text-xs text-[var(--cms-error)] disabled:opacity-45 disabled:cursor-not-allowed"
-                            disabled={hasPromoRefs}
-                            title={hasPromoRefs ? `已被 ${promoCount} 条推广链接引用，请先解绑后再删除` : undefined}
-                            onClick={() => void handleDelete(t)}
-                          >
-                            {hasPromoRefs ? `引用中 (${promoCount})` : '删除'}
-                          </button>
-                        )}
-                      </div>
+                          {canSetDefaultTemplate(t) && (
+                            <button
+                              type="button"
+                              className="btn-detail inline-flex items-center gap-1"
+                              onClick={() => void handleSetDefault(t)}
+                            >
+                              <Star size={12} aria-hidden="true" />
+                              设为默认
+                            </button>
+                          )}
+                          {!t.is_default && (
+                            <button
+                              type="button"
+                              className="btn-ghost text-xs text-[var(--cms-error)] disabled:opacity-45 disabled:cursor-not-allowed"
+                              disabled={hasPromoRefs}
+                              title={hasPromoRefs ? `已被 ${promoCount} 条推广链接引用，请先解绑后再删除` : undefined}
+                              onClick={() => void handleDelete(t)}
+                            >
+                              {hasPromoRefs ? `引用中 (${promoCount})` : '删除'}
+                            </button>
+                          )}
+                        </div>
+                      ) : (
+                        <span className="text-[var(--cms-muted-fg)]">—</span>
+                      )}
                     </td>
                   </tr>
                 );

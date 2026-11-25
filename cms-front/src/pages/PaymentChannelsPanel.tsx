@@ -19,6 +19,7 @@ import {
   ViewOptionsPopover,
 } from '../components/ui/Primitives';
 import CustomSelect from '../components/CustomSelect';
+import { usePermission } from '../context/PermissionContext';
 import { ToastContext } from '../context/ToastContext';
 import { ApiError } from '../utils/api';
 import {
@@ -59,6 +60,9 @@ function errMsg(err: unknown, fallback: string): string {
 }
 
 export function PaymentChannelsPanel() {
+  const { canRead, canWrite } = usePermission();
+  const canWriteChannels = canWrite('payments.channels');
+  const canReadProducts = canRead('payments.products');
   const toastCtx = useContext(ToastContext);
   const showToast = useCallback(
     (msg: string, type: 'success' | 'error' | 'info' = 'success') => {
@@ -233,6 +237,7 @@ export function PaymentChannelsPanel() {
   };
 
   const openCreate = () => {
+    if (!canWriteChannels) return;
     setCreateForm(EMPTY_FORM);
     setCreateProvider('paypal');
     setCreateEnv('sandbox');
@@ -242,7 +247,7 @@ export function PaymentChannelsPanel() {
 
   const submitCreate = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (submitting) return;
+    if (!canWriteChannels || submitting) return;
     setDialogError('');
     setSubmitting(true);
     try {
@@ -272,6 +277,7 @@ export function PaymentChannelsPanel() {
   };
 
   const openEdit = (ch: ChannelAccount) => {
+    if (!canWriteChannels) return;
     setEditTarget(ch);
     setEditForm({
       ...EMPTY_FORM,
@@ -284,7 +290,7 @@ export function PaymentChannelsPanel() {
 
   const submitEdit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!editTarget || submitting) return;
+    if (!canWriteChannels || !editTarget || submitting) return;
     setDialogError('');
     setSubmitting(true);
     try {
@@ -309,7 +315,7 @@ export function PaymentChannelsPanel() {
   };
 
   const handleValidate = async (ch: ChannelAccount) => {
-    if (busyId !== null) return;
+    if (!canWriteChannels || busyId !== null) return;
     setBusyId(ch.id);
     setValidationNote(null);
     try {
@@ -334,6 +340,7 @@ export function PaymentChannelsPanel() {
   };
 
   const openPublish = (ch: ChannelAccount) => {
+    if (!canWriteChannels) return;
     setPublishTarget(ch);
     setPublishPrimary(true);
     setPublishOrders(ch.new_orders_enabled || ch.status !== 'published');
@@ -344,7 +351,7 @@ export function PaymentChannelsPanel() {
   };
 
   const submitPublish = async () => {
-    if (!publishTarget || submitting) return;
+    if (!canWriteChannels || !publishTarget || submitting) return;
     setSubmitting(true);
     setDialogError('');
     setUnreadyProducts([]);
@@ -377,7 +384,7 @@ export function PaymentChannelsPanel() {
   };
 
   const submitDeactivate = async () => {
-    if (!deactivateTarget || submitting) return;
+    if (!canWriteChannels || !deactivateTarget || submitting) return;
     setSubmitting(true);
     setDialogError('');
     try {
@@ -436,9 +443,11 @@ export function PaymentChannelsPanel() {
               { value: 'live', label: 'Live 正式' },
             ]}
           />
-          <Link to="/payments/products" className="btn-secondary h-9 px-3 text-xs font-normal whitespace-nowrap">
-            商品与定价
-          </Link>
+          {canReadProducts && (
+            <Link to="/payments/products" className="btn-secondary h-9 px-3 text-xs font-normal whitespace-nowrap">
+              商品与定价
+            </Link>
+          )}
           <button
             type="button"
             className="btn-secondary h-9 px-3 text-xs font-normal whitespace-nowrap"
@@ -447,10 +456,12 @@ export function PaymentChannelsPanel() {
             <RefreshCw size={13} className={loading ? 'animate-spin' : ''} aria-hidden="true" />
             <span>刷新</span>
           </button>
-          <button type="button" className="btn-primary h-9 px-3.5 text-xs" onClick={openCreate}>
-            <Plus size={14} aria-hidden="true" />
-            <span>新增渠道账户</span>
-          </button>
+          {canWriteChannels && (
+            <button type="button" className="btn-primary h-9 px-3.5 text-xs" onClick={openCreate}>
+              <Plus size={14} aria-hidden="true" />
+              <span>新增渠道账户</span>
+            </button>
+          )}
         </div>
       </div>
 
@@ -599,11 +610,13 @@ export function PaymentChannelsPanel() {
                   const pendingDiff = ch.pending_version > ch.active_version;
                   const fullWebhookUrl = ch.webhook_path ? `${webhookOrigin}${ch.webhook_path}` : '';
                   const hintEntries = Object.entries(ch.credential_hints || {});
-                  const menuItems: RowActionItem[] = [
-                    { label: '编辑 / 轮换密钥', onClick: () => openEdit(ch) },
-                    { label: '风控策略', onClick: () => setPolicyTarget(ch) },
-                  ];
-                  if (ch.status !== 'disabled') {
+                  const menuItems: RowActionItem[] = canWriteChannels
+                    ? [
+                        { label: '编辑 / 轮换密钥', onClick: () => openEdit(ch) },
+                        { label: '风控策略', onClick: () => setPolicyTarget(ch) },
+                      ]
+                    : [];
+                  if (canWriteChannels && ch.status !== 'disabled') {
                     menuItems.push({
                       label: '停用账户',
                       tone: 'danger',
@@ -700,18 +713,26 @@ export function PaymentChannelsPanel() {
                       </td>
                       <td className="text-right whitespace-nowrap">
                         <div className="inline-flex items-center justify-end gap-0.5 whitespace-nowrap">
-                          <button
-                            type="button"
-                            className="btn-detail"
-                            disabled={busyId === ch.id}
-                            onClick={() => void handleValidate(ch)}
-                          >
-                            {busyId === ch.id ? '验证中…' : '验证'}
-                          </button>
-                          <button type="button" className="btn-detail" onClick={() => openPublish(ch)}>
-                            发布
-                          </button>
-                          <RowActionMenu ariaLabel={`${ch.display_name || ch.account_label} 更多操作`} items={menuItems} />
+                          {canWriteChannels ? (
+                            <>
+                              <button
+                                type="button"
+                                className="btn-detail"
+                                disabled={busyId === ch.id}
+                                onClick={() => void handleValidate(ch)}
+                              >
+                                {busyId === ch.id ? '验证中…' : '验证'}
+                              </button>
+                              <button type="button" className="btn-detail" onClick={() => openPublish(ch)}>
+                                发布
+                              </button>
+                              <RowActionMenu ariaLabel={`${ch.display_name || ch.account_label} 更多操作`} items={menuItems} />
+                            </>
+                          ) : (
+                            <button type="button" className="btn-detail" onClick={() => setPolicyTarget(ch)}>
+                              风控策略
+                            </button>
+                          )}
                         </div>
                       </td>
                     </tr>

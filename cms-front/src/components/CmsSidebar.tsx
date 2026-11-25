@@ -6,6 +6,7 @@ import { isNavPathActive, type NavNode } from '../config/navigation';
 
 interface CmsSidebarProps {
   navTree: NavNode[];
+  homePath?: string;
   resolvedTheme: ResolvedTheme;
   collapsed: boolean;
   onToggleCollapse: () => void;
@@ -319,6 +320,7 @@ function ExpandedNavList({
 
 export function CmsSidebar({
   navTree,
+  homePath = '/',
   resolvedTheme,
   collapsed,
   onToggleCollapse,
@@ -404,8 +406,8 @@ export function CmsSidebar({
           }`}
         >
           <Link
-            to="/"
-            title={collapsed ? 'STAR NOVEL · 首页总览' : undefined}
+            to={homePath}
+            title={collapsed ? 'STAR NOVEL' : undefined}
             className="flex items-center gap-2 min-w-0 no-underline"
           >
             <img
@@ -508,7 +510,7 @@ export function CmsSidebar({
         {mobileOpen && (
           <div className="flex flex-col h-full">
             <div className="h-12 px-3 border-b border-[var(--cms-border)] flex items-center justify-between gap-2 shrink-0">
-              <Link to="/" onClick={onCloseMobile} className="flex items-center gap-2 min-w-0 no-underline">
+              <Link to={homePath} onClick={onCloseMobile} className="flex items-center gap-2 min-w-0 no-underline">
                 <img
                   src={logoSrc}
                   alt="STAR NOVEL"

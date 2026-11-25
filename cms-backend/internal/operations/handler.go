@@ -3,6 +3,7 @@ package operations
 import (
 	"errors"
 	"net/http"
+	"strconv"
 
 	"github.com/gin-gonic/gin"
 	"star-novel-cms/internal/auth"
@@ -17,15 +18,17 @@ func NewHandler(service Service) *Handler {
 }
 
 func (h *Handler) RegisterRoutes(r *gin.RouterGroup) {
-	opsRoles := auth.RoleMiddleware("SuperAdmin", "Admin", "Editor")
+	opsRead := auth.RequirePermission(auth.PermContentOperationsRead)
+	opsWrite := auth.RequirePermission(auth.PermContentOperationsWrite)
 	ops := r.Group("/operations", auth.AuthMiddleware())
 	{
-		ops.GET("", h.GetConfig)
-		ops.POST("/preview", h.Preview)
-		ops.PUT("/ranking-config", opsRoles, h.SaveRankingConfig)
-		ops.PUT("/ranking", opsRoles, h.SaveRanking)
-		ops.PUT("/campaigns/checkin", opsRoles, h.SaveCheckInConfig)
-		ops.PUT("/groups/:group", opsRoles, h.SaveGroup)
+		ops.GET("", opsRead, h.GetConfig)
+		ops.POST("/preview", opsRead, h.Preview)
+		ops.GET("/novel-options", opsRead, h.ListNovelOptions)
+		ops.PUT("/ranking-config", opsWrite, h.SaveRankingConfig)
+		ops.PUT("/ranking", opsWrite, h.SaveRanking)
+		ops.PUT("/campaigns/checkin", opsWrite, h.SaveCheckInConfig)
+		ops.PUT("/groups/:group", opsWrite, h.SaveGroup)
 	}
 }
 
@@ -130,6 +133,28 @@ func (h *Handler) Preview(c *gin.Context) {
 	res, err := h.service.Preview(c.Request.Context(), req)
 	if err != nil {
 		handleServiceError(c, err, "Failed to preview operations catalog")
+		return
+	}
+	c.JSON(http.StatusOK, res)
+}
+
+func (h *Handler) ListNovelOptions(c *gin.Context) {
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
+	filter := NovelOptionsFilter{
+		Search: c.Query("search"),
+		Author: c.Query("author"),
+		Genre:  c.Query("genre"),
+		Status: c.Query("status"),
+		Sort:   c.Query("sort"),
+	}
+	res, err := h.service.ListNovelOptions(c.Request.Context(), page, pageSize, filter)
+	if err != nil {
+		if errors.Is(err, ErrInvalidNovelOptionsFilter) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch published novel options"})
 		return
 	}
 	c.JSON(http.StatusOK, res)

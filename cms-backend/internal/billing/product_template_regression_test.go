@@ -274,7 +274,7 @@ func TestStripeBinding_UpdateTaxCodeAndBehaviorReprovisionsPrice(t *testing.T) {
 	sbxRec2 := doJSON(t, r, http.MethodPut, fmt.Sprintf("/cms/products/%d/bindings/stripe", prodID), "cfg-super", map[string]any{
 		"environment": "sandbox", "sales_mode": "merchant_of_record",
 		"tax_liability_account": "acct_TaxLiability01",
-		"tax_code": "txcd_10103001", "tax_behavior": "inclusive",
+		"tax_code":              "txcd_10103001", "tax_behavior": "inclusive",
 		"countries": []string{"US"}, "reason": "sbx MoR upgrade",
 	})
 	if sbxRec2.Code != http.StatusOK || !strings.Contains(sbxRec2.Body.String(), `"external_price_ref":"price_sbx_2"`) {

@@ -18,8 +18,9 @@ import {
   TableRegion,
   ViewOptionsPopover,
 } from '../components/ui/Primitives';
+import { usePermission } from '../context/PermissionContext';
 import { ToastContext } from '../context/ToastContext';
-import { operationsApi, type RecommendationNovel } from '../utils/api';
+import { apiRequest, operationsApi, type RecommendationNovel } from '../utils/api';
 import {
   type ChannelAccount,
   channelsApi,
@@ -44,11 +45,6 @@ import {
   parseSpecificNovelIds as combineSpecificNovelIds,
   toggleSpecificNovelScope,
 } from '../utils/productCatalogHelpers';
-
-interface ProductsPageProps {
-  canWrite: boolean;
-  canManageBindings: boolean;
-}
 
 type ProductFormState = {
   code: string;
@@ -104,7 +100,15 @@ function errMsg(err: unknown, fallback: string): string {
   return err instanceof Error ? err.message : fallback;
 }
 
-export default function ProductsPage({ canWrite, canManageBindings }: ProductsPageProps) {
+export default function ProductsPage() {
+  const { canRead, canWrite: hasWrite } = usePermission();
+  const canWrite = hasWrite('payments.products');
+  const canReadChannels = canRead('payments.channels');
+  const canWriteChannels = hasWrite('payments.channels');
+  const canManageBindings = canWrite && canWriteChannels;
+  const canReadTemplates = canRead('ads.templates');
+  const canReadNovels = canRead('content.novels');
+  const canReadOperations = canRead('content.operations');
   const toastCtx = useContext(ToastContext);
   const showToast = useCallback(
     (msg: string, type: 'success' | 'error' | 'info' = 'success') => {
@@ -206,9 +210,19 @@ export default function ProductsPage({ canWrite, canManageBindings }: ProductsPa
 
   useEffect(() => {
     if (!drawerOpen || formState.product_type !== 'whole_book' || formState.novel_scope_type !== 'specific_novels') return;
+    if (!canReadNovels && !canReadOperations) {
+      setNovelOptions([]);
+      return;
+    }
     const controller = new AbortController();
-    void operationsApi
-      .searchPublishedNovels({ search: novelSearch, pageSize: 20, signal: controller.signal })
+    const fetchNovels = canReadNovels
+      ? (() => {
+          const query = new URLSearchParams({ publish_status: 'published', page: '1', page_size: '20' });
+          if (novelSearch.trim()) query.set('search', novelSearch.trim());
+          return apiRequest('GET', `/novels?${query.toString()}`, undefined, false, controller.signal);
+        })()
+      : operationsApi.getNovelOptions({ search: novelSearch, pageSize: 20, signal: controller.signal });
+    void fetchNovels
       .then((res) => {
         if (!controller.signal.aborted) {
           setNovelOptions(Array.isArray(res?.novels) ? res.novels : Array.isArray(res?.items) ? res.items : []);
@@ -216,7 +230,7 @@ export default function ProductsPage({ canWrite, canManageBindings }: ProductsPa
       })
       .catch(() => {});
     return () => controller.abort();
-  }, [drawerOpen, formState.product_type, formState.novel_scope_type, novelSearch]);
+  }, [drawerOpen, formState.product_type, formState.novel_scope_type, novelSearch, canReadNovels, canReadOperations]);
 
   const envAccounts = useMemo(
     () => ({
@@ -257,7 +271,7 @@ export default function ProductsPage({ canWrite, canManageBindings }: ProductsPa
 
   const handleSaveProduct = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (submitting) return;
+    if (!canWrite || submitting) return;
     setFormError('');
 
     const priceCents = Math.round(Number(formState.price_usd) * 100);
@@ -580,9 +594,11 @@ export default function ProductsPage({ canWrite, canManageBindings }: ProductsPa
               setParams(next);
             }}
           />
-          <Link to="/recharge-templates" className="btn-secondary h-9 px-3 text-xs font-normal whitespace-nowrap">
-            充值模板
-          </Link>
+          {canReadTemplates && (
+            <Link to="/recharge-templates" className="btn-secondary h-9 px-3 text-xs font-normal whitespace-nowrap">
+              充值模板
+            </Link>
+          )}
           <button
             type="button"
             className="btn-secondary h-9 px-3 text-xs font-normal whitespace-nowrap"
@@ -808,7 +824,7 @@ export default function ProductsPage({ canWrite, canManageBindings }: ProductsPa
                                 tone={p.paypal_ready ? 'success' : 'warning'}
                                 label={`PayPal: ${p.paypal_ready ? '就绪' : '待完善'}`}
                               />
-                              {p.paypal_binding?.external_price_ref && (
+                              {canReadChannels && p.paypal_binding?.external_price_ref && (
                                 <span className="font-mono-code text-[var(--cms-muted-fg)] truncate max-w-[140px]">
                                   {p.paypal_binding.external_price_ref}
                                 </span>
@@ -819,7 +835,7 @@ export default function ProductsPage({ canWrite, canManageBindings }: ProductsPa
                                 tone={p.stripe_ready ? 'success' : 'warning'}
                                 label={`Stripe: ${p.stripe_ready ? '就绪' : '待完善'}`}
                               />
-                              {p.stripe_binding?.external_price_ref && (
+                              {canReadChannels && p.stripe_binding?.external_price_ref && (
                                 <span className="font-mono-code text-[var(--cms-muted-fg)] truncate max-w-[140px]">
                                   {p.stripe_binding.external_price_ref}
                                 </span>
@@ -841,9 +857,11 @@ export default function ProductsPage({ canWrite, canManageBindings }: ProductsPa
                       </td>
                       <td className="text-right whitespace-nowrap">
                         <div className="inline-flex items-center justify-end gap-0.5 whitespace-nowrap">
-                          <button type="button" className="btn-detail" onClick={() => void openBindingsDrawer(p)}>
-                            {canManageBindings ? '绑定' : '绑定详情'}
-                          </button>
+                          {canReadChannels && (
+                            <button type="button" className="btn-detail" onClick={() => void openBindingsDrawer(p)}>
+                              {canManageBindings ? '绑定' : '绑定详情'}
+                            </button>
+                          )}
                           {canPublish && pubStatus !== 'retired' && pubStatus !== 'published' && (
                             <button
                               type="button"
@@ -859,6 +877,9 @@ export default function ProductsPage({ canWrite, canManageBindings }: ProductsPa
                           )}
                           {menuItems.length > 0 && (
                             <RowActionMenu ariaLabel={`${p.name} 更多操作`} items={menuItems} />
+                          )}
+                          {!canReadChannels && !(canPublish && pubStatus !== 'retired' && pubStatus !== 'published') && menuItems.length === 0 && (
+                            <span className="text-[var(--cms-muted-fg)]">—</span>
                           )}
                         </div>
                       </td>
@@ -1142,6 +1163,68 @@ export default function ProductsPage({ canWrite, canManageBindings }: ProductsPa
             </div>
 
             {formError && <p role="alert" className="text-xs text-[var(--cms-error)]">{formError}</p>}
+
+            {canReadChannels && !canManageBindings && (() => {
+              const bindings = bindingProduct.all_bindings && bindingProduct.all_bindings.length > 0
+                ? bindingProduct.all_bindings
+                : [bindingProduct.paypal_binding, bindingProduct.stripe_binding].filter(
+                    (b): b is NonNullable<typeof b> => Boolean(b),
+                  );
+              return (
+                <div className="space-y-3 text-xs">
+                  <div className="p-3 rounded-xl bg-[var(--cms-content)] border border-[var(--cms-border)] text-[var(--cms-muted-fg)]">
+                    当前账号具有渠道绑定只读权限，可查看各渠道绑定明细，修改绑定需同时具备「商品与定价写权限」和「渠道与商户写权限」。
+                  </div>
+                  {bindings.length === 0 ? (
+                    <div className="cms-card p-4 text-[var(--cms-muted-fg)]">
+                      该商品在 {env} 环境尚未配置任何渠道绑定记录。
+                    </div>
+                  ) : (
+                    bindings.map((b) => (
+                      <div key={b.id} className="cms-card p-4 space-y-2">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div className="font-semibold text-sm text-[var(--cms-fg)]">
+                            {b.provider === 'paypal' ? 'PayPal' : 'Stripe'} · {b.account_display_name || b.account_key}
+                            {b.account_is_primary ? '（主用）' : '（备选）'}
+                          </div>
+                          <StatusDot
+                            tone={b.validation_status === 'verified' && b.enabled ? 'success' : 'warning'}
+                            label={b.validation_status === 'verified' && b.enabled ? '已就绪' : `${b.validation_status}${b.enabled ? '' : ' · 已停用'}`}
+                          />
+                        </div>
+                        <dl className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[var(--cms-muted-fg)]">
+                          <div>
+                            <dt>外部商品 ID</dt>
+                            <dd className="font-mono-code text-[var(--cms-fg)] break-all">{b.external_product_ref || '—'}</dd>
+                          </div>
+                          <div>
+                            <dt>外部价格 / Plan ID</dt>
+                            <dd className="font-mono-code text-[var(--cms-fg)] break-all">{b.external_price_ref || '—'}</dd>
+                          </div>
+                          {b.provider === 'stripe' && (
+                            <>
+                              <div>
+                                <dt>销售模式</dt>
+                                <dd className="text-[var(--cms-fg)]">{b.sales_mode === 'merchant_of_record' ? 'Managed Payments (MoR)' : '直收 (Direct)'}</dd>
+                              </div>
+                              <div>
+                                <dt>允许销售国家/地区</dt>
+                                <dd className="font-mono-code text-[var(--cms-fg)]">{b.allowed_countries?.join(', ') || '—'}</dd>
+                              </div>
+                            </>
+                          )}
+                        </dl>
+                        {b.validation_error && (
+                          <p role="alert" className="text-[var(--cms-error)] m-0">
+                            上次同步异常：{b.validation_error}
+                          </p>
+                        )}
+                      </div>
+                    ))
+                  )}
+                </div>
+              );
+            })()}
 
             {canManageBindings && (() => {
               const activePPBinding = findBindingForAccount(bindingProduct, 'paypal', ppForm.account_id);

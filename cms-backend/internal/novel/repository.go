@@ -54,6 +54,9 @@ type NovelRepository interface {
 	DeletePromotionLink(ctx context.Context, id int) error
 
 	ListFBPixels(ctx context.Context) ([]FBPixel, error)
+	ListPublishedNovelOptionsForPromo(ctx context.Context) ([]PromotionLinkNovelOption, error)
+	ListLiveTemplateOptionsForPromo(ctx context.Context) ([]PromotionLinkTemplateOption, error)
+	ListActiveDomainOptionsForPromo(ctx context.Context) ([]PromotionLinkDomainOption, error)
 }
 
 type dbNovelRepository struct{}
@@ -550,4 +553,70 @@ func (r *dbNovelRepository) ListFBPixels(ctx context.Context) ([]FBPixel, error)
 		return nil, err
 	}
 	return pixels, nil
+}
+
+func (r *dbNovelRepository) ListPublishedNovelOptionsForPromo(ctx context.Context) ([]PromotionLinkNovelOption, error) {
+	rows, err := db.DB.Query(ctx, `
+		SELECT id, title, coin_cost_per_thousand, COALESCE(start_pay_chapter_index, 0)
+		FROM novels
+		WHERE status != 'archived' AND publish_status = 'published'
+		ORDER BY created_at DESC, id DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make([]PromotionLinkNovelOption, 0)
+	for rows.Next() {
+		var opt PromotionLinkNovelOption
+		if err := rows.Scan(&opt.ID, &opt.Title, &opt.CoinCostPerThousand, &opt.StartPayChapterIndex); err != nil {
+			return nil, err
+		}
+		out = append(out, opt)
+	}
+	return out, rows.Err()
+}
+
+func (r *dbNovelRepository) ListLiveTemplateOptionsForPromo(ctx context.Context) ([]PromotionLinkTemplateOption, error) {
+	rows, err := db.DB.Query(ctx, `
+		SELECT id, name, is_default
+		FROM recharge_templates
+		WHERE environment = 'live'
+		ORDER BY is_default DESC, id DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make([]PromotionLinkTemplateOption, 0)
+	for rows.Next() {
+		var opt PromotionLinkTemplateOption
+		if err := rows.Scan(&opt.ID, &opt.Name, &opt.IsDefault); err != nil {
+			return nil, err
+		}
+		out = append(out, opt)
+	}
+	return out, rows.Err()
+}
+
+func (r *dbNovelRepository) ListActiveDomainOptionsForPromo(ctx context.Context) ([]PromotionLinkDomainOption, error) {
+	rows, err := db.DB.Query(ctx, `
+		SELECT id, name, domain, type, is_default
+		FROM system_domains
+		WHERE status = 1
+		ORDER BY is_default DESC, type ASC, id DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make([]PromotionLinkDomainOption, 0)
+	for rows.Next() {
+		var opt PromotionLinkDomainOption
+		if err := rows.Scan(&opt.ID, &opt.Name, &opt.Domain, &opt.Type, &opt.IsDefault); err != nil {
+			return nil, err
+		}
+		out = append(out, opt)
+	}
+	return out, rows.Err()
 }

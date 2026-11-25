@@ -64,6 +64,8 @@ func openTestBillingPool(t *testing.T, dsn string) *pgxpool.Pool {
 		dbassets.PaymentAftercareSQL, dbassets.StripeOneTimeCheckoutSQL, dbassets.StripeVIPCheckoutSQL,
 		dbassets.PaymentCompletionSQL, dbassets.PaymentRecoverySQL, dbassets.PaymentReviewFixesSQL,
 		dbassets.PaymentCatalogAndChannelSQL, dbassets.PaymentVIPSwitchSQL, dbassets.PaymentTemplateCatalogFixesSQL,
+		dbassets.ConversionCenterReviewSQL, dbassets.ConversionBatchSQL, dbassets.ConversionThroughputRereviewSQL,
+		dbassets.ConversionCredentialHealthSQL, dbassets.RBACPermissionsSQL,
 	} {
 		if _, err := pool.Exec(ctx, stmt); err != nil {
 			t.Fatal(err)
@@ -96,10 +98,16 @@ func setupChannelCatalogRouter(t *testing.T) (*gin.Engine, context.Context) {
 	t.Cleanup(func() { config.AppConfig = origCfg })
 
 	if _, err := pool.Exec(ctx, `
-		INSERT INTO admins(id, username, password_hash, role, status) VALUES
-		('cfg-super', 'cfg-super', 'none', 'SuperAdmin', 1),
-		('cfg-finance', 'cfg-finance', 'none', 'Finance', 1),
-		('cfg-support', 'cfg-support', 'none', 'Support', 1)
+		INSERT INTO roles (code, name, description, is_system, is_super_admin, status)
+		VALUES ('ProductReadOnly', 'Product Read Only', 'Test role with products:read only', false, false, 1)
+		ON CONFLICT (code) DO NOTHING;
+		INSERT INTO role_permissions (role_id, permission_code)
+		SELECT id, 'payments.products:read' FROM roles WHERE code = 'ProductReadOnly'
+		ON CONFLICT DO NOTHING;
+		INSERT INTO admins(id, username, password_hash, role, role_id, status) VALUES
+		('cfg-super', 'cfg-super', 'none', 'Admin', (SELECT id FROM roles WHERE code='Admin'), 1),
+		('cfg-finance', 'cfg-finance', 'none', 'FinanceManager', (SELECT id FROM roles WHERE code='FinanceManager'), 1),
+		('cfg-support', 'cfg-support', 'none', 'ProductReadOnly', (SELECT id FROM roles WHERE code='ProductReadOnly'), 1)
 		ON CONFLICT (id) DO NOTHING`); err != nil {
 		t.Fatal(err)
 	}
@@ -113,11 +121,11 @@ func setupChannelCatalogRouter(t *testing.T) (*gin.Engine, context.Context) {
 func actorRole(actor string) string {
 	switch actor {
 	case "cfg-super":
-		return "SuperAdmin"
+		return "Admin"
 	case "cfg-finance":
-		return "Finance"
+		return "FinanceManager"
 	default:
-		return "Support"
+		return "ProductReadOnly"
 	}
 }
 
@@ -488,19 +496,22 @@ func TestProductCatalogDualChannelGateAndTemplateDecoupling(t *testing.T) {
 	}); rec.Code != http.StatusOK {
 		t.Fatalf("expected dual-channel ready publish success (200), got %d: %s", rec.Code, rec.Body.String())
 	}
-	for _, actor := range []string{"cfg-finance", "cfg-support"} {
-		rec := doJSON(t, r, http.MethodGet, fmt.Sprintf("/cms/products/%d?environment=sandbox", vipID), actor, nil)
-		if rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), "price_AnnualVIP9999") || !strings.Contains(rec.Body.String(), `"dual_channel_ready":true`) {
-			t.Fatalf("summary projection for %s: %d %s", actor, rec.Code, rec.Body.String())
-		}
+	// ProductReadOnly (lacking payments.channels:read) must NOT see binding details; FinanceManager (has payments.channels:read) DOES see them
+	if rec := doJSON(t, r, http.MethodGet, fmt.Sprintf("/cms/products/%d?environment=sandbox", vipID), "cfg-support", nil); rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), "price_AnnualVIP9999") || !strings.Contains(rec.Body.String(), `"dual_channel_ready":true`) {
+		t.Fatalf("summary projection for cfg-support: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := doJSON(t, r, http.MethodGet, fmt.Sprintf("/cms/products/%d?environment=sandbox", vipID), "cfg-finance", nil); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "price_AnnualVIP9999") || !strings.Contains(rec.Body.String(), `"dual_channel_ready":true`) {
+		t.Fatalf("channel-read projection for cfg-finance: %d %s", rec.Code, rec.Body.String())
 	}
 	policyPath := fmt.Sprintf("/cms/payments/channels/%d/aftercare-policy", ppID)
 	draft := map[string]any{"reason": "test review policy", "revision": "", "hold_fulfillment": true,
 		"reviewer_id": "cfg-super", "finance_id": "cfg-finance", "review_seconds": 600, "refund_seconds": 1200}
-	for _, method := range []string{http.MethodGet, http.MethodPut} {
-		if rec := doJSON(t, r, method, policyPath, "cfg-finance", draft); rec.Code != http.StatusForbidden {
-			t.Fatalf("finance policy %s: %d %s", method, rec.Code, rec.Body.String())
-		}
+	// FinanceManager has payments.channels:read (GET 200) but NOT payments.channels:write (PUT 403)
+	if rec := doJSON(t, r, http.MethodGet, policyPath, "cfg-finance", nil); rec.Code != http.StatusOK {
+		t.Fatalf("finance policy GET: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := doJSON(t, r, http.MethodPut, policyPath, "cfg-finance", draft); rec.Code != http.StatusForbidden {
+		t.Fatalf("finance policy PUT: %d %s", rec.Code, rec.Body.String())
 	}
 	readPolicy := func() struct {
 		Configured    bool `json:"configured"`

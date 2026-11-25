@@ -105,3 +105,30 @@ type PreviewResponse struct {
 	Rankings              []PreviewNovelItem `json:"rankings"`
 	RankingManualFallback bool               `json:"ranking_manual_fallback"`
 }
+
+type NovelOption struct {
+	ID            int64    `json:"id"`
+	Title         string   `json:"title"`
+	Author        string   `json:"author"`
+	CoverURL      string   `json:"cover_url"`
+	Rating        float64  `json:"rating"`
+	Status        string   `json:"status"`
+	PublishStatus string   `json:"publish_status"`
+	ViewCount     int64    `json:"view_count"`
+	Genres        []string `json:"genres"`
+}
+
+type NovelOptionsFilter struct {
+	Search string
+	Author string
+	Genre  string
+	Status string
+	Sort   string
+}
+
+type NovelOptionsResponse struct {
+	Novels   []NovelOption `json:"novels"`
+	Total    int           `json:"total"`
+	Page     int           `json:"page"`
+	PageSize int           `json:"page_size"`
+}

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"star-novel-cms/internal/auth"
 )
 
 const reconciliationCurrency = "USD"
@@ -52,18 +53,20 @@ type payoutFilter struct {
 	DifferencesOnly bool   `form:"differences_only"`
 }
 
-func (h *Handler) registerReconciliationRoutes(payments *gin.RouterGroup, financeRoles gin.HandlerFunc) {
-	group := payments.Group("/reconciliation", financeRoles)
-	group.GET("/movements", reconciliationQuery(h.service.ListLedgerMovements))
-	group.GET("/payouts", reconciliationQuery(h.service.ListSettlementPayouts))
-	group.GET("/report-issues", reconciliationQuery(h.service.ListSettlementReportIssues))
-	group.GET("/activity", reconciliationQuery(h.service.GetPaymentActivity))
-	group.GET("/accounts", h.listSettlementAccounts)
-	group.PUT("/accounts/:id/automatic", h.updateAutomaticLedger)
-	group.GET("/commands", h.listSettlementCommands)
-	group.GET("/commands/request/:key", h.getOwnSettlementCommand)
-	group.GET("/commands/:id", h.getSettlementCommand)
-	group.POST("/commands", h.submitSettlementCommand)
+func (h *Handler) registerReconciliationRoutes(payments *gin.RouterGroup) {
+	reconRead := auth.RequirePermission(auth.PermPaymentsReconciliationRead)
+	reconWrite := auth.RequirePermission(auth.PermPaymentsReconciliationWrite)
+	group := payments.Group("/reconciliation")
+	group.GET("/movements", reconRead, reconciliationQuery(h.service.ListLedgerMovements))
+	group.GET("/payouts", reconRead, reconciliationQuery(h.service.ListSettlementPayouts))
+	group.GET("/report-issues", reconRead, reconciliationQuery(h.service.ListSettlementReportIssues))
+	group.GET("/activity", reconRead, reconciliationQuery(h.service.GetPaymentActivity))
+	group.GET("/accounts", reconRead, h.listSettlementAccounts)
+	group.PUT("/accounts/:id/automatic", reconWrite, h.updateAutomaticLedger)
+	group.GET("/commands", reconRead, h.listSettlementCommands)
+	group.GET("/commands/request/:key", reconRead, h.getOwnSettlementCommand)
+	group.GET("/commands/:id", reconRead, h.getSettlementCommand)
+	group.POST("/commands", reconWrite, h.submitSettlementCommand)
 }
 
 var errReconciliationDateRange = errors.New("reconciliation dates are out of order")

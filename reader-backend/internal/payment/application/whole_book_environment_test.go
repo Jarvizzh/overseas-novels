@@ -31,7 +31,7 @@ func TestWholeBookEnvironmentScope(t *testing.T) {
 		VALUES(1,'Book','Author','published',50,1);
 		INSERT INTO chapters(id,novel_id,chapter_index,title,word_count,content) VALUES('chapter',1,0,'Chapter',1000,'Content');
 		INSERT INTO wallets(user_id,charged_coins,bonus_coins) VALUES(1,100,0),(2,100,0),(3,100,0),(4,100,0);
-		INSERT INTO admins(id,username,password_hash,role) VALUES('proof','proof','test','Finance');
+		INSERT INTO admins(id,username,password_hash,role,role_id) VALUES('proof','proof','test','FinanceManager',(SELECT id FROM roles WHERE code='FinanceManager'));
 		INSERT INTO payment_channel_accounts(provider,account_key,environment,credentials_ref,webhook_ref)
 		VALUES('paypal','book-live','live','test','test'),('paypal','book-sandbox','sandbox','test','test');
 		INSERT INTO recharge_orders(id,user_id,novel_id,amount_cents,payment_method,status,order_type,checkout_id,fulfilled_at,checkout_environment)
@@ -107,7 +107,7 @@ func TestLegacyWholeBookPendingReservation(t *testing.T) {
 	}
 	exec(`INSERT INTO users(id) VALUES(912),(913),(914);
 		INSERT INTO novels(id,title,author,publish_status) VALUES(912,'Book','Author','published');
-		INSERT INTO admins(id,username,password_hash,role) VALUES('r12','R12','test','Finance');
+		INSERT INTO admins(id,username,password_hash,role,role_id) VALUES('r12','R12','test','FinanceManager',(SELECT id FROM roles WHERE code='FinanceManager'));
 		SELECT assert_paypal_identity('r12-live','live');
 		INSERT INTO payment_channel_accounts(provider,account_key,environment,credentials_ref,webhook_ref)
 			VALUES('paypal','r12-sandbox','sandbox','test','test');`)
@@ -246,7 +246,7 @@ func TestWholeBookRecoveryFencesPreviouslyReservedChannelWrites(t *testing.T) {
 	}
 	exec(`INSERT INTO users(id) VALUES(930);
 		INSERT INTO novels(id,title,author,publish_status) VALUES(930,'Book','Author','published');
-		INSERT INTO admins(id,username,password_hash,role) VALUES('r13','R13','test','Finance');
+		INSERT INTO admins(id,username,password_hash,role,role_id) VALUES('r13','R13','test','FinanceManager',(SELECT id FROM roles WHERE code='FinanceManager'));
 		SELECT assert_paypal_identity('r13-live','live');
 		INSERT INTO payment_channel_accounts(provider,account_key,environment,credentials_ref,webhook_ref)
 			VALUES('stripe','acct_R13','live','fixture','fixture');

@@ -7,7 +7,7 @@ import _ "embed"
 //go:embed schema.sql
 var SchemaSQL string
 
-// SeedSQL embeds initial seed data (superadmin, configs, domains, templates, novels, chapters)
+// SeedSQL embeds initial seed data (configs, domains, templates, novels, chapters)
 //
 //go:embed seed.sql
 var SeedSQL string
@@ -184,3 +184,8 @@ var ConversionThroughputRereviewSQL string
 
 //go:embed migrations/2026111934.sql
 var ConversionCredentialHealthSQL string
+
+// RBACPermissionsSQL introduces single-role RBAC tables, built-in roles, and permission lock functions.
+//
+//go:embed migrations/2026111935.sql
+var RBACPermissionsSQL string

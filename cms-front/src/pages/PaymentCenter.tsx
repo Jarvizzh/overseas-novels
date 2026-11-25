@@ -1,6 +1,7 @@
 import { StripeMarketReview } from '../components/StripeMarketReview';
 import { useEffect, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
+import { usePermission } from '../context/PermissionContext';
 import { PaymentChannelsPanel } from './PaymentChannelsPanel';
 import { CmsDialog } from '../components/ui/CmsDialog';
 import { SearchInput, SkeletonRows, StatusDot, TableRegion } from '../components/ui/Primitives';
@@ -17,157 +18,6 @@ import {
   paymentMoney,
   usePaymentQuery,
 } from '../utils/paymentWorkspace';
-
-type SummaryOrder = {
-  id: number;
-  user_id: string;
-  order_type: string;
-  status: string;
-  refund_status?: string;
-  novel_id?: number;
-  coins: number;
-  bonus_coins_credited: number;
-};
-
-export function SupportPayments() {
-  const [params, setParams] = useSearchParams();
-  const orderID = params.get('order_id') ?? '';
-  const userID = params.get('user_id') ?? '';
-  const queryField = userID && !orderID ? 'user_id' : 'order_id';
-  const queryValue = orderID || userID;
-  const [field, setField] = useState(queryField);
-  const [value, setValue] = useState(queryValue);
-  const [revision, setRevision] = useState(0);
-  const page = Math.max(1, Number(params.get('page')) || 1);
-  const list = usePaymentQuery<{ orders: SummaryOrder[]; total: number }>(
-    queryValue
-      ? `/payments/orders?${paymentParams({ ...paymentScope(params, ''), order_id: orderID, user_id: userID, page: String(page), page_size: String(PAYMENT_PAGE_SIZE) })}`
-      : '',
-    revision,
-  );
-  const loading = Boolean(queryValue) && !list;
-
-  useEffect(() => {
-    setField(queryField);
-    setValue(queryValue);
-  }, [queryField, queryValue]);
-
-  return (
-    <div className="space-y-4">
-      <search>
-        <form
-          aria-label="查询客服订单"
-          className="flex flex-wrap items-center gap-2"
-          onSubmit={(event) => {
-            event.preventDefault();
-            const next = new URLSearchParams(params);
-            next.delete('order_id');
-            next.delete('user_id');
-            next.delete('page');
-            next.set(field, value.trim());
-            if (next.toString() === params.toString()) setRevision((current) => current + 1);
-            else setParams(next);
-          }}
-        >
-          <CustomSelect
-            aria-label="订单查询方式"
-            width="142px"
-            value={field}
-            options={[
-              { value: 'order_id', label: '订单号' },
-              { value: 'user_id', label: '用户 ID' },
-            ]}
-            onChange={(next) => {
-              setField(next === 'user_id' ? 'user_id' : 'order_id');
-              setValue('');
-            }}
-          />
-          <input
-            aria-label={field === 'order_id' ? '订单号' : '用户 ID'}
-            placeholder={field === 'order_id' ? '输入订单号' : '输入用户 ID'}
-            className="input-field w-full sm:w-56"
-            inputMode="numeric"
-            pattern="0*[1-9][0-9]*"
-            required
-            value={value}
-            onChange={(event) => setValue(event.target.value)}
-          />
-          <button type="submit" className="btn-secondary">
-            查询
-          </button>
-        </form>
-      </search>
-      {list?.error ? (
-        <PaymentLoadError message={list.error} onRetry={() => setRevision((current) => current + 1)} />
-      ) : (
-        <TableRegion
-          ariaLabel="客服订单列表"
-          footer={
-            list?.data && (
-              <Pagination
-                page={page}
-                pageSize={PAYMENT_PAGE_SIZE}
-                total={list.data.total}
-                onPageChange={(nextPage) => {
-                  const next = new URLSearchParams(params);
-                  next.set('page', String(nextPage));
-                  setParams(next);
-                }}
-              />
-            )
-          }
-        >
-          <table className="cms-table" aria-busy={loading}>
-            <thead>
-              <tr>
-                <th scope="col">订单</th>
-                <th scope="col">用户</th>
-                <th scope="col">状态</th>
-                <th scope="col">退款进度</th>
-                <th scope="col">权益</th>
-              </tr>
-            </thead>
-            <tbody>
-              {loading ? (
-                <SkeletonRows rows={3} cols={5} />
-              ) : list?.data?.orders.length ? (
-                list.data.orders.map((order) => (
-                  <tr key={order.id}>
-                    <td>#{order.id}</td>
-                    <td>{order.user_id}</td>
-                    <td>{order.status}</td>
-                    <td>{order.refund_status || '—'}</td>
-                    <td>
-                      {order.order_type === 'whole_book'
-                        ? `整本阅读 #${order.novel_id}`
-                        : ['vip', 'subscription'].includes(order.order_type)
-                          ? 'VIP'
-                          : `${order.coins + order.bonus_coins_credited} 金币`}
-                    </td>
-                  </tr>
-                ))
-              ) : (
-                <tr>
-                  <td colSpan={5} className="text-center">
-                    {queryValue ? (
-                      <p role="status" className="text-[11px] text-[var(--cms-muted-fg)]">
-                        未查询到订单。
-                      </p>
-                    ) : (
-                      <Link className="btn-detail" to="/users">
-                        从用户档案查看订单
-                      </Link>
-                    )}
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </TableRegion>
-      )}
-    </div>
-  );
-}
 
 type Subscription = {
   id: string;
@@ -212,7 +62,11 @@ const subscriptionStates = {
   APPROVAL_PENDING: { label: '待确认', tone: 'warning' },
 } as const;
 
-export function PaymentSubscriptions({ support, finance }: { support: boolean; finance: boolean }) {
+export function PaymentSubscriptions() {
+  const { canRead } = usePermission();
+  const canReadOrders = canRead('payments.orders');
+  const canReadRefunds = canRead('payments.refunds');
+  const canReadDisputes = canRead('payments.disputes');
   const [params, setParams] = useSearchParams();
   const userID = params.get('user_id') ?? '';
   const [user, setUser] = useState(userID);
@@ -225,11 +79,8 @@ export function PaymentSubscriptions({ support, finance }: { support: boolean; f
   const status = params.get('status') ?? '';
   const page = Math.max(1, Number(params.get('page')) || 1);
   const pageSize = Number(params.get('page_size')) || PAYMENT_PAGE_SIZE;
-  const shouldLoad = !support || Boolean(userID);
   const list = usePaymentQuery<{ subscriptions: Subscription[]; total: number }>(
-    shouldLoad
-      ? `/payments/subscriptions?${paymentParams({ ...scope, user_id: userID, status, page: String(page), page_size: String(pageSize) })}`
-      : '',
+    `/payments/subscriptions?${paymentParams({ ...scope, user_id: userID, status, page: String(page), page_size: String(pageSize) })}`,
     revision,
   );
   const periodQuery = usePaymentQuery<{ periods: StripePeriod[] }>(
@@ -251,14 +102,14 @@ export function PaymentSubscriptions({ support, finance }: { support: boolean; f
 
   return (
     <div className="space-y-4">
-      {!support && <PaymentScopeBar allEnvironments scope={scope} onChange={(value) => update(value)} />}
+      <PaymentScopeBar allEnvironments scope={scope} onChange={(value) => update(value)} />
       <div className="flex flex-wrap items-center justify-between gap-2">
         <form
           className="flex flex-wrap items-center gap-2"
           onSubmit={(event) => {
             event.preventDefault();
             const value = user.trim();
-            if ((support || value) && (!/^\d+$/.test(value) || /^0+$/.test(value))) {
+            if (value && (!/^\d+$/.test(value) || /^0+$/.test(value))) {
               setInputError('请输入有效的用户 ID。');
               return;
             }
@@ -290,17 +141,15 @@ export function PaymentSubscriptions({ support, finance }: { support: boolean; f
             </button>
           )}
         </form>
-        {!support && (
-          <CustomSelect
-            aria-label="订阅状态"
-            value={status}
-            options={[
-              { value: '', label: '全部订阅状态' },
-              ...Object.entries(subscriptionStates).map(([value, entry]) => ({ value, label: entry.label })),
-            ]}
-            onChange={(value) => update({ status: value })}
-          />
-        )}
+        <CustomSelect
+          aria-label="订阅状态"
+          value={status}
+          options={[
+            { value: '', label: '全部订阅状态' },
+            ...Object.entries(subscriptionStates).map(([value, entry]) => ({ value, label: entry.label })),
+          ]}
+          onChange={(value) => update({ status: value })}
+        />
       </div>
       {inputError && (
         <p role="alert" className="text-sm text-[var(--cms-error)]">
@@ -324,7 +173,7 @@ export function PaymentSubscriptions({ support, finance }: { support: boolean; f
             )
           }
         >
-          <table className="cms-table" aria-busy={shouldLoad && !list}>
+          <table className="cms-table" aria-busy={!list}>
             <thead>
               <tr>
                 <th scope="col">订阅编号</th>
@@ -333,13 +182,13 @@ export function PaymentSubscriptions({ support, finance }: { support: boolean; f
                 <th scope="col">协议状态</th>
                 <th scope="col">周期</th>
                 <th scope="col">已付至 UTC</th>
-                {finance && <th scope="col">账期明细</th>}
+                <th scope="col">账期明细</th>
               </tr>
             </thead>
             <tbody>
-              {shouldLoad && !list ? (
-                <SkeletonRows rows={3} cols={finance ? 7 : 6} />
-              ) : list?.data?.subscriptions.length ? (
+              {!list ? (
+                <SkeletonRows rows={3} cols={7} />
+              ) : list.data?.subscriptions.length ? (
                 list.data.subscriptions.map((item) => {
                   const channelScope = {
                     provider: item.provider,
@@ -370,30 +219,22 @@ export function PaymentSubscriptions({ support, finance }: { support: boolean; f
                       </td>
                       <td>{item.cycle || '—'}</td>
                       <td>{paymentTime(item.paid_until)}</td>
-                      {finance && (
-                        <td>
-                          {['stripe', 'paypal'].includes(item.provider) && (
-                            <button type="button" className="btn-detail" onClick={() => setSelected(item)}>
-                              账期 #{item.id}
-                            </button>
-                          )}
-                        </td>
-                      )}
+                      <td>
+                        {['stripe', 'paypal'].includes(item.provider) && (
+                          <button type="button" className="btn-detail" onClick={() => setSelected(item)}>
+                            账期 #{item.id}
+                          </button>
+                        )}
+                      </td>
                     </tr>
                   );
                 })
               ) : (
                 <tr>
-                  <td colSpan={finance ? 7 : 6} className="text-center">
-                    {shouldLoad ? (
-                      <p role="status" className="text-[11px] text-[var(--cms-muted-fg)]">
-                        当前范围没有匹配的订阅。
-                      </p>
-                    ) : (
-                      <Link className="btn-detail" to="/users">
-                        从用户档案查看订阅
-                      </Link>
-                    )}
+                  <td colSpan={7} className="text-center">
+                    <p role="status" className="text-[11px] text-[var(--cms-muted-fg)]">
+                      当前范围没有匹配的订阅。
+                    </p>
                   </td>
                 </tr>
               )}
@@ -438,29 +279,37 @@ export function PaymentSubscriptions({ support, finance }: { support: boolean; f
                 ) : (
                   <span>{period.invoice_ref || '原收款凭证待确认'}</span>
                 )}
-                <Link
-                  className="btn-detail"
-                  to={`/payments/orders?${paymentParams({ order_id: period.order_id, provider: selected?.provider, environment: period.environment === 'unknown' ? '' : period.environment })}`}
-                >
-                  订单 #{period.order_id}
-                </Link>
-                {period.environment !== 'unknown' ? (
-                  <>
-                    <Link
-                      className="btn-detail"
-                      to={`/payments/refunds?${paymentParams({ order_id: period.order_id, provider: selected?.provider, environment: period.environment })}`}
-                    >
-                      退款
-                    </Link>
-                    <Link
-                      className="btn-detail"
-                      to={`/payments/disputes?${paymentParams({ order_id: period.order_id, provider: selected?.provider, environment: period.environment })}`}
-                    >
-                      争议
-                    </Link>
-                  </>
-                ) : (
-                  <span>渠道环境待核对</span>
+                {canReadOrders && (
+                  <Link
+                    className="btn-detail"
+                    to={`/payments/orders?${paymentParams({ order_id: period.order_id, provider: selected?.provider, environment: period.environment === 'unknown' ? '' : period.environment })}`}
+                  >
+                    订单 #{period.order_id}
+                  </Link>
+                )}
+                {(canReadRefunds || canReadDisputes) && (
+                  period.environment !== 'unknown' ? (
+                    <>
+                      {canReadRefunds && (
+                        <Link
+                          className="btn-detail"
+                          to={`/payments/refunds?${paymentParams({ order_id: period.order_id, provider: selected?.provider, environment: period.environment })}`}
+                        >
+                          退款
+                        </Link>
+                      )}
+                      {canReadDisputes && (
+                        <Link
+                          className="btn-detail"
+                          to={`/payments/disputes?${paymentParams({ order_id: period.order_id, provider: selected?.provider, environment: period.environment })}`}
+                        >
+                          争议
+                        </Link>
+                      )}
+                    </>
+                  ) : (
+                    <span>渠道环境待核对</span>
+                  )
                 )}
               </div>
               <p>
@@ -490,7 +339,7 @@ export function PaymentSubscriptions({ support, finance }: { support: boolean; f
               {period.observed_tax_liability_account && <p>税务责任账户 {period.observed_tax_liability_account}</p>}
               {period.observed_customer_tax_status && <p>客户税务状态 {period.observed_customer_tax_status}</p>}
               {period.review_reason && <p>{period.review_reason}</p>}
-              {selected?.provider === 'stripe' && period.review_reason && (
+              {canReadOrders && selected?.provider === 'stripe' && period.review_reason && (
                 <StripeMarketReview key={period.order_id} orderID={period.order_id} />
               )}
             </li>

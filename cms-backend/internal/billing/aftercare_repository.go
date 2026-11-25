@@ -78,12 +78,13 @@ func listCases(ctx context.Context, f caseFilter) (json.RawMessage, error) {
 	return result, err
 }
 
-func getCase(ctx context.Context, id int64) (json.RawMessage, error) {
+func getCase(ctx context.Context, id int64) (string, json.RawMessage, error) {
+	var kind string
 	var result json.RawMessage
 	err := db.DB.QueryRow(ctx, `WITH detail AS (SELECT `+caseColumns+`,
 		array_remove(ARRAY['assign',CASE WHEN `+caseCanApproveSQL+` THEN 'approve' END,
 			CASE WHEN `+caseCanRejectSQL+` THEN 'reject' END],NULL) AS available_actions`+caseJoins+` WHERE c.id=$1)
-	SELECT to_jsonb(detail)||jsonb_build_object(
+	SELECT detail.kind, to_jsonb(detail)||jsonb_build_object(
 		'receipts',COALESCE((SELECT jsonb_agg(jsonb_build_object('id',r.receipt_id::text,'receipt',r.capture_id,
 			'order_id',r.order_id::text,'type',o.order_type,'state',o.status,'paid_at',o.paid_at,'fulfilled_at',o.fulfilled_at,
 			'paid_period_start',o.paid_period_start,'paid_period_end',o.paid_period_end,
@@ -125,8 +126,8 @@ func getCase(ctx context.Context, id int64) (json.RawMessage, error) {
 			FROM payment_case_evidence WHERE case_id=$1 AND (SELECT kind FROM detail)='risk_signal'
 			ORDER BY observed_at DESC LIMIT 20
 		) item),'[]')
-	) FROM detail`, id).Scan(&result)
-	return result, err
+	) FROM detail`, id).Scan(&kind, &result)
+	return kind, result, err
 }
 
 func listDecisions(ctx context.Context, orderID, before int64, environment, provider string) (json.RawMessage, error) {
@@ -142,9 +143,16 @@ func listDecisions(ctx context.Context, orderID, before int64, environment, prov
 	return data, err
 }
 
-func listFinanceOwners(ctx context.Context) (json.RawMessage, error) {
+func listCaseOwnersByScope(ctx context.Context, roleScope string) (json.RawMessage, error) {
 	var data json.RawMessage
-	err := db.DB.QueryRow(ctx, `SELECT COALESCE(jsonb_agg(jsonb_build_object('id',id,'name',username) ORDER BY username),'[]')
-		FROM admins WHERE status=1 AND role IN ('SuperAdmin','Finance')`).Scan(&data)
+	err := db.DB.QueryRow(ctx, `SELECT COALESCE(jsonb_agg(jsonb_build_object('id', a.id, 'name', a.username) ORDER BY a.username), '[]')
+		FROM admins a
+		WHERE a.status = 1
+		  AND (
+		      ($1 = 'risk' AND public.admin_has_permission(a.id, 'payments.risk:write'))
+		      OR ($1 = 'disputes' AND public.admin_has_permission(a.id, 'payments.disputes:write'))
+		      OR ($1 = 'aftercare_finance' AND public.admin_has_permission(a.id, 'payments.disputes:write') AND public.admin_has_permission(a.id, 'payments.refunds:write'))
+		      OR ($1 = '' AND (public.admin_has_permission(a.id, 'payments.risk:write') OR public.admin_has_permission(a.id, 'payments.disputes:write')))
+		  )`, roleScope).Scan(&data)
 	return data, err
 }

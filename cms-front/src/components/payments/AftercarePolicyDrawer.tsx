@@ -1,7 +1,8 @@
 import { useRef, useState } from 'react';
+import { usePermission } from '../../context/PermissionContext';
 import CustomSelect from '../CustomSelect';
 import { CmsDialog } from '../ui/CmsDialog';
-import { apiRequest } from '../../utils/api';
+import { apiRequest, paymentCaseOwnersPath, type PaymentCaseOwner } from '../../utils/api';
 import type { ChannelAccount } from '../../utils/paymentCatalogApi';
 import { paymentError, paymentScopeLabel, usePaymentQuery } from '../../utils/paymentWorkspace';
 import { PaymentLoadError } from './PaymentWorkspace';
@@ -17,16 +18,19 @@ type Policy = {
   refund_seconds: number | null;
   reminder_seconds: number | null;
 };
-type Owner = { id: string; name: string };
 
 function PolicyForm({
   policy,
-  owners,
+  reviewers,
+  financeOwners,
+  canWrite,
   submit,
   busy,
 }: {
   policy: Policy;
-  owners: Owner[];
+  reviewers: PaymentCaseOwner[];
+  financeOwners: PaymentCaseOwner[];
+  canWrite: boolean;
   submit: (payload: object) => void;
   busy: boolean;
 }) {
@@ -39,12 +43,12 @@ function PolicyForm({
     { name: 'reminder_seconds', label: '举证提醒提前量（秒）', required: false },
   ] as const;
 
-  function ownerOptions(current: string) {
+  function ownerOptions(list: PaymentCaseOwner[], current: string) {
     const options = [
       { value: '', label: '请选择负责人' },
-      ...owners.map((item) => ({ value: item.id, label: item.name })),
+      ...list.map((item) => ({ value: item.id, label: item.name })),
     ];
-    if (current && !owners.some((item) => item.id === current))
+    if (current && !list.some((item) => item.id === current))
       options.push({ value: current, label: '当前负责人已失效' });
     return options;
   }
@@ -55,6 +59,7 @@ function PolicyForm({
       className="space-y-4 text-sm"
       onSubmit={(event) => {
         event.preventDefault();
+        if (!canWrite) return;
         const data = new FormData(event.currentTarget);
         submit({
           revision: policy.revision,
@@ -67,17 +72,32 @@ function PolicyForm({
         });
       }}
     >
+      {!canWrite && (
+        <p role="status" className="text-xs text-[var(--cms-muted-fg)]">
+          当前账号仅有渠道策略只读查看权限，不可修改。
+        </p>
+      )}
       {!policy.configured && (
         <p role="status" className="text-xs text-[var(--cms-muted-fg)]">
           该商户尚未配置账户策略。
         </p>
       )}
       <label className="flex items-center gap-2">
-        <input type="checkbox" name="dispute_lookup" defaultChecked={policy.dispute_lookup} />
+        <input
+          type="checkbox"
+          name="dispute_lookup"
+          defaultChecked={policy.dispute_lookup}
+          disabled={!canWrite || busy}
+        />
         主动补查渠道争议
       </label>
       <label className="flex items-center gap-2">
-        <input type="checkbox" checked={hold} onChange={(event) => setHold(event.target.checked)} />
+        <input
+          type="checkbox"
+          checked={hold}
+          disabled={!canWrite || busy}
+          onChange={(event) => setHold(event.target.checked)}
+        />
         高风险收款暂缓履约
       </label>
       <div className="grid gap-3 sm:grid-cols-2">
@@ -86,17 +106,19 @@ function PolicyForm({
           <CustomSelect
             aria-label="风控复核负责人"
             width="100%"
-            options={ownerOptions(reviewer)}
+            disabled={!canWrite || busy}
+            options={ownerOptions(reviewers, reviewer)}
             value={reviewer}
             onChange={setReviewer}
           />
         </label>
         <label className="grid gap-1">
-          财务待办负责人
+          售后争议与退款负责人
           <CustomSelect
-            aria-label="财务待办负责人"
+            aria-label="售后争议与退款负责人"
             width="100%"
-            options={ownerOptions(finance)}
+            disabled={!canWrite || busy}
+            options={ownerOptions(financeOwners, finance)}
             value={finance}
             onChange={setFinance}
           />
@@ -113,40 +135,48 @@ function PolicyForm({
               step={1}
               defaultValue={policy[name] ?? ''}
               required={required}
+              disabled={!canWrite || busy}
             />
           </label>
         ))}
       </div>
-      {hold && (!reviewer || !finance) && (
+      {canWrite && hold && (!reviewer || !finance) && (
         <p className="text-xs text-[var(--cms-muted-fg)]">启用暂缓履约时须指定两位岗位负责人及处置期限。</p>
       )}
-      <label className="grid gap-1">
-        变更依据
-        <textarea name="reason" required maxLength={500} className="input-field" rows={2} />
-      </label>
-      <button type="submit" className="btn-primary" disabled={busy || (hold && (!reviewer || !finance))}>
-        {busy ? '保存中…' : '保存策略'}
-      </button>
+      {canWrite && (
+        <>
+          <label className="grid gap-1">
+            变更依据
+            <textarea name="reason" required maxLength={500} className="input-field" rows={2} disabled={busy} />
+          </label>
+          <button type="submit" className="btn-primary" disabled={busy || (hold && (!reviewer || !finance))}>
+            {busy ? '保存中…' : '保存策略'}
+          </button>
+        </>
+      )}
     </form>
   );
 }
 
 export function AftercarePolicyDrawer({ account, onClose }: { account: ChannelAccount; onClose: () => void }) {
+  const { canWrite } = usePermission();
+  const canWriteChannels = canWrite('payments.channels');
   const [revision, setRevision] = useState(0);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const inFlight = useRef(false);
   const url = `/payments/channels/${account.id}/aftercare-policy`;
   const policy = usePaymentQuery<Policy>(url, revision);
-  const owners = usePaymentQuery<Owner[]>('/payments/cases/owners', revision);
-  const fetchError = policy?.error || owners?.error;
+  const reviewers = usePaymentQuery<PaymentCaseOwner[]>(paymentCaseOwnersPath('risk'), revision);
+  const financeOwners = usePaymentQuery<PaymentCaseOwner[]>(paymentCaseOwnersPath('aftercare_finance'), revision);
+  const fetchError = policy?.error || reviewers?.error || financeOwners?.error;
   const refresh = () => {
     setError('');
     setRevision((value) => value + 1);
   };
 
   async function submit(payload: object) {
-    if (inFlight.current) return;
+    if (!canWriteChannels || inFlight.current) return;
     setBusy(true);
     inFlight.current = true;
     setError('');
@@ -179,11 +209,13 @@ export function AftercarePolicyDrawer({ account, onClose }: { account: ChannelAc
       <div className="space-y-4">
         {fetchError ? (
           <PaymentLoadError message={fetchError} onRetry={refresh} />
-        ) : policy?.data && owners?.data ? (
+        ) : policy?.data && reviewers?.data && financeOwners?.data ? (
           <PolicyForm
             key={revision}
             policy={policy.data}
-            owners={owners.data}
+            reviewers={reviewers.data}
+            financeOwners={financeOwners.data}
+            canWrite={canWriteChannels}
             submit={(payload) => void submit(payload)}
             busy={busy}
           />

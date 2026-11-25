@@ -1,21 +1,4 @@
-import type { SystemDomain } from './api';
-
-export const PROMO_WRITE_ROLES = ['SuperAdmin', 'Admin', 'Editor', 'MediaBuyer'] as const;
-
-/** Read current admin role from persisted login metadata. */
-export function getCurrentAdminRole(): string {
-  try {
-    const saved = localStorage.getItem('cms_admin');
-    return saved ? (JSON.parse(saved)?.role as string) || '' : '';
-  } catch {
-    return '';
-  }
-}
-
-/** Match backend promoWriteRoles middleware on promotion links. */
-export function canWritePromotions(role = getCurrentAdminRole()): boolean {
-  return (PROMO_WRITE_ROLES as readonly string[]).includes(role);
-}
+import type { PromotionLinkDomainOption, SystemDomain } from './api';
 
 /** Prepend https:// only when a host string does not already carry an HTTP(S) scheme. */
 export function normalizeDomainHref(domain: string): string {
@@ -65,7 +48,7 @@ export interface PromotionBuildResult {
 /** Validate promotion form inputs and build consistent landing URL + API payload for create/edit flows. */
 export function validateAndBuildPromotionPayload(
   input: PromotionBuildInput,
-  domains: SystemDomain[],
+  domains: Array<SystemDomain | PromotionLinkDomainOption>,
   pixels: Array<{ id: number; pixel_id: string }>,
 ): PromotionBuildResult {
   if (!input.fbPixelId) {
@@ -94,7 +77,7 @@ export function validateAndBuildPromotionPayload(
     }
   }
 
-  const activeDomains = (domains || []).filter((d) => d.status === 1);
+  const activeDomains = (domains || []).filter((d) => d.status === undefined || d.status === 1);
   const targetDomainObj = activeDomains.find((d) => String(d.id) === input.domainId);
   const defaultDomainObj =
     activeDomains.find((d) => d.is_default) || activeDomains.find((d) => d.type === 'main') || activeDomains[0];

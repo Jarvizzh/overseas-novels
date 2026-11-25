@@ -12,8 +12,8 @@ import (
 func TestBankStatementCommandExecutesOnlyInItsEnvironment(t *testing.T) {
 	pool := testdb.Open(t)
 	ctx := t.Context()
-	if _, err := pool.Exec(ctx, `INSERT INTO admins(id,username,password_hash,role,status)
-		VALUES('fixture-finance','fixture-finance','none','Finance',1)`); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO admins(id,username,password_hash,role,role_id,status)
+		VALUES('fixture-finance','fixture-finance','none','FinanceManager',(SELECT id FROM roles WHERE code='FinanceManager'),1)`); err != nil {
 		t.Fatal(err)
 	}
 	files, err := json.Marshal([]settlement.Upload{{Name: "b.csv", Data: []byte("transaction_id,booked_at,currency,amount_minor,bank_reference\nb1,2026-11-21T00:00:00Z,USD,900,TRACE\n")}})

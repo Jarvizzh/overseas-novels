@@ -7,6 +7,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5"
+	"star-novel-cms/internal/auth"
 	"star-novel-cms/internal/config"
 	"star-novel-cms/internal/db"
 )
@@ -42,9 +43,12 @@ func (h *Handler) UpdatePaymentChannel(c *gin.Context) {
 	}
 	defer tx.Rollback(ctx)
 	actor := c.GetString("admin_id")
-	var role string
-	if err := tx.QueryRow(ctx, `SELECT role FROM admins WHERE id=$1 AND status=1 FOR SHARE`, actor).Scan(&role); err != nil || role != "SuperAdmin" {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Payment configuration permission is required"})
+	if err := requirePermissionTx(ctx, tx, actor, errCaseForbidden, auth.PermPaymentsChannelsWrite); err != nil {
+		if err == errCaseForbidden {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Payment channel write permission is required"})
+			return
+		}
+		writeRefundCommandError(c, err)
 		return
 	}
 	var account, provider, environment, oldSource, status string
@@ -91,7 +95,10 @@ func (h *Handler) UpdatePaymentChannel(c *gin.Context) {
 func (h *Handler) listPaymentAccountOptions(c *gin.Context) {
 	var result json.RawMessage
 	err := db.DB.QueryRow(c.Request.Context(), `SELECT COALESCE(jsonb_agg(jsonb_build_object(
-		'id',a.id::text,'provider',a.provider,'environment',a.environment,'label','••••'||right(a.account_key,4)
+		'id',a.id::text,'provider',a.provider,'environment',a.environment,
+		'display_name',COALESCE(NULLIF(a.display_name,''),'••••'||right(a.account_key,4)),
+		'label','••••'||right(a.account_key,4),
+		'status',a.status
 	) ORDER BY a.provider,a.environment,a.id),'[]')
 	FROM payment_channel_accounts a WHERE a.provider IN ('paypal','stripe')`).Scan(&result)
 	writeCaseResult(c, gin.H{"accounts": result}, err)
@@ -107,11 +114,6 @@ func (h *Handler) ListPaymentSubscriptions(c *gin.Context) {
 	}
 	if c.ShouldBindQuery(&filter) != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid subscription filters"})
-		return
-	}
-	role := c.GetString("payment_role")
-	if role == "Support" && filter.UserID == "" {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Provide a user number for a support lookup"})
 		return
 	}
 	if filter.UserID != "" {
@@ -142,13 +144,13 @@ func (h *Handler) ListPaymentSubscriptions(c *gin.Context) {
 				AND ($5::bigint=0 OR (environment<>'unknown' AND account_id=$5))
 		), page AS (
 			SELECT id AS sort_id,id::text,user_id,provider,status,cycle,paid_until,environment,
-				CASE WHEN $8 AND environment<>'unknown' THEN account_id::text END AS account_id
+				CASE WHEN environment<>'unknown' THEN account_id::text END AS account_id
 			FROM filtered ORDER BY id DESC LIMIT $6 OFFSET $7
 		)
 		SELECT jsonb_build_object('subscriptions',COALESCE((SELECT jsonb_agg(jsonb_strip_nulls(to_jsonb(page)-'sort_id')
-			ORDER BY sort_id DESC) FROM page),'[]'),'total',(SELECT count(*) FROM filtered),'page',$9::integer,'page_size',$6::integer)`,
+			ORDER BY sort_id DESC) FROM page),'[]'),'total',(SELECT count(*) FROM filtered),'page',$8::integer,'page_size',$6::integer)`,
 		filter.UserID, filter.Provider, filter.Status, filter.Environment, filter.AccountID, filter.PageSize,
-		(filter.Page-1)*filter.PageSize, role == "Finance" || role == "SuperAdmin", filter.Page).Scan(&result)
+		(filter.Page-1)*filter.PageSize, filter.Page).Scan(&result)
 	writeCaseResult(c, result, err)
 }
 

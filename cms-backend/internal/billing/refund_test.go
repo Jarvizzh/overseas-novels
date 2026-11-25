@@ -16,6 +16,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5"
+	"star-novel-cms/internal/auth"
+	"star-novel-cms/internal/config"
 	"star-novel-cms/internal/db"
 )
 
@@ -34,16 +36,19 @@ func TestPaymentCenterRefundAuthorizationIntegration(t *testing.T) {
 	origDB := db.DB
 	db.DB = pool
 	t.Cleanup(func() { db.DB = origDB })
+	origCfg := config.AppConfig
+	config.AppConfig = &config.Config{JWTSecret: "test-billing-refund-jwt-secret"}
+	t.Cleanup(func() { config.AppConfig = origCfg })
 	exec := func(query string, args ...any) {
 		t.Helper()
 		if _, err := pool.Exec(ctx, query, args...); err != nil {
 			t.Fatal(err)
 		}
 	}
-	exec(`INSERT INTO admins(id,username,password_hash,role,status)
-		VALUES('test-editor','test-editor','none','Editor',1),
-		('test-disabled','test-disabled','none','Finance',2),
-		('test-finance','test-finance','none','Finance',1)`)
+	exec(`INSERT INTO admins(id,username,password_hash,role,role_id,status)
+		VALUES('test-editor','test-editor','none','ContentOperations',(SELECT id FROM roles WHERE code='ContentOperations'),1),
+		('test-disabled','test-disabled','none','FinanceManager',(SELECT id FROM roles WHERE code='FinanceManager'),2),
+		('test-finance','test-finance','none','FinanceManager',(SELECT id FROM roles WHERE code='FinanceManager'),1)`)
 	exec(`INSERT INTO users(id) VALUES(501)`)
 	t.Run("Stripe market approval scopes access and evidence", func(t *testing.T) {
 		const orderID = 519
@@ -280,22 +285,27 @@ func TestPaymentCenterRefundAuthorizationIntegration(t *testing.T) {
 			}
 		}
 	})
-	t.Run("CMS payment reads enforce role and field projection", func(t *testing.T) {
-		exec(`INSERT INTO admins(id,username,password_hash,role,status) VALUES ('test-support','test-support','none','Support',1);
-			INSERT INTO admins(id,username,password_hash,role,status) VALUES ('test-super','test-super','none','SuperAdmin',1);
-			INSERT INTO admins(id,username,password_hash,role,status) VALUES ('test-admin','test-admin','none','Admin',1);
+	t.Run("CMS payment reads enforce permissions and field projection", func(t *testing.T) {
+		exec(`INSERT INTO admins(id,username,password_hash,role,role_id,status) VALUES
+			('test-support','test-support','none','ContentOperations',(SELECT id FROM roles WHERE code='ContentOperations'),1),
+			('test-super','test-super','none','Admin',(SELECT id FROM roles WHERE code='Admin'),1),
+			('test-admin','test-admin','none','Leader',(SELECT id FROM roles WHERE code='Leader'),1);
 			UPDATE third_party_payment_orders SET raw_payload='{"internal":"must-stay-server-side"}' WHERE id=95502`)
 		handler := NewHandler(s)
 		router := gin.New()
-		router.Use(func(c *gin.Context) { c.Set("admin_id", c.GetHeader("X-Test-Actor")); c.Next() })
-		router.GET("/orders", paymentRoles("SuperAdmin", "Finance", "Admin", "Support"), handler.ListOrders)
-		router.GET("/orders/:id/payment-details", paymentRoles("SuperAdmin", "Finance"), handler.GetThirdPartyPaymentDetails)
-		router.GET("/orders/:id/checkout-evidence", paymentRoles("SuperAdmin", "Finance"), handler.getCheckoutEvidence)
-		router.GET("/payments/channels/vip-offers", paymentRoles("SuperAdmin"), handler.ListVIPOfferPublications)
+		api := router.Group("", auth.AuthMiddleware())
+		api.GET("/orders", auth.RequirePermission(auth.PermPaymentsOrdersRead), handler.ListOrders)
+		api.GET("/orders/:id/payment-details", auth.RequirePermission(auth.PermPaymentsOrdersRead), handler.GetThirdPartyPaymentDetails)
+		api.GET("/orders/:id/checkout-evidence", auth.RequirePermission(auth.PermPaymentsOrdersRead), handler.getCheckoutEvidence)
+		api.GET("/payments/channels/vip-offers", auth.RequirePermission(auth.PermPaymentsChannelsWrite), handler.ListVIPOfferPublications)
 		check := func(actor, path string, want int) string {
 			t.Helper()
 			req := httptest.NewRequest(http.MethodGet, path, nil)
-			req.Header.Set("X-Test-Actor", actor)
+			tok, err := auth.GenerateToken(actor, "test")
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set("Authorization", "Bearer "+tok)
 			out := httptest.NewRecorder()
 			router.ServeHTTP(out, req)
 			if out.Code != want {
@@ -304,15 +314,12 @@ func TestPaymentCenterRefundAuthorizationIntegration(t *testing.T) {
 			return out.Body.String()
 		}
 		check("test-editor", "/orders", http.StatusForbidden)
-		check("test-disabled", "/orders", http.StatusForbidden)
+		check("test-disabled", "/orders", http.StatusUnauthorized)
 		check("test-support", "/orders", http.StatusForbidden)
-		summary := check("test-support", "/orders?order_id=95502", http.StatusOK)
-		if !strings.Contains(summary, `"refund_status":"pending"`) || strings.Contains(summary, `"amount_cents"`) || strings.Contains(summary, `"external_ref_id"`) {
-			t.Fatalf("support projection: %s", summary)
-		}
 		check("test-support", "/orders/95502/payment-details", http.StatusForbidden)
 		check("test-support", "/orders/95502/checkout-evidence", http.StatusForbidden)
-		check("test-admin", "/orders/95502/checkout-evidence", http.StatusForbidden)
+		check("test-admin", "/orders?order_id=95502", http.StatusOK)
+		check("test-admin", "/orders/95502/checkout-evidence", http.StatusOK)
 		check("test-finance", "/payments/channels/vip-offers", http.StatusForbidden)
 		check("test-support", "/payments/channels/vip-offers", http.StatusForbidden)
 		check("test-super", "/payments/channels/vip-offers", http.StatusOK)
@@ -325,7 +332,7 @@ func TestPaymentCenterRefundAuthorizationIntegration(t *testing.T) {
 			t.Fatalf("unexpected checkout evidence projection: %s", evidence)
 		}
 	})
-	t.Run("Stripe mappings and invoice evidence enforce payment roles", func(t *testing.T) {
+	t.Run("Stripe mappings and invoice evidence enforce payment permissions", func(t *testing.T) {
 		exec(`INSERT INTO payment_channel_accounts(id,provider,account_key,environment,credentials_ref,webhook_ref) OVERRIDING SYSTEM VALUE
 			VALUES(777,'stripe','acct_Stripe','sandbox','env:stripe','env:stripe');
 			INSERT INTO recharge_templates(id,name) VALUES(777,'Stripe catalog');
@@ -335,17 +342,21 @@ func TestPaymentCenterRefundAuthorizationIntegration(t *testing.T) {
 			UPDATE recharge_slots s SET vip_offer_version_id=snapshot_vip_offer(s) WHERE s.id=777`)
 		handler := NewHandler(s)
 		router := gin.New()
-		router.Use(func(c *gin.Context) { c.Set("admin_id", c.GetHeader("X-Test-Actor")); c.Next() })
-		superOnly := paymentRoles("SuperAdmin")
-		router.GET("/channels/:id/stripe-vip", superOnly, handler.listStripeVIPOffers)
-		router.PUT("/channels/:id/stripe-vip/:slot", superOnly, handler.updateStripeVIPOffer)
-		router.GET("/channels/:id/stripe-one-time", superOnly, handler.listStripeOneTimeOffers)
-		router.PUT("/channels/:id/stripe-one-time/:slot", superOnly, handler.updateStripeOneTimeOffer)
-		router.GET("/subscriptions/:id/stripe-periods", paymentRoles("Finance", "SuperAdmin"), handler.listStripeVIPPeriods)
+		api := router.Group("", auth.AuthMiddleware())
+		channelWrite := auth.RequireAllPermissions(auth.PermPaymentsProductsWrite, auth.PermPaymentsChannelsWrite)
+		api.GET("/channels/:id/stripe-vip", auth.RequirePermission(auth.PermPaymentsChannelsRead), handler.listStripeVIPOffers)
+		api.PUT("/channels/:id/stripe-vip/:slot", channelWrite, handler.updateStripeVIPOffer)
+		api.GET("/channels/:id/stripe-one-time", auth.RequirePermission(auth.PermPaymentsChannelsRead), handler.listStripeOneTimeOffers)
+		api.PUT("/channels/:id/stripe-one-time/:slot", channelWrite, handler.updateStripeOneTimeOffer)
+		api.GET("/subscriptions/:id/stripe-periods", auth.RequirePermission(auth.PermPaymentsSubscriptionsRead), handler.listStripeVIPPeriods)
 		query := func(method, path, actor, body string, want int) string {
 			t.Helper()
 			req := httptest.NewRequest(method, path, strings.NewReader(body))
-			req.Header.Set("X-Test-Actor", actor)
+			tok, err := auth.GenerateToken(actor, "test")
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set("Authorization", "Bearer "+tok)
 			req.Header.Set("Content-Type", "application/json")
 			out := httptest.NewRecorder()
 			router.ServeHTTP(out, req)
@@ -475,23 +486,26 @@ func TestPaymentCenterRefundAuthorizationIntegration(t *testing.T) {
 		exec(`INSERT INTO user_subscriptions(id,user_id,subscription_id,payment_method,status,checkout_account_id)
 			VALUES(95510,501,'I-SCOPE-95510','paypal','ACTIVE',$1), (95511,501,'I-SCOPE-95511','paypal','SUSPENDED',$1)`, account)
 		subscriptions := gin.New()
-		subscriptions.Use(func(c *gin.Context) { c.Set("payment_role", c.GetHeader("X-Test-Role")); c.Next() })
-		subscriptions.GET("/subscriptions", NewHandler(s).ListPaymentSubscriptions)
+		subscriptions.GET("/subscriptions", auth.AuthMiddleware(), auth.RequirePermission(auth.PermPaymentsSubscriptionsRead), NewHandler(s).ListPaymentSubscriptions)
 		for _, test := range []struct {
-			role, query    string
+			actor, query   string
 			status         int
 			accountVisible bool
 		}{
-			{"Finance", "?environment=sandbox&provider=paypal&account_id=" + accountID + "&status=ACTIVE&page=1&page_size=1", http.StatusOK, true},
-			{"Support", "", http.StatusForbidden, false},
-			{"Support", "?user_id=501", http.StatusOK, false},
+			{"test-finance", "?environment=sandbox&provider=paypal&account_id=" + accountID + "&status=ACTIVE&page=1&page_size=1", http.StatusOK, true},
+			{"test-support", "", http.StatusForbidden, false},
+			{"test-support", "?user_id=501", http.StatusForbidden, false},
 		} {
 			req := httptest.NewRequest(http.MethodGet, "/subscriptions"+test.query, nil)
-			req.Header.Set("X-Test-Role", test.role)
+			tok, err := auth.GenerateToken(test.actor, "test")
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set("Authorization", "Bearer "+tok)
 			rec := httptest.NewRecorder()
 			subscriptions.ServeHTTP(rec, req)
 			if rec.Code != test.status || strings.Contains(rec.Body.String(), `"account_id"`) != test.accountVisible {
-				t.Fatalf("subscription visibility %s: %d %s", test.role, rec.Code, rec.Body.String())
+				t.Fatalf("subscription visibility %s: %d %s", test.actor, rec.Code, rec.Body.String())
 			}
 			if test.accountVisible && (!strings.Contains(rec.Body.String(), "95510") || strings.Contains(rec.Body.String(), "95511")) {
 				t.Fatalf("subscription scope: %s", rec.Body.String())

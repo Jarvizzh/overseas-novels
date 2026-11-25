@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
+import { usePermission } from '../context/PermissionContext';
 import { apiRequest } from '../utils/api';
 
 type Checkout = {
@@ -18,6 +19,10 @@ function formatAmount(minor: number, currency: string) {
 }
 
 export function CheckoutEvidence({ orderID }: { orderID: string | number }) {
+  const { canRead } = usePermission();
+  const canReadRefunds = canRead('payments.refunds');
+  const canReadDisputes = canRead('payments.disputes');
+  const canReadReconciliation = canRead('payments.reconciliation');
   const [opened, setOpened] = useState(false);
   const [checkout, setCheckout] = useState<Checkout>();
   const [error, setError] = useState(false);
@@ -68,18 +73,22 @@ export function CheckoutEvidence({ orderID }: { orderID: string | number }) {
                       {receipt.funds_entitlement && ' · 履约收款'}
                     </p>
                     {receipt.note && <p>{receipt.note}</p>}
-                    <Link className="btn-detail" to={`/payments/refunds?order_id=${order}&receipt_id=${encodeURIComponent(receipt.id)}${checkout.environment ? "&environment=" + checkout.environment : ""}`}>退款记录</Link>
+                    {canReadRefunds && (
+                      <Link className="btn-detail" to={`/payments/refunds?order_id=${order}&receipt_id=${encodeURIComponent(receipt.id)}${checkout.environment ? "&environment=" + checkout.environment : ""}`}>退款记录</Link>
+                    )}
                   </li>
                 ))}
               </ul>
             )}
           </div>
-          <div className="flex flex-wrap gap-2">
-            {checkout.environment ? <>
-              <Link className="btn-detail" to={`/payments/disputes?order_id=${order}&environment=${checkout.environment}`}>争议与冲回</Link>
-              <Link className="btn-detail" to={`/payments/reconciliation?order_id=${order}&environment=${checkout.environment}`}>流水与结算</Link>
-            </> : <span>渠道环境待核对</span>}
-          </div>
+          {(canReadDisputes || canReadReconciliation) && (
+            <div className="flex flex-wrap gap-2">
+              {checkout.environment ? <>
+                {canReadDisputes && <Link className="btn-detail" to={`/payments/disputes?order_id=${order}&environment=${checkout.environment}`}>争议与冲回</Link>}
+                {canReadReconciliation && <Link className="btn-detail" to={`/payments/reconciliation?order_id=${order}&environment=${checkout.environment}`}>流水与结算</Link>}
+              </> : <span>渠道环境待核对</span>}
+            </div>
+          )}
         </div>
       )}
     </details>

@@ -18,6 +18,8 @@ func (s Service) RedactExpired(ctx context.Context, actor Operator, days, limit 
 	if days < 7 || days > 3650 || limit < 1 || limit > 500 {
 		return result, ErrInvalidOperation
 	}
+	actor.RequireSuperAdmin = true
+	actor.Permission = ""
 	_, err := s.operate(ctx, actor, reason, func(tx pgx.Tx, operator Operator, reason string) (OperationResult, error) {
 		if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock(1930720,hashtext($1))", s.Environment); err != nil {
 			return OperationResult{}, err

@@ -17,6 +17,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"star-novel-cms/internal/auth"
 	"star-novel-cms/internal/config"
 	"star-novel-cms/internal/credentials"
 	"star-novel-cms/internal/db"
@@ -112,13 +113,8 @@ func maskAccountKey(provider, key string) string {
 	return "••••"
 }
 
-func requireSuperAdminTx(ctx context.Context, tx pgx.Tx, actor string) error {
-	var role string
-	err := tx.QueryRow(ctx, `SELECT role FROM admins WHERE id=$1 AND status=1 FOR SHARE`, actor).Scan(&role)
-	if errors.Is(err, pgx.ErrNoRows) || role != "SuperAdmin" {
-		return errCaseForbidden
-	}
-	return err
+func requireChannelWriteTx(ctx context.Context, tx pgx.Tx, actor string) error {
+	return requirePermissionTx(ctx, tx, actor, errCaseForbidden, auth.PermPaymentsChannelsWrite)
 }
 
 func loadKeyringForWrite() (*credentials.Keyring, string, error) {
@@ -379,7 +375,7 @@ func (h *Handler) CreatePaymentChannel(c *gin.Context) {
 		return
 	}
 	defer tx.Rollback(context.WithoutCancel(ctx))
-	if err := requireSuperAdminTx(ctx, tx, actor); err != nil {
+	if err := requireChannelWriteTx(ctx, tx, actor); err != nil {
 		writeChannelError(c, err)
 		return
 	}
@@ -470,13 +466,13 @@ func (h *Handler) CreatePaymentChannel(c *gin.Context) {
 }
 
 type editChannelReq struct {
-	DisplayName              string `json:"display_name" binding:"max=100"`
-	MerchantID               string `json:"merchant_id" binding:"max=160"`
-	ClientSecret             string `json:"client_secret" binding:"max=500"`
-	WebhookID                string `json:"webhook_id" binding:"max=200"`
-	APIKey                   string `json:"api_key" binding:"max=500"`
-	WebhookSecret            string `json:"webhook_secret" binding:"max=500"`
-	RotateWebhookGraceHours  *int   `json:"rotate_webhook_grace_hours" binding:"omitempty,gte=0,lte=168"`
+	DisplayName             string `json:"display_name" binding:"max=100"`
+	MerchantID              string `json:"merchant_id" binding:"max=160"`
+	ClientSecret            string `json:"client_secret" binding:"max=500"`
+	WebhookID               string `json:"webhook_id" binding:"max=200"`
+	APIKey                  string `json:"api_key" binding:"max=500"`
+	WebhookSecret           string `json:"webhook_secret" binding:"max=500"`
+	RotateWebhookGraceHours *int   `json:"rotate_webhook_grace_hours" binding:"omitempty,gte=0,lte=168"`
 }
 
 func (h *Handler) EditPaymentChannel(c *gin.Context) {
@@ -505,7 +501,7 @@ func (h *Handler) EditPaymentChannel(c *gin.Context) {
 		return
 	}
 	defer tx.Rollback(context.WithoutCancel(ctx))
-	if err := requireSuperAdminTx(ctx, tx, actor); err != nil {
+	if err := requireChannelWriteTx(ctx, tx, actor); err != nil {
 		writeChannelError(c, err)
 		return
 	}
@@ -680,14 +676,18 @@ func (h *Handler) ValidatePaymentChannel(c *gin.Context) {
 	}
 	ctx := c.Request.Context()
 	actor := c.GetString("admin_id")
+	if err := verifyContextPermissions(c, errCaseForbidden, auth.PermPaymentsChannelsWrite); err != nil {
+		writeChannelError(c, err)
+		return
+	}
 
 	var provider, environment, accountKey, credRef string
 	var pendingVer int
 	err = db.DB.QueryRow(ctx, `
 		SELECT provider, environment, account_key, credentials_ref, pending_version
 		FROM payment_channel_accounts
-		WHERE id = $1 AND EXISTS (SELECT 1 FROM admins WHERE id = $2 AND role = 'SuperAdmin' AND status = 1)`,
-		id, actor).Scan(&provider, &environment, &accountKey, &credRef, &pendingVer)
+		WHERE id = $1`,
+		id).Scan(&provider, &environment, &accountKey, &credRef, &pendingVer)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeChannelError(c, errChannelNotFound)
 		return
@@ -739,7 +739,7 @@ func (h *Handler) ValidatePaymentChannel(c *gin.Context) {
 		return
 	}
 	defer tx.Rollback(context.WithoutCancel(ctx))
-	if err := requireSuperAdminTx(ctx, tx, actor); err != nil {
+	if err := requireChannelWriteTx(ctx, tx, actor); err != nil {
 		writeChannelError(c, err)
 		return
 	}
@@ -808,7 +808,7 @@ func (h *Handler) PublishPaymentChannel(c *gin.Context) {
 		return
 	}
 	defer tx.Rollback(context.WithoutCancel(ctx))
-	if err := requireSuperAdminTx(ctx, tx, actor); err != nil {
+	if err := requireChannelWriteTx(ctx, tx, actor); err != nil {
 		writeChannelError(c, err)
 		return
 	}
@@ -926,7 +926,7 @@ func (h *Handler) PublishPaymentChannel(c *gin.Context) {
 			uRows.Close()
 			if len(unready) > 0 {
 				c.JSON(http.StatusConflict, gin.H{
-					"error":                     "Target account is missing verified bindings for published products; pre-bind products before switching primary or pass force_switch_when_products_unready=true",
+					"error":                      "Target account is missing verified bindings for published products; pre-bind products before switching primary or pass force_switch_when_products_unready=true",
 					"unready_published_products": unready,
 				})
 				return
@@ -995,7 +995,7 @@ func (h *Handler) DeactivatePaymentChannel(c *gin.Context) {
 		return
 	}
 	defer tx.Rollback(context.WithoutCancel(ctx))
-	if err := requireSuperAdminTx(ctx, tx, actor); err != nil {
+	if err := requireChannelWriteTx(ctx, tx, actor); err != nil {
 		writeChannelError(c, err)
 		return
 	}
@@ -1182,7 +1182,7 @@ func billingAuditLogTx(ctx context.Context, tx pgx.Tx, actor, action, targetID, 
 func writeChannelError(c *gin.Context, err error) {
 	switch {
 	case errors.Is(err, errCaseForbidden), errors.Is(err, ErrRefundForbidden):
-		c.JSON(http.StatusForbidden, gin.H{"error": "SuperAdmin permission required"})
+		c.JSON(http.StatusForbidden, gin.H{"error": "Payment channel permission required"})
 	case errors.Is(err, errChannelNotFound):
 		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
 	case errors.Is(err, errChannelConflict), errors.Is(err, errChannelUnverified):
