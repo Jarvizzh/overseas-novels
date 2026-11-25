@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from 'react';
-import { Plus } from 'lucide-react';
+import { type KeyboardEvent, useEffect, useId, useMemo, useRef, useState } from 'react';
+import { Check, ChevronDown, Plus, Search, X } from 'lucide-react';
 import { usePermission } from '../context/PermissionContext';
 import {
   apiRequest,
@@ -57,6 +57,335 @@ const EMPTY_CREATE_FORM = {
   coinCostPerThousand: '',
   startPayChapterIndex: '',
 };
+
+interface NovelSearchSelectProps {
+  novels: PromotionLinkNovelOption[];
+  value: string;
+  disabled?: boolean;
+  onChange: (novelId: string) => void;
+}
+
+function NovelSearchSelect({ novels, value, disabled = false, onChange }: NovelSearchSelectProps) {
+  const uid = useId();
+  const triggerId = `${uid}-trigger`;
+  const listboxId = `${uid}-listbox`;
+  const containerRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  const optionRefs = useRef<Array<HTMLButtonElement | null>>([]);
+
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState('');
+  const [activeIndex, setActiveIndex] = useState(0);
+
+  const selectedNovel = useMemo(
+    () => novels.find((n) => String(n.id) === value) ?? null,
+    [novels, value],
+  );
+
+  const filteredNovels = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return novels;
+    const idToken = q.startsWith('#') ? q.slice(1) : q;
+    return novels.filter((n) => {
+      if (n.title.toLowerCase().includes(q)) return true;
+      if (idToken && String(n.id).includes(idToken)) return true;
+      return false;
+    });
+  }, [novels, query]);
+
+  const effectiveOpen = open && !disabled;
+  const clampedActiveIndex =
+    filteredNovels.length === 0 ? -1 : Math.min(Math.max(activeIndex, 0), filteredNovels.length - 1);
+
+  useEffect(() => {
+    if (!effectiveOpen) return;
+    const raf = window.requestAnimationFrame(() => {
+      searchInputRef.current?.focus();
+    });
+    return () => window.cancelAnimationFrame(raf);
+  }, [effectiveOpen]);
+
+  useEffect(() => {
+    if (!effectiveOpen) return;
+    const onMouseDown = (e: MouseEvent) => {
+      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
+        setOpen(false);
+        setQuery('');
+      }
+    };
+    document.addEventListener('mousedown', onMouseDown);
+    return () => document.removeEventListener('mousedown', onMouseDown);
+  }, [effectiveOpen]);
+
+  useEffect(() => {
+    if (!effectiveOpen || clampedActiveIndex < 0) return;
+    optionRefs.current[clampedActiveIndex]?.scrollIntoView({ block: 'nearest' });
+  }, [effectiveOpen, clampedActiveIndex]);
+
+  const closeDropdown = (restoreFocus = false) => {
+    setOpen(false);
+    setQuery('');
+    if (restoreFocus) {
+      window.requestAnimationFrame(() => triggerRef.current?.focus());
+    }
+  };
+
+  const openDropdown = (initialQuery = '') => {
+    if (disabled) return;
+    setQuery(initialQuery);
+    const selectedIdx = initialQuery
+      ? 0
+      : Math.max(0, novels.findIndex((n) => String(n.id) === value));
+    setActiveIndex(selectedIdx);
+    setOpen(true);
+  };
+
+  const selectNovel = (novel: PromotionLinkNovelOption) => {
+    onChange(String(novel.id));
+    closeDropdown(true);
+  };
+
+  const handleTriggerKeyDown = (e: KeyboardEvent<HTMLButtonElement>) => {
+    if (disabled) return;
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp' || e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      if (effectiveOpen) {
+        closeDropdown();
+      } else {
+        openDropdown();
+      }
+    } else if (e.key === 'Escape' && effectiveOpen) {
+      e.preventDefault();
+      e.stopPropagation();
+      closeDropdown();
+    } else if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      e.preventDefault();
+      openDropdown(e.key);
+    }
+  };
+
+  const handleSearchKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      if (filteredNovels.length > 0) {
+        setActiveIndex((prev) => (prev + 1) % filteredNovels.length);
+      }
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      if (filteredNovels.length > 0) {
+        setActiveIndex((prev) => (prev <= 0 ? filteredNovels.length - 1 : prev - 1));
+      }
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      if (clampedActiveIndex >= 0 && filteredNovels[clampedActiveIndex]) {
+        selectNovel(filteredNovels[clampedActiveIndex]);
+      }
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      closeDropdown(true);
+    } else if (e.key === 'Tab') {
+      closeDropdown(false);
+    }
+  };
+
+  const activeOptionId =
+    effectiveOpen && clampedActiveIndex >= 0 && filteredNovels[clampedActiveIndex]
+      ? `${uid}-opt-${filteredNovels[clampedActiveIndex].id}`
+      : undefined;
+
+  return (
+    <div ref={containerRef} className="relative">
+      <div className="relative flex items-center">
+        <button
+          ref={triggerRef}
+          id={triggerId}
+          type="button"
+          role="combobox"
+          aria-label="推广书籍"
+          aria-expanded={effectiveOpen}
+          aria-haspopup="listbox"
+          aria-controls={listboxId}
+          disabled={disabled}
+          onClick={() => (effectiveOpen ? closeDropdown() : openDropdown())}
+          onKeyDown={handleTriggerKeyDown}
+          title={selectedNovel ? `#${selectedNovel.id} · ${selectedNovel.title}` : undefined}
+          className={`input-field focus-ring w-full text-left flex items-center justify-between gap-2 cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed ${
+            selectedNovel && !disabled ? 'pr-14' : 'pr-8'
+          }`}
+        >
+          {selectedNovel ? (
+            <span className="min-w-0 flex-1 truncate flex items-center gap-1.5">
+              <span className="font-mono-code tabular-nums text-[var(--cms-muted-fg)] shrink-0">
+                #{selectedNovel.id}
+              </span>
+              <span className="truncate text-[var(--cms-fg)]">{selectedNovel.title}</span>
+            </span>
+          ) : (
+            <span className="truncate text-[var(--cms-placeholder)]">
+              {novels.length === 0 ? '-- 暂无已上架书籍 --' : '-- 搜索书名或 ID 选择书籍 (必选) --'}
+            </span>
+          )}
+        </button>
+
+        {selectedNovel && !disabled && (
+          <button
+            type="button"
+            aria-label="清除已选书籍"
+            onClick={() => {
+              onChange('');
+              setQuery('');
+              triggerRef.current?.focus();
+            }}
+            className="focus-ring absolute right-7 top-1/2 -translate-y-1/2 w-5 h-5 rounded-full text-[var(--cms-muted-fg)] hover:text-[var(--cms-fg)] hover:bg-[var(--cms-secondary)] inline-flex items-center justify-center cursor-pointer transition-colors"
+          >
+            <X size={12} aria-hidden="true" />
+          </button>
+        )}
+
+        <ChevronDown
+          size={14}
+          aria-hidden="true"
+          className={`pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-[var(--cms-muted-fg)] transition-transform ${
+            effectiveOpen ? 'rotate-180' : ''
+          }`}
+        />
+      </div>
+
+      {effectiveOpen && (
+        <div className="absolute left-0 right-0 z-30 mt-1.5 rounded-xl border border-[var(--cms-border)] bg-[var(--cms-card)] shadow-lg overflow-hidden">
+          <div className="p-2 border-b border-[var(--cms-border)] bg-[var(--cms-content)]">
+            <div className="relative">
+              <Search
+                size={13}
+                aria-hidden="true"
+                className="text-[var(--cms-placeholder)] absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none"
+              />
+              <input
+                ref={searchInputRef}
+                type="text"
+                aria-label="搜索推广书籍"
+                aria-controls={listboxId}
+                aria-activedescendant={activeOptionId}
+                autoCorrect="off"
+                autoCapitalize="none"
+                spellCheck={false}
+                placeholder="输入书名或书籍 ID 搜索..."
+                value={query}
+                onChange={(e) => {
+                  setQuery(e.target.value);
+                  setActiveIndex(0);
+                }}
+                onKeyDown={handleSearchKeyDown}
+                className="input-field h-8 text-xs"
+                style={{ paddingLeft: '28px', paddingRight: query ? '28px' : '10px' }}
+              />
+              {query && (
+                <button
+                  type="button"
+                  aria-label="清除搜索关键词"
+                  onClick={() => {
+                    setQuery('');
+                    setActiveIndex(0);
+                    searchInputRef.current?.focus();
+                  }}
+                  className="focus-ring absolute right-1.5 top-1/2 -translate-y-1/2 w-5 h-5 rounded-full text-[var(--cms-muted-fg)] hover:text-[var(--cms-fg)] hover:bg-[var(--cms-secondary)] inline-flex items-center justify-center cursor-pointer"
+                >
+                  <X size={11} aria-hidden="true" />
+                </button>
+              )}
+            </div>
+            <div className="mt-1.5 px-0.5 flex items-center justify-between text-[11px] text-[var(--cms-muted-fg)] tabular-nums">
+              <span>
+                {query.trim()
+                  ? `匹配 ${filteredNovels.length} / ${novels.length} 本已上架书籍`
+                  : `共 ${novels.length} 本已上架书籍`}
+              </span>
+              <span>↑↓ 选择 · Enter 确认</span>
+            </div>
+          </div>
+
+          <div
+            id={listboxId}
+            role="listbox"
+            aria-label="已上架书籍选项"
+            className="max-h-56 overflow-y-auto p-1 space-y-0.5"
+          >
+            {filteredNovels.length === 0 ? (
+              <div className="py-6 px-3 text-center text-xs text-[var(--cms-muted-fg)] space-y-2">
+                <div>{novels.length === 0 ? '暂无已上架书籍' : `未找到匹配「${query.trim()}」的书籍`}</div>
+                {query.trim() && (
+                  <button
+                    type="button"
+                    className="btn-ghost h-7 px-2.5 text-xs text-[var(--cms-primary)]"
+                    onClick={() => {
+                      setQuery('');
+                      setActiveIndex(0);
+                      searchInputRef.current?.focus();
+                    }}
+                  >
+                    清除搜索条件
+                  </button>
+                )}
+              </div>
+            ) : (
+              filteredNovels.map((novel, idx) => {
+                const isSelected = String(novel.id) === value;
+                const isActive = idx === clampedActiveIndex;
+                const pricingParts: string[] = [];
+                if (novel.coin_cost_per_thousand != null) {
+                  pricingParts.push(`${novel.coin_cost_per_thousand}币/千字`);
+                }
+                if (novel.start_pay_chapter_index != null) {
+                  pricingParts.push(`第${novel.start_pay_chapter_index}章起付`);
+                }
+                return (
+                  <button
+                    key={novel.id}
+                    ref={(el) => {
+                      optionRefs.current[idx] = el;
+                    }}
+                    id={`${uid}-opt-${novel.id}`}
+                    type="button"
+                    role="option"
+                    aria-selected={isSelected}
+                    onMouseEnter={() => setActiveIndex(idx)}
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={() => selectNovel(novel)}
+                    title={`#${novel.id} · ${novel.title}`}
+                    className={`w-full text-left px-2.5 py-2 rounded-lg flex items-center justify-between gap-2 cursor-pointer transition-colors ${
+                      isActive
+                        ? 'bg-[var(--cms-secondary)] text-[var(--cms-fg)]'
+                        : 'text-[var(--cms-fg)] hover:bg-[var(--cms-secondary)]'
+                    } ${isSelected ? 'font-medium' : 'font-normal'}`}
+                  >
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-1.5 min-w-0">
+                        <span className="font-mono-code tabular-nums text-[11px] text-[var(--cms-muted-fg)] shrink-0">
+                          #{novel.id}
+                        </span>
+                        <span className="truncate">{novel.title}</span>
+                      </div>
+                      {pricingParts.length > 0 && (
+                        <div className="text-[11px] text-[var(--cms-muted-fg)] tabular-nums mt-0.5">
+                          {pricingParts.join(' · ')}
+                        </div>
+                      )}
+                    </div>
+                    {isSelected && (
+                      <Check size={14} className="text-[var(--cms-primary)] shrink-0" aria-hidden="true" />
+                    )}
+                  </button>
+                );
+              })
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
 
 export default function PromotionsTab() {
   const { canWrite: hasWrite } = usePermission();
@@ -612,23 +941,19 @@ export default function PromotionsTab() {
             />
           </label>
 
+          <div className="space-y-1.5">
+            <span className="block font-medium text-[var(--cms-muted-fg)]">
+              推广书籍 <span className="text-[var(--cms-error)]">*</span>
+            </span>
+            <NovelSearchSelect
+              novels={novels}
+              value={createForm.novelId}
+              disabled={createSubmitting || Boolean(createdUrl)}
+              onChange={(val) => setCreateForm({ ...createForm, novelId: val })}
+            />
+          </div>
+
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <label className="space-y-1.5">
-              <span className="block font-medium text-[var(--cms-muted-fg)]">
-                推广书籍 <span className="text-[var(--cms-error)]">*</span>
-              </span>
-              <CustomSelect
-                aria-label="推广书籍"
-                width="100%"
-                value={createForm.novelId}
-                disabled={createSubmitting || Boolean(createdUrl)}
-                onChange={(val) => setCreateForm({ ...createForm, novelId: val })}
-                options={[
-                  { value: '', label: novels.length === 0 ? '-- 暂无已上架书籍 --' : '-- 选择已上架书籍 (必选) --' },
-                  ...novels.map((n) => ({ value: String(n.id), label: `#${n.id} · ${n.title}` })),
-                ]}
-              />
-            </label>
             <label className="space-y-1.5">
               <span className="block font-medium text-[var(--cms-muted-fg)]">落地章节索引（可选）</span>
               <input
@@ -640,28 +965,28 @@ export default function PromotionsTab() {
                 onChange={(e) => setCreateForm({ ...createForm, chapterIndex: e.target.value })}
               />
             </label>
-          </div>
 
-          <label className="block space-y-1.5">
-            <span className="block font-medium text-[var(--cms-muted-fg)]">投放落地页域名（可选）</span>
-            <CustomSelect
-              aria-label="投放落地页域名"
-              width="100%"
-              value={createForm.domainId}
-              disabled={createSubmitting || Boolean(createdUrl)}
-              onChange={(val) => setCreateForm({ ...createForm, domainId: val })}
-              options={[
-                {
-                  value: '',
-                  label: `-- 默认主域名 (${defaultDomain?.domain || '主站默认域名'}) --`,
-                },
-                ...activeDomains.map((d) => ({
-                  value: String(d.id),
-                  label: `${d.name} (${d.domain}) ${d.is_default ? '[默认主域名]' : ''}`,
-                })),
-              ]}
-            />
-          </label>
+            <label className="space-y-1.5">
+              <span className="block font-medium text-[var(--cms-muted-fg)]">投放落地页域名（可选）</span>
+              <CustomSelect
+                aria-label="投放落地页域名"
+                width="100%"
+                value={createForm.domainId}
+                disabled={createSubmitting || Boolean(createdUrl)}
+                onChange={(val) => setCreateForm({ ...createForm, domainId: val })}
+                options={[
+                  {
+                    value: '',
+                    label: `-- 默认主域名 (${defaultDomain?.domain || '主站默认域名'}) --`,
+                  },
+                  ...activeDomains.map((d) => ({
+                    value: String(d.id),
+                    label: `${d.name} (${d.domain}) ${d.is_default ? '[默认主域名]' : ''}`,
+                  })),
+                ]}
+              />
+            </label>
+          </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <label className="space-y-1.5">
