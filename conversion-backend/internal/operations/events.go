@@ -76,9 +76,12 @@ const eventDetailsSQL = `
 		'attempts',COALESCE((SELECT jsonb_agg(jsonb_strip_nulls(jsonb_build_object(
 			'number',a.attempt_no,'started_at',a.started_at,'sending_at',a.sending_at,'responded_at',a.responded_at,
 			'recorded_at',a.recorded_at,'outcome',a.outcome,'reason',a.reason,'http_status',a.http_status,
-			'graph_code',a.graph_code,'graph_subcode',a.graph_subcode,'events_received',a.events_received,'fbtrace_id',a.fbtrace_id))
+			'graph_code',a.graph_code,'graph_subcode',a.graph_subcode,'events_received',a.events_received,'fbtrace_id',a.fbtrace_id,
+                'batch',a.batch))
 			ORDER BY a.attempt_no DESC) FROM (
-			   SELECT a.* FROM conversion.delivery_attempts a JOIN conversion.deliveries d ON d.id=a.delivery_id
+			   SELECT a.*,` + batchSummary + ` AS batch
+               FROM conversion.delivery_attempts a JOIN conversion.deliveries d ON d.id=a.delivery_id
+               LEFT JOIN conversion.meta_batches b ON b.id=a.batch_id
 			   WHERE d.event_id=e.id AND a.delivery_id=$3 AND ($4::int=0 OR a.attempt_no<$4)
 			   ORDER BY a.attempt_no DESC LIMIT 50) a),'[]'))
 	FROM conversion.events e JOIN conversion.integrations i ON i.id=e.integration_id
@@ -202,4 +205,64 @@ const eventListSQL = `
 		'next_cursor',CASE WHEN (SELECT count(*) FROM matched)>$6 THEN
 		    (SELECT to_char(created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"')||'|'||id
 		     FROM page ORDER BY created_at,id LIMIT 1) END)
+`
+
+func (repo Repository) handleEventDeliveries(w http.ResponseWriter, r *http.Request) {
+	id, ok := positiveID(r.PathValue("id"))
+	if !ok {
+		writeError(w, http.StatusBadRequest, "invalid_event_id")
+		return
+	}
+	q := r.URL.Query()
+	pixel := q.Get("pixel_id")
+	if len(pixel) > 100 {
+		writeError(w, http.StatusBadRequest, "invalid_filter")
+		return
+	}
+	var cursorID int64
+	var additional bool
+	if cursor := q.Get("cursor"); cursor != "" {
+		role, rawID, found := strings.Cut(cursor, "|")
+		cursorID, ok = positiveID(rawID)
+		if !found || !ok || (role != "original" && role != "additional") {
+			writeError(w, http.StatusBadRequest, "invalid_cursor")
+			return
+		}
+		additional = role == "additional"
+	}
+	var data json.RawMessage
+	err := repo.Pool.QueryRow(r.Context(), eventDeliveriesSQL, repo.Environment, id, pixel, cursorID, additional).Scan(&data)
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "resource_not_found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "reconciliation_unavailable")
+		return
+	}
+	writeJSON(w, http.StatusOK, data)
+}
+
+const eventDeliveriesSQL = `
+    WITH event AS (
+        SELECT id FROM conversion.events WHERE environment=$1 AND id=$2
+    ), matched AS (
+        SELECT d.id,d.role,(d.role<>'original') AS additional
+        FROM event e JOIN conversion.deliveries d ON d.event_id=e.id
+        JOIN conversion.destinations p ON p.id=d.destination_id
+        WHERE ($3='' OR p.pixel_id=$3)
+          AND ($4::bigint=0 OR ((d.role<>'original'),d.id)>($5::boolean,$4))
+        ORDER BY additional,d.id LIMIT 51
+    ), page AS (
+        SELECT m.id,m.role,m.additional,` + deliveryProjection + ` AS item
+        FROM (SELECT * FROM matched ORDER BY additional,id LIMIT 50) m
+        JOIN conversion.deliveries d ON d.id=m.id
+        JOIN conversion.destinations p ON p.id=d.destination_id
+        ` + deliveryLastAttempt + `
+    )
+    SELECT jsonb_build_object(
+        'deliveries',COALESCE((SELECT jsonb_agg(item ORDER BY additional,id) FROM page),'[]'),
+        'next_cursor',CASE WHEN (SELECT count(*) FROM matched)>50 THEN
+            (SELECT role||'|'||id FROM page ORDER BY additional DESC,id DESC LIMIT 1) END)
+    FROM event
 `

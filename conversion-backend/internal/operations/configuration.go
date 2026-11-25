@@ -290,7 +290,11 @@ func configurationID(r *http.Request) (int64, bool) {
 }
 
 func operatorFrom(r *http.Request) delivery.Operator {
-	return delivery.Operator{ID: r.Header.Get("X-Operator-ID"), Role: r.Header.Get("X-Operator-Role")}
+	return delivery.Operator{
+		ID:         r.Header.Get("X-Operator-ID"),
+		Role:       r.Header.Get("X-Operator-Role"),
+		Permission: r.Header.Get("X-Operator-Permission"),
+	}
 }
 
 func decodeConfiguration(w http.ResponseWriter, r *http.Request, value any) bool {
@@ -313,6 +317,10 @@ func writeConfiguration(w http.ResponseWriter, result delivery.OperationResult, 
 
 func writeOperation(w http.ResponseWriter, result delivery.OperationResult, err error, status int) {
 	switch {
+	case errors.Is(err, delivery.ErrSinanAppsRequired):
+		writeError(w, http.StatusBadRequest, "sinan_apps_required")
+	case errors.Is(err, delivery.ErrSinanEventsRequired):
+		writeError(w, http.StatusBadRequest, "sinan_events_required")
 	case errors.Is(err, delivery.ErrInvalidOperation):
 		writeError(w, http.StatusBadRequest, err.Error())
 	case errors.Is(err, delivery.ErrOperatorForbidden):

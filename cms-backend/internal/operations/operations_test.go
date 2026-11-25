@@ -332,6 +332,81 @@ func (m *mockOpsRepo) ListTopPublishedNovels(_ context.Context, sortRule string,
 	return list, nil
 }
 
+func (m *mockOpsRepo) ListPublishedNovelOptions(_ context.Context, page, pageSize int, filter NovelOptionsFilter) ([]NovelOption, int, error) {
+	var list []NovelOption
+	for _, n := range m.novels {
+		if n.Status == "archived" || n.PublishStatus != "published" {
+			continue
+		}
+		if filter.Status != "" && n.Status != filter.Status {
+			continue
+		}
+		if filter.Author != "" && !strings.Contains(strings.ToLower(n.Author), strings.ToLower(filter.Author)) {
+			continue
+		}
+		if filter.Search != "" {
+			q := strings.ToLower(filter.Search)
+			if !strings.Contains(strings.ToLower(n.Title), q) && !strings.Contains(strings.ToLower(n.Author), q) {
+				continue
+			}
+		}
+		if filter.Genre != "" {
+			matched := false
+			for _, g := range n.Genres {
+				if g == filter.Genre {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				continue
+			}
+		}
+		genres := n.Genres
+		if genres == nil {
+			genres = []string{}
+		}
+		list = append(list, NovelOption{
+			ID:            n.ID,
+			Title:         n.Title,
+			Author:        n.Author,
+			CoverURL:      n.CoverURL,
+			Rating:        n.Rating,
+			Status:        n.Status,
+			PublishStatus: n.PublishStatus,
+			ViewCount:     n.ViewCount,
+			Genres:        genres,
+		})
+	}
+	sort.Slice(list, func(i, j int) bool {
+		switch filter.Sort {
+		case "rating":
+			if list[i].Rating != list[j].Rating {
+				return list[i].Rating > list[j].Rating
+			}
+		case "latest", "updated":
+			if list[i].ID != list[j].ID {
+				return list[i].ID > list[j].ID
+			}
+		default:
+			if list[i].ViewCount != list[j].ViewCount {
+				return list[i].ViewCount > list[j].ViewCount
+			}
+		}
+		return list[i].ID > list[j].ID
+	})
+	total := len(list)
+	start := (page - 1) * pageSize
+	if start >= total {
+		return []NovelOption{}, total, nil
+	}
+	end := start + pageSize
+	if end > total {
+		end = total
+	}
+	return list[start:end], total, nil
+}
+
 func TestPreviewAndSaveRankingUnit(t *testing.T) {
 	repo := newMockOpsRepo()
 	repo.novels = map[int64]RecommendationNovel{
@@ -385,8 +460,8 @@ func TestPreviewAndSaveRankingUnit(t *testing.T) {
 		},
 		Groups: map[string][]GroupItemInput{
 			GroupEditorPick: {
-				{NovelID: 4},                              // draft -> filtered out
-				{NovelID: 2, ScheduledEnd: &pastEnd},      // expired -> filtered out
+				{NovelID: 4},                               // draft -> filtered out
+				{NovelID: 2, ScheduledEnd: &pastEnd},       // expired -> filtered out
 				{NovelID: 3, ScheduledStart: &futureStart}, // future -> filtered out now
 			},
 			GroupCurated: {
@@ -426,14 +501,29 @@ func TestPreviewAndSaveRankingUnit(t *testing.T) {
 	}
 }
 
-func TestOperationsHandlerRolePermissionsAndPreview(t *testing.T) {
+func TestOperationsHandlerPermissionsPreviewAndNovelOptions(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	prevCfg := config.AppConfig
 	config.AppConfig = &config.Config{JWTSecret: "test-secret"}
 	t.Cleanup(func() { config.AppConfig = prevCfg })
 
+	principals := map[string]*auth.Principal{
+		"ops-writer": auth.NewPrincipal("ops-writer", "writer", "Writer", 4, "ContentOperations", "内容运营", false, auth.StatusActive, auth.StatusActive, []string{auth.PermContentOperationsWrite}),
+		"ops-reader": auth.NewPrincipal("ops-reader", "reader", "Reader", 3, "AdOptimizer", "优化师", false, auth.StatusActive, auth.StatusActive, []string{auth.PermContentOperationsRead}),
+		"dash-only":  auth.NewPrincipal("dash-only", "dash", "Dash", 9, "Dash", "仅总览", false, auth.StatusActive, auth.StatusActive, []string{auth.PermDashboardRead}),
+	}
+	restore := auth.SetPrincipalLoaderForTest(func(_ context.Context, adminID string) (*auth.Principal, error) {
+		p, ok := principals[adminID]
+		if !ok {
+			return nil, auth.ErrAccountInactive
+		}
+		return p, nil
+	})
+	t.Cleanup(restore)
+
 	repo := newMockOpsRepo()
-	repo.novels[1] = RecommendationNovel{ID: 1, Title: "Book 1", Author: "A", Rating: 4.5, ViewCount: 100, Status: "Ongoing", PublishStatus: "published"}
+	repo.novels[1] = RecommendationNovel{ID: 1, Title: "Book 1", Author: "A", Rating: 4.5, ViewCount: 100, Status: "Ongoing", PublishStatus: "published", Synopsis: "Secret synopsis", Genres: []string{"Romance"}}
+	repo.novels[2] = RecommendationNovel{ID: 2, Title: "Draft Book", Author: "B", Rating: 5.0, ViewCount: 999, Status: "Ongoing", PublishStatus: "draft", Synopsis: "Draft synopsis"}
 	svc := NewService(repo, nil)
 	h := NewHandler(svc)
 
@@ -441,56 +531,95 @@ func TestOperationsHandlerRolePermissionsAndPreview(t *testing.T) {
 	api := r.Group("/api/v1/admin")
 	h.RegisterRoutes(api)
 
-	editorToken, err := auth.GenerateToken("admin-1", "Editor")
+	writerToken, err := auth.GenerateToken("ops-writer", "ContentOperations")
 	if err != nil {
 		t.Fatal(err)
 	}
-	buyerToken, err := auth.GenerateToken("admin-2", "MediaBuyer")
+	readerToken, err := auth.GenerateToken("ops-reader", "AdOptimizer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dashToken, err := auth.GenerateToken("dash-only", "Dash")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	// MediaBuyer can preview (read-only)
+	// Dashboard-only user gets 403 on operations reads and novel-options
+	for _, path := range []string{"/api/v1/admin/operations", "/api/v1/admin/operations/novel-options"} {
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.Header.Set("Authorization", "Bearer "+dashToken)
+		r.ServeHTTP(w, req)
+		if w.Code != http.StatusForbidden {
+			t.Fatalf("expected 403 for dashboard-only GET %s, got %d", path, w.Code)
+		}
+	}
+
+	// content.operations:read user can preview and fetch novel-options (published only, no synopsis)
 	wPreview := httptest.NewRecorder()
 	reqPreview := httptest.NewRequest(http.MethodPost, "/api/v1/admin/operations/preview", bytes.NewBufferString(`{}`))
-	reqPreview.Header.Set("Authorization", "Bearer "+buyerToken)
+	reqPreview.Header.Set("Authorization", "Bearer "+readerToken)
 	reqPreview.Header.Set("Content-Type", "application/json")
 	r.ServeHTTP(wPreview, reqPreview)
 	if wPreview.Code != http.StatusOK {
-		t.Fatalf("expected 200 for preview by MediaBuyer, got %d: %s", wPreview.Code, wPreview.Body.String())
+		t.Fatalf("expected 200 for preview by ops-reader, got %d: %s", wPreview.Code, wPreview.Body.String())
 	}
 
-	// MediaBuyer cannot save ranking
-	wBuyerSave := httptest.NewRecorder()
-	reqBuyerSave := httptest.NewRequest(http.MethodPut, "/api/v1/admin/operations/ranking", bytes.NewBufferString(`{"ranking_config":{"sort_rule":"views","limit":10}}`))
-	reqBuyerSave.Header.Set("Authorization", "Bearer "+buyerToken)
-	reqBuyerSave.Header.Set("Content-Type", "application/json")
-	r.ServeHTTP(wBuyerSave, reqBuyerSave)
-	if wBuyerSave.Code != http.StatusForbidden {
-		t.Fatalf("expected 403 for SaveRanking by MediaBuyer, got %d", wBuyerSave.Code)
+	wOpts := httptest.NewRecorder()
+	reqOpts := httptest.NewRequest(http.MethodGet, "/api/v1/admin/operations/novel-options?search=Book", nil)
+	reqOpts.Header.Set("Authorization", "Bearer "+readerToken)
+	r.ServeHTTP(wOpts, reqOpts)
+	if wOpts.Code != http.StatusOK {
+		t.Fatalf("expected 200 for novel-options by ops-reader, got %d: %s", wOpts.Code, wOpts.Body.String())
+	}
+	if strings.Contains(wOpts.Body.String(), "Draft Book") || strings.Contains(wOpts.Body.String(), "Secret synopsis") {
+		t.Fatalf("novel-options leaked draft novel or synopsis: %s", wOpts.Body.String())
+	}
+	var optsResp NovelOptionsResponse
+	if err := json.Unmarshal(wOpts.Body.Bytes(), &optsResp); err != nil || optsResp.Total != 1 || len(optsResp.Novels) != 1 || optsResp.Novels[0].ID != 1 {
+		t.Fatalf("unexpected novel-options payload: %s %v", wOpts.Body.String(), err)
 	}
 
-	// Editor can save ranking atomically
-	wEditorSave := httptest.NewRecorder()
-	reqEditorSave := httptest.NewRequest(http.MethodPut, "/api/v1/admin/operations/ranking", bytes.NewBufferString(`{"ranking_config":{"sort_rule":"rating","limit":12},"items":[{"novel_id":1}]}`))
-	reqEditorSave.Header.Set("Authorization", "Bearer "+editorToken)
-	reqEditorSave.Header.Set("Content-Type", "application/json")
-	r.ServeHTTP(wEditorSave, reqEditorSave)
-	if wEditorSave.Code != http.StatusOK {
-		t.Fatalf("expected 200 for SaveRanking by Editor, got %d: %s", wEditorSave.Code, wEditorSave.Body.String())
+	// Invalid sort returns 400
+	wBadOpts := httptest.NewRecorder()
+	reqBadOpts := httptest.NewRequest(http.MethodGet, "/api/v1/admin/operations/novel-options?sort=evil", nil)
+	reqBadOpts.Header.Set("Authorization", "Bearer "+readerToken)
+	r.ServeHTTP(wBadOpts, reqBadOpts)
+	if wBadOpts.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for invalid novel-options sort, got %d", wBadOpts.Code)
+	}
+
+	// Read-only user cannot save ranking
+	wReaderSave := httptest.NewRecorder()
+	reqReaderSave := httptest.NewRequest(http.MethodPut, "/api/v1/admin/operations/ranking", bytes.NewBufferString(`{"ranking_config":{"sort_rule":"views","limit":10}}`))
+	reqReaderSave.Header.Set("Authorization", "Bearer "+readerToken)
+	reqReaderSave.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(wReaderSave, reqReaderSave)
+	if wReaderSave.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for SaveRanking by ops-reader, got %d", wReaderSave.Code)
+	}
+
+	// content.operations:write user can save ranking atomically
+	wWriterSave := httptest.NewRecorder()
+	reqWriterSave := httptest.NewRequest(http.MethodPut, "/api/v1/admin/operations/ranking", bytes.NewBufferString(`{"ranking_config":{"sort_rule":"rating","limit":12},"items":[{"novel_id":1}]}`))
+	reqWriterSave.Header.Set("Authorization", "Bearer "+writerToken)
+	reqWriterSave.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(wWriterSave, reqWriterSave)
+	if wWriterSave.Code != http.StatusOK {
+		t.Fatalf("expected 200 for SaveRanking by ops-writer, got %d: %s", wWriterSave.Code, wWriterSave.Body.String())
 	}
 	var saveResp SaveRankingResponse
-	if err := json.Unmarshal(wEditorSave.Body.Bytes(), &saveResp); err != nil {
+	if err := json.Unmarshal(wWriterSave.Body.Bytes(), &saveResp); err != nil {
 		t.Fatal(err)
 	}
 	if saveResp.RankingConfig.SortRule != RankingSortRating || saveResp.RankingConfig.Limit != 12 || len(saveResp.Items) != 1 {
 		t.Fatalf("unexpected SaveRanking HTTP response: %+v", saveResp)
 	}
 
-	// Editor can save check-in gradient; invalid length rejected with 400
+	// content.operations:write user can save check-in gradient; invalid length rejected with 400
 	wInvalidCheckin := httptest.NewRecorder()
 	reqInvalidCheckin := httptest.NewRequest(http.MethodPut, "/api/v1/admin/operations/campaigns/checkin", bytes.NewBufferString(`{"rewards":[10,20]}`))
-	reqInvalidCheckin.Header.Set("Authorization", "Bearer "+editorToken)
+	reqInvalidCheckin.Header.Set("Authorization", "Bearer "+writerToken)
 	reqInvalidCheckin.Header.Set("Content-Type", "application/json")
 	r.ServeHTTP(wInvalidCheckin, reqInvalidCheckin)
 	if wInvalidCheckin.Code != http.StatusBadRequest {
@@ -499,10 +628,10 @@ func TestOperationsHandlerRolePermissionsAndPreview(t *testing.T) {
 
 	wSaveCheckin := httptest.NewRecorder()
 	reqSaveCheckin := httptest.NewRequest(http.MethodPut, "/api/v1/admin/operations/campaigns/checkin", bytes.NewBufferString(`{"rewards":[10,12,15,20,25,30,60]}`))
-	reqSaveCheckin.Header.Set("Authorization", "Bearer "+editorToken)
+	reqSaveCheckin.Header.Set("Authorization", "Bearer "+writerToken)
 	reqSaveCheckin.Header.Set("Content-Type", "application/json")
 	r.ServeHTTP(wSaveCheckin, reqSaveCheckin)
 	if wSaveCheckin.Code != http.StatusOK {
-		t.Fatalf("expected 200 for SaveCheckInConfig by Editor, got %d: %s", wSaveCheckin.Code, wSaveCheckin.Body.String())
+		t.Fatalf("expected 200 for SaveCheckInConfig by ops-writer, got %d: %s", wSaveCheckin.Code, wSaveCheckin.Body.String())
 	}
 }

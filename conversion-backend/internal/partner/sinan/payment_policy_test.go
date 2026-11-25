@@ -152,6 +152,9 @@ func TestSinanPaymentDedupAndRouteRecoveryUnderConcurrentWorkers(t *testing.T) {
 		SELECT (SELECT count(*) FROM conversion.events)||':'||
 		       (SELECT count(*) FROM conversion.payment_policy_decisions)||':'||
 		       (SELECT count(*) FROM conversion.inbox WHERE reason='duplicate_payment_event')`)
+	f.check(t, "2:1", `SELECT count(*)||':'||count(DISTINCT normalized_event_id)
+	    FROM conversion.inbox WHERE source_event_id IN ('receipt-a','receipt-b')
+	      AND processed_at IS NOT NULL AND processed_at>=received_at`)
 	f.check(t, "2", "SELECT count(*)::text FROM conversion.deliveries WHERE state='blocked'")
 	var original int64
 	if err := f.owner.QueryRow(f.ctx, "SELECT id FROM conversion.deliveries WHERE role='original'").Scan(&original); err != nil {
@@ -206,8 +209,8 @@ func TestSinanPaymentMigrationPreservesHistoricIdentity(t *testing.T) {
 
 func (f fixture) paymentOperator(t *testing.T) delivery.Operator {
 	t.Helper()
-	exec(t, f.ctx, f.owner, "INSERT INTO admins(id,username,password_hash,role) VALUES('policy-ops','policy-ops','fixture','Admin')")
-	return delivery.Operator{ID: "policy-ops", Role: "Admin"}
+	exec(t, f.ctx, f.owner, "INSERT INTO admins(id,username,password_hash,role,role_id) VALUES('policy-ops','policy-ops','fixture','Admin',(SELECT id FROM roles WHERE code='Admin'))")
+	return delivery.Operator{ID: "policy-ops", Role: "Admin", Permission: delivery.PermissionAdsConversionsWrite}
 }
 
 func (f fixture) postPayment(t *testing.T, body string) {

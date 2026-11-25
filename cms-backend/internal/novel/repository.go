@@ -54,6 +54,9 @@ type NovelRepository interface {
 	DeletePromotionLink(ctx context.Context, id int) error
 
 	ListFBPixels(ctx context.Context) ([]FBPixel, error)
+	ListPublishedNovelOptionsForPromo(ctx context.Context) ([]PromotionLinkNovelOption, error)
+	ListLiveTemplateOptionsForPromo(ctx context.Context) ([]PromotionLinkTemplateOption, error)
+	ListActiveDomainOptionsForPromo(ctx context.Context) ([]PromotionLinkDomainOption, error)
 }
 
 type dbNovelRepository struct{}
@@ -454,15 +457,46 @@ func (r *dbNovelRepository) CreatePromotionLink(ctx context.Context, link *Promo
 	query := `
 		INSERT INTO promotion_links (name, novel_id, novel_title, chapter_index, utm_source, utm_campaign, generated_url, fb_pixel_id, recharge_template_id, domain_id, domain, coin_cost_per_thousand, start_pay_chapter_index)
 		SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13
-		WHERE $8::int IS NULL OR EXISTS (
+		WHERE ($8::int IS NULL OR EXISTS (
 			SELECT 1 FROM conversion.destinations x JOIN conversion.integration_destinations b ON b.destination_id=x.id
 			JOIN conversion.integrations i ON i.id=b.integration_id
 			WHERE x.legacy_fb_pixel_id=$8 AND x.enabled AND x.retired_at IS NULL
-			  AND i.source='starnovel' AND i.account_key='reader')
+			  AND i.source='starnovel' AND i.account_key='reader'))
+		  AND ($9::int IS NULL OR EXISTS (SELECT 1 FROM recharge_templates rt WHERE rt.id = $9 AND rt.environment = 'live'))
 		RETURNING id, created_at`
 	var id int
-	err := db.DB.QueryRow(ctx, query, link.Name, link.NovelID, link.NovelTitle, link.ChapterIndex, link.UtmSource, link.UtmCampaign, link.GeneratedURL, link.FBPixelID, link.RechargeTemplateID, link.DomainID, link.Domain, link.CoinCostPerThousand, link.StartPayChapterIndex).Scan(&id, &link.CreatedAt)
+	err := runPromoLinkMutationTx(ctx, link.RechargeTemplateID, func(tx pgx.Tx) error {
+		return tx.QueryRow(
+			ctx, query, link.Name, link.NovelID, link.NovelTitle, link.ChapterIndex,
+			link.UtmSource, link.UtmCampaign, link.GeneratedURL, link.FBPixelID, link.RechargeTemplateID,
+			link.DomainID, link.Domain, link.CoinCostPerThousand, link.StartPayChapterIndex,
+		).Scan(&id, &link.CreatedAt)
+	})
 	return id, err
+}
+
+// Acquire FOR KEY SHARE on recharge_templates before mutating promotion_links so
+// concurrent live->sandbox template demotion (FOR UPDATE) serializes cleanly.
+func runPromoLinkMutationTx(ctx context.Context, templateID *int, fn func(pgx.Tx) error) error {
+	tx, err := db.DB.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(context.WithoutCancel(ctx))
+	if templateID != nil {
+		var env string
+		err := tx.QueryRow(ctx, `SELECT environment FROM recharge_templates WHERE id = $1 FOR KEY SHARE`, *templateID).Scan(&env)
+		if errors.Is(err, pgx.ErrNoRows) || (err == nil && env != "live") {
+			return ErrInvalidPromoTemplate
+		}
+		if err != nil {
+			return err
+		}
+	}
+	if err := fn(tx); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func (r *dbNovelRepository) UpdatePromotionLinkURL(ctx context.Context, id int, generatedURL string) error {
@@ -478,12 +512,15 @@ func (r *dbNovelRepository) UpdatePromotionLink(ctx context.Context, id int, nam
 			SELECT 1 FROM conversion.destinations x JOIN conversion.integration_destinations b ON b.destination_id=x.id
 			JOIN conversion.integrations i ON i.id=b.integration_id
 			WHERE x.legacy_fb_pixel_id=$6 AND x.enabled AND x.retired_at IS NULL
-			  AND i.source='starnovel' AND i.account_key='reader'))`
-	tag, err := db.DB.Exec(ctx, query, name, chapterIndex, source, campaign, url, pixelID, templateID, domainID, domain, coinCost, startPayIndex, id)
-	if err == nil && tag.RowsAffected() != 1 {
-		return pgx.ErrNoRows
-	}
-	return err
+			  AND i.source='starnovel' AND i.account_key='reader'))
+		  AND ($7::int IS NULL OR EXISTS (SELECT 1 FROM recharge_templates rt WHERE rt.id = $7 AND rt.environment = 'live'))`
+	return runPromoLinkMutationTx(ctx, templateID, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, query, name, chapterIndex, source, campaign, url, pixelID, templateID, domainID, domain, coinCost, startPayIndex, id)
+		if err == nil && tag.RowsAffected() != 1 {
+			return pgx.ErrNoRows
+		}
+		return err
+	})
 }
 
 func (r *dbNovelRepository) DeletePromotionLink(ctx context.Context, id int) error {
@@ -516,4 +553,70 @@ func (r *dbNovelRepository) ListFBPixels(ctx context.Context) ([]FBPixel, error)
 		return nil, err
 	}
 	return pixels, nil
+}
+
+func (r *dbNovelRepository) ListPublishedNovelOptionsForPromo(ctx context.Context) ([]PromotionLinkNovelOption, error) {
+	rows, err := db.DB.Query(ctx, `
+		SELECT id, title, coin_cost_per_thousand, COALESCE(start_pay_chapter_index, 0)
+		FROM novels
+		WHERE status != 'archived' AND publish_status = 'published'
+		ORDER BY created_at DESC, id DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make([]PromotionLinkNovelOption, 0)
+	for rows.Next() {
+		var opt PromotionLinkNovelOption
+		if err := rows.Scan(&opt.ID, &opt.Title, &opt.CoinCostPerThousand, &opt.StartPayChapterIndex); err != nil {
+			return nil, err
+		}
+		out = append(out, opt)
+	}
+	return out, rows.Err()
+}
+
+func (r *dbNovelRepository) ListLiveTemplateOptionsForPromo(ctx context.Context) ([]PromotionLinkTemplateOption, error) {
+	rows, err := db.DB.Query(ctx, `
+		SELECT id, name, is_default
+		FROM recharge_templates
+		WHERE environment = 'live'
+		ORDER BY is_default DESC, id DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make([]PromotionLinkTemplateOption, 0)
+	for rows.Next() {
+		var opt PromotionLinkTemplateOption
+		if err := rows.Scan(&opt.ID, &opt.Name, &opt.IsDefault); err != nil {
+			return nil, err
+		}
+		out = append(out, opt)
+	}
+	return out, rows.Err()
+}
+
+func (r *dbNovelRepository) ListActiveDomainOptionsForPromo(ctx context.Context) ([]PromotionLinkDomainOption, error) {
+	rows, err := db.DB.Query(ctx, `
+		SELECT id, name, domain, type, is_default
+		FROM system_domains
+		WHERE status = 1
+		ORDER BY is_default DESC, type ASC, id DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make([]PromotionLinkDomainOption, 0)
+	for rows.Next() {
+		var opt PromotionLinkDomainOption
+		if err := rows.Scan(&opt.ID, &opt.Name, &opt.Domain, &opt.Type, &opt.IsDefault); err != nil {
+			return nil, err
+		}
+		out = append(out, opt)
+	}
+	return out, rows.Err()
 }

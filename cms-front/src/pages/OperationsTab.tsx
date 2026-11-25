@@ -40,6 +40,7 @@ import {
   toGroupInputs,
 } from '../components/operations/operationsUtils';
 import { RowActionMenu, StatusDot } from '../components/ui/Primitives';
+import { usePermission } from '../context/PermissionContext';
 import {
   operationsApi,
   type OperationsPreviewResponse,
@@ -80,15 +81,8 @@ const DEFAULT_RANKING_CONFIG: RankingConfig = {
 };
 
 export default function OperationsTab() {
-  const currentAdminRole = (() => {
-    try {
-      const saved = localStorage.getItem('cms_admin');
-      return saved ? JSON.parse(saved).role || '' : '';
-    } catch {
-      return '';
-    }
-  })();
-  const canEdit = ['SuperAdmin', 'Admin', 'Editor'].includes(currentAdminRole);
+  const { canWrite } = usePermission();
+  const canEdit = canWrite('content.operations');
 
   const [searchParams, setSearchParams] = useSearchParams();
   const initialTabParam = searchParams.get('tab');

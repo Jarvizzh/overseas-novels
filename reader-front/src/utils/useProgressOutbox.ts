@@ -1,3 +1,4 @@
+import { readerStorage } from './readerStorage';
 import { useCallback, useEffect, useRef } from 'react';
 import { api, type ProgressUpdate } from './api';
 import { progressOutbox } from './progressOutbox';
@@ -78,7 +79,7 @@ export function useProgressOutbox(
     }
 
     async function flush(keepalive: boolean) {
-      if (running || session.signal.aborted || !navigator.onLine || authToken !== localStorage.getItem('auth-token')) return;
+      if (running || session.signal.aborted || !navigator.onLine || authToken !== readerStorage.getItem('auth-token')) return;
       running = true;
       queued = false;
       try {
@@ -86,7 +87,7 @@ export function useProgressOutbox(
         // Keep the exit request well below the browser's shared keepalive body limit.
         const limit = keepalive ? Math.min(BATCH_SIZE, entries.length) : entries.length;
         for (let offset = 0; offset < limit && !session.signal.aborted; offset += BATCH_SIZE) {
-          if (authToken !== localStorage.getItem('auth-token')) break;
+          if (authToken !== readerStorage.getItem('auth-token')) break;
           const batch = entries.slice(offset, offset + BATCH_SIZE);
           await withRequestTimeout(session.signal, 10_000, (signal) =>
             api.syncProgress(batch, { userId: owner, authToken, signal, keepalive }),

@@ -1,6 +1,6 @@
 import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ExternalLink, RefreshCw, SlidersHorizontal } from 'lucide-react';
-import { apiRequest } from '../../utils/api';
+import { apiRequest, type ConversionPromotionOption } from '../../utils/api';
 import CustomSelect from '../CustomSelect';
 import {
   type ColumnOption,
@@ -17,19 +17,13 @@ import {
   formatAmount,
   getErrorMessage,
   getReasonLabel,
-  isServiceUnavailableError,
   partnerReportStatusLabel,
   sourceEventLabel,
   sourceLabel,
   status,
   timestamp,
 } from '../../utils/conversionStatus';
-import {
-  ConversionStatusDot,
-  CopyableText,
-  InlineErrorBanner,
-  ServiceUnavailableState,
-} from './ConversionShared';
+import { ConversionStatusDot, CopyableText, InlineErrorBanner } from './ConversionShared';
 import type {
   ConversionDestination,
   ConversionEvent,
@@ -151,32 +145,26 @@ function summarizeDeliveries(event: ConversionEvent) {
 export function ConversionEventsTab({
   integrations,
   destinations,
+  promotionOptions = [],
   integrationMap,
   destinationByPixel,
   selectedEventId,
   refreshToken,
   initialPixelId = '',
   onClearUrlPixelId,
-  serviceUnavailable,
-  retryingService = false,
-  onServiceUnavailable,
-  onRetryService,
   onSelectEvent,
   onJumpToOrder,
 }: {
   integrations: ConversionIntegration[];
   destinations: ConversionDestination[];
+  promotionOptions?: ConversionPromotionOption[];
   integrationMap: Map<string, ConversionIntegration>;
   destinationByPixel: Map<string, ConversionDestination>;
   selectedEventId: string | null;
   refreshToken: number;
   initialPixelId?: string;
   onClearUrlPixelId?: () => void;
-  serviceUnavailable: boolean;
-  retryingService?: boolean;
-  onServiceUnavailable: () => void;
-  onRetryService: () => void;
-  onSelectEvent: (ev: ConversionEvent) => void;
+  onSelectEvent: (ev: ConversionEvent, pixel: string) => void;
   onJumpToOrder: (orderId: string, integrationId?: string) => void;
 }) {
   const [draft, setDraft] = useState<EventFilterState>(() => ({
@@ -225,11 +213,6 @@ export function ConversionEventsTab({
   const currentCursor = cursorStack.at(-1) ?? '';
 
   useEffect(() => {
-    if (serviceUnavailable) {
-      setLoading(false);
-      return;
-    }
-
     const seq = ++requestSeqRef.current;
     const controller = new AbortController();
     setLoading(true);
@@ -280,11 +263,7 @@ export function ConversionEventsTab({
       })
       .catch((err) => {
         if (seq !== requestSeqRef.current || controller.signal.aborted) return;
-        if (isServiceUnavailableError(err)) {
-          onServiceUnavailable();
-        } else {
-          setError(getErrorMessage(err, '加载回传事件列表失败'));
-        }
+        setError(getErrorMessage(err, '加载回传事件列表失败'));
         setHasLoadedOnce(true);
       })
       .finally(() => {
@@ -294,7 +273,7 @@ export function ConversionEventsTab({
       });
 
     return () => controller.abort();
-  }, [committed, currentCursor, limit, refreshToken, manualNonce, serviceUnavailable, onServiceUnavailable]);
+  }, [committed, currentCursor, limit, refreshToken, manualNonce]);
 
   const commitFilters = useCallback((next: EventFilterState): boolean => {
     if (next.timePreset === 'custom' && next.fromLocal && next.toLocal) {
@@ -427,9 +406,11 @@ export function ConversionEventsTab({
       });
     }
     if (committed.promotionId.trim()) {
+      const pid = committed.promotionId.trim();
+      const matchedPromo = promotionOptions.find((p) => String(p.id) === pid);
       chips.push({
         key: 'promotionId',
-        label: `推广链: ${committed.promotionId.trim()}`,
+        label: `推广链: ${matchedPromo ? `#${matchedPromo.id} ${matchedPromo.name}` : pid}`,
         onClear: () => {
           setDraft((prev) => ({ ...prev, promotionId: '' }));
           commitFilters({ ...committed, promotionId: '' });
@@ -452,7 +433,7 @@ export function ConversionEventsTab({
       });
     }
     return chips;
-  }, [committed, draft, integrationMap, commitFilters]);
+  }, [committed, draft, integrationMap, promotionOptions, commitFilters]);
 
   const columnOptions: ColumnOption[] = [
     { key: 'promotion_id', label: '推广链 ID', visible: visibleCols.promotion_id },
@@ -465,15 +446,6 @@ export function ConversionEventsTab({
     (visibleCols.promotion_id ? 1 : 0) +
     (visibleCols.source_event_id ? 1 : 0) +
     (visibleCols.enqueued_at ? 1 : 0);
-
-  if (serviceUnavailable) {
-    return (
-      <ServiceUnavailableState
-        retrying={retryingService}
-        onRetry={onRetryService}
-      />
-    );
-  }
 
   const integrationOptions = [
     { value: '', label: '全部接入账户' },
@@ -626,14 +598,33 @@ export function ConversionEventsTab({
                   </div>
 
                   <label className="block space-y-1">
-                    <span className="block text-[var(--cms-muted-fg)]">推广链 ID</span>
-                    <input
-                      type="text"
-                      className="input-field font-mono-code"
-                      placeholder="输入 promotion_id..."
-                      value={draft.promotionId}
-                      onChange={(e) => setDraft((prev) => ({ ...prev, promotionId: e.target.value }))}
-                    />
+                    <span className="block text-[var(--cms-muted-fg)]">推广链接</span>
+                    {promotionOptions.length > 0 ? (
+                      <CustomSelect
+                        aria-label="筛选推广链接"
+                        width="100%"
+                        value={draft.promotionId}
+                        onChange={(val) => setDraft((prev) => ({ ...prev, promotionId: val }))}
+                        options={[
+                          { value: '', label: '全部推广链接' },
+                          ...(draft.promotionId && !promotionOptions.some((p) => String(p.id) === draft.promotionId)
+                            ? [{ value: draft.promotionId, label: `推广链接 #${draft.promotionId}` }]
+                            : []),
+                          ...promotionOptions.map((p) => ({
+                            value: String(p.id),
+                            label: `#${p.id} · ${p.name || '未命名'}${p.novel_title ? ` (${p.novel_title})` : ''}`,
+                          })),
+                        ]}
+                      />
+                    ) : (
+                      <input
+                        type="text"
+                        className="input-field font-mono-code"
+                        placeholder="输入 promotion_id..."
+                        value={draft.promotionId}
+                        onChange={(e) => setDraft((prev) => ({ ...prev, promotionId: e.target.value }))}
+                      />
+                    )}
                   </label>
 
                   <label className="block space-y-1">
@@ -1072,7 +1063,7 @@ export function ConversionEventsTab({
                     <td className="text-right whitespace-nowrap">
                       <button
                         type="button"
-                        onClick={() => onSelectEvent(item)}
+                        onClick={() => onSelectEvent(item, committed.pixelId.trim())}
                         className="btn-detail"
                       >
                         详情

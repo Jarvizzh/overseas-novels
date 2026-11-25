@@ -19,9 +19,9 @@ const (
 	paymentAwaitingOriginal = "original_target_unavailable"
 
 	// The event alias is shared by the claim, send and allowed-target queries.
-	paymentCanSend = `(e.payment_policy_state IN ('historical','not_applicable') OR
+	paymentCanSend = `(e.reason IS DISTINCT FROM 'event_not_allowed' AND (e.payment_policy_state IN ('historical','not_applicable') OR
 		(e.payment_policy_state='decided' AND EXISTS (SELECT 1 FROM conversion.payment_policy_decisions p
-		 WHERE p.id=e.payment_policy_decision_id AND p.outcome='selected')))`
+		 WHERE p.id=e.payment_policy_decision_id AND p.outcome='selected'))))`
 )
 
 func lockPaymentTx(ctx context.Context, tx pgx.Tx, scope paymentpolicy.Scope, key string) error {
@@ -229,7 +229,7 @@ func (s Service) retryPendingPaymentTx(ctx context.Context, tx pgx.Tx, actor Ope
 			return OperationResult{}, true, err
 		}
 		var target int64
-		target, err = readerAuthorizedOriginalTx(ctx, tx, s.Environment, e.IntegrationID, e.readerPayment.pixel, true)
+		target, err = readerAuthorizedOriginalTx(ctx, tx, s.Environment, e.IntegrationID, e.readerPayment.pixel, e.OrderID, e.ReceivedAt, true)
 		if err != nil {
 			return OperationResult{}, true, err
 		}

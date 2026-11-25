@@ -36,6 +36,7 @@ var (
 	ErrInvalidSettingValue     = errors.New("无效的全局配置参数")
 	ErrInvalidNovelPricing     = errors.New("小说千字单价必须为 0 到 2147483647 的整数")
 	ErrInvalidPromoPricing     = errors.New("无效的推广链接计费参数")
+	ErrInvalidPromoTemplate    = errors.New("推广链接仅支持绑定 Live 环境的充值模板")
 	ErrInvalidGenres           = errors.New("分类标签总长度不能超过 2048 个字符")
 	ErrInvalidFilterParam      = errors.New("无效的查询筛选参数")
 	ErrInvalidBatchNovelIDs    = errors.New("请至少选择一本有效书籍")
@@ -136,6 +137,7 @@ type NovelService interface {
 	UpdateSettings(ctx context.Context, configs map[string]string) error
 
 	ListPromotionLinks(ctx context.Context) ([]PromotionLink, error)
+	GetPromotionLinkOptions(ctx context.Context) (*PromotionLinkOptions, error)
 	CreatePromotionLink(ctx context.Context, link *PromotionLink) (*PromotionLink, error)
 	UpdatePromotionLink(ctx context.Context, id int, name string, chapterIndex int, source, campaign, url string, pixelID, templateID, domainID, coinCost, startPayIndex *int, domain string) error
 	DeletePromotionLink(ctx context.Context, id int) error
@@ -1325,7 +1327,17 @@ func (s *novelService) BulkImportChapters(ctx context.Context, novelID int64, zi
 }
 
 func (s *novelService) GetSettings(ctx context.Context) (map[string]string, error) {
-	return s.repo.GetSettings(ctx)
+	all, err := s.repo.GetSettings(ctx)
+	if err != nil {
+		return nil, err
+	}
+	settings := map[string]string{}
+	for _, key := range []string{"global_coin_cost_per_thousand", "global_start_pay_chapter_index"} {
+		if value, ok := all[key]; ok {
+			settings[key] = value
+		}
+	}
+	return settings, nil
 }
 
 func validateSettingInt(val string, minVal int, fieldName string) (int, error) {
@@ -1337,6 +1349,14 @@ func validateSettingInt(val string, minVal int, fieldName string) (int, error) {
 }
 
 func (s *novelService) UpdateSettings(ctx context.Context, configs map[string]string) error {
+	for key := range configs {
+		switch key {
+		case "global_coin_cost_per_thousand", "global_start_pay_chapter_index", "apply_to_all_novels",
+			"apply_coin_cost_to_all_novels", "apply_start_pay_to_all_novels", "reset_novel_coin_cost":
+		default:
+			return fmt.Errorf("%w：不支持的通用设置字段", ErrInvalidSettingValue)
+		}
+	}
 	coin, coinUpdated := configs["global_coin_cost_per_thousand"]
 	cost := 0
 	var err error
@@ -1433,6 +1453,66 @@ func appendLinkIDToURL(rawURL string, linkID int) string {
 
 func (s *novelService) ListPromotionLinks(ctx context.Context) ([]PromotionLink, error) {
 	return s.repo.ListPromotionLinks(ctx)
+}
+
+func (s *novelService) GetPromotionLinkOptions(ctx context.Context) (*PromotionLinkOptions, error) {
+	novels, err := s.repo.ListPublishedNovelOptionsForPromo(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if novels == nil {
+		novels = []PromotionLinkNovelOption{}
+	}
+	fbPixels, err := s.repo.ListFBPixels(ctx)
+	if err != nil {
+		return nil, err
+	}
+	pixels := make([]PromotionLinkPixelOption, 0, len(fbPixels))
+	for _, p := range fbPixels {
+		pixels = append(pixels, PromotionLinkPixelOption{
+			ID:      p.ID,
+			Name:    p.Name,
+			PixelID: p.PixelID,
+		})
+	}
+	templates, err := s.repo.ListLiveTemplateOptionsForPromo(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if templates == nil {
+		templates = []PromotionLinkTemplateOption{}
+	}
+	domains, err := s.repo.ListActiveDomainOptionsForPromo(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if domains == nil {
+		domains = []PromotionLinkDomainOption{}
+	}
+	configs, err := s.repo.GetSettings(ctx)
+	if err != nil {
+		return nil, err
+	}
+	coinCost, err := pricingSetting(configs, "global_coin_cost_per_thousand", 0, 500)
+	if err != nil {
+		coinCost = 500
+	}
+	startPay, err := pricingSetting(configs, "global_start_pay_chapter_index", 1, 3)
+	if err != nil {
+		startPay = 3
+	}
+	return &PromotionLinkOptions{
+		Novels:                     novels,
+		Pixels:                     pixels,
+		Templates:                  templates,
+		Domains:                    domains,
+		GlobalCoinCostPerThousand:  coinCost,
+		GlobalStartPayChapterIndex: startPay,
+		Defaults: PromotionLinkDefaults{
+			GlobalCoinCostPerThousand:  coinCost,
+			GlobalStartPayChapterIndex: startPay,
+		},
+	}, nil
 }
 
 func (s *novelService) CreatePromotionLink(ctx context.Context, link *PromotionLink) (*PromotionLink, error) {

@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
+	"reader-backend/internal/conversion"
 	"reader-backend/internal/db"
 	"reader-backend/internal/model"
 )
@@ -34,21 +35,40 @@ type Repository interface {
 
 type dbRepository struct{}
 
-const PaidSubscriptionPredicate = `status IN ('ACTIVE','CANCELLED','CANCEL_PENDING') AND current_period_end > now() AND last_payment_time IS NOT NULL AND subscription_id NOT LIKE 'I-MOCK%'
+const PaidSubscriptionPredicate = `(status IN ('ACTIVE','CANCELLED','CANCEL_PENDING','SUSPENDED')
+  OR (payment_method='stripe' AND status IN ('SUSPENDED','PENDING'))) AND current_period_end > now() AND last_payment_time IS NOT NULL AND subscription_id NOT LIKE 'I-MOCK%'
  AND (
-  NOT EXISTS(SELECT 1 FROM recharge_orders paid WHERE paid.subscription_id=user_subscriptions.subscription_id AND paid.paid_period_end IS NOT NULL)
+  (payment_method IS DISTINCT FROM 'stripe' AND NOT EXISTS(
+   SELECT 1 FROM recharge_orders paid WHERE paid.subscription_id=user_subscriptions.subscription_id AND paid.paid_period_end IS NOT NULL))
   OR EXISTS(SELECT 1 FROM recharge_orders paid WHERE paid.subscription_id=user_subscriptions.subscription_id
    AND paid.status IN ('Success','Paid','RefundPending') AND NOT paid.paypal_refund_reported
+   AND (user_subscriptions.payment_method IS DISTINCT FROM 'stripe' OR (paid.payment_method='stripe' AND paid.fulfilled_at IS NOT NULL
+       AND EXISTS(SELECT 1 FROM payment_stripe_invoice_periods p WHERE p.order_id=paid.id AND p.admitted AND p.intent_id=user_subscriptions.checkout_intent_id)))
+   AND NOT EXISTS(SELECT 1 FROM payment_entitlement_adjustments adj WHERE adj.order_id=paid.id AND adj.blocked)
+   AND NOT EXISTS(SELECT 1 FROM payment_deferred_fulfillment h WHERE h.order_id=paid.id AND h.resolved_at IS NULL)
    AND COALESCE(paid.paid_period_start,paid.paid_at)<=now() AND paid.paid_period_end>now())
  )`
 
 const WholeBookEntitlementPredicate = `order_type='whole_book' AND status IN ('Success','Paid','RefundPending') AND fulfilled_at IS NOT NULL
+ AND NOT EXISTS(SELECT 1 FROM payment_entitlement_adjustments adj WHERE adj.order_id=recharge_orders.id AND adj.blocked)
  AND (checkout_id IS NOT NULL OR EXISTS(SELECT 1 FROM legacy_whole_book_proofs proof
   WHERE proof.order_id=recharge_orders.id AND proof.novel_id=recharge_orders.novel_id))`
 
+// WholeBookEnvironmentPredicate compares the deployment environment with the
+// order snapshot and verified channel receipts. The argument is a SQL parameter.
+func WholeBookEnvironmentPredicate(environmentParam string) string {
+	return `payment_order_environment(recharge_orders)=CASE ` + environmentParam + `
+		WHEN 'production' THEN 'live' WHEN 'sandbox' THEN 'sandbox' END
+		AND (checkout_environment=` + environmentParam + ` OR (checkout_environment IS NULL AND EXISTS(
+			SELECT 1 FROM third_party_payment_orders receipt JOIN payment_channel_accounts account ON account.id=receipt.account_id
+			WHERE receipt.order_id=recharge_orders.id AND receipt.status='VERIFIED'
+			AND receipt.payment_provider=recharge_orders.payment_method
+		)))`
+}
+
 func (r *dbRepository) HasWholeBook(ctx context.Context, userID, novelID int64) (bool, error) {
 	var ok bool
-	err := db.DB.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM recharge_orders WHERE user_id=$1 AND novel_id=$2 AND `+WholeBookEntitlementPredicate+`)`, userID, novelID).Scan(&ok)
+	err := db.DB.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM recharge_orders WHERE user_id=$1 AND novel_id=$2 AND `+WholeBookEntitlementPredicate+` AND `+WholeBookEnvironmentPredicate("$3")+`)`, userID, novelID, conversion.Environment()).Scan(&ok)
 	return ok, err
 }
 
@@ -263,9 +283,9 @@ func (r *dbRepository) HasActiveSubscription(ctx context.Context, userID int64) 
 	query := `
 		SELECT EXISTS(
 			SELECT 1 FROM user_subscriptions 
-			WHERE user_id = $1 AND ` + PaidSubscriptionPredicate + `
+			WHERE user_id = $1 AND payment_subscription_environment(user_subscriptions)=$2 AND ` + PaidSubscriptionPredicate + `
 		)`
-	err := db.DB.QueryRow(ctx, query, userID).Scan(&exists)
+	err := db.DB.QueryRow(ctx, query, userID, conversion.Environment()).Scan(&exists)
 	if err != nil {
 		return false, err
 	}

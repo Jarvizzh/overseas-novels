@@ -139,17 +139,58 @@ func testRestrictedRoles(t *testing.T, ctx context.Context, s Service) {
 		 WHERE source_event_id='payment:400:Purchase';
 		UPDATE conversion.delivery_diagnostics SET recorded_at=now()-interval '45 days' WHERE delivery_id=3;`)
 	retention := roleService("retention")
-	batch, err := retention.RedactExpired(ctx, Operator{ID: "ops"}, 30, 100, "retention fixture")
+	if _, err := retention.RedactExpired(ctx, Operator{ID: "optimizer", RequireSuperAdmin: true}, 30, 100, "non-super retention"); !errors.Is(err, ErrOperatorForbidden) {
+		t.Fatalf("non-super-admin retention guard: %v", err)
+	}
+	batch, err := retention.RedactExpired(ctx, Operator{ID: "ops", RequireSuperAdmin: true}, 30, 100, "retention fixture")
 	if err != nil || batch.Outbox != 1 || batch.RepairFacts != 1 || batch.Events != 1 || batch.Diagnostics != 1 {
 		t.Fatalf("redaction: %+v %v", batch, err)
 	}
 	assertString(t, ctx, s.Pool, "SELECT (snapshot='{}' AND original_send_started_at IS NOT NULL)::text FROM reader_conversion_repair_facts WHERE business_key='payment:400:Purchase'", "true")
 	assertString(t, ctx, s.Pool, "SELECT (snapshot<>'{}' AND original_send_started_at IS NOT NULL)::text FROM reader_conversion_repair_facts WHERE business_key='payment:500:Purchase'", "true")
 	assertString(t, ctx, s.Pool, "SELECT state FROM conversion.deliveries WHERE id=3", "succeeded")
-	if batch, err := retention.RedactExpired(ctx, Operator{ID: "ops"}, 30, 100, "repeat"); err != nil || batch != (RetentionResult{}) {
+	if batch, err := retention.RedactExpired(ctx, Operator{ID: "ops", RequireSuperAdmin: true}, 30, 100, "repeat"); err != nil || batch != (RetentionResult{}) {
 		t.Fatalf("retention replay: %+v %v", batch, err)
 	}
 	t.Run("historical renewal recovery", func(t *testing.T) {
 		testReaderSubscriptionRecovery(t, ctx, s, worker, api)
+	})
+
+	t.Run("request ledger with isolated runtime roles", func(t *testing.T) {
+		mustExec(t, ctx, s.Pool, `
+			INSERT INTO conversion.integrations(source,account_key,environment,contract_version,enabled)
+			VALUES ('fixture','batch-role','batch-role','v1',true);
+			INSERT INTO conversion.destinations(environment,media,pixel_id,credential_id)
+			VALUES ('batch-role','meta','8532',1);
+			INSERT INTO conversion.events(integration_id,environment,source_event_type,source_event_id,event_name,attribution_state,
+			    occurred_at,received_at,action_source,matching_data)
+			SELECT id,environment,'Registration','batch-role-fixture','CompleteRegistration','matched',now(),now(),
+			    'system_generated','{"external_id":["fixture"]}' FROM conversion.integrations WHERE environment='batch-role';
+			INSERT INTO conversion.deliveries(event_id,destination_id,environment,meta_event_id,role,deadline_at)
+			SELECT e.id,x.id,e.environment,'fixture','original',now()+interval '1 hour'
+			FROM conversion.events e JOIN conversion.destinations x ON x.environment=e.environment WHERE e.environment='batch-role';`)
+		restricted := Service{Store{Pool: worker.Pool, Environment: "batch-role"}}
+		job, err := restricted.ClaimBatch(ctx, 5, 1, time.Minute, time.Second)
+		if err != nil {
+			t.Fatal(err)
+		}
+		prepared, err := restricted.StartBatch(ctx, job, time.Second, 0,
+			func(string, []byte) (string, error) { return "fixture", nil },
+			func([]Payload, string) (Send, error) {
+				return func(context.Context) Result { return confirmedReviewReceipt() }, nil
+			})
+		if err != nil || prepared == nil {
+			t.Fatalf("prepare using Worker grants: %v", err)
+		}
+		if err := restricted.PersistBatchReceipt(ctx, job, prepared.send(ctx), 0); err != nil {
+			t.Fatal(err)
+		}
+		if err := restricted.FinalizeBatch(ctx, job, time.Second); err != nil {
+			t.Fatal(err)
+		}
+		assertString(t, ctx, api.Pool, `SELECT receipt->>'EventsReceived' FROM conversion.meta_batches WHERE environment='batch-role'`, "1")
+		if _, err := api.Pool.Exec(ctx, `SELECT credential_id,lease_token FROM conversion.meta_batches`); err == nil {
+			t.Fatal("API can read private request-ledger fields")
+		}
 	})
 }

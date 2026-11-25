@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { ExternalLink, Plus, RefreshCw } from 'lucide-react';
 import { domainApi } from '../utils/api';
 import type { SystemDomain } from '../utils/api';
+import { usePermission } from '../context/PermissionContext';
 import { normalizeDomainHref } from '../utils/promotion';
 import CustomSelect from '../components/CustomSelect';
 import { CmsDialog } from '../components/ui/CmsDialog';
@@ -18,6 +19,9 @@ import {
 } from '../components/ui/Primitives';
 
 export default function DomainsTab() {
+  const { canWrite } = usePermission();
+  const canWriteDomains = canWrite('system.domains');
+
   const [domains, setDomains] = useState<SystemDomain[]>([]);
   const [loading, setLoading] = useState(true);
   const [hasLoadedOnce, setHasLoadedOnce] = useState(false);
@@ -59,7 +63,7 @@ export default function DomainsTab() {
 
   const handleCreateSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (submitting) return;
+    if (!canWriteDomains || submitting) return;
     if (!formData.name.trim() || !formData.domain.trim()) {
       window.showToast?.('请填写完整的域名信息', 'error');
       return;
@@ -86,6 +90,7 @@ export default function DomainsTab() {
   };
 
   const handleToggleStatus = async (domain: SystemDomain) => {
+    if (!canWriteDomains) return;
     const nextStatus = domain.status === 1 ? 2 : 1;
     try {
       await domainApi.updateDomainStatus(domain.id, nextStatus);
@@ -97,6 +102,7 @@ export default function DomainsTab() {
   };
 
   const handleSetDefault = async (domain: SystemDomain) => {
+    if (!canWriteDomains) return;
     try {
       await domainApi.setDefaultDomain(domain.id);
       window.showToast?.(`已将 ${domain.domain} 设为默认主域名`, 'success');
@@ -107,6 +113,7 @@ export default function DomainsTab() {
   };
 
   const handleDelete = (domain: SystemDomain) => {
+    if (!canWriteDomains) return;
     if (domain.is_default) {
       window.showToast?.('默认域名不可删除', 'error');
       return;
@@ -185,10 +192,12 @@ export default function DomainsTab() {
               <RefreshCw size={13} className={loading ? 'animate-spin' : ''} aria-hidden="true" />
               <span>刷新</span>
             </button>
-            <button type="button" onClick={() => setIsModalOpen(true)} className="btn-primary h-8 px-3.5 text-xs">
-              <Plus size={14} aria-hidden="true" />
-              <span>新建域名</span>
-            </button>
+            {canWriteDomains && (
+              <button type="button" onClick={() => setIsModalOpen(true)} className="btn-primary h-8 px-3.5 text-xs">
+                <Plus size={14} aria-hidden="true" />
+                <span>新建域名</span>
+              </button>
+            )}
           </div>
         </div>
 
@@ -213,17 +222,19 @@ export default function DomainsTab() {
               <th scope="col">默认入口</th>
               <th scope="col">状态</th>
               <th scope="col">创建时间</th>
-              <th scope="col" className="text-right w-px whitespace-nowrap">
-                操作
-              </th>
+              {canWriteDomains && (
+                <th scope="col" className="text-right w-px whitespace-nowrap">
+                  操作
+                </th>
+              )}
             </tr>
           </thead>
           <tbody className={loading && hasLoadedOnce ? 'opacity-65 transition-opacity' : ''}>
             {!hasLoadedOnce && loading ? (
-              <SkeletonRows rows={5} cols={8} />
+              <SkeletonRows rows={5} cols={canWriteDomains ? 8 : 7} />
             ) : filteredDomains.length === 0 ? (
               <tr>
-                <td colSpan={8} className="py-16 text-center text-[var(--cms-muted-fg)]">
+                <td colSpan={canWriteDomains ? 8 : 7} className="py-16 text-center text-[var(--cms-muted-fg)]">
                   暂无匹配的域名配置
                 </td>
               </tr>
@@ -262,34 +273,36 @@ export default function DomainsTab() {
                   <td className="tabular-nums text-[var(--cms-muted-fg)] whitespace-nowrap">
                     {new Date(item.created_at).toLocaleString()}
                   </td>
-                  <td className="text-right whitespace-nowrap">
-                    <div className="inline-flex items-center justify-end gap-0.5 whitespace-nowrap">
-                      <button
-                        type="button"
-                        onClick={() => void handleToggleStatus(item)}
-                        className="btn-ghost whitespace-nowrap"
-                      >
-                        {item.status === 1 ? '禁用' : '启用'}
-                      </button>
-                      {!item.is_default && (
-                        <RowActionMenu
-                          ariaLabel={`域名 ${item.domain} 更多操作`}
-                          items={[
-                            {
-                              label: '设为默认落地页',
-                              onClick: () => void handleSetDefault(item),
-                            },
-                            {
-                              label: '删除域名',
-                              tone: 'danger' as const,
-                              dividerBefore: true,
-                              onClick: () => handleDelete(item),
-                            },
-                          ]}
-                        />
-                      )}
-                    </div>
-                  </td>
+                  {canWriteDomains && (
+                    <td className="text-right whitespace-nowrap">
+                      <div className="inline-flex items-center justify-end gap-0.5 whitespace-nowrap">
+                        <button
+                          type="button"
+                          onClick={() => void handleToggleStatus(item)}
+                          className="btn-ghost whitespace-nowrap"
+                        >
+                          {item.status === 1 ? '禁用' : '启用'}
+                        </button>
+                        {!item.is_default && (
+                          <RowActionMenu
+                            ariaLabel={`域名 ${item.domain} 更多操作`}
+                            items={[
+                              {
+                                label: '设为默认落地页',
+                                onClick: () => void handleSetDefault(item),
+                              },
+                              {
+                                label: '删除域名',
+                                tone: 'danger' as const,
+                                dividerBefore: true,
+                                onClick: () => handleDelete(item),
+                              },
+                            ]}
+                          />
+                        )}
+                      </div>
+                    </td>
+                  )}
                 </tr>
               ))
             )}
@@ -297,6 +310,7 @@ export default function DomainsTab() {
         </table>
       </TableRegion>
 
+      {canWriteDomains && (
       <CmsDialog
         open={isModalOpen}
         onClose={handleCloseModal}
@@ -382,6 +396,7 @@ export default function DomainsTab() {
           </label>
         </form>
       </CmsDialog>
+      )}
     </div>
   );
 }

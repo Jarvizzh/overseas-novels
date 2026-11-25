@@ -14,6 +14,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"star-novel-cms/internal/auth"
+	"star-novel-cms/internal/db"
 )
 
 type conversionOrderClient struct {
@@ -22,11 +23,14 @@ type conversionOrderClient struct {
 	http     *http.Client
 }
 
-type adminLookup interface {
-	GetAdminByID(context.Context, string) (*auth.Admin, error)
+type ConversionPromotionOption struct {
+	ID         int    `json:"id"`
+	Name       string `json:"name"`
+	NovelTitle string `json:"novel_title"`
+	FBPixelID  *int   `json:"fb_pixel_id"`
 }
 
-func RegisterConversionOrders(rg *gin.RouterGroup, admins adminLookup, rawURL, token string) error {
+func RegisterConversionOrders(rg *gin.RouterGroup, _ any, rawURL, token string) error {
 	var client *conversionOrderClient
 	if rawURL != "" || token != "" {
 		endpoint, err := url.Parse(rawURL)
@@ -39,35 +43,59 @@ func RegisterConversionOrders(rg *gin.RouterGroup, admins adminLookup, rawURL, t
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 		}}
 	}
-	service := conversionOrderService{admins: admins, client: client}
+	service := conversionOrderService{client: client}
+
+	rg.GET(
+		"/conversion/promotion-options",
+		auth.AuthMiddleware(),
+		auth.RequirePermission(auth.PermAdsConversionsRead),
+		listConversionPromotionOptions,
+	)
+
+	pixelsOrConvRead := auth.RequireAnyPermission(auth.PermAdsPixelsRead, auth.PermAdsConversionsRead)
+	pixelsWrite := auth.RequirePermission(auth.PermAdsPixelsWrite)
+	convRead := auth.RequirePermission(auth.PermAdsConversionsRead)
+	convWrite := auth.RequirePermission(auth.PermAdsConversionsWrite)
+
 	for _, route := range []struct {
 		method, pattern string
+		guard           gin.HandlerFunc
+		access          string
+		resolvePerm     func(*auth.Principal) string
 		path            func(*gin.Context) []string
 	}{
-		{http.MethodGet, "/conversion/orders/:order_id", func(c *gin.Context) []string { return []string{"orders", c.Param("order_id")} }},
-		{http.MethodGet, "/conversion/summary", func(*gin.Context) []string { return []string{"summary"} }},
-		{http.MethodGet, "/conversion/events", func(*gin.Context) []string { return []string{"events"} }},
-		{http.MethodGet, "/conversion/events/:id", func(c *gin.Context) []string { return []string{"events", c.Param("id")} }},
-		{http.MethodGet, "/conversion/events/:id/destinations", func(c *gin.Context) []string { return []string{"events", c.Param("id"), "destinations"} }},
-		{http.MethodPost, "/conversion/events/:id/deliveries", func(c *gin.Context) []string { return []string{"events", c.Param("id"), "deliveries"} }},
-		{http.MethodPost, "/conversion/deliveries/:id/retry", func(c *gin.Context) []string { return []string{"deliveries", c.Param("id"), "retry"} }},
-		{http.MethodPost, "/conversion/partner-reports/:id/retry", func(c *gin.Context) []string { return []string{"partner-reports", c.Param("id"), "retry"} }},
-		{http.MethodGet, "/conversion/integrations", func(*gin.Context) []string { return []string{"integrations"} }},
-		{http.MethodPost, "/conversion/integrations", func(*gin.Context) []string { return []string{"integrations"} }},
-		{http.MethodPatch, "/conversion/integrations/:id", func(c *gin.Context) []string { return []string{"integrations", c.Param("id")} }},
-		{http.MethodGet, "/conversion/integrations/:id/payment-policy", func(c *gin.Context) []string { return []string{"integrations", c.Param("id"), "payment-policy"} }},
-		{http.MethodPost, "/conversion/integrations/:id/payment-policy/preview", func(c *gin.Context) []string {
+		{http.MethodGet, "/conversion/orders/:order_id", convRead, "read", constPerm(auth.PermAdsConversionsRead), func(c *gin.Context) []string { return []string{"orders", c.Param("order_id")} }},
+		{http.MethodGet, "/conversion/summary", convRead, "read", constPerm(auth.PermAdsConversionsRead), func(*gin.Context) []string { return []string{"summary"} }},
+		{http.MethodGet, "/conversion/throughput", convRead, "read", constPerm(auth.PermAdsConversionsRead), func(*gin.Context) []string { return []string{"throughput"} }},
+		{http.MethodGet, "/conversion/events", convRead, "read", constPerm(auth.PermAdsConversionsRead), func(*gin.Context) []string { return []string{"events"} }},
+		{http.MethodGet, "/conversion/events/:id", convRead, "read", constPerm(auth.PermAdsConversionsRead), func(c *gin.Context) []string { return []string{"events", c.Param("id")} }},
+		{http.MethodGet, "/conversion/events/:id/destinations", convRead, "read", constPerm(auth.PermAdsConversionsRead), func(c *gin.Context) []string { return []string{"events", c.Param("id"), "destinations"} }},
+		{http.MethodGet, "/conversion/events/:id/deliveries", convRead, "read", constPerm(auth.PermAdsConversionsRead), func(c *gin.Context) []string { return []string{"events", c.Param("id"), "deliveries"} }},
+		{http.MethodPost, "/conversion/events/:id/deliveries", convWrite, "write", constPerm(auth.PermAdsConversionsWrite), func(c *gin.Context) []string { return []string{"events", c.Param("id"), "deliveries"} }},
+		{http.MethodPost, "/conversion/deliveries/:id/retry", convWrite, "write", constPerm(auth.PermAdsConversionsWrite), func(c *gin.Context) []string { return []string{"deliveries", c.Param("id"), "retry"} }},
+		{http.MethodPost, "/conversion/partner-reports/:id/retry", convWrite, "write", constPerm(auth.PermAdsConversionsWrite), func(c *gin.Context) []string { return []string{"partner-reports", c.Param("id"), "retry"} }},
+		{http.MethodGet, "/conversion/integrations", pixelsOrConvRead, "read", pixelsOrConversionsReadPerm, func(*gin.Context) []string { return []string{"integrations"} }},
+		{http.MethodPost, "/conversion/integrations", pixelsWrite, "write", constPerm(auth.PermAdsPixelsWrite), func(*gin.Context) []string { return []string{"integrations"} }},
+		{http.MethodPatch, "/conversion/integrations/:id", pixelsWrite, "write", constPerm(auth.PermAdsPixelsWrite), func(c *gin.Context) []string { return []string{"integrations", c.Param("id")} }},
+		{http.MethodGet, "/conversion/integrations/:id/payment-policy", convRead, "read", constPerm(auth.PermAdsConversionsRead), func(c *gin.Context) []string { return []string{"integrations", c.Param("id"), "payment-policy"} }},
+		{http.MethodPost, "/conversion/integrations/:id/payment-policy/preview", convWrite, "write", constPerm(auth.PermAdsConversionsWrite), func(c *gin.Context) []string {
 			return []string{"integrations", c.Param("id"), "payment-policy", "preview"}
 		}},
-		{http.MethodPost, "/conversion/integrations/:id/payment-policy/publish", func(c *gin.Context) []string {
+		{http.MethodPost, "/conversion/integrations/:id/payment-policy/publish", convWrite, "write", constPerm(auth.PermAdsConversionsWrite), func(c *gin.Context) []string {
 			return []string{"integrations", c.Param("id"), "payment-policy", "publish"}
 		}},
-		{http.MethodGet, "/conversion/destinations", func(*gin.Context) []string { return []string{"destinations"} }},
-		{http.MethodPost, "/conversion/destinations", func(*gin.Context) []string { return []string{"destinations"} }},
-		{http.MethodPatch, "/conversion/destinations/:id", func(c *gin.Context) []string { return []string{"destinations", c.Param("id")} }},
-		{http.MethodGet, "/conversion/audit", func(*gin.Context) []string { return []string{"audit"} }},
+		{http.MethodGet, "/conversion/destinations", pixelsOrConvRead, "read", pixelsOrConversionsReadPerm, func(*gin.Context) []string { return []string{"destinations"} }},
+		{http.MethodPost, "/conversion/destinations", pixelsWrite, "write", constPerm(auth.PermAdsPixelsWrite), func(*gin.Context) []string { return []string{"destinations"} }},
+		{http.MethodPatch, "/conversion/destinations/:id", pixelsWrite, "write", constPerm(auth.PermAdsPixelsWrite), func(c *gin.Context) []string { return []string{"destinations", c.Param("id")} }},
+		{http.MethodGet, "/conversion/audit", convRead, "read", constPerm(auth.PermAdsConversionsRead), func(*gin.Context) []string { return []string{"audit"} }},
 	} {
-		rg.Handle(route.method, route.pattern, auth.AuthMiddleware(), func(c *gin.Context) {
+		route := route
+		rg.Handle(route.method, route.pattern, auth.AuthMiddleware(), route.guard, func(c *gin.Context) {
+			principal, ok := auth.PrincipalFromContext(c)
+			if !ok || !principal.IsActive() {
+				c.JSON(http.StatusUnauthorized, gin.H{"code": "account_inactive", "error": "账号未启用或不存在"})
+				return
+			}
 			path := route.path(c)
 			for _, part := range path {
 				if part == "." || part == ".." || len(part) > 512 || strings.Contains(part, "/") {
@@ -92,7 +120,8 @@ func RegisterConversionOrders(rg *gin.RouterGroup, admins adminLookup, rawURL, t
 					return
 				}
 			}
-			body, status := service.proxy(c.Request.Context(), c.GetString("admin_id"), route.method, path, c.Request.URL.RawQuery, input)
+			perm := route.resolvePerm(principal)
+			body, status := service.proxy(c.Request.Context(), principal, route.access, perm, route.method, path, c.Request.URL.RawQuery, input)
 			c.Header("Cache-Control", "no-store")
 			c.Data(status, "application/json", body)
 		})
@@ -100,37 +129,66 @@ func RegisterConversionOrders(rg *gin.RouterGroup, admins adminLookup, rawURL, t
 	return nil
 }
 
+func constPerm(code string) func(*auth.Principal) string {
+	return func(*auth.Principal) string { return code }
+}
+
+func pixelsOrConversionsReadPerm(p *auth.Principal) string {
+	if p != nil && p.HasPermission(auth.PermAdsPixelsRead) {
+		return auth.PermAdsPixelsRead
+	}
+	return auth.PermAdsConversionsRead
+}
+
+func listConversionPromotionOptions(c *gin.Context) {
+	if db.DB == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "database unavailable"})
+		return
+	}
+	rows, err := db.DB.Query(c.Request.Context(), `
+		SELECT id, COALESCE(name, ''), COALESCE(novel_title, ''), fb_pixel_id
+		FROM promotion_links
+		ORDER BY created_at DESC, id DESC`)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch promotion options"})
+		return
+	}
+	defer rows.Close()
+
+	items := make([]ConversionPromotionOption, 0)
+	for rows.Next() {
+		var item ConversionPromotionOption
+		if err := rows.Scan(&item.ID, &item.Name, &item.NovelTitle, &item.FBPixelID); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch promotion options"})
+			return
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch promotion options"})
+		return
+	}
+	c.Header("Cache-Control", "no-store")
+	c.JSON(http.StatusOK, items)
+}
+
 type conversionOrderService struct {
-	admins adminLookup
 	client *conversionOrderClient
 }
 
 var reconciliationUnavailable = []byte(`{"code":"reconciliation_unavailable","error":"转化对账服务暂不可用"}`)
 
-func (s conversionOrderService) proxy(ctx context.Context, adminID, method string, path []string, query string, input []byte) ([]byte, int) {
-	admin, err := s.admins.GetAdminByID(ctx, adminID)
-	if err != nil {
-		return []byte(`{"code":"operator_check_unavailable","error":"暂时无法核验账号"}`), http.StatusServiceUnavailable
-	}
-	if admin == nil || admin.Status != 1 || !conversionReadAllowed(admin.Role) || (method != http.MethodGet && admin.Role != "Admin" && admin.Role != "SuperAdmin") {
+func (s conversionOrderService) proxy(ctx context.Context, principal *auth.Principal, access, permission, method string, path []string, query string, input []byte) ([]byte, int) {
+	if principal == nil || !principal.IsActive() {
 		return []byte(`{"code":"operator_forbidden","error":"当前账号无权查看转化对账"}`), http.StatusForbidden
 	}
 	if s.client == nil {
 		return reconciliationUnavailable, http.StatusServiceUnavailable
 	}
-	return s.client.request(ctx, admin, method, path, query, input)
+	return s.client.request(ctx, principal, access, permission, method, path, query, input)
 }
 
-func conversionReadAllowed(role string) bool {
-	switch role {
-	case "SuperAdmin", "Admin", "MediaBuyer", "Finance":
-		return true
-	default:
-		return false
-	}
-}
-
-func (c *conversionOrderClient) request(ctx context.Context, admin *auth.Admin, method string, path []string, query string, input []byte) ([]byte, int) {
+func (c *conversionOrderClient) request(ctx context.Context, principal *auth.Principal, access, permission, method string, path []string, query string, input []byte) ([]byte, int) {
 	parts := []string{"internal", "conversion"}
 	for _, part := range path {
 		parts = append(parts, url.PathEscape(part))
@@ -145,8 +203,10 @@ func (c *conversionOrderClient) request(ctx context.Context, admin *auth.Admin, 
 		req.Header.Set("Content-Type", "application/json")
 	}
 	req.Header.Set("Authorization", "Bearer "+c.token)
-	req.Header.Set("X-Operator-ID", admin.ID)
-	req.Header.Set("X-Operator-Role", admin.Role)
+	req.Header.Set("X-Operator-ID", principal.ID)
+	req.Header.Set("X-Operator-Role", principal.Role)
+	req.Header.Set("X-Operator-Access", access)
+	req.Header.Set("X-Operator-Permission", permission)
 	res, err := c.http.Do(req)
 	if err != nil {
 		return reconciliationUnavailable, http.StatusServiceUnavailable
@@ -194,6 +254,8 @@ var conversionUpstreamErrorCatalog = map[int]map[string]string{
 		"payment_policy_first_requires_promotion":  "仅推广链接专属规则可配置首单",
 		"payment_policy_first_coverage_unverified": "该链接的历史付款覆盖尚未核实",
 		"payment_policy_first_source_unsupported":  "该来源暂不支持首单规则",
+		"sinan_apps_required":                      "启用司南前至少填写一个允许应用 ID",
+		"sinan_events_required":                    "启用司南前至少选择一个允许事件",
 		"invalid_operation":                        "操作参数无效，请核对必填字段与原因长度（1-500 字）",
 	},
 	http.StatusForbidden: {

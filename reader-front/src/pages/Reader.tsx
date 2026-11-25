@@ -1,3 +1,4 @@
+import { readerStorage } from '../utils/readerStorage';
 import React, { useState, useEffect, useLayoutEffect, useRef, useCallback } from 'react';
 import { ChevronLeft, ChevronRight, List, Lock, BookOpen } from 'lucide-react';
 import { useToast } from '../context/toastStore';
@@ -150,45 +151,45 @@ export const Reader: React.FC<ReaderProps> = ({
 
   // Typography & surface settings (default: Humanist Serif 20px + Warm Paper)
   const [fontSize, setFontSize] = useState<number>(() => {
-    const parsed = parseInt(localStorage.getItem('reader-font-size') || '20', 10);
+    const parsed = parseInt(readerStorage.getItem('reader-font-size') || '20', 10);
     return Number.isNaN(parsed) ? 20 : Math.min(28, Math.max(14, parsed));
   });
-  const [theme, setTheme] = useState<string>(() => normalizeReaderTheme(localStorage.getItem('reader-theme')));
+  const [theme, setTheme] = useState<string>(() => normalizeReaderTheme(readerStorage.getItem('reader-theme')));
   const [fontFamily, setFontFamily] = useState<ReaderFontFamily>(() => {
-    const saved = localStorage.getItem('reader-font-family');
+    const saved = readerStorage.getItem('reader-font-family');
     return saved === 'sans' ? 'sans' : 'serif';
   });
   const [lineHeight, setLineHeight] = useState<ReaderLineHeight>(() => {
-    const saved = localStorage.getItem('reader-line-height');
+    const saved = readerStorage.getItem('reader-line-height');
     if (saved === 'compact' || saved === 'relaxed') return saved;
     return 'standard';
   });
 
   const handleFontSizeChange = (newSize: number) => {
     setFontSize(newSize);
-    localStorage.setItem('reader-font-size', String(newSize));
+    readerStorage.setItem('reader-font-size', String(newSize));
   };
 
   const handleThemeChange = (newTheme: string) => {
     setTheme(newTheme);
-    localStorage.setItem('reader-theme', newTheme);
+    readerStorage.setItem('reader-theme', newTheme);
   };
 
   const handleFontFamilyChange = (family: ReaderFontFamily) => {
     setFontFamily(family);
-    localStorage.setItem('reader-font-family', family);
+    readerStorage.setItem('reader-font-family', family);
   };
 
   const handleLineHeightChange = (lh: ReaderLineHeight) => {
     setLineHeight(lh);
-    localStorage.setItem('reader-line-height', lh);
+    readerStorage.setItem('reader-line-height', lh);
   };
 
   const [showSettings, setShowSettings] = useState(false);
   const [showTOC, setShowTOC] = useState(false);
 
   const [autoUnlock, setAutoUnlock] = useState<boolean>(() => {
-    return localStorage.getItem('reader-auto-unlock') === 'true';
+    return readerStorage.getItem('reader-auto-unlock') === 'true';
   });
 
   const autoUnlockRef = useRef(autoUnlock);
@@ -457,7 +458,7 @@ export const Reader: React.FC<ReaderProps> = ({
   }, [authReady, userId, novelId, initialChapterIndex, loadChapter]);
 
   useEffect(() => {
-    localStorage.setItem('reader-auto-unlock', autoUnlock.toString());
+    readerStorage.setItem('reader-auto-unlock', autoUnlock.toString());
   }, [autoUnlock]);
 
   const handleChapterSelect = useCallback(

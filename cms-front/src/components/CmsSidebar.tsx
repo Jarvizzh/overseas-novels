@@ -1,14 +1,12 @@
 import React, { useEffect, useId, useRef, useState } from 'react';
 import { Link, useLocation } from 'react-router-dom';
-import { ChevronDown, ChevronLeft, ChevronRight, ChevronsUpDown, LogOut, X } from 'lucide-react';
-import type { AdminUser } from '../utils/api';
+import { ChevronDown, ChevronLeft, ChevronRight, X } from 'lucide-react';
 import type { ResolvedTheme } from '../utils/theme';
-import { ToolbarPopover } from './ui/Primitives';
-import { isNavPathActive, ROLE_LABELS, type NavNode } from '../config/navigation';
+import { isNavPathActive, type NavNode } from '../config/navigation';
 
 interface CmsSidebarProps {
   navTree: NavNode[];
-  admin: AdminUser;
+  homePath?: string;
   resolvedTheme: ResolvedTheme;
   collapsed: boolean;
   onToggleCollapse: () => void;
@@ -16,7 +14,6 @@ interface CmsSidebarProps {
   onToggleGroup: (groupId: string) => void;
   mobileOpen: boolean;
   onCloseMobile: () => void;
-  onLogout: () => void;
 }
 
 interface RailGroupPopoverProps {
@@ -321,73 +318,9 @@ function ExpandedNavList({
   );
 }
 
-interface AccountFooterProps {
-  admin: AdminUser;
-  collapsed: boolean;
-  onLogout: () => void;
-}
-
-function AccountFooter({ admin, collapsed, onLogout }: AccountFooterProps) {
-  return (
-    <div className="p-2 border-t border-[var(--cms-border)] shrink-0">
-      <ToolbarPopover
-        align="top-start"
-        fullWidth
-        ariaLabel="账号菜单"
-        panelClassName="w-48 p-1.5 space-y-0.5"
-        triggerClassName={`rounded-xl hover:bg-[var(--cms-secondary)] transition-colors ${
-          collapsed ? 'p-1 justify-center' : 'px-2 py-1.5 justify-between'
-        }`}
-        label={
-          <span className={`flex items-center gap-2 min-w-0 flex-1 ${collapsed ? 'justify-center' : ''}`}>
-            <span className="w-7 h-7 rounded-full nav-active-item text-xs font-semibold inline-flex items-center justify-center shrink-0">
-              {(admin.nickname || admin.username || 'A').charAt(0).toUpperCase()}
-            </span>
-            {!collapsed && (
-              <span className="min-w-0 text-left flex-1">
-                <span className="block text-[12.5px] font-medium text-[var(--cms-fg)] truncate">
-                  {admin.nickname || admin.username}
-                </span>
-                <span className="block text-[11.5px] text-[var(--cms-muted-fg)] truncate">
-                  {ROLE_LABELS[admin.role] || admin.role}
-                </span>
-              </span>
-            )}
-            {!collapsed && (
-              <ChevronsUpDown size={13} className="text-[var(--cms-muted-fg)] shrink-0" aria-hidden="true" />
-            )}
-          </span>
-        }
-      >
-        {({ close }) => (
-          <>
-            <div className="px-3 py-2 text-xs border-b border-[var(--cms-border)] mb-1">
-              <div className="font-medium text-[var(--cms-fg)] truncate">{admin.nickname || admin.username}</div>
-              <div className="text-[var(--cms-muted-fg)] mt-0.5">
-                角色：{ROLE_LABELS[admin.role] || admin.role}
-              </div>
-            </div>
-            <button
-              type="button"
-              onClick={() => {
-                close();
-                onLogout();
-              }}
-              className="focus-ring w-full px-3 py-2 rounded-lg text-xs font-medium text-[var(--cms-error)] hover:bg-[color-mix(in_srgb,var(--cms-error)_10%,transparent)] flex items-center gap-2 cursor-pointer transition-colors"
-            >
-              <LogOut size={14} aria-hidden="true" />
-              <span>退出登录</span>
-            </button>
-          </>
-        )}
-      </ToolbarPopover>
-    </div>
-  );
-}
-
 export function CmsSidebar({
   navTree,
-  admin,
+  homePath = '/',
   resolvedTheme,
   collapsed,
   onToggleCollapse,
@@ -395,7 +328,6 @@ export function CmsSidebar({
   onToggleGroup,
   mobileOpen,
   onCloseMobile,
-  onLogout,
 }: CmsSidebarProps) {
   const { pathname } = useLocation();
   const mobileDialogRef = useRef<HTMLDialogElement>(null);
@@ -474,8 +406,8 @@ export function CmsSidebar({
           }`}
         >
           <Link
-            to="/"
-            title={collapsed ? 'STAR NOVEL · 首页总览' : undefined}
+            to={homePath}
+            title={collapsed ? 'STAR NOVEL' : undefined}
             className="flex items-center gap-2 min-w-0 no-underline"
           >
             <img
@@ -520,7 +452,7 @@ export function CmsSidebar({
 
         {/* Navigation */}
         <nav
-          className={`flex-1 overflow-y-auto ${collapsed ? 'px-1.5 py-2 space-y-1.5' : 'px-2 py-2.5'}`}
+          className={`cms-nav-scroll flex-1 overflow-y-auto ${collapsed ? 'px-1.5 py-2 space-y-1.5' : 'px-2 py-2.5'}`}
           aria-label="主导航"
         >
           {collapsed ? (
@@ -560,8 +492,6 @@ export function CmsSidebar({
             />
           )}
         </nav>
-
-        <AccountFooter admin={admin} collapsed={collapsed} onLogout={onLogout} />
       </aside>
 
       {/* Mobile Navigation Drawer (< md) */}
@@ -580,7 +510,7 @@ export function CmsSidebar({
         {mobileOpen && (
           <div className="flex flex-col h-full">
             <div className="h-12 px-3 border-b border-[var(--cms-border)] flex items-center justify-between gap-2 shrink-0">
-              <Link to="/" onClick={onCloseMobile} className="flex items-center gap-2 min-w-0 no-underline">
+              <Link to={homePath} onClick={onCloseMobile} className="flex items-center gap-2 min-w-0 no-underline">
                 <img
                   src={logoSrc}
                   alt="STAR NOVEL"
@@ -601,7 +531,7 @@ export function CmsSidebar({
               </button>
             </div>
 
-            <nav className="flex-1 overflow-y-auto px-2.5 py-2.5" aria-label="移动端导航">
+            <nav className="cms-nav-scroll flex-1 overflow-y-auto px-2.5 py-2.5" aria-label="移动端导航">
               <ExpandedNavList
                 navTree={navTree}
                 pathname={pathname}
@@ -611,15 +541,6 @@ export function CmsSidebar({
                 idPrefix="mobile"
               />
             </nav>
-
-            <AccountFooter
-              admin={admin}
-              collapsed={false}
-              onLogout={() => {
-                onCloseMobile();
-                onLogout();
-              }}
-            />
           </div>
         )}
       </dialog>

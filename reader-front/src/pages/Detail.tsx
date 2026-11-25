@@ -1,10 +1,11 @@
 import React, { useState, useEffect } from 'react';
 import { ChevronLeft, Bookmark, Star, BookOpen, ChevronDown, ChevronUp, ArrowUpDown, Check } from 'lucide-react';
-import { api } from '../utils/api';
+import { api, ApiError } from '../utils/api';
 import type { Novel, Chapter } from '../utils/api';
 
 interface DetailProps {
   authReady?: boolean;
+  sessionToken?: string;
   novelId: number;
   novels?: Novel[];
   onNavigate: (page: string, params?: Record<string, unknown>) => void;
@@ -21,6 +22,7 @@ interface DetailProps {
 
 export const Detail: React.FC<DetailProps> = ({
   authReady = true,
+  sessionToken,
   novelId,
   onNavigate,
   onBack,
@@ -31,6 +33,8 @@ export const Detail: React.FC<DetailProps> = ({
   const [novel, setNovel] = useState<Novel | null>(null);
   const [chapters, setChapters] = useState<Chapter[]>([]);
   const [loading, setLoading] = useState(true);
+  const [chapterError, setChapterError] = useState('');
+  const [chapterRetry, setChapterRetry] = useState(0);
 
   const [activeTab, setActiveTab] = useState<'about' | 'chapters'>('about');
   const [isDescCollapsed, setIsDescCollapsed] = useState(true);
@@ -43,27 +47,32 @@ export const Detail: React.FC<DetailProps> = ({
       setLoading(true);
       setNovel(null);
       setChapters([]);
-      try {
-        const [detail, chList] = await Promise.all([
-          api.getNovelDetail(novelId),
-          api.getChaptersList(novelId).catch(() => []),
-        ]);
-        if (cancelled) return;
-        setNovel(detail);
-        setChapters(chList || []);
-      } catch (err) {
-        if (!cancelled) {
-          console.error('Failed to load novel detail or chapters list:', err);
-        }
-      } finally {
-        if (!cancelled) setLoading(false);
+      setChapterError('');
+      const [detail, chapterList] = await Promise.allSettled([
+        api.getNovelDetail(novelId),
+        api.getChaptersList(novelId),
+      ]);
+      if (cancelled) return;
+      if (detail.status === 'fulfilled') {
+        setNovel(detail.value);
+      } else {
+        console.error('Failed to load novel detail:', detail.reason);
       }
+      if (chapterList.status === 'fulfilled') {
+        setChapters(chapterList.value || []);
+      } else {
+        const expired = chapterList.reason instanceof ApiError && chapterList.reason.status === 401;
+        setChapterError(expired
+          ? 'Your session expired. Retry to reconnect.'
+          : 'Could not load chapters. Please try again.');
+      }
+      setLoading(false);
     };
     loadNovelDetails();
     return () => {
       cancelled = true;
     };
-  }, [authReady, novelId]);
+  }, [authReady, sessionToken, novelId, chapterRetry]);
 
   if (loading) {
     return (
@@ -98,7 +107,11 @@ export const Detail: React.FC<DetailProps> = ({
     ? [...chapters].reverse()
     : chapters;
 
-  const startReadingButton = (
+  const startReadingButton = chapterError ? (
+    <button type="button" className="btn-cta-primary" style={{ flex: 1 }} onClick={() => setChapterRetry((attempt) => attempt + 1)}>
+      Retry Chapters
+    </button>
+  ) : (
     <button
       type="button"
       className="btn-cta-primary"
@@ -203,10 +216,12 @@ export const Detail: React.FC<DetailProps> = ({
               <span className="detail-stat-lbl">Words</span>
             </div>
             <div className="detail-stat-item">
-              <span className="detail-stat-val">{chapters.length}</span>
+              <span className="detail-stat-val">{chapterError ? '—' : chapters.length}</span>
               <span className="detail-stat-lbl">Chapters</span>
             </div>
           </div>
+
+          {chapterError && <p role="alert">{chapterError}</p>}
 
           {/* Tabs */}
           <div className="detail-tabs" role="tablist">
@@ -226,7 +241,7 @@ export const Detail: React.FC<DetailProps> = ({
               className={`detail-tab ${activeTab === 'chapters' ? 'active' : ''}`}
               onClick={() => setActiveTab('chapters')}
             >
-              Chapters ({chapters.length})
+              Chapters{!chapterError && ` (${chapters.length})`}
             </button>
           </div>
 
@@ -277,7 +292,7 @@ export const Detail: React.FC<DetailProps> = ({
                   </div>
                 )}
               </div>
-            ) : (
+            ) : !chapterError && (
               <div>
                 <div className="chapters-header-row">
                   <span className="tabular-nums">Total: {chapters.length} Chapters</span>

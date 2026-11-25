@@ -18,6 +18,10 @@ func (s Service) ReviewLegacyEnvironment(ctx context.Context, operator Operator,
 	if err != nil {
 		return OperationResult{}, err
 	}
+	operator, err = requireBusinessPermission(operator, PermissionAdsConversionsWrite)
+	if err != nil {
+		return OperationResult{}, err
+	}
 	return s.operate(ctx, operator, reason, func(tx pgx.Tx, actor Operator, reason string) (OperationResult, error) {
 		out := OperationResult{ID: key, Action: "review_legacy_environment"}
 		var version, oldResolution string

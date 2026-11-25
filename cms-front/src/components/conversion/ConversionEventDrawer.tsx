@@ -20,6 +20,7 @@ import type {
   AllowedDestinationTarget,
   ConversionDelivery,
   ConversionDeliveryAttempt,
+  ConversionDeliveryPage,
   ConversionDestination,
   ConversionEvent,
   ConversionEventDetail,
@@ -459,6 +460,7 @@ function AuditActionModal({
 export function ConversionEventDrawer({
   eventId,
   initialSummary,
+  initialPixelId = '',
   canWrite,
   integrationMap,
   destinationByPixel,
@@ -468,6 +470,7 @@ export function ConversionEventDrawer({
 }: {
   eventId: string | null;
   initialSummary?: ConversionEvent | null;
+  initialPixelId?: string;
   canWrite: boolean;
   integrationMap: Map<string, ConversionIntegration>;
   destinationByPixel: Map<string, ConversionDestination>;
@@ -484,11 +487,59 @@ export function ConversionEventDrawer({
     setRetryStatus('');
   }, [eventId]);
 
+  const [showAllTargets, setShowAllTargets] = useState(false);
+  const [targetCursors, setTargetCursors] = useState<string[]>([]);
+  const [targetRefresh, setTargetRefresh] = useState(0);
+  const [targetPage, setTargetPage] = useState<ConversionDeliveryPage | null>(null);
+  const [targetLoading, setTargetLoading] = useState(false);
+  const [targetError, setTargetError] = useState('');
+  const targetPixel = showAllTargets ? '' : initialPixelId;
+  const targetCursor = targetCursors.at(-1) ?? '';
+
+  useEffect(() => {
+    setShowAllTargets(false);
+    setTargetCursors([]);
+  }, [eventId, initialPixelId]);
+
+  useEffect(() => {
+    setTargetPage(null);
+    setTargetError('');
+    if (!eventId || (!targetPixel && !targetCursor)) {
+      setTargetLoading(false);
+      return;
+    }
+
+    const controller = new AbortController();
+    const query = new URLSearchParams();
+    if (targetPixel) query.set('pixel_id', targetPixel);
+    if (targetCursor) query.set('cursor', targetCursor);
+    setTargetLoading(true);
+    apiRequest(
+      'GET',
+      `/conversion/events/${eventId}/deliveries?${query}`,
+      undefined,
+      false,
+      controller.signal,
+    )
+      .then((page: ConversionDeliveryPage) => {
+        if (!controller.signal.aborted) setTargetPage(page);
+      })
+      .catch((err) => {
+        if (!controller.signal.aborted)
+          setTargetError(getErrorMessage(err, '加载 Pixel 投递任务失败'));
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setTargetLoading(false);
+      });
+    return () => controller.abort();
+  }, [eventId, targetPixel, targetCursor, targetRefresh]);
+
   const [attemptsDeliveryId, setAttemptsDeliveryId] = useState('');
   const [attempts, setAttempts] = useState<ConversionDeliveryAttempt[]>([]);
   const [attemptBusy, setAttemptBusy] = useState(false);
   const [hasMoreAttempts, setHasMoreAttempts] = useState(false);
   const [attemptError, setAttemptError] = useState('');
+  const attemptRequest = useRef<AbortController | null>(null);
 
   const loadDetail = useCallback(
     async (targetId: string, signal?: AbortSignal) => {
@@ -519,6 +570,8 @@ export function ConversionEventDrawer({
   );
 
   useEffect(() => {
+    attemptRequest.current?.abort();
+    setAttemptBusy(false);
     setAttemptsDeliveryId('');
     setAttempts([]);
     setHasMoreAttempts(false);
@@ -552,6 +605,9 @@ export function ConversionEventDrawer({
       return;
     }
 
+    attemptRequest.current?.abort();
+    const controller = new AbortController();
+    attemptRequest.current = controller;
     setAttemptBusy(true);
     setAttemptsDeliveryId(delivery.id);
     setAttemptError('');
@@ -565,20 +621,33 @@ export function ConversionEventDrawer({
       const res: { attempts?: ConversionDeliveryAttempt[] } = await apiRequest(
         'GET',
         `/conversion/events/${eventId}?${query.toString()}`,
+        undefined,
+        false,
+        controller.signal,
       );
+      if (controller.signal.aborted) return;
       const batch = res.attempts ?? [];
       setAttempts((prev) => (beforeAttempt ? [...prev, ...batch] : batch));
       setHasMoreAttempts(batch.length === 50);
     } catch (err) {
-      setAttemptError(getErrorMessage(err, '加载尝试记录失败'));
+      if (!controller.signal.aborted) setAttemptError(getErrorMessage(err, '加载尝试记录失败'));
     } finally {
-      setAttemptBusy(false);
+      if (!controller.signal.aborted) setAttemptBusy(false);
     }
   };
 
   const active = detail;
   const integration = active ? integrationMap.get(active.integration_id) : undefined;
-  const activeAttemptsDelivery = active?.deliveries.find((d) => d.id === attemptsDeliveryId);
+  const targetDeliveries =
+    targetPixel || targetCursor ? (targetPage?.deliveries ?? []) : (active?.deliveries ?? []);
+  const lastDelivery = targetDeliveries.at(-1);
+  const nextTargetCursor =
+    targetPixel || targetCursor
+      ? targetPage?.next_cursor
+      : active?.deliveries_truncated && lastDelivery
+        ? `${lastDelivery.role}|${lastDelivery.id}`
+        : null;
+  const activeAttemptsDelivery = targetDeliveries.find((d) => d.id === attemptsDeliveryId);
   const amountLabel = active ? formatAmount(active.amount, active.currency) : '';
 
   const eventDisplayTitle = active
@@ -609,14 +678,17 @@ export function ConversionEventDrawer({
               <button
                 type="button"
                 disabled={loading}
-                onClick={() => void loadDetail(active.id)}
+                onClick={() => {
+                  void loadDetail(active.id);
+                  setTargetRefresh((n) => n + 1);
+                }}
                 className="btn-secondary h-8 px-2.5 text-xs"
                 title="刷新事件详情"
               >
                 <RefreshCw size={13} aria-hidden="true" />
                 <span className="hidden sm:inline">刷新</span>
               </button>
-              {canWrite && (
+              {canWrite && active.reason !== 'event_not_allowed' && (
                 <button
                   type="button"
                   onClick={() => setAuditAction({ kind: 'append', eventId: active.id })}
@@ -755,23 +827,45 @@ export function ConversionEventDrawer({
               <div className="space-y-2.5">
                 <div className="flex items-center justify-between gap-2">
                   <h3 className="text-sm font-semibold text-[var(--cms-fg)] m-0">
-                    Meta Pixel 投递任务 ({active.deliveries.length})
+                    Meta Pixel 投递任务
                   </h3>
-                  {active.deliveries_truncated && (
-                    <span className="text-[11px] text-[var(--cms-warning)]">
-                      仅展示前 50 个目标（原目标优先）
-                    </span>
+                  {targetPixel && (
+                    <button
+                      type="button"
+                      className="btn-secondary"
+                      onClick={() => {
+                        setTargetCursors([]);
+                        setShowAllTargets(true);
+                      }}
+                    >
+                      清除 Pixel {targetPixel} 筛选
+                    </button>
                   )}
                 </div>
 
-                {active.deliveries.length === 0 ? (
+                {targetError ? (
+                  <InlineErrorBanner
+                    message={targetError}
+                    onRetry={() => setTargetRefresh((n) => n + 1)}
+                  />
+                ) : targetLoading ? (
+                  <p role="status" className="text-xs text-[var(--cms-muted-fg)]">
+                    正在加载投递目标…
+                  </p>
+                ) : targetDeliveries.length === 0 ? (
                   <div className="cms-card p-6 text-center text-[var(--cms-muted-fg)]">
-                    当前事件未生成 Pixel 投递任务
-                    {active.reason ? `（原因：${getReasonLabel(active.reason)}）` : ''}。
+                    {targetPixel ? (
+                      `当前事件没有 Pixel ${targetPixel} 的投递任务。`
+                    ) : (
+                      <>
+                        当前事件未生成 Pixel 投递任务
+                        {active.reason ? `（原因：${getReasonLabel(active.reason)}）` : ''}。
+                      </>
+                    )}
                   </div>
                 ) : (
                   <TargetResultsTable
-                    deliveries={active.deliveries}
+                    deliveries={targetDeliveries}
                     destinationByPixel={destinationByPixel}
                     canWrite={canWrite}
                     activeAttemptsDeliveryId={attemptsDeliveryId}
@@ -779,6 +873,35 @@ export function ConversionEventDrawer({
                     onViewAttempts={(d) => void handleToggleAttempts(d)}
                     onRetry={(d) => setAuditAction({ kind: 'retry', delivery: d })}
                   />
+                )}
+                {(targetCursor || nextTargetCursor) && (
+                  <nav aria-label="投递目标分页" className="flex items-center justify-end gap-2">
+                    <button
+                      type="button"
+                      className="btn-secondary"
+                      disabled={!targetCursor || targetLoading}
+                      onClick={() => {
+                        setAttemptsDeliveryId('');
+                        setTargetCursors((pages) => pages.slice(0, -1));
+                      }}
+                    >
+                      上一页
+                    </button>
+                    <span className="text-xs tabular-nums">第 {targetCursors.length + 1} 页</span>
+                    <button
+                      type="button"
+                      className="btn-secondary"
+                      disabled={!nextTargetCursor || targetLoading}
+                      onClick={() => {
+                        if (nextTargetCursor) {
+                          setAttemptsDeliveryId('');
+                          setTargetCursors((pages) => [...pages, nextTargetCursor]);
+                        }
+                      }}
+                    >
+                      下一页
+                    </button>
+                  </nav>
                 )}
               </div>
 
@@ -841,11 +964,32 @@ export function ConversionEventDrawer({
                               </td>
                               <td className="tabular-nums">{att.http_status ?? '—'}</td>
                               <td className="tabular-nums">
-                                {att.graph_code !== undefined
-                                  ? `Graph ${att.graph_code}/${att.graph_subcode ?? '—'}`
-                                  : att.events_received !== undefined
+                                {att.batch && (
+                                  <>
+                                    <div>
+                                      请求 #{att.batch.id} · 成员 {att.batch.position}
+                                    </div>
+                                    <div>
+                                      本请求接收 {att.batch.received ?? '未知'} / {att.batch.sent}
+                                    </div>
+                                    {att.batch.late_receipt_at && (
+                                      <div>
+                                        迟到回执接收 {att.batch.late_received ?? '未知'} /{' '}
+                                        {att.batch.sent}
+                                      </div>
+                                    )}
+                                  </>
+                                )}
+                                {att.graph_code !== undefined && (
+                                  <div>
+                                    Graph {att.graph_code}/{att.graph_subcode ?? '—'}
+                                  </div>
+                                )}
+                                {!att.batch &&
+                                  att.graph_code === undefined &&
+                                  (att.events_received !== undefined
                                     ? `接收 ${att.events_received}`
-                                    : '—'}
+                                    : '—')}
                               </td>
                               <td>
                                 {att.fbtrace_id ? (
@@ -918,6 +1062,7 @@ export function ConversionEventDrawer({
           }
           if (eventId) {
             await loadDetail(eventId);
+            setTargetRefresh((n) => n + 1);
           }
           onChanged();
         }}

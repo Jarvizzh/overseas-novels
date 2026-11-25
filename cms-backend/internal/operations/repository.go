@@ -22,6 +22,7 @@ type Repository interface {
 	ListPublishedGenres(ctx context.Context) ([]string, error)
 	GetNovelsByIDs(ctx context.Context, ids []int64, publishedOnly bool) (map[int64]RecommendationNovel, error)
 	ListTopPublishedNovels(ctx context.Context, sortRule string, excludeIDs []int64, limit int) ([]RecommendationNovel, error)
+	ListPublishedNovelOptions(ctx context.Context, page, pageSize int, filter NovelOptionsFilter) ([]NovelOption, int, error)
 }
 
 type dbRepository struct{}
@@ -374,4 +375,82 @@ func (r *dbRepository) ListTopPublishedNovels(ctx context.Context, sortRule stri
 		out = append(out, n)
 	}
 	return out, rows.Err()
+}
+
+func (r *dbRepository) ListPublishedNovelOptions(ctx context.Context, page, pageSize int, filter NovelOptionsFilter) ([]NovelOption, int, error) {
+	whereClauses := []string{"n.status != 'archived'", "n.publish_status = 'published'"}
+	args := make([]any, 0, 6)
+	argIdx := 1
+
+	if status := strings.TrimSpace(filter.Status); status != "" {
+		whereClauses = append(whereClauses, fmt.Sprintf("n.status = $%d", argIdx))
+		args = append(args, status)
+		argIdx++
+	}
+	if genre := strings.TrimSpace(filter.Genre); genre != "" {
+		whereClauses = append(whereClauses, fmt.Sprintf("$%d = ANY(n.genres)", argIdx))
+		args = append(args, genre)
+		argIdx++
+	}
+	if author := strings.TrimSpace(filter.Author); author != "" {
+		whereClauses = append(whereClauses, fmt.Sprintf("n.author ILIKE $%d", argIdx))
+		args = append(args, "%"+author+"%")
+		argIdx++
+	}
+	if search := strings.TrimSpace(filter.Search); search != "" {
+		whereClauses = append(whereClauses, fmt.Sprintf("(n.title ILIKE $%d OR n.author ILIKE $%d OR CAST(n.id AS TEXT) = $%d)", argIdx, argIdx, argIdx+1))
+		args = append(args, "%"+search+"%", search)
+		argIdx += 2
+	}
+
+	orderSQL := "ORDER BY n.view_count DESC, n.created_at DESC, n.id DESC"
+	switch strings.TrimSpace(filter.Sort) {
+	case "", "views":
+		orderSQL = "ORDER BY n.view_count DESC, n.created_at DESC, n.id DESC"
+	case "rating":
+		orderSQL = "ORDER BY n.rating DESC, n.view_count DESC, n.id DESC"
+	case "latest":
+		orderSQL = "ORDER BY n.created_at DESC, n.id DESC"
+	case "updated":
+		orderSQL = "ORDER BY n.updated_at DESC, n.id DESC"
+	}
+
+	whereSQL := "WHERE " + strings.Join(whereClauses, " AND ")
+	var total int
+	if err := db.DB.QueryRow(ctx, "SELECT COUNT(*) FROM novels n "+whereSQL, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+
+	offset := (page - 1) * pageSize
+	selectSQL := fmt.Sprintf(`
+		SELECT n.id, n.title, n.author, COALESCE(n.cover_url, ''), COALESCE(n.rating, 0),
+		       COALESCE(n.status, 'Ongoing'), COALESCE(n.publish_status, 'published'),
+		       COALESCE(n.view_count, 0), COALESCE(n.genres, '{}')
+		FROM novels n
+		%s
+		%s
+		LIMIT $%d OFFSET $%d`, whereSQL, orderSQL, argIdx, argIdx+1)
+	args = append(args, pageSize, offset)
+
+	rows, err := db.DB.Query(ctx, selectSQL, args...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+
+	out := make([]NovelOption, 0)
+	for rows.Next() {
+		var opt NovelOption
+		if err := rows.Scan(
+			&opt.ID, &opt.Title, &opt.Author, &opt.CoverURL, &opt.Rating,
+			&opt.Status, &opt.PublishStatus, &opt.ViewCount, &opt.Genres,
+		); err != nil {
+			return nil, 0, err
+		}
+		if opt.Genres == nil {
+			opt.Genres = []string{}
+		}
+		out = append(out, opt)
+	}
+	return out, total, rows.Err()
 }

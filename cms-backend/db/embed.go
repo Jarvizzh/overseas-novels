@@ -7,7 +7,7 @@ import _ "embed"
 //go:embed schema.sql
 var SchemaSQL string
 
-// SeedSQL embeds initial seed data (superadmin, configs, domains, templates, novels, chapters)
+// SeedSQL embeds initial seed data (configs, domains, templates, novels, chapters)
 //
 //go:embed seed.sql
 var SeedSQL string
@@ -101,3 +101,91 @@ var ReaderPaymentRecoverySQL string
 //
 //go:embed migrations/2026111915.sql
 var ReaderSubscriptionEvidenceSQL string
+
+// PaymentDomainFoundationSQL introduces channel account and event identities.
+//
+//go:embed migrations/2026111916.sql
+var PaymentDomainFoundationSQL string
+
+// PaymentCheckoutSQL adds persistent checkout requests, attempts and funding.
+//
+//go:embed migrations/2026111917.sql
+var PaymentCheckoutSQL string
+
+// VIPOfferVersionsSQL preserves published VIP terms and account-scoped PayPal plans.
+//
+//go:embed migrations/2026111918.sql
+var VIPOfferVersionsSQL string
+
+// PaymentLedgerSQL adds authoritative balance movements and their evidence.
+//
+//go:embed migrations/2026111919.sql
+var PaymentLedgerSQL string
+
+// PaymentSettlementSQL adds channel settlement imports and bank reconciliation.
+//
+//go:embed migrations/2026111920.sql
+var PaymentSettlementSQL string
+
+// PaymentCheckoutDecisionsSQL records versioned checkout rules and outcomes.
+//
+//go:embed migrations/2026111921.sql
+var PaymentCheckoutDecisionsSQL string
+
+// PaymentAftercareSQL adds scoped channel facts and audited financial work.
+//
+//go:embed migrations/2026111922.sql
+var PaymentAftercareSQL string
+
+// StripeOneTimeCheckoutSQL adds an approved catalog and immutable checkout snapshots.
+//
+//go:embed migrations/2026111923.sql
+var StripeOneTimeCheckoutSQL string
+
+// StripeVIPCheckoutSQL adds Stripe VIP offers, periods and payment allocations.
+//
+//go:embed migrations/2026111924.sql
+var StripeVIPCheckoutSQL string
+
+// PaymentCompletionSQL adds event recovery, verified offer evidence and finance commands.
+//
+//go:embed migrations/2026111925.sql
+var PaymentCompletionSQL string
+
+//go:embed migrations/2026111926.sql
+var PaymentRecoverySQL string
+
+//go:embed migrations/2026111927.sql
+var PaymentReviewFixesSQL string
+
+// PaymentCatalogAndChannelSQL adds CFG-04 encrypted channel lifecycle and CAT-01..04 unified product catalog.
+//
+//go:embed migrations/2026111928.sql
+var PaymentCatalogAndChannelSQL string
+
+// PaymentVIPSwitchSQL persists a unified VIP channel switch until it is verified.
+//
+//go:embed migrations/2026111929.sql
+var PaymentVIPSwitchSQL string
+
+// PaymentTemplateCatalogFixesSQL adds Stripe catalog revision tracking, template environment scoping, and restricted promotion template FK.
+//
+//go:embed migrations/2026111930.sql
+var PaymentTemplateCatalogFixesSQL string
+
+//go:embed migrations/2026111931.sql
+var ConversionCenterReviewSQL string
+
+//go:embed migrations/2026111932.sql
+var ConversionBatchSQL string
+
+//go:embed migrations/2026111933.sql
+var ConversionThroughputRereviewSQL string
+
+//go:embed migrations/2026111934.sql
+var ConversionCredentialHealthSQL string
+
+// RBACPermissionsSQL introduces single-role RBAC tables, built-in roles, and permission lock functions.
+//
+//go:embed migrations/2026111935.sql
+var RBACPermissionsSQL string

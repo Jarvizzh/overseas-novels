@@ -153,6 +153,13 @@ export function TargetResultsTable({
                             className="text-[var(--cms-muted-fg)]"
                           />
                         )}
+                        {delivery.last_attempt?.batch && (
+                          <div className="text-[11px] text-[var(--cms-muted-fg)] tabular-nums">
+                            请求 #{delivery.last_attempt.batch.id} 接收{' '}
+                            {delivery.last_attempt.batch.received ?? '未知'} /{' '}
+                            {delivery.last_attempt.batch.sent}
+                          </div>
+                        )}
                         {lastAttemptReason && (
                           <div
                             className="text-[var(--cms-muted-fg)] break-words"

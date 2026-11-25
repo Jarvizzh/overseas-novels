@@ -8,16 +8,11 @@ import {
   formatDurationSeconds,
   getErrorMessage,
   getReasonLabel,
-  isServiceUnavailableError,
   sourceLabel,
   timestamp,
   workerTypeMeta,
 } from '../../utils/conversionStatus';
-import {
-  ConversionStatusDot,
-  InlineErrorBanner,
-  ServiceUnavailableState,
-} from './ConversionShared';
+import { ConversionStatusDot, InlineErrorBanner } from './ConversionShared';
 import type {
   ConversionDestination,
   ConversionIntegration,
@@ -56,10 +51,6 @@ export function ConversionSummaryTab({
   destinations,
   integrationMap,
   destinationById,
-  serviceUnavailable,
-  retryingService = false,
-  onServiceUnavailable,
-  onRetryService,
   onOpenEventDrawer,
   onAlertsCountChange,
 }: {
@@ -67,12 +58,8 @@ export function ConversionSummaryTab({
   destinations: ConversionDestination[];
   integrationMap: Map<string, ConversionIntegration>;
   destinationById: Map<string, ConversionDestination>;
-  serviceUnavailable: boolean;
-  retryingService?: boolean;
-  onServiceUnavailable: () => void;
-  onRetryService: () => void;
   onOpenEventDrawer: (eventId: string) => void;
-  onAlertsCountChange: (count: number) => void;
+  onAlertsCountChange: (count: number | null) => void;
 }) {
   const [filters, setFilters] = useState({
     hours: '24',
@@ -91,10 +78,6 @@ export function ConversionSummaryTab({
 
   const fetchSummary = useCallback(
     async (signal?: AbortSignal) => {
-      if (serviceUnavailable) {
-        setLoading(false);
-        return;
-      }
       const seq = ++reqSeqRef.current;
       setLoading(true);
       setError('');
@@ -117,21 +100,18 @@ export function ConversionSummaryTab({
         if (seq !== reqSeqRef.current || signal?.aborted) return;
         setData(res);
         setLastUpdated(new Date().toLocaleTimeString());
-        onAlertsCountChange(res.alerts?.length ?? 0);
+        onAlertsCountChange(res.collector?.state === 'fresh' ? res.alerts.length : null);
       } catch (err) {
         if (seq !== reqSeqRef.current || signal?.aborted) return;
-        if (isServiceUnavailableError(err)) {
-          onServiceUnavailable();
-        } else {
-          setError(getErrorMessage(err, '加载转化汇总监控失败'));
-        }
+        onAlertsCountChange(null);
+        setError(getErrorMessage(err, '加载转化汇总监控失败'));
       } finally {
         if (seq === reqSeqRef.current && !signal?.aborted) {
           setLoading(false);
         }
       }
     },
-    [filters, serviceUnavailable, onServiceUnavailable, onAlertsCountChange],
+    [filters, onAlertsCountChange],
   );
 
   useEffect(() => {
@@ -172,11 +152,7 @@ export function ConversionSummaryTab({
   }, [data?.heartbeats]);
 
   const resolveAlertSubject = (alert: SummaryAlert): string => {
-    if (
-      alert.kind === 'meta_queue_delayed' ||
-      alert.kind === 'meta_credentials' ||
-      alert.kind === 'meta_outcome_unknown'
-    ) {
+    if (alert.kind.startsWith('meta_')) {
       const dest = destinationById.get(alert.subject);
       const pixel = alert.detail.pixel_id || dest?.pixel_id;
       if (dest?.name && pixel) return `${pixel} (${dest.name})`;
@@ -197,15 +173,6 @@ export function ConversionSummaryTab({
     }
     return alert.subject;
   };
-
-  if (serviceUnavailable) {
-    return (
-      <ServiceUnavailableState
-        retrying={retryingService}
-        onRetry={onRetryService}
-      />
-    );
-  }
 
   const integrationOptions = [
     { value: '', label: '全部接入账户' },
@@ -347,9 +314,24 @@ export function ConversionSummaryTab({
                   aria-hidden="true"
                 />
                 <span>活动告警 ({data.alerts.length})</span>
+                {data.collector?.sampled_at && (
+                  <span className="text-[11px] font-normal text-[var(--cms-muted-fg)]">
+                    最近采样 {timestamp(data.collector.sampled_at)}
+                  </span>
+                )}
               </h2>
 
-              {data.alerts.length === 0 ? (
+              {data.collector?.state !== 'fresh' && (
+                <InlineErrorBanner
+                  message={
+                    data.collector?.sampled_at
+                      ? `采集数据已过期。最近成功采样于 ${timestamp(data.collector.sampled_at)}。`
+                      : '等待 Collector 首次成功采样。'
+                  }
+                  onRetry={() => setRefreshNonce((n) => n + 1)}
+                />
+              )}
+              {data.alerts.length === 0 && data.collector?.state === 'fresh' ? (
                 <div
                   className="p-4 rounded-2xl border text-xs flex items-center gap-2.5"
                   style={{
@@ -381,6 +363,9 @@ export function ConversionSummaryTab({
                       </div>
 
                       <div className="text-[var(--cms-fg)]">
+                        {alert.detail.affected_deliveries !== undefined && (
+                          <span>受影响投递 {alert.detail.affected_deliveries} 条 · </span>
+                        )}
                         对象：<span className="font-medium">{resolveAlertSubject(alert)}</span>
                       </div>
 
@@ -564,6 +549,48 @@ export function ConversionSummaryTab({
             </section>
 
             {/* Target Delivery Metrics */}
+            {Boolean(data.requests?.length) && (
+              <section className="flex flex-col gap-3.5">
+                <h2 className="text-sm font-semibold text-[var(--cms-fg)]">Meta 请求批次</h2>
+                <TableRegion ariaLabel="按 Pixel 汇总 Meta 请求批次">
+                  <table className="cms-table min-w-[640px]" data-density="compact">
+                    <caption className="caption-top px-3 py-2 text-left text-xs text-[var(--cms-muted-fg)]">
+                      成员数按当前筛选统计。请求数、HTTP 429
+                      和平均批量以整批计算，同一请求可出现在多个筛选结果中。
+                    </caption>
+                    <thead>
+                      <tr>
+                        <th scope="col">Pixel</th>
+                        <th scope="col">请求数</th>
+                        <th scope="col">发出成员</th>
+                        <th scope="col">确认成员</th>
+                        <th scope="col">平均批量</th>
+                        <th scope="col">HTTP 429</th>
+                        <th scope="col">结果未知请求</th>
+                        <th scope="col">受影响投递</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {data.requests?.map((row) => (
+                        <tr key={row.pixel_id} className="tabular-nums">
+                          <th scope="row">{row.pixel_id}</th>
+                          <td>{row.requests}</td>
+                          <td>{row.sent}</td>
+                          <td>{row.confirmed_members ?? '—'}</td>
+                          <td>{row.mean_batch_size.toFixed(1)}</td>
+                          <td>
+                            {row.http_429} / {row.http_responses}
+                          </td>
+                          <td>{row.unknown_requests}</td>
+                          <td>{row.unknown_deliveries}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </TableRegion>
+              </section>
+            )}
+
             <section className="flex flex-col gap-3.5">
               <h2 className="text-sm font-semibold text-[var(--cms-fg)]">Pixel 投递与延迟分布</h2>
               <TableRegion ariaLabel="Pixel 投递与延迟分布">

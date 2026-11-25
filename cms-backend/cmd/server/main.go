@@ -121,6 +121,11 @@ func main() {
 		authHandler := auth.NewAuthHandler(authService)
 		authHandler.RegisterRoutes(api)
 
+		roleRepo := auth.NewRoleRepository()
+		roleService := auth.NewRoleService(roleRepo)
+		roleHandler := auth.NewRoleHandler(roleService)
+		roleHandler.RegisterRoutes(api)
+
 		contentStorage, err := storage.NewContentStorage(config.AppConfig, db.DB)
 		if err != nil {
 			log.Fatalf("Failed to initialize content storage: %v", err)
@@ -151,11 +156,8 @@ func main() {
 		novelHandler := novel.NewHandler(novelService)
 		novelHandler.RegisterRoutes(api)
 
-		refundCtx, stopRefunds := context.WithCancel(context.Background())
-		defer stopRefunds()
 		billingRepo := billing.NewBillingRepository()
 		billingService := billing.NewBillingService(billingRepo)
-		go billingService.RunRefundReconciliation(refundCtx)
 		billingHandler := billing.NewHandler(billingService)
 		billingHandler.RegisterRoutes(api)
 
@@ -221,7 +223,7 @@ func corsMiddleware() gin.HandlerFunc {
 			c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
 		}
 		c.Writer.Header().Set("Access-Control-Allow-Credentials", "true")
-		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization, accept, origin, Cache-Control, X-Requested-With, X-FB-FBP, X-FB-FBC, X-UTM-Source, X-UTM-Campaign, X-Event-Source-URL, X-FB-Pixel-ID, X-Recharge-Template-ID")
+		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization, accept, origin, Cache-Control, X-Requested-With, X-FB-FBP, X-FB-FBC, X-UTM-Source, X-UTM-Campaign, X-Event-Source-URL, X-FB-Pixel-ID")
 		c.Writer.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS, GET, PUT, DELETE, PATCH")
 
 		if c.Request.Method == "OPTIONS" {

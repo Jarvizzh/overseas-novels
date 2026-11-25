@@ -6,12 +6,48 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"time"
 
 	"conversion-backend/internal/delivery"
 
 	"github.com/jackc/pgx/v5"
 )
+
+const (
+	operatorAccessRead  = "read"
+	operatorAccessWrite = "write"
+)
+
+func requiredWritePermission(method, path string) (string, bool) {
+	rel, ok := strings.CutPrefix(path, "/internal/conversion/")
+	if !ok || rel == "" {
+		return "", false
+	}
+	parts := strings.Split(rel, "/")
+	switch {
+	case method == http.MethodPost && len(parts) == 1 && parts[0] == "destinations":
+		return delivery.PermissionAdsPixelsWrite, true
+	case method == http.MethodPatch && len(parts) == 2 && parts[0] == "destinations" && parts[1] != "":
+		return delivery.PermissionAdsPixelsWrite, true
+	case method == http.MethodPost && len(parts) == 1 && parts[0] == "integrations":
+		return delivery.PermissionAdsPixelsWrite, true
+	case method == http.MethodPatch && len(parts) == 2 && parts[0] == "integrations" && parts[1] != "":
+		return delivery.PermissionAdsPixelsWrite, true
+	case method == http.MethodPut && len(parts) == 3 && parts[0] == "integrations" && parts[1] != "" && parts[2] == "sinan-mock":
+		return delivery.PermissionAdsPixelsWrite, true
+	case method == http.MethodPost && len(parts) == 4 && parts[0] == "integrations" && parts[1] != "" &&
+		parts[2] == "payment-policy" && (parts[3] == "preview" || parts[3] == "publish"):
+		return delivery.PermissionAdsConversionsWrite, true
+	case method == http.MethodPost && len(parts) == 3 && parts[0] == "events" && parts[1] != "" && parts[2] == "deliveries":
+		return delivery.PermissionAdsConversionsWrite, true
+	case method == http.MethodPost && len(parts) == 3 && (parts[0] == "deliveries" || parts[0] == "partner-reports") &&
+		parts[1] != "" && parts[2] == "retry":
+		return delivery.PermissionAdsConversionsWrite, true
+	default:
+		return "", false
+	}
+}
 
 func NewHandler(repo Repository, token string) http.Handler {
 	mux := http.NewServeMux()
@@ -22,9 +58,11 @@ func NewHandler(repo Repository, token string) http.Handler {
 	mux.HandleFunc("POST /internal/conversion/deliveries/{id}/retry", handleAction(svc.retry, http.StatusAccepted))
 	mux.HandleFunc("POST /internal/conversion/partner-reports/{id}/retry", handleAction(svc.retryReport, http.StatusAccepted))
 	mux.HandleFunc("GET /internal/conversion/summary", repo.handleSummary)
+	mux.HandleFunc("GET /internal/conversion/throughput", repo.handleThroughput)
 	mux.HandleFunc("GET /internal/conversion/events", repo.handleEvents)
 	mux.HandleFunc("GET /internal/conversion/events/{id}", repo.handleEvent)
 	mux.HandleFunc("GET /internal/conversion/events/{id}/destinations", repo.handleAllowedTargets)
+	mux.HandleFunc("GET /internal/conversion/events/{id}/deliveries", repo.handleEventDeliveries)
 	mux.HandleFunc("GET /internal/conversion/orders/{order_id}", func(w http.ResponseWriter, r *http.Request) {
 		query := r.URL.Query()
 		key, ok := ParseOrderKey(r.PathValue("order_id"), query.Get("integration_id"), query.Get("app_id"))
@@ -53,11 +91,23 @@ func NewHandler(repo Repository, token string) http.Handler {
 			writeError(w, http.StatusUnauthorized, "service_auth_required")
 			return
 		}
-		role := r.Header.Get("X-Operator-Role")
-		if r.Header.Get("X-Operator-ID") == "" || ((role != "Admin" && role != "SuperAdmin") &&
-			(r.Method != http.MethodGet || (role != "MediaBuyer" && role != "Finance"))) {
+		operatorID := strings.TrimSpace(r.Header.Get("X-Operator-ID"))
+		access := r.Header.Get("X-Operator-Access")
+		if operatorID == "" {
 			writeError(w, http.StatusForbidden, "operator_forbidden")
 			return
+		}
+		if r.Method == http.MethodGet {
+			if access != operatorAccessRead && access != operatorAccessWrite {
+				writeError(w, http.StatusForbidden, "operator_forbidden")
+				return
+			}
+		} else {
+			requiredPerm, ok := requiredWritePermission(r.Method, r.URL.Path)
+			if !ok || access != operatorAccessWrite || r.Header.Get("X-Operator-Permission") != requiredPerm {
+				writeError(w, http.StatusForbidden, "operator_forbidden")
+				return
+			}
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), 4*time.Second)
 		defer cancel()
@@ -91,7 +141,8 @@ func (repo Repository) handleAllowedTargets(w http.ResponseWriter, r *http.Reque
 		   AND COALESCE(conversion.sinan_route_issue(e.id,x.id),'')=''
 		   AND NOT EXISTS (SELECT 1 FROM conversion.deliveries j WHERE j.event_id=e.id AND j.destination_id=x.id)),'[]')
 		FROM conversion.events e WHERE e.id=$1 AND e.environment=$2
-		  AND (e.payment_policy_state IN ('historical','not_applicable') OR
+		  AND e.reason IS DISTINCT FROM 'event_not_allowed'
+          AND (e.payment_policy_state IN ('historical','not_applicable') OR
 		      (e.payment_policy_state='decided' AND EXISTS (SELECT 1 FROM conversion.payment_policy_decisions p
 		         WHERE p.id=e.payment_policy_decision_id AND p.outcome='selected')))`, id, repo.Environment).Scan(&result)
 	if errors.Is(err, pgx.ErrNoRows) {

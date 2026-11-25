@@ -1,8 +1,17 @@
 import { useEffect, useMemo, useState } from 'react';
-import { apiRequest, domainApi } from '../utils/api';
-import type { SystemDomain } from '../utils/api';
+import { Plus } from 'lucide-react';
+import { usePermission } from '../context/PermissionContext';
+import {
+  apiRequest,
+  getPromotionLinkOptions,
+  type PromotionLinkDomainOption,
+  type PromotionLinkNovelOption,
+  type PromotionLinkPixelOption,
+  type PromotionLinkTemplateOption,
+} from '../utils/api';
 import { copyTextToClipboard } from '../utils/clipboard';
-import { canWritePromotions, validateAndBuildPromotionPayload } from '../utils/promotion';
+import { validateAndBuildPromotionPayload } from '../utils/promotion';
+import { filterLivePromotionTemplates } from '../utils/templateCatalogHelpers';
 import CustomSelect from '../components/CustomSelect';
 import { CmsDialog } from '../components/ui/CmsDialog';
 import { Pagination } from '../components/ui/Pagination';
@@ -36,24 +45,31 @@ interface PromotionLink {
   created_at: string;
 }
 
-interface FBPixel {
-  id: number;
-  name: string;
-  pixel_id: string;
-}
-
-interface RechargeTemplate {
-  id: number;
-  name: string;
-  is_default: boolean;
-}
+const EMPTY_CREATE_FORM = {
+  novelId: '',
+  name: '',
+  chapterIndex: '1',
+  utmSource: 'facebook',
+  utmCampaign: '',
+  domainId: '',
+  fbPixelId: '',
+  rechargeTemplateId: '',
+  coinCostPerThousand: '',
+  startPayChapterIndex: '',
+};
 
 export default function PromotionsTab() {
-  const canWrite = canWritePromotions();
+  const { canWrite: hasWrite } = usePermission();
+  const canWrite = hasWrite('ads.promotions');
   const [links, setLinks] = useState<PromotionLink[]>([]);
-  const [pixels, setPixels] = useState<FBPixel[]>([]);
-  const [templates, setTemplates] = useState<RechargeTemplate[]>([]);
-  const [domains, setDomains] = useState<SystemDomain[]>([]);
+  const [novels, setNovels] = useState<PromotionLinkNovelOption[]>([]);
+  const [pixels, setPixels] = useState<PromotionLinkPixelOption[]>([]);
+  const [templates, setTemplates] = useState<PromotionLinkTemplateOption[]>([]);
+  const [domains, setDomains] = useState<PromotionLinkDomainOption[]>([]);
+  const [globalDefaults, setGlobalDefaults] = useState<{
+    coinCostPerThousand?: number;
+    startPayChapterIndex?: number;
+  }>({});
   const [loading, setLoading] = useState(true);
   const [hasLoadedOnce, setHasLoadedOnce] = useState(false);
 
@@ -63,6 +79,11 @@ export default function PromotionsTab() {
   const [pageSize, setPageSize] = useState(15);
   const [density, setDensity] = useState<TableDensity>('comfortable');
   const [showCreatedAt, setShowCreatedAt] = useState(true);
+
+  const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
+  const [createSubmitting, setCreateSubmitting] = useState(false);
+  const [createForm, setCreateForm] = useState(EMPTY_CREATE_FORM);
+  const [createdUrl, setCreatedUrl] = useState('');
 
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
   const [editingLink, setEditingLink] = useState<PromotionLink | null>(null);
@@ -93,13 +114,88 @@ export default function PromotionsTab() {
   };
 
   useEffect(() => {
+    const controller = new AbortController();
     void fetchLinks();
-    void apiRequest('GET', '/fb-pixels').then((d) => setPixels(d || [])).catch(() => {});
-    void apiRequest('GET', '/recharge-templates').then((d) => setTemplates(d || [])).catch(() => {});
-    void domainApi.getDomains().then((d) => setDomains(d || [])).catch(() => {});
+    void getPromotionLinkOptions(controller.signal)
+      .then((opts) => {
+        if (controller.signal.aborted || !opts) return;
+        setNovels(opts.novels || []);
+        setPixels(opts.pixels || []);
+        setTemplates(opts.templates || []);
+        setDomains(opts.domains || []);
+        setGlobalDefaults({
+          coinCostPerThousand: opts.defaults?.global_coin_cost_per_thousand,
+          startPayChapterIndex: opts.defaults?.global_start_pay_chapter_index,
+        });
+      })
+      .catch(() => {});
+    return () => controller.abort();
   }, []);
 
+  const openCreateModal = () => {
+    if (!canWrite) return;
+    setCreateForm({
+      ...EMPTY_CREATE_FORM,
+      fbPixelId: pixels[0] ? String(pixels[0].id) : '',
+    });
+    setCreatedUrl('');
+    setIsCreateModalOpen(true);
+  };
+
+  const handleCreateSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!canWrite || createSubmitting) return;
+
+    const selectedNovel = novels.find((n) => String(n.id) === createForm.novelId);
+    if (!selectedNovel) {
+      window.showToast?.('请选择要推广的书籍', 'error');
+      return;
+    }
+
+    const trimmedName = createForm.name.trim();
+    if (!trimmedName) {
+      window.showToast?.('请填写推广名称', 'error');
+      return;
+    }
+
+    const built = validateAndBuildPromotionPayload(
+      {
+        novelId: selectedNovel.id,
+        novelTitle: selectedNovel.title,
+        name: trimmedName,
+        chapterIndex: createForm.chapterIndex,
+        utmSource: createForm.utmSource,
+        utmCampaign: createForm.utmCampaign,
+        domainId: createForm.domainId,
+        fbPixelId: createForm.fbPixelId,
+        rechargeTemplateId: createForm.rechargeTemplateId,
+        coinCostPerThousand: createForm.coinCostPerThousand,
+        startPayChapterIndex: createForm.startPayChapterIndex,
+      },
+      domains,
+      pixels,
+    );
+    if (built.error || !built.payload) {
+      window.showToast?.(built.error || '推广参数无效', 'error');
+      return;
+    }
+
+    setCreateSubmitting(true);
+    try {
+      const created = await apiRequest('POST', '/promotion-links', built.payload);
+      const url = created?.generated_url || built.finalUrl || '';
+      setCreatedUrl(url);
+      window.showToast?.('新建推广链接成功！', 'success');
+      void fetchLinks();
+    } catch (err: unknown) {
+      window.showToast?.(`新建推广链接失败：${err instanceof Error ? err.message : ''}`, 'error');
+    } finally {
+      setCreateSubmitting(false);
+    }
+  };
+
   const handleEditClick = (link: PromotionLink) => {
+    if (!canWrite) return;
     setEditingLink(link);
     setEditForm({
       name: link.name || '',
@@ -162,6 +258,7 @@ export default function PromotionsTab() {
   };
 
   const handleDelete = (id: number) => {
+    if (!canWrite) return;
     window.showConfirm?.('确定要删除这条推广链接记录吗？此操作无法撤销。', async () => {
       try {
         await apiRequest('DELETE', `/promotion-links/${id}`);
@@ -200,9 +297,22 @@ export default function PromotionsTab() {
   const paginatedLinks = filteredLinks.slice((safePage - 1) * pageSize, safePage * pageSize);
 
   const uniqueSources = Array.from(new Set(links.map((l) => l.utm_source).filter(Boolean)));
-  const activeDomains = (domains || []).filter((d) => d.status === 1);
+  const activeDomains = (domains || []).filter((d) => d.status === undefined || d.status === 1);
   const defaultDomain =
     activeDomains.find((d) => d.is_default) || activeDomains.find((d) => d.type === 'main') || activeDomains[0];
+  const selectedCreateNovel = novels.find((n) => String(n.id) === createForm.novelId);
+  const createCostPlaceholder =
+    selectedCreateNovel?.coin_cost_per_thousand != null
+      ? `留空继承书籍 (${selectedCreateNovel.coin_cost_per_thousand})`
+      : globalDefaults.coinCostPerThousand != null
+        ? `留空继承全局 (${globalDefaults.coinCostPerThousand})`
+        : '留空继承默认';
+  const createPayChPlaceholder =
+    selectedCreateNovel?.start_pay_chapter_index != null
+      ? `留空继承书籍 (第 ${selectedCreateNovel.start_pay_chapter_index} 章)`
+      : globalDefaults.startPayChapterIndex != null
+        ? `留空继承全局 (第 ${globalDefaults.startPayChapterIndex} 章)`
+        : '留空继承默认';
 
   const resetFilters = () => {
     setSearchQuery('');
@@ -289,6 +399,12 @@ export default function PromotionsTab() {
                 if (key === 'created_at') setShowCreatedAt((v) => !v);
               }}
             />
+            {canWrite && (
+              <button type="button" onClick={openCreateModal} className="btn-primary h-9 px-3.5 text-xs">
+                <Plus size={14} aria-hidden="true" />
+                <span>新建推广链接</span>
+              </button>
+            )}
           </div>
         </div>
 
@@ -451,9 +567,210 @@ export default function PromotionsTab() {
         </table>
       </TableRegion>
 
+      {/* Create Promotion Link Slide-Over Drawer */}
+      <CmsDialog
+        open={Boolean(canWrite && isCreateModalOpen)}
+        onClose={() => !createSubmitting && setIsCreateModalOpen(false)}
+        closedBy={createSubmitting ? 'none' : 'any'}
+        closeDisabled={createSubmitting}
+        variant="drawer"
+        title="新建推广链接"
+        subtitle="选择已上架书籍与像素目标，直接生成推广投放链接"
+        size="md"
+        footer={
+          <>
+            <button
+              type="button"
+              disabled={createSubmitting}
+              className="btn-secondary"
+              onClick={() => !createSubmitting && setIsCreateModalOpen(false)}
+            >
+              {createdUrl ? '完成' : '取消'}
+            </button>
+            {!createdUrl && (
+              <button type="submit" form="create-promo-form" disabled={createSubmitting} className="btn-primary">
+                {createSubmitting ? '创建中...' : '生成并保存'}
+              </button>
+            )}
+          </>
+        }
+      >
+        <form id="create-promo-form" onSubmit={handleCreateSubmit} className="space-y-4 text-xs">
+          <label className="block space-y-1.5">
+            <span className="block font-medium text-[var(--cms-muted-fg)]">
+              推广名称 <span className="text-[var(--cms-error)]">*</span>
+            </span>
+            <input
+              type="text"
+              autoFocus
+              className="input-field"
+              placeholder="例如: FB_BlackFriday_Campaign"
+              value={createForm.name}
+              onChange={(e) => setCreateForm({ ...createForm, name: e.target.value })}
+              disabled={createSubmitting || Boolean(createdUrl)}
+              required
+            />
+          </label>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <label className="space-y-1.5">
+              <span className="block font-medium text-[var(--cms-muted-fg)]">
+                推广书籍 <span className="text-[var(--cms-error)]">*</span>
+              </span>
+              <CustomSelect
+                aria-label="推广书籍"
+                width="100%"
+                value={createForm.novelId}
+                disabled={createSubmitting || Boolean(createdUrl)}
+                onChange={(val) => setCreateForm({ ...createForm, novelId: val })}
+                options={[
+                  { value: '', label: novels.length === 0 ? '-- 暂无已上架书籍 --' : '-- 选择已上架书籍 (必选) --' },
+                  ...novels.map((n) => ({ value: String(n.id), label: `#${n.id} · ${n.title}` })),
+                ]}
+              />
+            </label>
+            <label className="space-y-1.5">
+              <span className="block font-medium text-[var(--cms-muted-fg)]">落地章节索引（可选）</span>
+              <input
+                type="number"
+                min={0}
+                className="input-field tabular-nums"
+                value={createForm.chapterIndex}
+                disabled={createSubmitting || Boolean(createdUrl)}
+                onChange={(e) => setCreateForm({ ...createForm, chapterIndex: e.target.value })}
+              />
+            </label>
+          </div>
+
+          <label className="block space-y-1.5">
+            <span className="block font-medium text-[var(--cms-muted-fg)]">投放落地页域名（可选）</span>
+            <CustomSelect
+              aria-label="投放落地页域名"
+              width="100%"
+              value={createForm.domainId}
+              disabled={createSubmitting || Boolean(createdUrl)}
+              onChange={(val) => setCreateForm({ ...createForm, domainId: val })}
+              options={[
+                {
+                  value: '',
+                  label: `-- 默认主域名 (${defaultDomain?.domain || '主站默认域名'}) --`,
+                },
+                ...activeDomains.map((d) => ({
+                  value: String(d.id),
+                  label: `${d.name} (${d.domain}) ${d.is_default ? '[默认主域名]' : ''}`,
+                })),
+              ]}
+            />
+          </label>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <label className="space-y-1.5">
+              <span className="block font-medium text-[var(--cms-muted-fg)]">广告渠道 (utm_source)</span>
+              <input
+                type="text"
+                aria-label="广告渠道"
+                className="input-field"
+                placeholder="例如: facebook, tiktok"
+                value={createForm.utmSource}
+                disabled={createSubmitting || Boolean(createdUrl)}
+                onChange={(e) => setCreateForm({ ...createForm, utmSource: e.target.value })}
+              />
+            </label>
+
+            <label className="space-y-1.5">
+              <span className="block font-medium text-[var(--cms-muted-fg)]">
+                绑定 Facebook 像素 <span className="text-[var(--cms-error)]">*</span>
+              </span>
+              <CustomSelect
+                aria-label="绑定 Facebook 像素"
+                width="100%"
+                value={createForm.fbPixelId}
+                disabled={createSubmitting || Boolean(createdUrl)}
+                onChange={(val) => setCreateForm({ ...createForm, fbPixelId: val })}
+                options={[
+                  { value: '', label: pixels.length === 0 ? '-- 请先添加像素配置 --' : '-- 选择像素 (必选) --' },
+                  ...pixels.map((p) => ({ value: String(p.id), label: `${p.name} (${p.pixel_id})` })),
+                ]}
+              />
+            </label>
+          </div>
+
+          <label className="block space-y-1.5">
+            <span className="block font-medium text-[var(--cms-muted-fg)]">广告活动名称 (utm_campaign)</span>
+            <input
+              type="text"
+              className="input-field"
+              placeholder="例如: blackfriday_adset1"
+              value={createForm.utmCampaign}
+              disabled={createSubmitting || Boolean(createdUrl)}
+              onChange={(e) => setCreateForm({ ...createForm, utmCampaign: e.target.value })}
+            />
+          </label>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <label className="space-y-1.5">
+              <span className="block font-medium text-[var(--cms-muted-fg)]">专属千字计费（可选）</span>
+              <input
+                type="number"
+                className="input-field tabular-nums"
+                placeholder={createCostPlaceholder}
+                min={0}
+                value={createForm.coinCostPerThousand}
+                disabled={createSubmitting || Boolean(createdUrl)}
+                onChange={(e) => setCreateForm({ ...createForm, coinCostPerThousand: e.target.value })}
+              />
+            </label>
+
+            <label className="space-y-1.5">
+              <span className="block font-medium text-[var(--cms-muted-fg)]">专属起付章节（可选）</span>
+              <input
+                type="number"
+                className="input-field tabular-nums"
+                placeholder={createPayChPlaceholder}
+                min={1}
+                value={createForm.startPayChapterIndex}
+                disabled={createSubmitting || Boolean(createdUrl)}
+                onChange={(e) => setCreateForm({ ...createForm, startPayChapterIndex: e.target.value })}
+              />
+            </label>
+          </div>
+
+          <label className="block space-y-1.5">
+            <span className="block font-medium text-[var(--cms-muted-fg)]">绑定充值模板（可选）</span>
+            <CustomSelect
+              aria-label="绑定充值模板"
+              width="100%"
+              value={createForm.rechargeTemplateId}
+              disabled={createSubmitting || Boolean(createdUrl)}
+              onChange={(val) => setCreateForm({ ...createForm, rechargeTemplateId: val })}
+              options={[
+                { value: '', label: '-- 使用默认激活模板 --' },
+                ...filterLivePromotionTemplates(templates).map((t) => ({
+                  value: String(t.id),
+                  label: `${t.name} ${t.is_default ? '(默认)' : ''}`,
+                })),
+              ]}
+            />
+            <span className="block text-[11px] text-[var(--cms-muted-fg)]">
+              该模板绑定仅对通过此推广链接首次注册/首次触达的读者生效；已归因老用户仍按首触推广或默认模板计价。
+            </span>
+          </label>
+
+          {createdUrl && (
+            <div className="p-3.5 rounded-xl bg-[var(--cms-content)] border border-[var(--cms-border)] space-y-2">
+              <div className="text-xs font-medium text-[var(--cms-muted-fg)]">已生成的推广链接地址</div>
+              <input type="text" className="input-field font-mono-code text-xs" readOnly value={createdUrl} />
+              <button type="button" className="btn-secondary w-full" onClick={() => void handleCopy(createdUrl)}>
+                复制链接到剪贴板
+              </button>
+            </div>
+          )}
+        </form>
+      </CmsDialog>
+
       {/* Edit Promotion Link Slide-Over Drawer */}
       <CmsDialog
-        open={Boolean(isEditModalOpen && editingLink)}
+        open={Boolean(canWrite && isEditModalOpen && editingLink)}
         onClose={() => !editSubmitting && setIsEditModalOpen(false)}
         closedBy={editSubmitting ? 'none' : 'any'}
         closeDisabled={editSubmitting}
@@ -602,9 +919,12 @@ export default function PromotionsTab() {
                 onChange={(val) => setEditForm({ ...editForm, rechargeTemplateId: val })}
                 options={[
                   { value: '', label: '-- 使用默认激活模板 --' },
-                  ...templates.map((t) => ({ value: String(t.id), label: `${t.name} ${t.is_default ? '(默认)' : ''}` })),
+                  ...filterLivePromotionTemplates(templates).map((t) => ({ value: String(t.id), label: `${t.name} ${t.is_default ? '(默认)' : ''}` })),
                 ]}
               />
+              <span className="block text-[11px] text-[var(--cms-muted-fg)]">
+                该模板绑定仅对通过此推广链接首次注册/首次触达的读者生效；已归因老用户仍按首触推广或默认模板计价。
+              </span>
             </label>
           </form>
         )}

@@ -54,7 +54,8 @@ func TestCollectorAndSummaryWithoutWorker(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/internal/conversion"+tt.route, nil)
 		req.Header.Set("Authorization", "Bearer fixture")
 		req.Header.Set("X-Operator-ID", "test-admin")
-		req.Header.Set("X-Operator-Role", "Finance")
+		req.Header.Set("X-Operator-Role", "FinanceManager")
+		req.Header.Set("X-Operator-Access", "read")
 		w := httptest.NewRecorder()
 		handler.ServeHTTP(w, req)
 		if w.Code != 200 || !strings.Contains(w.Body.String(), tt.body) {
@@ -112,7 +113,7 @@ func TestCollectorAndSummaryWithoutWorker(t *testing.T) {
 		group[row.Name+":"+row.Eligibility] = counts{row.Events, row.Confirmed, row.MissingTarget}
 	}
 	if group["Purchase:expected"] != (counts{3, 1, 1}) || group["Subscribe:expected"] != (counts{1, 1, 0}) ||
-		group["Purchase:historical_unknown"].total != 1 {
+		group["Purchase:environment_unknown"].total != 1 {
 		t.Fatalf("population: %+v", group)
 	}
 	changes, err = repo.Collect(ctx)

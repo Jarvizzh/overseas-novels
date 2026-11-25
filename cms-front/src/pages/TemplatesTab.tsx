@@ -1,1934 +1,910 @@
-import React, { useCallback, useEffect, useId, useRef, useState } from 'react';
-import { useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
+import React, { useCallback, useContext, useEffect, useId, useMemo, useState } from 'react';
+import { Link, Navigate, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import {
+  ArrowDown,
+  ArrowUp,
   BookOpen,
   Check,
   ChevronLeft,
+  Copy,
   Crown,
-  GripVertical,
+  Lock,
   Plus,
+  RefreshCw,
   Save,
+  Sparkles,
+  Star,
   Trash2,
 } from 'lucide-react';
-import { apiRequest } from '../utils/api';
 import CustomSelect from '../components/CustomSelect';
-import { CmsDialog } from '../components/ui/CmsDialog';
 import { Pagination } from '../components/ui/Pagination';
+import { SearchInput, SkeletonRows, StatusDot, TableRegion } from '../components/ui/Primitives';
+import { ConfirmContext } from '../context/ConfirmContext';
+import { usePermission } from '../context/PermissionContext';
+import { ToastContext } from '../context/ToastContext';
+import { getRechargeTemplateProductOptions, type RechargeTemplateProductOption } from '../utils/api';
 import {
-  RowActionMenu,
-  SearchInput,
-  SkeletonRows,
-  StatusDot,
-  type TableDensity,
-  TableRegion,
-  ViewOptionsPopover,
-} from '../components/ui/Primitives';
+  formatUSD,
+  NOVEL_SCOPE_LABELS,
+  type PaymentEnvironment,
+  PRODUCT_TYPE_LABELS,
+  type RechargeTemplateDTO,
+  templatesApi,
+  type TemplateSlotDTO,
+  type TemplateSlotWriteItem,
+  VIP_CYCLE_LABELS,
+  type VipCycle,
+} from '../utils/paymentCatalogApi';
+import {
+  canDeleteTemplate,
+  canSetDefaultTemplate,
+  shouldLockDefaultTemplate,
+} from '../utils/templateCatalogHelpers';
 
-const H5GoldCoin: React.FC<{ size?: number }> = ({ size = 16 }) => {
-  const gradId = useId();
-  return (
-    <svg
-      xmlns="http://www.w3.org/2000/svg"
-      viewBox="0 0 24 24"
-      aria-hidden="true"
-      style={{
-        width: `${size}px`,
-        height: `${size}px`,
-        display: 'inline-block',
-        verticalAlign: 'middle',
-        flexShrink: 0,
-      }}
-    >
-      <circle cx="12" cy="12" r="10" fill={`url(#${gradId})`} stroke="#9A7132" strokeWidth="1.25" />
-      <circle cx="12" cy="12" r="7.5" fill="none" stroke="rgba(255, 248, 225, 0.55)" strokeWidth="0.75" />
-      <path
-        d="M12 6.5l1.35 3.65L17 11.5l-3.65 1.35L12 16.5l-1.35-3.65L7 11.5l3.65-1.35L12 6.5z"
-        fill="#6B4A16"
-      />
-      <defs>
-        <linearGradient id={gradId} x1="0%" y1="0%" x2="100%" y2="100%">
-          <stop offset="0%" stopColor="#F5E1A4" />
-          <stop offset="50%" stopColor="#D4AE68" />
-          <stop offset="100%" stopColor="#A67C37" />
-        </linearGradient>
-      </defs>
-    </svg>
-  );
+type SlotDraft = {
+  uid: string;
+  product_id: number;
+  badge: string;
+  is_highlighted: boolean;
+  display_alias: string;
 };
 
-interface RechargeSlot {
-  _uid?: string;
-  id?: number;
-  template_id?: number;
-  slot_index: number;
-  type: 'single' | 'subscription' | 'vip' | 'whole_book';
-  coins: number;
-  bonus: number;
-  vip_duration: string;
-  subscription_cycle?: string; // 'day', 'week', 'month'
-  vip_name: string;
-  vip_desc: string;
-  price: string;
-  price_cents: number;
-  price_amount?: number | string;
+let draftSeq = 1;
+function nextDraftUid(): string {
+  draftSeq += 1;
+  return `tpl-slot-${draftSeq}`;
 }
 
-type SlotDraft = Omit<RechargeSlot, 'coins' | 'bonus'> & {
-  coins: number | string;
-  bonus: number | string;
-};
-
-let slotUidSeq = 1;
-function nextSlotUid(): string {
-  slotUidSeq += 1;
-  return `slot-${slotUidSeq}`;
-}
-
-function makeDefaultNewSlot(slotIndex: number): RechargeSlot {
-  return {
-    _uid: nextSlotUid(),
-    slot_index: slotIndex,
-    type: 'single',
-    coins: 499,
-    bonus: 0,
-    vip_duration: '',
-    subscription_cycle: '',
-    vip_name: '',
-    vip_desc: '',
-    price: '$4.99',
-    price_cents: 499,
-    price_amount: 4.99,
-  };
-}
-
-interface RechargeTemplate {
-  id: number;
-  name: string;
-  is_default: boolean;
-  slots: RechargeSlot[];
-  created_at: string;
-  updated_at: string;
-}
-
-type SlotTypeNormalized = 'single' | 'subscription' | 'whole_book';
-
-const CYCLE_LABELS: Record<string, string> = {
-  day: '日卡 · 1 天',
-  week: '周卡 · 7 天',
-  month: '月卡 · 30 天',
-};
-
-function normalizeSlotType(type: RechargeSlot['type']): SlotTypeNormalized {
-  if (type === 'vip' || type === 'subscription') return 'subscription';
-  if (type === 'whole_book') return 'whole_book';
-  return 'single';
-}
-
-function getSlotAmount(slot: { price_amount?: number | string; price_cents: number }): number {
-  if (slot.price_amount === '') return 0;
-  if (slot.price_amount !== undefined) {
-    const num = Number(slot.price_amount);
-    return Number.isFinite(num) ? num : 0;
-  }
-  return (slot.price_cents || 0) / 100;
-}
-
-function getSlotMaxBonus(slot: { coins: number | string }): number {
-  return Math.floor((Number(slot.coins) || 0) * 1.5);
-}
-
-function isSlotBonusValid(slot: { type: RechargeSlot['type']; coins: number | string; bonus: number | string }): boolean {
-  if (normalizeSlotType(slot.type) !== 'single') return true;
-  if (slot.bonus === '') return true;
-  const bonus = Number(slot.bonus);
-  return Number.isFinite(bonus) && bonus >= 0 && bonus <= getSlotMaxBonus(slot);
-}
-
-function summarizeTemplate(tpl: RechargeTemplate) {
+function summarizeSlots(slots: TemplateSlotDTO[]) {
   let single = 0;
-  let sub = 0;
   let book = 0;
-  let minP = Infinity;
-  let maxP = 0;
-  let maxBonusPct = 0;
-
-  (tpl.slots || []).forEach((s) => {
-    const t = normalizeSlotType(s.type);
-    if (t === 'single') {
-      single += 1;
-      if (s.coins > 0 && s.bonus > 0) {
-        maxBonusPct = Math.max(maxBonusPct, Math.round((s.bonus / s.coins) * 100));
-      }
-    } else if (t === 'subscription') {
-      sub += 1;
-    } else {
-      book += 1;
+  let vip = 0;
+  let minCents = Infinity;
+  let maxCents = 0;
+  for (const s of slots || []) {
+    const pType = s.product_type || (s.type === 'subscription' ? 'vip' : s.type);
+    if (pType === 'vip') vip += 1;
+    else if (pType === 'whole_book') book += 1;
+    else single += 1;
+    const cents = s.price_cents || 0;
+    if (cents > 0) {
+      minCents = Math.min(minCents, cents);
+      maxCents = Math.max(maxCents, cents);
     }
-    const amt = getSlotAmount(s);
-    if (amt > 0) {
-      minP = Math.min(minP, amt);
-      maxP = Math.max(maxP, amt);
-    }
-  });
-
+  }
   const parts: string[] = [];
-  if (single > 0) parts.push(`${single} 金币包`);
-  if (sub > 0) parts.push(`${sub} VIP 订阅`);
-  if (book > 0) parts.push(`${book} 整本购买`);
-
+  if (single > 0) parts.push(`${single} 金币`);
+  if (book > 0) parts.push(`${book} 整本`);
+  if (vip > 0) parts.push(`${vip} VIP`);
   return {
-    summaryText: parts.join(' · ') || '暂无卡位',
-    priceRange: minP === Infinity ? '$0.00' : `$${minP.toFixed(2)} – $${maxP.toFixed(2)}`,
-    maxBonusPct,
+    summary: parts.join(' · ') || '暂无槽位',
+    priceRange: minCents === Infinity ? '$0.00' : `$${(minCents / 100).toFixed(2)} – $${(maxCents / 100).toFixed(2)}`,
   };
 }
-
-const initDefaultSlots = (): RechargeSlot[] => [
-  { _uid: nextSlotUid(), slot_index: 1, type: 'single', coins: 499, bonus: 50, vip_duration: '', subscription_cycle: '', vip_name: '', vip_desc: '', price: '$4.99', price_cents: 499, price_amount: 4.99 },
-  { _uid: nextSlotUid(), slot_index: 2, type: 'single', coins: 999, bonus: 150, vip_duration: '', subscription_cycle: '', vip_name: '', vip_desc: '', price: '$9.99', price_cents: 999, price_amount: 9.99 },
-  { _uid: nextSlotUid(), slot_index: 3, type: 'single', coins: 1999, bonus: 400, vip_duration: '', subscription_cycle: '', vip_name: '', vip_desc: '', price: '$19.99', price_cents: 1999, price_amount: 19.99 },
-  { _uid: nextSlotUid(), slot_index: 4, type: 'single', coins: 4999, bonus: 1200, vip_duration: '', subscription_cycle: '', vip_name: '', vip_desc: '', price: '$49.99', price_cents: 4999, price_amount: 49.99 },
-  { _uid: nextSlotUid(), slot_index: 5, type: 'subscription', coins: 0, bonus: 0, vip_duration: 'day', subscription_cycle: 'day', vip_name: 'VIP Daily Pass', vip_desc: '全站小说24小时无限畅读，每日自动续费', price: '$0.99', price_cents: 99, price_amount: 0.99 },
-  { _uid: nextSlotUid(), slot_index: 6, type: 'subscription', coins: 0, bonus: 0, vip_duration: 'week', subscription_cycle: 'week', vip_name: 'VIP Weekly Pass', vip_desc: '全站小说7天无限畅读，每周自动续费', price: '$4.99', price_cents: 499, price_amount: 4.99 },
-  { _uid: nextSlotUid(), slot_index: 7, type: 'subscription', coins: 0, bonus: 0, vip_duration: 'month', subscription_cycle: 'month', vip_name: 'VIP Monthly Pass', vip_desc: '全站小说30天无限畅读，每月自动续费', price: '$14.99', price_cents: 1499, price_amount: 14.99 },
-];
 
 export default function TemplatesTab() {
+  const { canRead, canWrite } = usePermission();
+  const canWriteTemplates = canWrite('ads.templates');
+  const canReadProducts = canRead('payments.products');
   const navigate = useNavigate();
   const location = useLocation();
   const { templateId } = useParams<{ templateId?: string }>();
   const [searchParams] = useSearchParams();
-
-  const currentAdminRole = (() => {
-    try {
-      const info = localStorage.getItem('cms_admin');
-      return info ? (JSON.parse(info)?.role as string) || '' : '';
-    } catch {
-      return '';
-    }
-  })();
-  const canManageTemplates = ['SuperAdmin', 'Finance'].includes(currentAdminRole);
+  const toastCtx = useContext(ToastContext);
+  const confirmCtx = useContext(ConfirmContext);
+  const showToast = useCallback(
+    (msg: string, type: 'success' | 'error' | 'info' = 'success') => {
+      if (toastCtx?.showToast) toastCtx.showToast(msg, type);
+      else window.showToast?.(msg, type);
+    },
+    [toastCtx],
+  );
+  const formId = useId();
 
   const isNewRoute = location.pathname === '/recharge-templates/new';
-  const parsedTemplateId =
-    templateId && /^\d+$/.test(templateId) ? Number(templateId) : null;
-  const isEditRoute = parsedTemplateId !== null;
-  const isInvalidEditRoute = Boolean(templateId && parsedTemplateId === null);
-  const isEditorPage = isNewRoute || isEditRoute || isInvalidEditRoute;
-  const copyFromParam = searchParams.get('copyFrom');
-  const parsedCopyFromId =
-    copyFromParam && /^\d+$/.test(copyFromParam) ? Number(copyFromParam) : null;
-  const routeKey = `${location.pathname}?${searchParams.toString()}`;
+  const editTemplateId = !isNewRoute && templateId ? Number(templateId) : null;
+  const isEditor = isNewRoute || (editTemplateId !== null && Number.isInteger(editTemplateId) && editTemplateId > 0);
+  const copyFromId = isNewRoute ? Number(searchParams.get('copyFrom') || 0) : 0;
 
-  const [templates, setTemplates] = useState<RechargeTemplate[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [searchQuery, setSearchQuery] = useState('');
-  const [currentPage, setCurrentPage] = useState(1);
+  // List state
+  const [templates, setTemplates] = useState<RechargeTemplateDTO[] | null>(null);
+  const [loadError, setLoadError] = useState('');
+  const [search, setSearch] = useState('');
+  const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(10);
-  const [density, setDensity] = useState<TableDensity>('comfortable');
+
+  // Published product catalog for editor dropdown grouped by environment
+  const [liveProducts, setLiveProducts] = useState<RechargeTemplateProductOption[]>([]);
+  const [sandboxProducts, setSandboxProducts] = useState<RechargeTemplateProductOption[]>([]);
+  const [productsLoading, setProductsLoading] = useState(false);
 
   // Editor state
-  const [editID, setEditID] = useState<number | null>(null);
-  const [templateName, setTemplateName] = useState('');
-  const [isDefaultTemplate, setIsDefaultTemplate] = useState(false);
-  const [slots, setSlots] = useState<RechargeSlot[]>(initDefaultSlots);
-  const [selectedSlotIdx, setSelectedSlotIdx] = useState(0);
+  const [tplName, setTplName] = useState('');
+  const [tplEnv, setTplEnv] = useState<PaymentEnvironment>('live');
+  const [tplIsDefault, setTplIsDefault] = useState(false);
+  const [drafts, setDrafts] = useState<SlotDraft[]>([]);
+  const [previewTheme, setPreviewTheme] = useState<'light' | 'dark'>('light');
+  const [selectedPreviewIdx, setSelectedPreviewIdx] = useState(0);
   const [saving, setSaving] = useState(false);
-  const [formError, setFormError] = useState('');
-  const [h5Theme, setH5Theme] = useState<'light' | 'dark'>('light');
-  const [dragSlotIdx, setDragSlotIdx] = useState<number | null>(null);
-  const [dragOverIdx, setDragOverIdx] = useState<number | null>(null);
-  const [reorderStatus, setReorderStatus] = useState('');
-  const [editingSlotTarget, setEditingSlotTarget] = useState<number | 'new' | null>(null);
-  const [slotDraft, setSlotDraft] = useState<SlotDraft | null>(null);
-  const [slotDraftError, setSlotDraftError] = useState('');
-  const [missingEditTemplate, setMissingEditTemplate] = useState(false);
-  const slotFormId = useId();
-  const editIdRef = useRef<number | null>(null);
-  const hydratedRouteKeyRef = useRef<string | null>(null);
-  useEffect(() => {
-    editIdRef.current = editID;
-  }, [editID]);
+  const [editorError, setEditorError] = useState('');
 
-  const fetchTemplates = async () => {
-    setLoading(true);
+  const loadTemplates = useCallback(async (signal?: AbortSignal) => {
+    setLoadError('');
     try {
-      const data: RechargeTemplate[] = (await apiRequest('GET', '/recharge-templates')) || [];
-      setTemplates(data);
-      const currentEditId = editIdRef.current;
-      if (currentEditId !== null) {
-        const matched = data.find((item) => item.id === currentEditId);
-        if (matched) {
-          setIsDefaultTemplate(Boolean(matched.is_default));
-        }
+      const list = await templatesApi.list(signal);
+      if (!signal?.aborted) setTemplates(Array.isArray(list) ? list : []);
+    } catch (err) {
+      if (!signal?.aborted) setLoadError(err instanceof Error ? err.message : '加载模板列表失败');
+    }
+  }, []);
+
+  const loadPublishedCatalog = useCallback(async (signal?: AbortSignal) => {
+    setProductsLoading(true);
+    try {
+      const res = await getRechargeTemplateProductOptions(signal);
+      if (signal?.aborted) return;
+      setSandboxProducts(res?.sandbox ?? []);
+      setLiveProducts(res?.live ?? []);
+    } catch {
+      if (!signal?.aborted) {
+        setLiveProducts([]);
+        setSandboxProducts([]);
       }
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : '获取充值模板列表失败';
-      window.showToast?.(msg, 'error');
     } finally {
-      setLoading(false);
+      if (!signal?.aborted) setProductsLoading(false);
     }
-  };
-
-  useEffect(() => {
-    void fetchTemplates();
   }, []);
 
   useEffect(() => {
-    setCurrentPage(1);
-  }, [searchQuery]);
+    const controller = new AbortController();
+    void loadTemplates(controller.signal);
+    if (isEditor && canWriteTemplates) void loadPublishedCatalog(controller.signal);
+    return () => controller.abort();
+  }, [loadTemplates, loadPublishedCatalog, isEditor, canWriteTemplates]);
 
-  const resetBlankEditor = useCallback(() => {
-    setEditID(null);
-    setTemplateName('');
-    setIsDefaultTemplate(false);
-    setSlots(initDefaultSlots());
-    setSelectedSlotIdx(0);
-    setFormError('');
-    setReorderStatus('');
-    setEditingSlotTarget(null);
-    setSlotDraft(null);
-    setSlotDraftError('');
-  }, []);
-
-  const applyTemplateToEditor = useCallback((t: RechargeTemplate, asCopy: boolean) => {
-    setEditID(asCopy ? null : t.id);
-    setTemplateName(asCopy ? `${t.name} (副本)` : t.name);
-    setIsDefaultTemplate(asCopy ? false : t.is_default);
-    const sorted: RechargeSlot[] = [...(t.slots || [])]
-      .sort((a, b) => a.slot_index - b.slot_index)
-      .map((s) => ({
-        ...s,
-        _uid: nextSlotUid(),
-        price_amount: s.price_amount !== undefined ? s.price_amount : s.price_cents / 100,
-      }));
-    while (sorted.length < 4) {
-      sorted.push(makeDefaultNewSlot(sorted.length + 1));
-    }
-    setSlots(sorted);
-    setSelectedSlotIdx(0);
-    setFormError('');
-    setReorderStatus('');
-    setEditingSlotTarget(null);
-    setSlotDraft(null);
-    setSlotDraftError('');
-  }, []);
-
-  // Hydrate standalone /new, /new?copyFrom=<id>, and /:templateId/edit pages cleanly
+  // Populate editor form when templates finish loading
   useEffect(() => {
-    if (!isEditorPage) {
-      hydratedRouteKeyRef.current = null;
-      setMissingEditTemplate(false);
-      setEditingSlotTarget(null);
-      setSlotDraft(null);
-      setSlotDraftError('');
-      return;
-    }
-    if (isInvalidEditRoute) {
-      setMissingEditTemplate(true);
-      return;
-    }
-    if (isNewRoute) {
-      if (parsedCopyFromId !== null) {
-        if (loading) return;
-        const source = templates.find((item) => item.id === parsedCopyFromId);
-        if (!source) {
-          setMissingEditTemplate(true);
-          return;
-        }
-        setMissingEditTemplate(false);
-        if (hydratedRouteKeyRef.current !== routeKey) {
-          hydratedRouteKeyRef.current = routeKey;
-          applyTemplateToEditor(source, true);
-        }
+    if (!isEditor || !templates) return;
+    setEditorError('');
+    if (editTemplateId !== null) {
+      const target = templates.find((t) => t.id === editTemplateId);
+      if (!target) {
+        setEditorError('未找到要编辑的充值模板');
         return;
       }
-      setMissingEditTemplate(false);
-      if (hydratedRouteKeyRef.current !== routeKey) {
-        hydratedRouteKeyRef.current = routeKey;
-        resetBlankEditor();
-      }
+      setTplName(target.name);
+      setTplEnv(target.environment === 'sandbox' ? 'sandbox' : 'live');
+      setTplIsDefault(target.is_default);
+      setDrafts(
+        (target.slots || []).map((s) => ({
+          uid: nextDraftUid(),
+          product_id: s.product_id,
+          badge: s.badge || '',
+          is_highlighted: Boolean(s.is_highlighted),
+          display_alias: s.display_alias || '',
+        })),
+      );
       return;
     }
-    if (isEditRoute && parsedTemplateId !== null) {
-      if (loading) return;
-      const matched = templates.find((item) => item.id === parsedTemplateId);
-      if (!matched) {
-        setMissingEditTemplate(true);
-        return;
-      }
-      setMissingEditTemplate(false);
-      if (hydratedRouteKeyRef.current !== routeKey) {
-        hydratedRouteKeyRef.current = routeKey;
-        applyTemplateToEditor(matched, false);
-      }
-    }
-  }, [
-    isEditorPage,
-    isInvalidEditRoute,
-    isNewRoute,
-    isEditRoute,
-    parsedCopyFromId,
-    parsedTemplateId,
-    loading,
-    templates,
-    routeKey,
-    applyTemplateToEditor,
-    resetBlankEditor,
-  ]);
 
-  const startCreateTemplate = () => {
-    navigate('/recharge-templates/new');
-  };
-
-  const openEditorForTemplate = (t: RechargeTemplate) => {
-    navigate(`/recharge-templates/${t.id}/edit`);
-  };
-
-  const openCopyTemplate = (t: RechargeTemplate) => {
-    navigate(`/recharge-templates/new?copyFrom=${t.id}`);
-  };
-
-  const handleSetDefault = async (id: number) => {
-    try {
-      await apiRequest('POST', `/recharge-templates/${id}/set-default`);
-      if (editID !== null) {
-        setIsDefaultTemplate(editID === id);
-      }
-      window.showToast?.('已更新全站默认充值模板', 'success');
-      void fetchTemplates();
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : '设置默认模板失败';
-      window.showToast?.(msg, 'error');
-    }
-  };
-
-  const handleDelete = (t: RechargeTemplate) => {
-    if (t.is_default) {
-      window.showToast?.('全站默认模板不可直接删除，请先切换其他默认模板', 'error');
-      return;
-    }
-    window.showConfirm?.(`您确定要删除充值模板「${t.name}」吗？关联的卡位配置将同步删除，且不可恢复。`, async () => {
-      try {
-        await apiRequest('DELETE', `/recharge-templates/${t.id}`);
-        window.showToast?.(`已删除模板「${t.name}」`, 'success');
-        if (editID === t.id) {
-          setEditID(null);
-          navigate('/recharge-templates');
-        }
-        void fetchTemplates();
-      } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : '删除模板失败';
-        window.showToast?.(msg, 'error');
-      }
-    });
-  };
-
-  const applySlotDraftChange = (field: keyof SlotDraft, value: string | number) => {
-    setSlotDraftError('');
-    setSlotDraft((prev) => {
-      if (!prev) return prev;
-      const prevCents = Math.round(getSlotAmount(prev) * 100);
-      const current: SlotDraft = { ...prev, [field]: value };
-      const normalizedType = normalizeSlotType(current.type);
-
-      if (field === 'price_amount') {
-        const amount = value === '' ? 0 : Number(value);
-        const safeCents = value === '' || !Number.isFinite(amount) || amount < 0 ? 0 : Math.round(amount * 100);
-        current.price_cents = safeCents;
-        current.price = `$${(safeCents / 100).toFixed(2)}`;
-        const prevCoinsNum = Number(prev.coins);
-        if (normalizedType === 'single' && (prevCoinsNum === prevCents || prev.coins === 0)) {
-          current.coins = safeCents;
-        }
-      }
-
-      if (field === 'coins') {
-        current.coins = value === '' ? '' : String(value);
-      }
-
-      if (field === 'bonus') {
-        current.bonus = value === '' ? '' : String(value);
-      }
-
-      if (field === 'type') {
-        const nextType = normalizeSlotType(value as RechargeSlot['type']);
-        const amount = getSlotAmount(current);
-        if (nextType === 'single') {
-          const curCoins = Number(current.coins);
-          current.coins = Number.isFinite(curCoins) && curCoins > 0 ? curCoins : Math.round(amount * 100);
-          const curBonus = Number(current.bonus);
-          current.bonus = Number.isFinite(curBonus) && curBonus >= 0 ? curBonus : 0;
-          current.vip_duration = '';
-          current.subscription_cycle = '';
-        } else if (nextType === 'subscription') {
-          current.coins = 0;
-          current.bonus = 0;
-          const cycle = current.subscription_cycle || current.vip_duration || 'week';
-          current.subscription_cycle = cycle;
-          current.vip_duration = cycle;
-          current.vip_name = current.vip_name || 'VIP Weekly Pass';
-          current.vip_desc = current.vip_desc || 'Unlimited reading across all titles. Auto-renews, cancel anytime.';
-        } else {
-          current.coins = 0;
-          current.bonus = 0;
-          current.vip_duration = '';
-          current.subscription_cycle = '';
-          current.vip_name = current.vip_name || 'Unlock Entire Novel';
-          current.vip_desc = current.vip_desc || 'One-time purchase to unlock all premium chapters in this book.';
-        }
-      }
-
-      if (field === 'subscription_cycle') {
-        current.subscription_cycle = String(value);
-        current.vip_duration = String(value);
-      }
-
-      return current;
-    });
-  };
-
-  const openEditSlotModal = (index: number) => {
-    if (!canManageTemplates) return;
-    const target = slots[index];
-    if (!target) return;
-    setSelectedSlotIdx(index);
-    setSlotDraft({ ...target });
-    setSlotDraftError('');
-    setEditingSlotTarget(index);
-  };
-
-  const handleAddSlot = () => {
-    if (!canManageTemplates) return;
-    if (slots.length >= 8) {
-      window.showToast?.('单个模板最多配置 8 个卡位', 'error');
-      return;
-    }
-    setSlotDraft(makeDefaultNewSlot(slots.length + 1));
-    setSlotDraftError('');
-    setEditingSlotTarget('new');
-  };
-
-  const closeSlotModal = () => {
-    setEditingSlotTarget(null);
-    setSlotDraft(null);
-    setSlotDraftError('');
-  };
-
-  const handleConfirmSlotModal = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!canManageTemplates || !slotDraft || editingSlotTarget === null) return;
-    const amt = getSlotAmount(slotDraft);
-    const cents = Math.round(amt * 100);
-    const type = normalizeSlotType(slotDraft.type);
-
-    if (!Number.isFinite(amt) || cents < 1) {
-      setSlotDraftError('档位售价不能低于 $0.01');
-      return;
-    }
-    if (type === 'single') {
-      const coinsVal = Number(slotDraft.coins);
-      if (slotDraft.coins === '' || !Number.isInteger(coinsVal) || coinsVal <= 0) {
-        setSlotDraftError('基础金币数必须为大于 0 的整数');
-        return;
-      }
-      const bonusVal = Number(slotDraft.bonus);
-      if (slotDraft.bonus === '' || !Number.isInteger(bonusVal) || bonusVal < 0) {
-        setSlotDraftError('额外赠送金币数必须为不小于 0 的整数');
-        return;
-      }
-      if (!isSlotBonusValid(slotDraft)) {
-        setSlotDraftError(
-          `赠送不可超过基础金币 1.5 倍（上限 ${getSlotMaxBonus(slotDraft)} 金币）`,
+    if (copyFromId > 0) {
+      const src = templates.find((t) => t.id === copyFromId);
+      if (src) {
+        setTplName(`${src.name} - 副本`);
+        setTplEnv(src.environment === 'sandbox' ? 'sandbox' : 'live');
+        setTplIsDefault(false);
+        setDrafts(
+          (src.slots || []).map((s) => ({
+            uid: nextDraftUid(),
+            product_id: s.product_id,
+            badge: s.badge || '',
+            is_highlighted: Boolean(s.is_highlighted),
+            display_alias: s.display_alias || '',
+          })),
         );
         return;
       }
     }
-    if (type === 'subscription' && (!slotDraft.vip_name.trim() || !slotDraft.vip_desc.trim())) {
-      setSlotDraftError('请完整填写会员卡标题与权益描述');
-      return;
-    }
-    if (type === 'whole_book' && (!slotDraft.vip_name.trim() || !slotDraft.vip_desc.trim())) {
-      setSlotDraftError('请完整填写整本购买的商品名称与权益描述');
-      return;
-    }
 
-    const committed: RechargeSlot = {
-      ...slotDraft,
-      _uid: slotDraft._uid || nextSlotUid(),
-      coins: type === 'single' ? Math.round(Number(slotDraft.coins) || 0) : 0,
-      bonus: type === 'single' ? Math.round(Number(slotDraft.bonus) || 0) : 0,
-      price: `$${(cents / 100).toFixed(2)}`,
-      price_cents: cents,
-      price_amount: Number((cents / 100).toFixed(2)),
+    setTplName('');
+    setTplEnv('live');
+    setTplIsDefault(false);
+    setDrafts([]);
+  }, [isEditor, editTemplateId, copyFromId, templates]);
+
+  const envPublishedProducts = useMemo(
+    () => (tplEnv === 'live' ? liveProducts : sandboxProducts),
+    [tplEnv, liveProducts, sandboxProducts],
+  );
+  const eligibleProducts = useMemo(
+    () => envPublishedProducts.filter((p) => p.dual_channel_ready),
+    [envPublishedProducts],
+  );
+  const eligibleProductMap = useMemo(() => {
+    const map = new Map<number, RechargeTemplateProductOption>();
+    for (const p of eligibleProducts) map.set(p.id, p);
+    return map;
+  }, [eligibleProducts]);
+  const productMap = useMemo(() => {
+    const map = new Map<number, RechargeTemplateProductOption>();
+    for (const p of [...sandboxProducts, ...liveProducts]) map.set(p.id, p);
+    for (const p of envPublishedProducts) map.set(p.id, p);
+    return map;
+  }, [liveProducts, sandboxProducts, envPublishedProducts]);
+  const lockDefaultCheckbox = useMemo(
+    () => shouldLockDefaultTemplate(templates ?? [], editTemplateId),
+    [templates, editTemplateId],
+  );
+
+  // Also index slot product metadata already hydrated from GET /recharge-templates so existing slot details remain readable even if paused later
+  const fallbackSlotMetaMap = useMemo(() => {
+    const map = new Map<number, TemplateSlotDTO>();
+    for (const t of templates ?? []) {
+      for (const s of t.slots || []) {
+        if (s.product_id > 0 && !map.has(s.product_id)) map.set(s.product_id, s);
+      }
+    }
+    return map;
+  }, [templates]);
+
+  const filteredTemplates = useMemo(() => {
+    if (!templates) return [];
+    const q = search.trim().toLowerCase();
+    if (!q) return templates;
+    return templates.filter((t) => t.name.toLowerCase().includes(q) || String(t.id).includes(q));
+  }, [templates, search]);
+
+  const pagedTemplates = useMemo(() => {
+    const start = (page - 1) * pageSize;
+    return filteredTemplates.slice(start, start + pageSize);
+  }, [filteredTemplates, page, pageSize]);
+
+  const handleSetDefault = async (tpl: RechargeTemplateDTO) => {
+    if (!canWriteTemplates) return;
+    try {
+      await templatesApi.setDefault(tpl.id);
+      showToast(`已将「${tpl.name}」设为默认模板`, 'success');
+      await loadTemplates();
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : '设置默认失败', 'error');
+    }
+  };
+
+  const handleDelete = (tpl: RechargeTemplateDTO) => {
+    if (!canWriteTemplates) return;
+    if (tpl.is_default) {
+      showToast('默认模板不可删除，请先设置其他模板为默认', 'error');
+      return;
+    }
+    if ((tpl.linked_promotion_count ?? 0) > 0) {
+      const names = (tpl.linked_promotion_names ?? []).slice(0, 3).join('、');
+      showToast(`该模板已被 ${tpl.linked_promotion_count} 条推广链接引用${names ? `（${names}）` : ''}，无法删除`, 'error');
+      return;
+    }
+    const runDelete = async () => {
+      try {
+        await templatesApi.delete(tpl.id);
+        showToast('模板已删除', 'success');
+        await loadTemplates();
+      } catch (err) {
+        showToast(err instanceof Error ? err.message : '删除失败', 'error');
+      }
     };
-
-    setFormError('');
-    if (editingSlotTarget === 'new') {
-      const nextIdx = slots.length;
-      setSlots((prev) => [...prev, { ...committed, slot_index: prev.length + 1 }]);
-      setSelectedSlotIdx(nextIdx);
-      setReorderStatus(`已新增卡位 ${nextIdx + 1}`);
-    } else {
-      const targetIdx = editingSlotTarget;
-      setSlots((prev) =>
-        prev.map((item, idx) => (idx === targetIdx ? { ...committed, slot_index: idx + 1 } : item)),
-      );
-      setSelectedSlotIdx(targetIdx);
+    const msg = `确认删除模板「${tpl.name}」吗？已被推广链接引用的模板无法删除。`;
+    if (confirmCtx?.showConfirm) {
+      confirmCtx.showConfirm(msg, () => void runDelete());
+    } else if (window.showConfirm) {
+      window.showConfirm(msg, () => void runDelete());
     }
-    closeSlotModal();
   };
 
-  const handleDeleteSlot = (index: number) => {
-    if (!canManageTemplates) return;
-    if (slots.length <= 4) {
-      window.showToast?.('单个模板至少保留 4 个卡位', 'error');
+  const selectedProductIds = useMemo(() => new Set(drafts.map((d) => d.product_id).filter((id) => id > 0)), [drafts]);
+
+  const addSlot = () => {
+    if (drafts.length >= 8) {
+      showToast('每个模板最多只能配置 8 个槽位', 'error');
       return;
     }
-    setSlots((prev) =>
-      prev
-        .filter((_, idx) => idx !== index)
-        .map((s, idx) => ({ ...s, slot_index: idx + 1 })),
-    );
-    setSelectedSlotIdx((prevIdx) => {
-      if (prevIdx >= slots.length - 1) return Math.max(0, slots.length - 2);
-      if (prevIdx > index) return prevIdx - 1;
-      return prevIdx;
+    const nextUnassigned = eligibleProducts.find((p) => !selectedProductIds.has(p.id));
+    setDrafts((prev) => [
+      ...prev,
+      {
+        uid: nextDraftUid(),
+        product_id: nextUnassigned?.id ?? 0,
+        badge: '',
+        is_highlighted: false,
+        display_alias: '',
+      },
+    ]);
+  };
+
+  const removeSlot = (uid: string) => {
+    setDrafts((prev) => prev.filter((item) => item.uid !== uid));
+  };
+
+  const moveSlot = (idx: number, delta: -1 | 1) => {
+    const target = idx + delta;
+    if (target < 0 || target >= drafts.length) return;
+    setDrafts((prev) => {
+      const copy = [...prev];
+      const [moved] = copy.splice(idx, 1);
+      copy.splice(target, 0, moved);
+      return copy;
     });
-    setReorderStatus(`已移除卡位 ${index + 1}`);
   };
 
-  const reorderSlots = (fromIdx: number, toIdx: number) => {
-    if (!canManageTemplates) return;
-    if (fromIdx === toIdx || fromIdx < 0 || toIdx < 0 || fromIdx >= slots.length || toIdx >= slots.length) return;
-    setSlots((prev) => {
-      const next = [...prev];
-      const [moved] = next.splice(fromIdx, 1);
-      next.splice(toIdx, 0, moved);
-      return next.map((s, i) => ({ ...s, slot_index: i + 1 }));
-    });
-    setSelectedSlotIdx((prevSel) => {
-      if (prevSel === fromIdx) return toIdx;
-      if (fromIdx < toIdx && prevSel > fromIdx && prevSel <= toIdx) return prevSel - 1;
-      if (fromIdx > toIdx && prevSel >= toIdx && prevSel < fromIdx) return prevSel + 1;
-      return prevSel;
-    });
-    setReorderStatus(`已将卡位调整至第 ${toIdx + 1} 位，共 ${slots.length} 个卡位`);
+  const updateDraft = (uid: string, patch: Partial<SlotDraft>) => {
+    setDrafts((prev) => prev.map((d) => (d.uid === uid ? { ...d, ...patch } : d)));
   };
 
-  const handleSlotDragStart = (e: React.DragEvent<HTMLElement>, index: number) => {
-    if (!canManageTemplates) return;
-    setDragSlotIdx(index);
-    setDragOverIdx(index);
-    e.dataTransfer.effectAllowed = 'move';
-    e.dataTransfer.setData('text/plain', String(index));
-  };
-
-  const handleSlotDragOver = (e: React.DragEvent<HTMLElement>, index: number) => {
-    if (!canManageTemplates) return;
-    e.preventDefault();
-    e.dataTransfer.dropEffect = 'move';
-    if (dragOverIdx !== index) setDragOverIdx(index);
-  };
-
-  const handleSlotDrop = (e: React.DragEvent<HTMLElement>, targetIndex: number) => {
-    if (!canManageTemplates) return;
-    e.preventDefault();
-    const raw = e.dataTransfer.getData('text/plain');
-    const sourceIndex = dragSlotIdx !== null ? dragSlotIdx : raw !== '' ? Number(raw) : -1;
-    if (sourceIndex >= 0 && sourceIndex < slots.length && sourceIndex !== targetIndex) {
-      reorderSlots(sourceIndex, targetIndex);
+  const editorValidationError = useMemo(() => {
+    if (!tplName.trim()) return '请填写模板名称';
+    if (drafts.length < 4 || drafts.length > 8) return `槽位数量需为 4–8 个（当前 ${drafts.length} 个）`;
+    const seen = new Set<number>();
+    for (let i = 0; i < drafts.length; i += 1) {
+      const pid = drafts[i].product_id;
+      if (!pid || pid <= 0) return `第 ${i + 1} 个槽位尚未选择已上架商品`;
+      if (seen.has(pid)) return `商品 #${pid} 在同一模板中重复选择`;
+      if (!productsLoading && !eligibleProductMap.has(pid)) {
+        return `第 ${i + 1} 个槽位商品 #${pid} 未在 ${tplEnv} 环境下架或未满足双渠道就绪`;
+      }
+      seen.add(pid);
     }
-    setDragSlotIdx(null);
-    setDragOverIdx(null);
-  };
-
-  const handleSlotDragEnd = () => {
-    setDragSlotIdx(null);
-    setDragOverIdx(null);
-  };
+    return '';
+  }, [tplName, drafts, productsLoading, eligibleProductMap, tplEnv]);
 
   const handleSaveTemplate = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!canManageTemplates) return;
-    setFormError('');
-
-    if (!templateName.trim()) {
-      setFormError('请填写充值模板名称');
+    if (!canWriteTemplates || saving) return;
+    if (editorValidationError) {
+      setEditorError(editorValidationError);
       return;
     }
-    if (slots.length < 4 || slots.length > 8) {
-      setFormError('每个模板配置的卡位数量必须在 4 到 8 个之间');
-      return;
-    }
-
-    for (let i = 0; i < slots.length; i++) {
-      const slot = slots[i];
-      const amt = getSlotAmount(slot);
-      const cents = Math.round(amt * 100);
-      if (!Number.isFinite(amt) || cents < 1) {
-        setSelectedSlotIdx(i);
-        setFormError(`卡位 ${i + 1} 的售价不能低于 $0.01`);
-        return;
-      }
-      if (normalizeSlotType(slot.type) === 'single' && !(Number(slot.coins) > 0)) {
-        setSelectedSlotIdx(i);
-        setFormError(`卡位 ${i + 1} 的基础金币数必须大于 0`);
-        return;
-      }
-      if (normalizeSlotType(slot.type) === 'single' && !isSlotBonusValid(slot)) {
-        setSelectedSlotIdx(i);
-        setFormError(
-          Number(slot.bonus) < 0 || !Number.isFinite(Number(slot.bonus))
-            ? `卡位 ${i + 1} 的赠送金币数不能为负数`
-            : `卡位 ${i + 1} 的赠送金币数不能超过充值金币数的 1.5 倍（上限 ${getSlotMaxBonus(slot)} 金币）`,
-        );
-        return;
-      }
-      if (normalizeSlotType(slot.type) === 'subscription' && (!slot.vip_name.trim() || !slot.vip_desc.trim())) {
-        setSelectedSlotIdx(i);
-        setFormError(`卡位 ${i + 1} 请完整填写会员卡名称与权益描述`);
-        return;
-      }
-      if (normalizeSlotType(slot.type) === 'whole_book' && (!slot.vip_name.trim() || !slot.vip_desc.trim())) {
-        setSelectedSlotIdx(i);
-        setFormError(`卡位 ${i + 1} 请完整填写整本购买的商品名称与权益描述`);
-        return;
-      }
-    }
-
-    const finalSlots = slots.map(({ _uid: _ignored, ...s }, idx) => {
-      const amount = getSlotAmount(s);
-      return {
-        ...s,
-        slot_index: idx + 1,
-        price: `$${amount.toFixed(2)}`,
-        price_cents: Math.round(amount * 100),
-      };
-    });
-
-    const payload = {
-      name: templateName.trim(),
-      is_default: isDefaultTemplate,
-      slots: finalSlots,
-    };
-
+    setEditorError('');
     setSaving(true);
     try {
-      if (editID !== null) {
-        await apiRequest('PUT', `/recharge-templates/${editID}`, payload);
-        window.showToast?.(`模板「${payload.name}」修改成功`, 'success');
+      const slots: TemplateSlotWriteItem[] = drafts.map((d, idx) => ({
+        slot_index: idx + 1,
+        product_id: d.product_id,
+        badge: d.badge.trim(),
+        is_highlighted: d.is_highlighted,
+        display_alias: d.display_alias.trim(),
+      }));
+      if (editTemplateId !== null) {
+        await templatesApi.update(editTemplateId, { name: tplName.trim(), environment: tplEnv, is_default: tplIsDefault, slots });
+        showToast('模板保存成功', 'success');
       } else {
-        await apiRequest('POST', '/recharge-templates', payload);
-        window.showToast?.(`模板「${payload.name}」创建成功`, 'success');
+        await templatesApi.create({ name: tplName.trim(), environment: tplEnv, is_default: tplIsDefault, slots });
+        showToast('模板创建成功', 'success');
       }
-      setEditID(null);
-      hydratedRouteKeyRef.current = null;
       navigate('/recharge-templates');
-      void fetchTemplates();
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : '保存充值模板失败，请重试';
-      setFormError(msg);
-      window.showToast?.(msg, 'error');
+    } catch (err) {
+      setEditorError(err instanceof Error ? err.message : '保存模板失败');
     } finally {
       setSaving(false);
     }
   };
 
-  const filteredTemplates = templates.filter(
-    (t) =>
-      String(t.id).includes(searchQuery.trim()) ||
-      t.name.toLowerCase().includes(searchQuery.trim().toLowerCase()),
-  );
-  const totalPages = Math.max(1, Math.ceil(filteredTemplates.length / pageSize));
-  const safePage = Math.min(currentPage, totalPages);
-  const startIndex = (safePage - 1) * pageSize;
-  const paginatedTemplates = filteredTemplates.slice(startIndex, startIndex + pageSize);
+  const resolveProductSummary = (productId: number) => {
+    const p = productMap.get(productId);
+    if (p) {
+      return {
+        name: p.name,
+        code: p.code,
+        type: p.product_type,
+        price: p.price || formatUSD(p.price_cents),
+        coins: p.coins,
+        bonus: p.bonus,
+        vipCycle: p.vip_cycle,
+        novelScope: p.novel_scope_type,
+        published: true,
+      };
+    }
+    const fb = fallbackSlotMetaMap.get(productId);
+    if (fb) {
+      const pType = fb.product_type || (fb.type === 'subscription' ? 'vip' : fb.type) || 'single';
+      return {
+        name: fb.name || `商品 #${productId}`,
+        code: fb.product_code || `#${productId}`,
+        type: pType,
+        price: fb.price || '$0.00',
+        coins: fb.coins || 0,
+        bonus: fb.bonus || 0,
+        vipCycle: (fb.subscription_cycle || fb.vip_duration || '') as VipCycle | '',
+        novelScope: fb.novel_scope_type || 'none',
+        published: false,
+      };
+    }
+    return null;
+  };
 
-  const activeSlot = slots[selectedSlotIdx] || slots[0];
-  const activeSlotType = activeSlot ? normalizeSlotType(activeSlot.type) : 'single';
+  if (isEditor) {
+    if (!canWriteTemplates) {
+      return <Navigate to="/recharge-templates" replace />;
+    }
+    return (
+      <div className="space-y-5">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <button type="button" className="btn-secondary inline-flex items-center gap-1.5" onClick={() => navigate('/recharge-templates')}>
+              <ChevronLeft size={16} aria-hidden="true" />
+              返回列表
+            </button>
+            <div>
+              <h1 className="text-xl font-semibold text-[var(--cms-fg)]">
+                {editTemplateId ? `编辑充值模板 #${editTemplateId}` : '新建充值模板'}
+              </h1>
+              <p className="text-xs text-[var(--cms-muted-fg)] mt-0.5">
+                模板严格只存槽位序号、商品引用与非商业 UI 字段；商业定价由「商品与定价」统一管控。
+              </p>
+            </div>
+          </div>
 
-  // Mirror real H5 Reader grouping (reader-front/src/pages/Recharge.tsx)
-  const subscriptionPreviewPacks = slots
-    .map((slot, idx) => ({ slot, idx }))
-    .filter(({ slot }) => normalizeSlotType(slot.type) === 'subscription');
+          <div className="flex items-center gap-2">
+            {canReadProducts && (
+              <Link to="/payments/products" className="btn-secondary text-xs">管理 / 新建商品</Link>
+            )}
+            <button type="submit" form={`${formId}-editor`} className="btn-primary inline-flex items-center gap-1.5" disabled={saving}>
+              <Save size={15} aria-hidden="true" />
+              {saving ? '保存中…' : '保存模板'}
+            </button>
+          </div>
+        </div>
 
-  const coinAndBookPreviewPacks = slots
-    .map((slot, idx) => ({ slot, idx }))
-    .filter(({ slot }) => {
-      const t = normalizeSlotType(slot.type);
-      return t === 'single' || t === 'whole_book';
-    });
+        <div className="grid grid-cols-1 xl:grid-cols-12 gap-5 items-start">
+          {/* 左侧：模板与槽位编排表单 */}
+          <form id={`${formId}-editor`} onSubmit={handleSaveTemplate} className="xl:col-span-7 space-y-4">
+            <div className="cms-card p-4 space-y-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 items-end">
+                <div>
+                  <label htmlFor={`${formId}-tname`} className="block text-xs font-medium text-[var(--cms-muted-fg)] mb-1">模板名称 *</label>
+                  <input
+                    id={`${formId}-tname`}
+                    type="text"
+                    required
+                    className="input-field w-full"
+                    placeholder="例如：标准双渠道模板 v1"
+                    value={tplName}
+                    onChange={(e) => setTplName(e.target.value)}
+                  />
+                </div>
+                <div>
+                  <label htmlFor={`${formId}-tenv`} className="block text-xs font-medium text-[var(--cms-muted-fg)] mb-1">模板校验环境 *</label>
+                  <CustomSelect
+                    id={`${formId}-tenv`}
+                    width="100%"
+                    value={tplEnv}
+                    onChange={(v) => {
+                      const nextEnv = v === 'sandbox' ? 'sandbox' : 'live';
+                      setTplEnv(nextEnv);
+                      if (nextEnv !== 'live') setTplIsDefault(false);
+                    }}
+                    options={[
+                      { value: 'live', label: 'Live 正式（推荐：要求商品在 Live 已上架且双渠道就绪）' },
+                      { value: 'sandbox', label: 'Sandbox 沙箱测试（要求商品在 Sandbox 已上架）' },
+                    ]}
+                  />
+                </div>
+              </div>
+              <div className="space-y-1">
+                <label className={`flex items-center gap-2 text-sm ${lockDefaultCheckbox || tplEnv !== 'live' ? 'cursor-not-allowed opacity-75' : 'cursor-pointer'}`}>
+                  <input
+                    type="checkbox"
+                    checked={tplEnv === 'live' && tplIsDefault}
+                    disabled={lockDefaultCheckbox || tplEnv !== 'live'}
+                    onChange={(e) => setTplIsDefault(e.target.checked)}
+                  />
+                  <span>设为全站默认模板（自然流量与兜底用户生效）</span>
+                </label>
+                {lockDefaultCheckbox && (
+                  <p className="text-xs text-[var(--cms-muted-fg)]">
+                    当前为全站唯一默认模板，不能直接取消默认；请先在列表将其他模板「设为默认」。
+                  </p>
+                )}
+                {tplEnv !== 'live' && (
+                  <p className="text-xs text-[var(--cms-muted-fg)]">
+                    仅 Live 环境模板可设为全站默认模板或用于推广绑定；Sandbox 模板仅用于沙箱预演。
+                  </p>
+                )}
+              </div>
+            </div>
 
-  const awaitingInitialHydration =
-    isEditorPage &&
-    !isInvalidEditRoute &&
-    hydratedRouteKeyRef.current !== routeKey &&
-    (isEditRoute || parsedCopyFromId !== null) &&
-    loading;
-
-  return (
-    <div className="space-y-4 animate-fade-in">
-      {!isEditorPage ? (
-        /* ROUTE A: TEMPLATES LIST PAGE (/recharge-templates) */
-        <div className="space-y-4">
-          <search className="flex flex-wrap items-center justify-between gap-2.5">
-            <SearchInput
-              className="w-full sm:w-80"
-              ariaLabel="搜索模板名称或 ID"
-              placeholder="搜索模板名称或 ID..."
-              value={searchQuery}
-              onChange={(val) => {
-                setSearchQuery(val);
-                setCurrentPage(1);
-              }}
-            />
-            <div className="flex items-center gap-2.5 text-xs text-[var(--cms-muted-fg)]">
-              <span className="tabular-nums">共 {filteredTemplates.length} 套模板</span>
-              <ViewOptionsPopover density={density} onDensityChange={setDensity} />
-              {canManageTemplates && (
+            <div className="cms-card p-4 space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <h2 className="text-sm font-semibold text-[var(--cms-fg)]">
+                    商品槽位编排 ({drafts.length} / 8，需 4–8 个)
+                  </h2>
+                  <p className="text-xs text-[var(--cms-muted-fg)]">
+                    仅可选择在 {tplEnv === 'live' ? 'Live' : 'Sandbox'} 环境已上架且 PayPal + Stripe 双渠道就绪的不重复商品。
+                  </p>
+                </div>
                 <button
                   type="button"
-                  onClick={startCreateTemplate}
-                  className="btn-primary h-9 px-3.5 text-xs whitespace-nowrap"
+                  className="btn-secondary text-xs inline-flex items-center gap-1"
+                  disabled={drafts.length >= 8 || productsLoading}
+                  onClick={addSlot}
                 >
                   <Plus size={14} aria-hidden="true" />
-                  <span>新建模板</span>
+                  添加槽位
                 </button>
-              )}
-            </div>
-          </search>
+              </div>
 
-          <TableRegion
-            ariaLabel="充值模板列表"
-            footer={
-              <Pagination
-                page={currentPage}
-                pageSize={pageSize}
-                total={filteredTemplates.length}
-                onPageChange={setCurrentPage}
-                onPageSizeChange={(nextSize) => {
-                  setPageSize(nextSize);
-                  setCurrentPage(1);
-                }}
-                itemLabel="套模板"
-              />
-            }
-          >
-            <table className="cms-table min-w-[820px]" data-density={density}>
-              <thead>
-                <tr>
-                  <th scope="col">模板名称</th>
-                  <th scope="col">档位结构摘要</th>
-                  <th scope="col">价格区间 &amp; 最高赠送</th>
-                  <th scope="col">状态</th>
-                  <th scope="col">更新时间</th>
-                  <th scope="col" className="text-right w-px whitespace-nowrap">
-                    操作
-                  </th>
-                </tr>
-              </thead>
-              <tbody>
-                {loading ? (
-                  <SkeletonRows rows={5} cols={6} />
-                ) : paginatedTemplates.length === 0 ? (
-                  <tr>
-                    <td colSpan={6} className="py-16 text-center text-[var(--cms-muted-fg)]">
-                      {searchQuery.trim() ? '暂无匹配的充值模板' : '暂未创建充值模板，点击右上角「新建模板」开始配置'}
-                    </td>
-                  </tr>
-                ) : (
-                  paginatedTemplates.map((t) => {
-                    const meta = summarizeTemplate(t);
-                    return (
-                      <tr key={t.id}>
-                        <td>
-                          <div className="space-y-0.5">
-                            <button
-                              type="button"
-                              onClick={() => openEditorForTemplate(t)}
-                              className="focus-ring text-left text-[var(--cms-fg)] hover:underline cursor-pointer transition-colors"
-                            >
-                              {t.name}
-                            </button>
-                            <div className="text-[var(--cms-muted-fg)] tabular-nums">
-                              #{t.id} <span className="mx-1">·</span> {t.slots?.length || 0} 个卡位
-                            </div>
-                          </div>
-                        </td>
-                        <td className="text-[var(--cms-fg)]">{meta.summaryText}</td>
-                        <td className="tabular-nums">
-                          <div className="text-[var(--cms-fg)]">{meta.priceRange}</div>
-                          <div className="text-[var(--cms-muted-fg)] mt-0.5">
-                            {meta.maxBonusPct > 0 ? `最高赠送 +${meta.maxBonusPct}%` : '无额外赠送'}
-                          </div>
-                        </td>
-                        <td>
-                          {t.is_default ? (
-                            <StatusDot tone="primary" label="全站默认" />
-                          ) : (
-                            <StatusDot tone="muted" label="备用方案" />
-                          )}
-                        </td>
-                        <td className="tabular-nums text-[var(--cms-muted-fg)]">
-                          {new Date(t.updated_at).toLocaleString('zh-CN', { hour12: false })}
-                        </td>
-                        <td className="text-right whitespace-nowrap">
-                          <div className="inline-flex items-center justify-end gap-0.5 whitespace-nowrap">
-                            <button
-                              type="button"
-                              onClick={() => openEditorForTemplate(t)}
-                              className="btn-detail whitespace-nowrap"
-                            >
-                              {canManageTemplates ? '编辑' : '查看'}
-                            </button>
-                            {canManageTemplates && (
-                              <RowActionMenu
-                                ariaLabel={`模板 ${t.name} 更多操作`}
-                                items={[
-                                  ...(!t.is_default
-                                    ? [{
-                                        label: '设为全站默认',
-                                        tone: 'success' as const,
-                                        onClick: () => void handleSetDefault(t.id),
-                                      }]
-                                    : []),
-                                  {
-                                    label: '复制为新模板',
-                                    onClick: () => openCopyTemplate(t),
-                                  },
-                                  ...(!t.is_default
-                                    ? [{
-                                        label: '删除模板',
-                                        tone: 'danger' as const,
-                                        dividerBefore: true,
-                                        onClick: () => handleDelete(t),
-                                      }]
-                                    : []),
-                                ]}
-                              />
-                            )}
-                          </div>
-                        </td>
-                      </tr>
-                    );
-                  })
-                )}
-              </tbody>
-            </table>
-          </TableRegion>
-        </div>
-      ) : awaitingInitialHydration ? (
-        <div className="cms-card p-8 space-y-4">
-          <div className="flex items-center justify-between gap-3">
-            <span className="text-sm text-[var(--cms-muted-fg)]">正在加载充值模板配置...</span>
-            <button
-              type="button"
-              onClick={() => navigate('/recharge-templates')}
-              className="btn-secondary whitespace-nowrap"
-            >
-              <ChevronLeft size={15} aria-hidden="true" />
-              <span>返回列表</span>
-            </button>
-          </div>
-          <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
-            <div className="lg:col-span-7 h-72 rounded-xl skeleton-bar" />
-            <div className="lg:col-span-5 h-72 rounded-xl skeleton-bar" />
-          </div>
-        </div>
-      ) : missingEditTemplate ? (
-        <div className="cms-card p-10 text-center space-y-4">
-          <div className="text-sm font-medium text-[var(--cms-fg)]">
-            未找到指定的充值模板（ID 无效或已被删除）
-          </div>
-          <div>
-            <button
-              type="button"
-              onClick={() => navigate('/recharge-templates')}
-              className="btn-secondary inline-flex items-center gap-1.5 whitespace-nowrap"
-            >
-              <ChevronLeft size={15} aria-hidden="true" />
-              <span>返回模板列表</span>
-            </button>
-          </div>
-        </div>
-      ) : (
-        /* ROUTE B: STANDALONE TEMPLATE EDITOR + LIVE H5 PREVIEW (/recharge-templates/new | /:id/edit) */
-        <form onSubmit={handleSaveTemplate} className="space-y-6">
-          {/* Top Meta & Save Strip */}
-          <div className="cms-card p-5 flex flex-wrap items-center justify-between gap-4">
-            <div className="flex flex-wrap items-center gap-5 flex-1 min-w-[260px]">
-              <label className="flex-1 min-w-[220px] max-w-sm space-y-1.5">
-                <span className="block text-xs font-medium text-[var(--cms-muted-fg)]">
-                  模板名称 <span className="text-[var(--cms-error)]">*</span>
-                </span>
-                <input
-                  type="text"
-                  required
-                  disabled={!canManageTemplates}
-                  placeholder="例如：欧美通用默认模板 / 新客首充高转化方案"
-                  value={templateName}
-                  onChange={(e) => {
-                    setFormError('');
-                    setTemplateName(e.target.value);
-                  }}
-                  className="input-field disabled:opacity-65 disabled:cursor-not-allowed"
-                />
-              </label>
-
-              <label className={`inline-flex items-center gap-2 pt-5 text-xs font-medium text-[var(--cms-fg)] select-none ${canManageTemplates ? 'cursor-pointer' : 'opacity-65 cursor-not-allowed'}`}>
-                <input
-                  type="checkbox"
-                  disabled={!canManageTemplates}
-                  checked={isDefaultTemplate}
-                  onChange={(e) => setIsDefaultTemplate(e.target.checked)}
-                  className="w-4 h-4 rounded cursor-pointer disabled:cursor-not-allowed"
-                />
-                <span>设为全站默认模板</span>
-              </label>
-            </div>
-
-            <div className="flex items-center gap-2.5 shrink-0">
-              <button
-                type="button"
-                onClick={() => navigate('/recharge-templates')}
-                className="btn-secondary whitespace-nowrap"
-              >
-                <ChevronLeft size={15} aria-hidden="true" />
-                <span>返回列表</span>
-              </button>
-              {canManageTemplates && (
-                <button type="submit" disabled={saving} className="btn-primary px-5 whitespace-nowrap">
-                  <Save size={15} aria-hidden="true" />
-                  <span>{saving ? '保存中...' : '保存模板配置'}</span>
-                </button>
-              )}
-            </div>
-          </div>
-
-          {!canManageTemplates && (
-            <div
-              role="status"
-              className="px-4 py-2.5 rounded-xl border border-[var(--cms-border)] bg-[var(--cms-card)] text-xs text-[var(--cms-muted-fg)]"
-            >
-              当前账号为只读查看模式（仅 SuperAdmin / Finance 角色支持创建、编辑或保存充值模板）。
-            </div>
-          )}
-
-          {formError && (
-            <div
-              role="alert"
-              className="px-4 py-3 rounded-xl border text-xs font-medium"
-              style={{
-                backgroundColor: 'color-mix(in srgb, var(--cms-error) 10%, transparent)',
-                borderColor: 'color-mix(in srgb, var(--cms-error) 28%, transparent)',
-                color: 'var(--cms-error)',
-              }}
-            >
-              {formError}
-            </div>
-          )}
-
-          {/* Split Workspace */}
-          <p role="status" className="visually-hidden">
-            {reorderStatus}
-          </p>
-          <div className="grid grid-cols-1 xl:grid-cols-[1fr_390px] gap-6 items-start">
-            {/* LEFT: Slot Sequence List (Draggable, Click Edit -> Modal) */}
-            <div className="min-w-0">
-              <div className="cms-card overflow-hidden">
-                <div className="px-5 py-4 border-b border-[var(--cms-border)] flex flex-wrap items-center justify-between gap-3">
-                  <div className="flex items-center gap-2.5">
-                    <h2 className="text-sm font-semibold text-[var(--cms-fg)] m-0">卡位顺序与结构</h2>
-                    <span className="tabular-nums text-xs text-[var(--cms-muted-fg)]">{slots.length} / 8</span>
-                    <span className="hidden sm:inline text-xs text-[var(--cms-muted-fg)]">
-                      · 支持鼠标拖拽调整顺序，点击「编辑」弹窗修改属性
-                    </span>
-                  </div>
-                  {canManageTemplates && (
-                    <button
-                      type="button"
-                      disabled={slots.length >= 8}
-                      onClick={handleAddSlot}
-                      className="btn-secondary h-8 px-3 text-xs"
-                    >
-                      <Plus size={14} aria-hidden="true" />
-                      <span>添加卡位</span>
-                    </button>
-                  )}
+              {eligibleProducts.length === 0 && !productsLoading && (
+                <div role="alert" className="p-3 rounded-xl border border-[var(--cms-warning)] bg-[var(--cms-warning-soft)] text-xs text-[var(--cms-warning)]">
+                  当前尚未有在 {tplEnv === 'live' ? 'Live' : 'Sandbox'} 环境下「已上架且双渠道就绪」的商品，请先前往{' '}
+                  {canReadProducts ? (
+                    <Link to={`/payments/products?environment=${tplEnv}`} className="underline font-medium">商品与定价</Link>
+                  ) : (
+                    <span className="font-medium">商品与定价</span>
+                  )}{' '}
+                  完成 PayPal / Stripe 绑定并上架。
                 </div>
+              )}
 
-                <div className="divide-y divide-[color-mix(in_srgb,var(--cms-border)_60%,transparent)]">
-                  {slots.map((slot, idx) => {
-                    const active = idx === selectedSlotIdx;
-                    const isDragging = dragSlotIdx === idx;
-                    const isDragTarget = dragOverIdx === idx && dragSlotIdx !== null && dragSlotIdx !== idx;
-                    const type = normalizeSlotType(slot.type);
-                    const invalid = !isSlotBonusValid(slot) || (type === 'single' && !(Number(slot.coins) > 0));
-                    const amount = getSlotAmount(slot);
-                    const pct = slot.coins > 0 && slot.bonus > 0 ? Math.round((slot.bonus / slot.coins) * 100) : 0;
+              <div className="space-y-3">
+                {drafts.map((draft, idx) => {
+                  const summary = resolveProductSummary(draft.product_id);
+                  const envEligible = draft.product_id <= 0 || eligibleProductMap.has(draft.product_id);
+                  const selectOptions = eligibleProducts
+                    .filter((p) => p.id === draft.product_id || !selectedProductIds.has(p.id))
+                    .map((p) => ({
+                      value: String(p.id),
+                      label: `[${tplEnv === 'live' ? 'Live 已上架' : 'Sandbox 已上架'} · ${PRODUCT_TYPE_LABELS[p.product_type]}] ${p.name} · ${p.price || formatUSD(p.price_cents)} (${p.code})`,
+                    }));
+                  if (draft.product_id > 0 && !eligibleProductMap.has(draft.product_id) && summary) {
+                    const sbxOnly = tplEnv === 'live' && sandboxProducts.some((sp) => sp.id === draft.product_id);
+                    selectOptions.unshift({
+                      value: String(draft.product_id),
+                      label: `[${sbxOnly ? '仅 Sandbox' : `${tplEnv} 未就绪`}] ${summary.name} · ${summary.price} (${summary.code})`,
+                    });
+                  }
 
-                    return (
-                      <div
-                        key={slot._uid || slot.id || idx}
-                        draggable={canManageTemplates && !saving}
-                        onDragStart={(e) => canManageTemplates && handleSlotDragStart(e, idx)}
-                        onDragOver={(e) => canManageTemplates && handleSlotDragOver(e, idx)}
-                        onDrop={(e) => canManageTemplates && handleSlotDrop(e, idx)}
-                        onDragEnd={handleSlotDragEnd}
-                        onDoubleClick={() => canManageTemplates && openEditSlotModal(idx)}
-                        className={`px-4 py-3.5 flex items-center justify-between gap-3 transition-all ${
-                          isDragging
-                            ? 'opacity-45 bg-[var(--cms-content)]'
-                            : isDragTarget
-                              ? 'ring-2 ring-inset ring-[var(--cms-primary)] bg-[color-mix(in_srgb,var(--cms-primary)_10%,var(--cms-card))]'
-                              : active
-                                ? 'bg-[color-mix(in_srgb,var(--cms-primary)_7%,var(--cms-card))]'
-                                : 'hover:bg-[var(--cms-content)]'
-                        }`}
-                      >
-                        <button
-                          type="button"
-                          onClick={() => setSelectedSlotIdx(idx)}
-                          aria-pressed={active}
-                          className={`focus-ring flex items-center gap-3 min-w-0 flex-1 text-left rounded-lg ${
-                            canManageTemplates ? 'cursor-grab active:cursor-grabbing' : 'cursor-pointer'
-                          }`}
-                        >
-                          <span
-                            aria-hidden="true"
-                            className="text-[var(--cms-placeholder)] hover:text-[var(--cms-muted-fg)] shrink-0 inline-flex items-center"
-                          >
-                            <GripVertical size={15} />
-                          </span>
-
-                          <span
-                            className={`w-7 h-7 rounded-lg text-xs font-medium tabular-nums flex items-center justify-center shrink-0 ${
-                              active
-                                ? 'nav-active-item'
-                                : 'bg-[var(--cms-content)] text-[var(--cms-muted-fg)]'
-                            }`}
-                          >
-                            0{idx + 1}
-                          </span>
-
-                          <span className="min-w-0 flex-1 space-y-0.5 block">
-                            <span className="flex flex-wrap items-center gap-2 text-xs">
-                              <span className="inline-flex items-center gap-1.5 text-[var(--cms-muted-fg)] shrink-0">
-                                <span
-                                  className="w-1.5 h-1.5 rounded-full"
-                                  style={{
-                                    backgroundColor:
-                                      type === 'subscription'
-                                        ? 'var(--cms-primary)'
-                                        : type === 'whole_book'
-                                          ? 'var(--cms-success)'
-                                          : 'var(--cms-muted-fg)',
-                                  }}
-                                />
-                                {type === 'subscription'
-                                  ? CYCLE_LABELS[slot.subscription_cycle || slot.vip_duration || 'month'] || 'VIP 订阅'
-                                  : type === 'whole_book'
-                                    ? '整本购买'
-                                    : '金币包'}
-                              </span>
-
-                              <span className="text-[var(--cms-border)]">·</span>
-
-                              {type === 'single' ? (
-                                <>
-                                  <span className="text-[var(--cms-fg)] tabular-nums">{slot.coins} 金币</span>
-                                  {slot.bonus > 0 ? (
-                                    <span
-                                      className={`tabular-nums ${
-                                        invalid ? 'text-[var(--cms-error)]' : 'text-[var(--cms-muted-fg)]'
-                                      }`}
-                                    >
-                                      +{slot.bonus} 赠 (+{pct}%)
-                                    </span>
-                                  ) : (
-                                    <span className="text-[var(--cms-muted-fg)]">无额外赠送</span>
-                                  )}
-                                  {invalid && <span className="text-[var(--cms-error)]">· 配置异常</span>}
-                                </>
-                              ) : (
-                                <span className="text-[var(--cms-fg)] truncate">
-                                  {slot.vip_name || (type === 'subscription' ? 'VIP 会员卡' : '整本买断')}
-                                </span>
+                  return (
+                    <div key={draft.uid} className="p-3.5 rounded-xl border border-[var(--cms-border)] bg-[var(--cms-bg)] space-y-3">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="flex items-center gap-2">
+                          <span className="badge badge-gray font-mono-code">槽位 #{idx + 1}</span>
+                          {!envEligible && !productsLoading && (
+                            <span className="badge badge-red text-[11px]">
+                              {tplEnv === 'live' && sandboxProducts.some((sp) => sp.id === draft.product_id) ? '仅 Sandbox 上架' : `${tplEnv} 未就绪`}
+                            </span>
+                          )}
+                          {summary && (
+                            <span className="text-xs font-medium text-[var(--cms-fg)] flex items-center gap-1">
+                              <Lock size={11} aria-hidden="true" />
+                              <span className="tabular-nums">{summary.price}</span>
+                              {summary.type === 'single' && (
+                                <span className="text-[var(--cms-muted-fg)]">· {summary.coins}{summary.bonus > 0 ? `+${summary.bonus}` : ''} 金币</span>
+                              )}
+                              {summary.type === 'whole_book' && (
+                                <span className="text-[var(--cms-muted-fg)]">· {NOVEL_SCOPE_LABELS[summary.novelScope]} · 无赠币</span>
+                              )}
+                              {summary.type === 'vip' && (
+                                <span className="text-[var(--cms-muted-fg)]">· {summary.vipCycle ? VIP_CYCLE_LABELS[summary.vipCycle] : 'VIP'} · 无赠币</span>
                               )}
                             </span>
-
-                            {type !== 'single' && slot.vip_desc && (
-                              <span className="block text-xs text-[var(--cms-muted-fg)] truncate">{slot.vip_desc}</span>
-                            )}
-                          </span>
-                        </button>
-
-                        <div className="flex items-center gap-2 shrink-0">
-                          <span className="text-xs tabular-nums text-[var(--cms-fg)] mr-1">
-                            ${amount.toFixed(2)}
-                          </span>
-
-                          {canManageTemplates && (
-                            <>
-                              <button
-                                type="button"
-                                onClick={() => openEditSlotModal(idx)}
-                                className="btn-detail whitespace-nowrap"
-                              >
-                                编辑
-                              </button>
-
-                              <button
-                                type="button"
-                                disabled={slots.length <= 4}
-                                onClick={() => handleDeleteSlot(idx)}
-                                title={slots.length <= 4 ? '模板至少保留 4 个卡位' : '移除卡位'}
-                                aria-label={`移除卡位 ${idx + 1}`}
-                                className="focus-ring w-7 h-7 rounded-md hover:bg-[color-mix(in_srgb,var(--cms-error)_12%,transparent)] text-[var(--cms-muted-fg)] hover:text-[var(--cms-error)] flex items-center justify-center cursor-pointer disabled:opacity-25 disabled:cursor-not-allowed"
-                              >
-                                <Trash2 size={13} aria-hidden="true" />
-                              </button>
-                            </>
                           )}
                         </div>
+                        <div className="flex items-center gap-1">
+                          <button
+                            type="button"
+                            className="btn-ghost p-1"
+                            aria-label={`上移槽位 ${idx + 1}`}
+                            disabled={idx === 0}
+                            onClick={() => moveSlot(idx, -1)}
+                          >
+                            <ArrowUp size={14} aria-hidden="true" />
+                          </button>
+                          <button
+                            type="button"
+                            className="btn-ghost p-1"
+                            aria-label={`下移槽位 ${idx + 1}`}
+                            disabled={idx === drafts.length - 1}
+                            onClick={() => moveSlot(idx, 1)}
+                          >
+                            <ArrowDown size={14} aria-hidden="true" />
+                          </button>
+                          <button
+                            type="button"
+                            className="btn-ghost p-1 text-[var(--cms-error)]"
+                            aria-label={`删除槽位 ${idx + 1}`}
+                            onClick={() => removeSlot(draft.uid)}
+                          >
+                            <Trash2 size={14} aria-hidden="true" />
+                          </button>
+                        </div>
                       </div>
+
+                      <div>
+                        <label htmlFor={`${formId}-prod-${idx}`} className="block text-xs text-[var(--cms-muted-fg)] mb-1">绑定已上架商品 *</label>
+                        <CustomSelect
+                          id={`${formId}-prod-${idx}`}
+                          width="100%"
+                          placeholder="请选择商品…"
+                          value={draft.product_id ? String(draft.product_id) : ''}
+                          onChange={(val) => updateDraft(draft.uid, { product_id: Number(val) || 0 })}
+                          options={selectOptions}
+                        />
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 items-end">
+                        <div>
+                          <label htmlFor={`${formId}-alias-${idx}`} className="block text-xs text-[var(--cms-muted-fg)] mb-1">展示别名（非商业，可选）</label>
+                          <input
+                            id={`${formId}-alias-${idx}`}
+                            type="text"
+                            maxLength={64}
+                            className="input-field w-full text-xs"
+                            placeholder={summary?.name || '例如：Starter Pack'}
+                            value={draft.display_alias}
+                            onChange={(e) => updateDraft(draft.uid, { display_alias: e.target.value })}
+                          />
+                        </div>
+                        <div>
+                          <label htmlFor={`${formId}-badge-${idx}`} className="block text-xs text-[var(--cms-muted-fg)] mb-1">推荐 / 热门角标（可选）</label>
+                          <input
+                            id={`${formId}-badge-${idx}`}
+                            type="text"
+                            maxLength={32}
+                            className="input-field w-full text-xs"
+                            placeholder="例如：Popular / Save 45%"
+                            value={draft.badge}
+                            onChange={(e) => updateDraft(draft.uid, { badge: e.target.value })}
+                          />
+                        </div>
+                        <label className="flex items-center gap-2 text-xs cursor-pointer pb-2">
+                          <input
+                            type="checkbox"
+                            checked={draft.is_highlighted}
+                            onChange={(e) => updateDraft(draft.uid, { is_highlighted: e.target.checked })}
+                          />
+                          <span>默认高亮 / 主推</span>
+                        </label>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {editorError && <p role="alert" className="text-xs text-[var(--cms-error)] pt-1">{editorError}</p>}
+            </div>
+          </form>
+
+          {/* 右侧：H5 实时效果预览 */}
+          <div className="xl:col-span-5 space-y-3 xl:sticky xl:top-20">
+            <div className="cms-card p-4 space-y-3">
+              <div className="flex items-center justify-between">
+                <h2 className="text-sm font-semibold text-[var(--cms-fg)]">Reader H5 收银台预览</h2>
+                <div className="inline-flex rounded-lg border border-[var(--cms-border)] p-0.5 text-xs">
+                  <button
+                    type="button"
+                    className={`px-2 py-1 rounded-md cursor-pointer ${previewTheme === 'light' ? 'bg-[var(--cms-primary)] text-white' : 'text-[var(--cms-muted-fg)]'}`}
+                    onClick={() => setPreviewTheme('light')}
+                  >
+                    浅色
+                  </button>
+                  <button
+                    type="button"
+                    className={`px-2 py-1 rounded-md cursor-pointer ${previewTheme === 'dark' ? 'bg-[var(--cms-primary)] text-white' : 'text-[var(--cms-muted-fg)]'}`}
+                    onClick={() => setPreviewTheme('dark')}
+                  >
+                    深色
+                  </button>
+                </div>
+              </div>
+
+              <div className={`${previewTheme === 'light' ? 'h5-preview-light' : 'h5-preview-dark'} p-4 rounded-2xl border border-[var(--cms-border)] space-y-3`}>
+                <div className="flex items-center justify-between text-xs opacity-75">
+                  <span>{tplName || '未命名模板'}</span>
+                  <span>支持 PayPal · Stripe</span>
+                </div>
+                <div className="grid grid-cols-2 gap-2.5">
+                  {drafts.map((d, idx) => {
+                    const summary = resolveProductSummary(d.product_id);
+                    const active = selectedPreviewIdx === idx || d.is_highlighted;
+                    return (
+                      <button
+                        key={d.uid}
+                        type="button"
+                        onClick={() => setSelectedPreviewIdx(idx)}
+                        className={`relative text-left p-3 rounded-xl border transition-colors cursor-pointer ${
+                          active
+                            ? 'border-amber-500 ring-1 ring-amber-500/40 bg-amber-500/10'
+                            : 'border-current/15 hover:border-current/30'
+                        }`}
+                      >
+                        {d.badge && (
+                          <span className="inline-flex items-center gap-0.5 text-[10px] font-semibold px-1.5 py-0.5 rounded-full bg-amber-500 text-white mb-1.5">
+                            <Sparkles size={9} aria-hidden="true" />
+                            {d.badge}
+                          </span>
+                        )}
+                        <div className="flex items-center gap-1 text-xs font-semibold">
+                          {summary?.type === 'vip' && <Crown size={12} className="text-amber-500 shrink-0" aria-hidden="true" />}
+                          {summary?.type === 'whole_book' && <BookOpen size={12} className="text-indigo-500 shrink-0" aria-hidden="true" />}
+                          <span className="truncate">{d.display_alias || summary?.name || `槽位 #${idx + 1}`}</span>
+                        </div>
+                        <div className="text-base font-bold tabular-nums mt-1">{summary?.price ?? '—'}</div>
+                        {summary?.type === 'single' && (
+                          <div className="text-[11px] opacity-75 tabular-nums">
+                            {summary.coins} Coins{summary.bonus > 0 ? ` + ${summary.bonus}` : ''}
+                          </div>
+                        )}
+                        {summary?.type === 'vip' && (
+                          <div className="text-[11px] opacity-75">{summary.vipCycle ? VIP_CYCLE_LABELS[summary.vipCycle] : 'VIP'}</div>
+                        )}
+                        {summary?.type === 'whole_book' && <div className="text-[11px] opacity-75">Unlock Whole Book</div>}
+                      </button>
                     );
                   })}
                 </div>
               </div>
             </div>
-
-            {/* RIGHT: Real H5 Reader Recharge Preview (Draggable + Double-Click Edit) */}
-            <div className="xl:sticky xl:top-20 space-y-2.5">
-              <div className="flex items-center justify-between gap-2 px-1">
-                <span className="text-xs text-[var(--cms-muted-fg)]">
-                  {canManageTemplates ? 'H5 Reader 真实样式预览（可拖拽排序 · 双击编辑）' : 'H5 Reader 真实样式预览'}
-                </span>
-                <div className="flex items-center rounded-lg border border-[var(--cms-border)] bg-[var(--cms-card)] p-0.5 text-xs shrink-0">
-                  <button
-                    type="button"
-                    onClick={() => setH5Theme('light')}
-                    className={`px-2 py-0.5 rounded-md cursor-pointer transition-colors ${
-                      h5Theme === 'light'
-                        ? 'bg-[var(--cms-secondary)] text-[var(--cms-fg)] font-medium'
-                        : 'text-[var(--cms-muted-fg)]'
-                    }`}
-                  >
-                    日间
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setH5Theme('dark')}
-                    className={`px-2 py-0.5 rounded-md cursor-pointer transition-colors ${
-                      h5Theme === 'dark'
-                        ? 'bg-[var(--cms-secondary)] text-[var(--cms-fg)] font-medium'
-                        : 'text-[var(--cms-muted-fg)]'
-                    }`}
-                  >
-                    夜间
-                  </button>
-                </div>
-              </div>
-
-              {/* H5 Phone Container mirroring reader-front /recharge */}
-              <div
-                className={`rounded-[26px] border border-[var(--cms-border)] overflow-hidden transition-colors ${
-                  h5Theme === 'dark' ? 'h5-preview-dark' : 'h5-preview-light'
-                }`}
-                style={{ boxShadow: 'var(--shadow-sm)' }}
-              >
-                {/* Real H5 Reader Sticky Header */}
-                <div
-                  className="px-3.5 py-3 flex items-center justify-between"
-                  style={{
-                    borderBottom: '1px solid var(--h5-border)',
-                    backgroundColor: 'var(--h5-bg-primary)',
-                  }}
-                >
-                  <span
-                    aria-hidden="true"
-                    className="w-7 h-7 inline-flex items-center justify-center rounded-lg"
-                    style={{ color: 'var(--h5-text-primary)' }}
-                  >
-                    <ChevronLeft size={18} strokeWidth={1.8} />
-                  </span>
-                  <span
-                    style={{
-                      fontFamily: "'Iowan Old Style', Georgia, serif",
-                      fontSize: '0.95rem',
-                      fontWeight: 600,
-                      letterSpacing: '-0.02em',
-                      color: 'var(--h5-text-primary)',
-                    }}
-                  >
-                    Membership &amp; Coins
-                  </span>
-                  <span className="w-7" />
-                </div>
-
-                {/* Real H5 Reader Scrollable Body */}
-                <div className="p-3.5 space-y-4 max-h-[600px] overflow-y-auto h5-no-scrollbar">
-                  {/* Section 1: UNLIMITED MEMBERSHIP */}
-                  {subscriptionPreviewPacks.length > 0 && (
-                    <section className="space-y-2">
-                      <div
-                        style={{
-                          fontSize: '0.6875rem',
-                          fontWeight: 600,
-                          textTransform: 'uppercase',
-                          letterSpacing: '0.1em',
-                          color: 'var(--h5-text-tertiary)',
-                        }}
-                      >
-                        Unlimited Membership
-                      </div>
-
-                      <div className="flex flex-col gap-2">
-                        {subscriptionPreviewPacks.map(({ slot, idx }) => {
-                          const isSelected = idx === selectedSlotIdx;
-                          const isDragging = dragSlotIdx === idx;
-                          const isDragTarget = dragOverIdx === idx && dragSlotIdx !== null && dragSlotIdx !== idx;
-                          const amt = getSlotAmount(slot).toFixed(2);
-                          const cycle = slot.subscription_cycle || slot.vip_duration || 'month';
-                          const fallbackName =
-                            cycle === 'day'
-                              ? 'VIP Daily Pass'
-                              : cycle === 'week'
-                                ? 'VIP Weekly Pass'
-                                : 'VIP Monthly Pass';
-
-                          return (
-                            <div
-                              key={slot._uid || slot.id || idx}
-                              draggable={canManageTemplates && !saving}
-                              onDragStart={(e) => canManageTemplates && handleSlotDragStart(e, idx)}
-                              onDragOver={(e) => canManageTemplates && handleSlotDragOver(e, idx)}
-                              onDrop={(e) => canManageTemplates && handleSlotDrop(e, idx)}
-                              onDragEnd={handleSlotDragEnd}
-                              role="button"
-                              tabIndex={0}
-                              onClick={() => setSelectedSlotIdx(idx)}
-                              onDoubleClick={() => canManageTemplates && openEditSlotModal(idx)}
-                              onKeyDown={(e) => {
-                                if (e.key === 'Enter' || e.key === ' ') {
-                                  e.preventDefault();
-                                  setSelectedSlotIdx(idx);
-                                }
-                              }}
-                              title={canManageTemplates ? '点击选中 · 拖拽调整顺序 · 双击编辑属性' : '点击切换预览档位'}
-                              className={`text-left flex items-center justify-between gap-3 ${canManageTemplates ? 'cursor-grab active:cursor-grabbing' : 'cursor-pointer'} select-none transition-all ${
-                                isDragging ? 'opacity-45' : ''
-                              }`}
-                              style={{
-                                borderRadius: '14px',
-                                padding: '12px 13px',
-                                backgroundColor: isSelected ? 'var(--h5-hero-bg)' : 'var(--h5-bg-secondary)',
-                                color: isSelected ? 'var(--h5-hero-text)' : 'var(--h5-text-primary)',
-                                border: isDragTarget
-                                  ? '1.5px dashed var(--h5-accent)'
-                                  : isSelected
-                                    ? '1.5px solid var(--h5-accent)'
-                                    : '1px solid var(--h5-border)',
-                              }}
-                            >
-                              <div className="flex items-start gap-2.5 min-w-0 flex-1">
-                                <Crown
-                                  size={16}
-                                  strokeWidth={1.8}
-                                  aria-hidden="true"
-                                  style={{
-                                    color: isSelected ? '#E2BB6B' : 'var(--h5-accent)',
-                                    marginTop: '2px',
-                                    flexShrink: 0,
-                                  }}
-                                />
-                                <div className="min-w-0 flex-1">
-                                  <div className="flex items-center gap-1.5 flex-wrap">
-                                    <span
-                                      className="truncate"
-                                      style={{
-                                        fontFamily: "'Iowan Old Style', Georgia, serif",
-                                        fontSize: '0.875rem',
-                                        fontWeight: 600,
-                                      }}
-                                    >
-                                      {slot.vip_name || fallbackName}
-                                    </span>
-                                    <span
-                                      style={{
-                                        fontSize: '0.625rem',
-                                        backgroundColor: isSelected ? 'rgba(212, 174, 104, 0.2)' : 'var(--h5-accent-light)',
-                                        color: isSelected ? '#E2BB6B' : 'var(--h5-accent-text)',
-                                        fontWeight: 600,
-                                        padding: '1px 7px',
-                                        borderRadius: '999px',
-                                        textTransform: 'uppercase',
-                                      }}
-                                    >
-                                      {cycle}
-                                    </span>
-                                  </div>
-                                  <div
-                                    className="line-clamp-2 mt-1"
-                                    style={{
-                                      fontSize: '0.6875rem',
-                                      color: isSelected ? 'rgba(250, 248, 245, 0.74)' : 'var(--h5-text-secondary)',
-                                      lineHeight: 1.4,
-                                    }}
-                                  >
-                                    {slot.vip_desc || 'Unlimited reading across all titles. Auto-renews, cancel anytime.'}
-                                  </div>
-                                </div>
-                              </div>
-
-                              <div className="text-right shrink-0 tabular-nums">
-                                <div style={{ fontSize: '0.9375rem', fontWeight: 700 }}>${amt}</div>
-                                <div style={{ fontSize: '0.625rem', opacity: 0.7 }}>/{cycle}</div>
-                              </div>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    </section>
-                  )}
-
-                  {/* Section 2: SINGLE PURCHASES (Coin Packs & Whole Book 2-col Grid) */}
-                  {coinAndBookPreviewPacks.length > 0 && (
-                    <section className="space-y-2">
-                      <div className="flex items-baseline justify-between">
-                        <div
-                          style={{
-                            fontSize: '0.6875rem',
-                            fontWeight: 600,
-                            textTransform: 'uppercase',
-                            letterSpacing: '0.1em',
-                            color: 'var(--h5-text-tertiary)',
-                          }}
-                        >
-                          Single Purchases
-                        </div>
-                        <span style={{ fontSize: '0.6875rem', color: 'var(--h5-text-tertiary)' }}>Never expire</span>
-                      </div>
-
-                      <div className="grid grid-cols-2 gap-2.5">
-                        {coinAndBookPreviewPacks.map(({ slot, idx }) => {
-                          const isSelected = idx === selectedSlotIdx;
-                          const isDragging = dragSlotIdx === idx;
-                          const isDragTarget = dragOverIdx === idx && dragSlotIdx !== null && dragSlotIdx !== idx;
-                          const type = normalizeSlotType(slot.type);
-                          const invalid = !isSlotBonusValid(slot) || (type === 'single' && !(Number(slot.coins) > 0));
-                          const amt = getSlotAmount(slot).toFixed(2);
-                          const totalCoins = (Number(slot.coins) || 0) + (Number(slot.bonus) || 0);
-
-                          return (
-                            <div
-                              key={slot._uid || slot.id || idx}
-                              draggable={canManageTemplates && !saving}
-                              onDragStart={(e) => canManageTemplates && handleSlotDragStart(e, idx)}
-                              onDragOver={(e) => canManageTemplates && handleSlotDragOver(e, idx)}
-                              onDrop={(e) => canManageTemplates && handleSlotDrop(e, idx)}
-                              onDragEnd={handleSlotDragEnd}
-                              role="button"
-                              tabIndex={0}
-                              onClick={() => setSelectedSlotIdx(idx)}
-                              onDoubleClick={() => canManageTemplates && openEditSlotModal(idx)}
-                              onKeyDown={(e) => {
-                                if (e.key === 'Enter' || e.key === ' ') {
-                                  e.preventDefault();
-                                  setSelectedSlotIdx(idx);
-                                }
-                              }}
-                              title={canManageTemplates ? '点击选中 · 拖拽调整顺序 · 双击编辑属性' : '点击切换预览档位'}
-                              className={`text-left flex flex-col justify-between gap-2.5 ${canManageTemplates ? 'cursor-grab active:cursor-grabbing' : 'cursor-pointer'} select-none transition-all ${
-                                isDragging ? 'opacity-45' : ''
-                              }`}
-                              style={{
-                                backgroundColor: 'var(--h5-bg-secondary)',
-                                color: 'var(--h5-text-primary)',
-                                borderRadius: '13px',
-                                padding: '11px 10px',
-                                border: isDragTarget
-                                  ? '1.5px dashed var(--h5-accent)'
-                                  : invalid
-                                    ? '1.5px solid #dc2626'
-                                    : isSelected
-                                      ? '1.5px solid var(--h5-accent)'
-                                      : '1px solid var(--h5-border)',
-                                boxShadow: isSelected && !invalid && !isDragTarget ? '0 0 0 1px var(--h5-accent)' : 'none',
-                              }}
-                            >
-                              <div className="flex items-center justify-between gap-1">
-                                {type === 'whole_book' ? (
-                                  <span
-                                    style={{
-                                      backgroundColor: 'var(--h5-accent-light)',
-                                      color: 'var(--h5-accent-text)',
-                                      fontSize: '0.625rem',
-                                      fontWeight: 600,
-                                      padding: '2px 6px',
-                                      borderRadius: '999px',
-                                    }}
-                                  >
-                                    Full Book
-                                  </span>
-                                ) : Number(slot.bonus) > 0 ? (
-                                  <span
-                                    className="tabular-nums"
-                                    style={{
-                                      backgroundColor: invalid ? 'rgba(220,38,38,0.12)' : 'var(--h5-accent-light)',
-                                      color: invalid ? '#dc2626' : 'var(--h5-accent-text)',
-                                      fontSize: '0.625rem',
-                                      fontWeight: 600,
-                                      padding: '2px 6px',
-                                      borderRadius: '999px',
-                                    }}
-                                  >
-                                    +{slot.bonus} bonus
-                                  </span>
-                                ) : (
-                                  <span />
-                                )}
-
-                                <span
-                                  aria-hidden="true"
-                                  style={{
-                                    width: '15px',
-                                    height: '15px',
-                                    borderRadius: '50%',
-                                    border: isSelected ? 'none' : '1.5px solid var(--h5-border-strong)',
-                                    backgroundColor: isSelected ? 'var(--h5-accent)' : 'transparent',
-                                    color: '#FFFFFF',
-                                    display: 'inline-flex',
-                                    alignItems: 'center',
-                                    justifyContent: 'center',
-                                    flexShrink: 0,
-                                  }}
-                                >
-                                  {isSelected && <Check size={10} strokeWidth={2.8} />}
-                                </span>
-                              </div>
-
-                              {type === 'whole_book' ? (
-                                <div>
-                                  <div className="flex items-center gap-1.5">
-                                    <BookOpen
-                                      size={14}
-                                      strokeWidth={1.9}
-                                      style={{ color: 'var(--h5-accent)', flexShrink: 0 }}
-                                      aria-hidden="true"
-                                    />
-                                    <span
-                                      className="truncate"
-                                      style={{
-                                        fontSize: '0.8125rem',
-                                        fontWeight: 700,
-                                        color: 'var(--h5-text-primary)',
-                                        lineHeight: 1.25,
-                                      }}
-                                    >
-                                      {slot.vip_name || 'Unlock Entire Novel'}
-                                    </span>
-                                  </div>
-                                  <span
-                                    className="block truncate mt-0.5"
-                                    style={{ fontSize: '0.6875rem', color: 'var(--h5-text-tertiary)' }}
-                                  >
-                                    Current Novel
-                                  </span>
-                                </div>
-                              ) : (
-                                <div>
-                                  <div className="flex items-center gap-1.5">
-                                    <H5GoldCoin size={15} />
-                                    <span
-                                      className="tabular-nums"
-                                      style={{ fontSize: '1rem', fontWeight: 700, color: 'var(--h5-text-primary)' }}
-                                    >
-                                      {Number(slot.coins).toLocaleString()}
-                                    </span>
-                                  </div>
-                                  <span
-                                    className="block tabular-nums mt-0.5"
-                                    style={{ fontSize: '0.6875rem', color: 'var(--h5-text-tertiary)' }}
-                                  >
-                                    Total: {totalCoins.toLocaleString()} Coins
-                                  </span>
-                                </div>
-                              )}
-
-                              <div
-                                className="tabular-nums text-center"
-                                style={{
-                                  fontSize: '0.75rem',
-                                  fontWeight: 600,
-                                  backgroundColor: isSelected ? 'var(--h5-cta-bg)' : 'var(--h5-bg-tertiary)',
-                                  color: isSelected ? 'var(--h5-cta-text)' : 'var(--h5-text-primary)',
-                                  padding: '6px 0',
-                                  borderRadius: '8px',
-                                }}
-                              >
-                                ${amt}
-                              </div>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    </section>
-                  )}
-
-                  {/* Real PayPal Pill CTA */}
-                  {activeSlot && (
-                    <div
-                      className="w-full flex items-center justify-center gap-2 tabular-nums"
-                      style={{
-                        minHeight: '44px',
-                        backgroundColor: '#F5C344',
-                        color: '#0F265C',
-                        borderRadius: '999px',
-                        fontSize: '0.8125rem',
-                        fontWeight: 700,
-                      }}
-                    >
-                      <svg width="17" height="17" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                        <path
-                          d="M7.076 21.337H2.47a.64.64 0 0 1-.633-.74L4.931 2.378A.853.853 0 0 1 5.774 1.7h7.24c3.483 0 5.69 1.642 5.093 5.372-.44 2.75-2.228 4.316-4.945 4.316h-2.14l-1.07 6.776-.026.173a.853.853 0 0 1-.85.8z"
-                          fill="#003087"
-                        />
-                        <path
-                          d="M8.766 18.066l1.24-7.852h2.64c2.717 0 4.505-1.566 4.945-4.316.597-3.73-1.61-5.372-5.093-5.372H5.258a.853.853 0 0 0-.843.678L1.321 19.723a.64.64 0 0 0 .633.74h4.606l1.07-6.776.026-.173a.853.853 0 0 1 .85-.8z"
-                          fill="#0079C1"
-                        />
-                        <path
-                          d="M9.13 14.77l1.07-6.776h2.14c2.717 0 4.505-1.566 4.945-4.316.14-.876.105-1.614-.078-2.217C16.89 2.532 15.65 2 13.904 2H8.354a.853.853 0 0 0-.843.678L4.417 21.2a.64.64 0 0 0 .633.74h4.606l1.07-6.776.026-.173a.853.853 0 0 1 .85-.8z"
-                          fill="#00457C"
-                        />
-                      </svg>
-                      <span>
-                        {activeSlotType === 'subscription'
-                          ? `Subscribe with PayPal · $${getSlotAmount(activeSlot).toFixed(2)}`
-                          : `Pay with PayPal · $${getSlotAmount(activeSlot).toFixed(2)}`}
-                      </span>
-                    </div>
-                  )}
-
-                  {/* Real H5 Notes & Legal Footer */}
-                  <div
-                    style={{
-                      backgroundColor: 'var(--h5-bg-secondary)',
-                      borderRadius: '12px',
-                      padding: '10px 12px',
-                      border: '1px solid var(--h5-border)',
-                      fontSize: '0.6875rem',
-                      color: 'var(--h5-text-secondary)',
-                      lineHeight: 1.55,
-                    }}
-                  >
-                    <p className="m-0">
-                      • <strong>VIP Unlimited Pass:</strong> Instant access to all novel chapters across the site without consuming coins.
-                    </p>
-                    <p className="m-0">
-                      • <strong>Coin Top-up:</strong> Permanent coins to unlock individual chapters across StarNovel.
-                    </p>
-                    <p className="m-0">
-                      • Need help?{' '}
-                      <span style={{ color: 'var(--h5-accent-text)', fontWeight: 600, textDecoration: 'underline' }}>
-                        Contact Customer Support
-                      </span>
-                      .
-                    </p>
-                  </div>
-
-                  <div
-                    className="flex flex-wrap justify-center items-center gap-x-2 gap-y-1 pb-1"
-                    style={{ fontSize: '0.6875rem', color: 'var(--h5-text-tertiary)' }}
-                  >
-                    <span className="underline">Terms of Service</span>
-                    <span aria-hidden="true">·</span>
-                    <span className="underline">Privacy Policy</span>
-                    <span aria-hidden="true">·</span>
-                    <span className="underline">Refund Policy</span>
-                    <span aria-hidden="true">·</span>
-                    <span className="underline">Contact Us</span>
-                  </div>
-                </div>
-              </div>
-            </div>
           </div>
-        </form>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h1 className="text-xl font-semibold text-[var(--cms-fg)]">充值模板管理</h1>
+          <p className="text-xs text-[var(--cms-muted-fg)] mt-1">
+            将已双渠道上架的不可变商品编排为 4–8 个 H5 充值卡位，仅维护模板内的排序、角标与默认高亮等非商业展示配置。
+          </p>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          {canReadProducts && (
+            <Link to="/payments/products" className="btn-secondary text-sm">商品与定价</Link>
+          )}
+          <button type="button" className="btn-secondary inline-flex items-center gap-1.5" onClick={() => void loadTemplates()}>
+            <RefreshCw size={14} aria-hidden="true" />
+            刷新
+          </button>
+          {canWriteTemplates && (
+            <button type="button" className="btn-primary inline-flex items-center gap-1.5" onClick={() => navigate('/recharge-templates/new')}>
+              <Plus size={15} aria-hidden="true" />
+              新建模板
+            </button>
+          )}
+        </div>
+      </div>
+
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <SearchInput value={search} onChange={(v) => { setSearch(v); setPage(1); }} placeholder="搜索模板名称或 ID…" ariaLabel="搜索充值模板" />
+      </div>
+
+      {loadError && (
+        <div role="alert" className="p-3 rounded-xl border border-[var(--cms-error)] bg-[var(--cms-error-soft)] text-sm text-[var(--cms-error)]">
+          {loadError}
+        </div>
       )}
 
-      {/* Centered Slot Edit / Add Modal */}
-      <CmsDialog
-        open={Boolean(editingSlotTarget !== null && slotDraft)}
-        onClose={closeSlotModal}
-        variant="modal"
-        size="md"
-        closedBy="any"
-        title={
-          editingSlotTarget === 'new'
-            ? `新增卡位 (第 ${slots.length + 1} 位)`
-            : typeof editingSlotTarget === 'number'
-              ? `编辑卡位 0${editingSlotTarget + 1}`
-              : '编辑卡位'
-        }
-        subtitle="修改类型、售价、基础金币 / 赠送数量及展示标题描述，保存后即时更新右侧 H5 预览"
+      <TableRegion
+        ariaLabel="充值模板列表"
         footer={
-          <>
-            <button type="button" onClick={closeSlotModal} className="btn-secondary">
-              取消
-            </button>
-            <button type="submit" form={slotFormId} className="btn-primary">
-              {editingSlotTarget === 'new' ? '确认添加卡位' : '确认修改'}
-            </button>
-          </>
+          filteredTemplates.length > 0 ? (
+            <Pagination
+              page={page}
+              pageSize={pageSize}
+              total={filteredTemplates.length}
+              onPageChange={setPage}
+              onPageSizeChange={(next) => {
+                setPageSize(next);
+                setPage(1);
+              }}
+              itemLabel="个模板"
+            />
+          ) : undefined
         }
       >
-        {slotDraft && (
-          <form id={slotFormId} onSubmit={handleConfirmSlotModal} className="space-y-4 text-xs">
-            {/* Slot Type Switcher */}
-            <div className="space-y-1.5">
-              <span className="block font-medium text-[var(--cms-muted-fg)]">卡位充值类型</span>
-              <div
-                role="group"
-                aria-label="卡位充值类型"
-                className="grid grid-cols-3 gap-1 rounded-xl bg-[var(--cms-content)] border border-[var(--cms-border)] p-1"
-              >
-                {(
-                  [
-                    { id: 'single', label: '单次金币包' },
-                    { id: 'subscription', label: 'VIP 周期订阅' },
-                    { id: 'whole_book', label: '整本购买' },
-                  ] as Array<{ id: SlotTypeNormalized; label: string }>
-                ).map((tab) => {
-                  const selected = normalizeSlotType(slotDraft.type) === tab.id;
-                  return (
-                    <button
-                      key={tab.id}
-                      type="button"
-                      aria-pressed={selected}
-                      onClick={() => applySlotDraftChange('type', tab.id)}
-                      className={`focus-ring py-2 rounded-lg font-medium cursor-pointer transition-colors ${
-                        selected
-                          ? 'bg-[var(--cms-card)] text-[var(--cms-fg)] shadow-xs'
-                          : 'text-[var(--cms-muted-fg)] hover:text-[var(--cms-fg)]'
-                      }`}
-                    >
-                      {tab.label}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-
-            {normalizeSlotType(slotDraft.type) === 'single' && (
-              <div className="space-y-4">
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                  <label className="space-y-1.5">
-                    <span className="block font-medium text-[var(--cms-muted-fg)]">档位售价 (USD)</span>
-                    <div className="relative">
-                      <span className="absolute left-3 top-1/2 -translate-y-1/2 text-xs text-[var(--cms-muted-fg)]">$</span>
-                      <input
-                        type="number"
-                        step="0.01"
-                        min="0.01"
-                        autoFocus
-                        required
-                        className="input-field tabular-nums"
-                        style={{ paddingLeft: '26px' }}
-                        value={slotDraft.price_amount ?? getSlotAmount(slotDraft)}
-                        onChange={(e) => applySlotDraftChange('price_amount', e.target.value)}
-                      />
-                    </div>
-                  </label>
-
-                  <label className="space-y-1.5">
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="font-medium text-[var(--cms-muted-fg)]">基础金币 (Coins)</span>
-                      {Number(slotDraft.coins) !== Math.round(getSlotAmount(slotDraft) * 100) && (
-                        <button
-                          type="button"
-                          onClick={() => applySlotDraftChange('coins', Math.round(getSlotAmount(slotDraft) * 100))}
-                          className="text-[11px] text-[var(--cms-detail)] hover:underline cursor-pointer"
-                        >
-                          按 1:100 折算
-                        </button>
+        <table className="cms-table">
+          <thead>
+            <tr>
+              <th scope="col">ID</th>
+              <th scope="col">模板名称</th>
+              <th scope="col">槽位构成（4–8 个）</th>
+              <th scope="col">售价区间</th>
+              <th scope="col">更新时间</th>
+              <th scope="col" className="text-right">操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            {!templates && !loadError ? (
+              <SkeletonRows rows={3} cols={6} />
+            ) : pagedTemplates.length === 0 ? (
+              <tr>
+                <td colSpan={6} className="text-center py-8 text-sm text-[var(--cms-muted-fg)]">暂无充值模板</td>
+              </tr>
+            ) : (
+              pagedTemplates.map((t) => {
+                const { summary, priceRange } = summarizeSlots(t.slots || []);
+                const slotCount = t.slots?.length || 0;
+                const promoCount = t.linked_promotion_count ?? 0;
+                const hasPromoRefs = !canDeleteTemplate(t) && !t.is_default;
+                return (
+                  <tr key={t.id}>
+                    <td className="font-mono-code text-xs text-[var(--cms-muted-fg)]">#{t.id}</td>
+                    <td>
+                      <div className="flex items-center gap-2 font-medium text-[var(--cms-fg)]">
+                        <span>{t.name}</span>
+                        <span className="badge badge-gray text-[11px]">{t.environment === 'sandbox' ? 'Sandbox' : 'Live'}</span>
+                        {t.is_default && (
+                          <span className="badge badge-green inline-flex items-center gap-1">
+                            <Check size={11} aria-hidden="true" />
+                            全站默认
+                          </span>
+                        )}
+                        {hasPromoRefs && (
+                          <span className="badge badge-gray text-[11px]" title={(t.linked_promotion_names ?? []).join('、')}>
+                            已绑定 {promoCount} 条推广
+                          </span>
+                        )}
+                      </div>
+                    </td>
+                    <td>
+                      <div className="text-xs text-[var(--cms-fg)]">{summary}</div>
+                      <div className="mt-0.5">
+                        <StatusDot
+                          tone={slotCount >= 4 && slotCount <= 8 ? 'success' : 'warning'}
+                          label={`${slotCount} 个槽位`}
+                        />
+                      </div>
+                    </td>
+                    <td className="tabular-nums text-xs font-medium">{priceRange}</td>
+                    <td className="text-xs text-[var(--cms-muted-fg)] tabular-nums">
+                      {new Date(t.updated_at).toLocaleString()}
+                    </td>
+                    <td className="text-right">
+                      {canWriteTemplates ? (
+                        <div className="inline-flex flex-wrap justify-end gap-1.5">
+                          <button type="button" className="btn-detail" onClick={() => navigate(`/recharge-templates/${t.id}/edit`)}>
+                            编辑
+                          </button>
+                          <button
+                            type="button"
+                            className="btn-detail inline-flex items-center gap-1"
+                            onClick={() => navigate(`/recharge-templates/new?copyFrom=${t.id}`)}
+                          >
+                            <Copy size={12} aria-hidden="true" />
+                            复制
+                          </button>
+                          {canSetDefaultTemplate(t) && (
+                            <button
+                              type="button"
+                              className="btn-detail inline-flex items-center gap-1"
+                              onClick={() => void handleSetDefault(t)}
+                            >
+                              <Star size={12} aria-hidden="true" />
+                              设为默认
+                            </button>
+                          )}
+                          {!t.is_default && (
+                            <button
+                              type="button"
+                              className="btn-ghost text-xs text-[var(--cms-error)] disabled:opacity-45 disabled:cursor-not-allowed"
+                              disabled={hasPromoRefs}
+                              title={hasPromoRefs ? `已被 ${promoCount} 条推广链接引用，请先解绑后再删除` : undefined}
+                              onClick={() => void handleDelete(t)}
+                            >
+                              {hasPromoRefs ? `引用中 (${promoCount})` : '删除'}
+                            </button>
+                          )}
+                        </div>
+                      ) : (
+                        <span className="text-[var(--cms-muted-fg)]">—</span>
                       )}
-                    </div>
-                    <input
-                      type="number"
-                      min="1"
-                      step="1"
-                      required
-                      className="input-field tabular-nums"
-                      value={slotDraft.coins}
-                      onChange={(e) => applySlotDraftChange('coins', e.target.value)}
-                    />
-                  </label>
-                </div>
-
-                <label className="block space-y-1.5">
-                  <div className="flex items-center justify-between">
-                    <span className="font-medium text-[var(--cms-muted-fg)]">额外赠送金币 (Bonus)</span>
-                    <span
-                      className={`tabular-nums font-medium ${
-                        !isSlotBonusValid(slotDraft) ? 'text-[var(--cms-error)]' : 'text-[var(--cms-primary)]'
-                      }`}
-                    >
-                      {!isSlotBonusValid(slotDraft)
-                        ? Number(slotDraft.bonus) < 0
-                          ? '不能为负数'
-                          : '超出 1.5x 上限'
-                        : Number(slotDraft.coins) > 0 && Number(slotDraft.bonus) > 0
-                          ? `+${Math.round((Number(slotDraft.bonus) / Number(slotDraft.coins)) * 100)}%`
-                          : '不赠送'}
-                    </span>
-                  </div>
-                  <input
-                    type="number"
-                    min="0"
-                    step="1"
-                    required
-                    className={`input-field tabular-nums ${!isSlotBonusValid(slotDraft) ? 'border-[var(--cms-error)]' : ''}`}
-                    value={slotDraft.bonus}
-                    onChange={(e) => applySlotDraftChange('bonus', e.target.value)}
-                  />
-                  <div
-                    className={`text-xs pt-0.5 tabular-nums ${
-                      !isSlotBonusValid(slotDraft) ? 'text-[var(--cms-error)]' : 'text-[var(--cms-muted-fg)]'
-                    }`}
-                  >
-                    总计到账 {(Number(slotDraft.coins) || 0) + (Number(slotDraft.bonus) || 0)} 金币 · 风控上限{' '}
-                    {getSlotMaxBonus(slotDraft)} Bonus（基础金币 × 1.5）
-                  </div>
-                </label>
-              </div>
+                    </td>
+                  </tr>
+                );
+              })
             )}
-
-            {normalizeSlotType(slotDraft.type) === 'subscription' && (
-              <div className="space-y-4">
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                  <label className="space-y-1.5">
-                    <span className="block font-medium text-[var(--cms-muted-fg)]">订阅扣费周期</span>
-                    <CustomSelect
-                      width="100%"
-                      value={slotDraft.subscription_cycle || slotDraft.vip_duration || 'month'}
-                      onChange={(val) => applySlotDraftChange('subscription_cycle', val)}
-                      options={[
-                        { value: 'day', label: '日卡 · 每 1 天续费 (Daily)' },
-                        { value: 'week', label: '周卡 · 每 7 天续费 (Weekly)' },
-                        { value: 'month', label: '月卡 · 每 30 天续费 (Monthly)' },
-                      ]}
-                    />
-                  </label>
-
-                  <label className="space-y-1.5">
-                    <span className="block font-medium text-[var(--cms-muted-fg)]">订阅周期售价 (USD)</span>
-                    <div className="relative">
-                      <span className="absolute left-3 top-1/2 -translate-y-1/2 text-xs text-[var(--cms-muted-fg)]">$</span>
-                      <input
-                        type="number"
-                        step="0.01"
-                        min="0.01"
-                        required
-                        className="input-field tabular-nums"
-                        style={{ paddingLeft: '26px' }}
-                        value={slotDraft.price_amount ?? getSlotAmount(slotDraft)}
-                        onChange={(e) => applySlotDraftChange('price_amount', e.target.value)}
-                      />
-                    </div>
-                  </label>
-                </div>
-
-                <label className="block space-y-1.5">
-                  <span className="block font-medium text-[var(--cms-muted-fg)]">会员卡标题 *</span>
-                  <input
-                    type="text"
-                    required
-                    placeholder="例如：VIP Weekly Pass"
-                    className="input-field"
-                    value={slotDraft.vip_name}
-                    onChange={(e) => applySlotDraftChange('vip_name', e.target.value)}
-                  />
-                </label>
-
-                <label className="block space-y-1.5">
-                  <span className="block font-medium text-[var(--cms-muted-fg)]">权益描述 *</span>
-                  <input
-                    type="text"
-                    required
-                    placeholder="例如：Unlimited reading across all titles."
-                    className="input-field"
-                    value={slotDraft.vip_desc}
-                    onChange={(e) => applySlotDraftChange('vip_desc', e.target.value)}
-                  />
-                </label>
-              </div>
-            )}
-
-            {normalizeSlotType(slotDraft.type) === 'whole_book' && (
-              <div className="space-y-4">
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                  <label className="space-y-1.5">
-                    <span className="block font-medium text-[var(--cms-muted-fg)]">整本买断价格 (USD)</span>
-                    <div className="relative">
-                      <span className="absolute left-3 top-1/2 -translate-y-1/2 text-xs text-[var(--cms-muted-fg)]">$</span>
-                      <input
-                        type="number"
-                        step="0.01"
-                        min="0.01"
-                        required
-                        className="input-field tabular-nums"
-                        style={{ paddingLeft: '26px' }}
-                        value={slotDraft.price_amount ?? getSlotAmount(slotDraft)}
-                        onChange={(e) => applySlotDraftChange('price_amount', e.target.value)}
-                      />
-                    </div>
-                  </label>
-
-                  <label className="space-y-1.5">
-                    <span className="block font-medium text-[var(--cms-muted-fg)]">商品名称 *</span>
-                    <input
-                      type="text"
-                      required
-                      placeholder="例如：Unlock Entire Novel"
-                      className="input-field"
-                      value={slotDraft.vip_name}
-                      onChange={(e) => applySlotDraftChange('vip_name', e.target.value)}
-                    />
-                  </label>
-                </div>
-
-                <label className="block space-y-1.5">
-                  <span className="block font-medium text-[var(--cms-muted-fg)]">权益描述 *</span>
-                  <input
-                    type="text"
-                    required
-                    placeholder="例如：一次性解锁当前小说全部付费章节"
-                    className="input-field"
-                    value={slotDraft.vip_desc}
-                    onChange={(e) => applySlotDraftChange('vip_desc', e.target.value)}
-                  />
-                </label>
-              </div>
-            )}
-
-            {slotDraftError && (
-              <div
-                role="alert"
-                className="px-3.5 py-2.5 rounded-xl border text-xs"
-                style={{
-                  backgroundColor: 'color-mix(in srgb, var(--cms-error) 10%, transparent)',
-                  borderColor: 'color-mix(in srgb, var(--cms-error) 28%, transparent)',
-                  color: 'var(--cms-error)',
-                }}
-              >
-                {slotDraftError}
-              </div>
-            )}
-          </form>
-        )}
-      </CmsDialog>
+          </tbody>
+        </table>
+      </TableRegion>
     </div>
   );
 }

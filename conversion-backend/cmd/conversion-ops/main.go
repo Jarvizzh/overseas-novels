@@ -42,7 +42,7 @@ func run(ctx context.Context, args []string) error {
 	eventName := flags.String("event-name", "", "Purchase or Subscribe")
 	apply := flags.Bool("apply", false, "apply missing-row repair or confirm retention")
 	keepDays := flags.Int("keep-days", 0, "retention period in days (minimum seven)")
-	operator := flags.String("operator", "", "active Admin or SuperAdmin account ID")
+	operator := flags.String("operator", "", "active admin account ID (SuperAdmin required for retention; ads.conversions:write required for other audited operations)")
 	reason := flags.String("reason", "", "audit reason")
 	evidenceRef := flags.String("evidence-reference", "", "reference for missing-row repair evidence")
 	deliveryID := flags.Int64("delivery-id", 0, "delivery ID")
@@ -112,18 +112,18 @@ func run(ctx context.Context, args []string) error {
 		if !*apply || *operator == "" || *reason == "" {
 			return delivery.ErrRetentionApply
 		}
-		result, err = service.RedactExpired(ctx, delivery.Operator{ID: *operator}, *keepDays, *limit, *reason)
+		result, err = service.RedactExpired(ctx, operatorForCommand(command, *operator), *keepDays, *limit, *reason)
 	case "review-legacy-environment":
-		result, err = service.ReviewLegacyEnvironment(ctx, delivery.Operator{ID: *operator}, *legacyEventID, *evidenceRef, *reason)
+		result, err = service.ReviewLegacyEnvironment(ctx, operatorForCommand(command, *operator), *legacyEventID, *evidenceRef, *reason)
 	case "repair-missing":
-		result, err = service.RepairMissing(ctx, delivery.Operator{ID: *operator}, delivery.RepairRequest{
+		result, err = service.RepairMissing(ctx, operatorForCommand(command, *operator), delivery.RepairRequest{
 			OrderID: *orderID, EventName: *eventName, Apply: *apply, Reason: *reason, Evidence: *evidenceRef})
 	case "retry-delivery":
-		result, err = service.RetryDelivery(ctx, delivery.Operator{ID: *operator}, *deliveryID, *expected, *reason, *acknowledge)
+		result, err = service.RetryDelivery(ctx, operatorForCommand(command, *operator), *deliveryID, *expected, *reason, *acknowledge)
 	case "retry-partner-report":
-		result, err = service.RetryPartnerReport(ctx, delivery.Operator{ID: *operator}, *reportID, *reason)
+		result, err = service.RetryPartnerReport(ctx, operatorForCommand(command, *operator), *reportID, *reason)
 	case "append-target":
-		result, err = service.AppendTarget(ctx, delivery.Operator{ID: *operator}, *eventID, *destinationID, *reason)
+		result, err = service.AppendTarget(ctx, operatorForCommand(command, *operator), *eventID, *destinationID, *reason)
 	default:
 		return errors.New("unknown conversion operation: " + command)
 	}
@@ -131,6 +131,17 @@ func run(ctx context.Context, args []string) error {
 		return err
 	}
 	return json.NewEncoder(os.Stdout).Encode(result)
+}
+
+func operatorForCommand(command, operatorID string) delivery.Operator {
+	switch command {
+	case "retention":
+		return delivery.Operator{ID: operatorID, RequireSuperAdmin: true}
+	case "review-legacy-environment", "repair-missing", "retry-delivery", "retry-partner-report", "append-target":
+		return delivery.Operator{ID: operatorID, Permission: delivery.PermissionAdsConversionsWrite}
+	default:
+		return delivery.Operator{ID: operatorID}
+	}
 }
 
 func loadEvidence(path, environment string) (map[string]delivery.LegacyEvidence, error) {

@@ -86,7 +86,7 @@ func TestUnlockChapter_EnforcesPublishedAndUnifiedPrice(t *testing.T) {
 		effectiveCost: 10, // round(5/1000 * 10) = 0; must not fallback to stale ch.Price=99
 	}
 	wRepo := &fakeWalletRepo{}
-	svc := NewService(wRepo, nRepo, nil, nil)
+	svc := NewService(wRepo, nRepo)
 
 	for _, hiddenID := range []int64{1, 2} {
 		err := svc.UnlockChapter(ctx, 42, hiddenID, 2, 0, "", "", ChapterQuote{})
@@ -122,7 +122,7 @@ func TestUnlockChapterDoesNotDebitPaidVIP(t *testing.T) {
 		startPay: 3, effectiveCost: 500,
 	}}
 	repo := &fakeWalletRepo{}
-	service := NewService(repo, novels, nil, nil)
+	service := NewService(repo, novels)
 	if err := service.UnlockChapter(context.Background(), 42, 1, 2, 0, "", "", ChapterQuote{ID: "ch-vip", Version: 1, Price: 500}); err != nil {
 		t.Fatal(err)
 	}

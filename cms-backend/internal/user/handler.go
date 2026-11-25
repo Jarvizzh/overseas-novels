@@ -21,12 +21,14 @@ func NewHandler(service UserService) *Handler {
 }
 
 func (h *Handler) RegisterRoutes(rg *gin.RouterGroup) {
+	usersRead := auth.RequirePermission(auth.PermRevenueUsersRead)
+	usersWrite := auth.RequirePermission(auth.PermRevenueUsersWrite)
 	users := rg.Group("/users", auth.AuthMiddleware())
 	{
-		users.GET("", h.ListUsers)
-		users.GET("/:id", h.GetUserDetail)
-		users.PUT("/:id/status", h.ToggleUserStatus)
-		users.POST("/:id/adjust-wallet", h.AdjustWallet)
+		users.GET("", usersRead, h.ListUsers)
+		users.GET("/:id", usersRead, h.GetUserDetail)
+		users.PUT("/:id/status", usersWrite, h.ToggleUserStatus)
+		users.POST("/:id/adjust-wallet", usersWrite, h.AdjustWallet)
 	}
 }
 

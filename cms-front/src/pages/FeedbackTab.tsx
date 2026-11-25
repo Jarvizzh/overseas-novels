@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { feedbackApi } from '../utils/api';
 import type { FeedbackItem } from '../utils/api';
+import { usePermission } from '../context/PermissionContext';
 import CustomSelect from '../components/CustomSelect';
 import { CmsDialog } from '../components/ui/CmsDialog';
 import { Pagination } from '../components/ui/Pagination';
@@ -29,6 +30,9 @@ const modalStatusOptions = [
 ];
 
 export default function FeedbackTab() {
+  const { canWrite } = usePermission();
+  const canWriteFeedback = canWrite('support.feedback');
+
   const [items, setItems] = useState<FeedbackItem[]>([]);
   const [total, setTotal] = useState(0);
   const [keyword, setKeyword] = useState('');
@@ -108,7 +112,7 @@ export default function FeedbackTab() {
 
   const handleUpdateSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!selectedItem || saving) return;
+    if (!canWriteFeedback || !selectedItem || saving) return;
 
     setSaving(true);
     try {
@@ -284,7 +288,7 @@ export default function FeedbackTab() {
                       onClick={() => openDetailModal(item)}
                       className="btn-detail"
                     >
-                      处理
+                      {canWriteFeedback ? '处理' : '查看'}
                     </button>
                   </td>
                 </tr>
@@ -305,14 +309,20 @@ export default function FeedbackTab() {
         closedBy={saving ? 'none' : 'any'}
         closeDisabled={saving}
         footer={
-          <>
-            <button type="button" className="btn-secondary" disabled={saving} onClick={() => !saving && setSelectedItem(null)}>
-              取消
+          canWriteFeedback ? (
+            <>
+              <button type="button" className="btn-secondary" disabled={saving} onClick={() => !saving && setSelectedItem(null)}>
+                取消
+              </button>
+              <button type="submit" form="feedback-reply-form" disabled={saving} className="btn-primary">
+                {saving ? '保存中...' : '保存处理结果'}
+              </button>
+            </>
+          ) : (
+            <button type="button" className="btn-secondary" onClick={() => setSelectedItem(null)}>
+              关闭
             </button>
-            <button type="submit" form="feedback-reply-form" disabled={saving} className="btn-primary">
-              {saving ? '保存中...' : '保存处理结果'}
-            </button>
-          </>
+          )
         }
       >
         {selectedItem && (
@@ -357,6 +367,7 @@ export default function FeedbackTab() {
                   options={modalStatusOptions}
                   value={editStatus}
                   onChange={setEditStatus}
+                  disabled={!canWriteFeedback}
                   width="100%"
                 />
               </label>
@@ -367,7 +378,8 @@ export default function FeedbackTab() {
                   rows={5}
                   value={adminReply}
                   onChange={(e) => setAdminReply(e.target.value)}
-                  placeholder="输入处理记录或回复备注（如已通过邮件回复、退款补单单号等）..."
+                  disabled={!canWriteFeedback}
+                  placeholder={canWriteFeedback ? '输入处理记录或回复备注（如已通过邮件回复、退款补单单号等）...' : '暂无处理备注'}
                   className="input-field"
                 />
               </label>

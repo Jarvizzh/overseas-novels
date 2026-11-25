@@ -1,9 +1,13 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { CreditCard, SlidersHorizontal } from 'lucide-react';
+import { Link, useSearchParams } from 'react-router-dom';
+import { usePermission } from '../context/PermissionContext';
 import { apiRequest } from '../utils/api';
 import CustomSelect from '../components/CustomSelect';
 import { ThirdPartyPaymentModal, type ThirdPartyPaymentDetail } from '../components/ThirdPartyPaymentModal';
 import { Pagination } from '../components/ui/Pagination';
+import { PaymentLoadError, PaymentScopeBar } from '../components/payments/PaymentWorkspace';
+import { paymentError, paymentParams, paymentScope, providerLabels, environmentLabels } from '../utils/paymentWorkspace';
 import {
   type ColumnOption,
   type FilterChip,
@@ -42,6 +46,9 @@ interface Order {
   coins: number;
   bonus_coins_credited: number;
   payment_method: string;
+  payment_environment?: "live" | "sandbox";
+  payment_provider?: string;
+  payment_account_id?: string;
   status: string;
   utm_source: string;
   utm_campaign: string;
@@ -90,11 +97,20 @@ function getOrderTypeLabel(orderType?: string): string {
 }
 
 export default function OrdersTab() {
+  const { canRead, canWrite } = usePermission();
+  const canReadReconciliation = canRead('payments.reconciliation');
+  const canReadRisk = canRead('payments.risk');
+  const canReadDisputes = canRead('payments.disputes');
+  const canWriteRefunds = canWrite('payments.refunds');
   const searchFormId = useId();
+  const [params, setParams] = useSearchParams();
+  const { provider, environment, account_id } = paymentScope(params, '');
+  const linkedOrder = params.get('order_id');
+  const linkedUser = params.get('user_id') ?? '';
   const [orders, setOrders] = useState<Order[]>([]);
   const [total, setTotal] = useState(0);
-  const [draft, setDraft] = useState<OrderFilterState>(EMPTY_FILTER);
-  const [queryState, setQueryState] = useState<OrderFilterState & { page: number; pageSize: number; nonce: number }>({
+  const [draft, setDraft] = useState<OrderFilterState>({ ...EMPTY_FILTER, userId: linkedUser });
+  const [queryState, setQueryState] = useState<Omit<OrderFilterState, 'userId'> & { page: number; pageSize: number; nonce: number }>({
     page: 1,
     pageSize: 10,
     nonce: 0,
@@ -103,6 +119,7 @@ export default function OrdersTab() {
   const [dateError, setDateError] = useState('');
   const [loading, setLoading] = useState(true);
   const [hasLoadedOnce, setHasLoadedOnce] = useState(false);
+  const [loadError, setLoadError] = useState('');
 
   const [density, setDensity] = useState<TableDensity>('comfortable');
   const [visibleCols, setVisibleCols] = useState<Record<OrderColKey, boolean>>({
@@ -119,36 +136,57 @@ export default function OrdersTab() {
   const fetchSeqRef = useRef(0);
   const detailSeqRef = useRef(0);
 
+  useEffect(() => {
+    setDraft((previous) => ({ ...previous, userId: linkedUser }));
+  }, [linkedUser]);
+
+  const clearNumber = useCallback(
+    (field: 'user_id' | 'order_id') => {
+      setParams((current) => {
+        const next = new URLSearchParams(current);
+        next.delete(field);
+        return next;
+      });
+      setQueryState((previous) => ({ ...previous, page: 1 }));
+    },
+    [setParams],
+  );
+
   const fetchOrders = useCallback(async () => {
     const seq = ++fetchSeqRef.current;
     setLoading(true);
+    setLoadError('');
     try {
       const params = new URLSearchParams({
         page: String(queryState.page),
         page_size: String(queryState.pageSize),
       });
+      if (linkedOrder) params.set('order_id', linkedOrder);
+      if (provider) params.set('provider', provider);
+      if (environment) params.set('environment', environment);
+      if (account_id) params.set('account_id', account_id);
       if (queryState.status) params.set('status', queryState.status);
-      if (queryState.userId) params.set('user_id', queryState.userId);
+      if (linkedUser) params.set('user_id', linkedUser);
       if (queryState.orderType) params.set('order_type', queryState.orderType);
       if (queryState.promotionLinkId) params.set('promotion_link_id', queryState.promotionLinkId);
       if (queryState.paidStart) params.set('paid_start', `${queryState.paidStart}T00:00:00Z`);
       if (queryState.paidEnd) params.set('paid_end', `${queryState.paidEnd}T23:59:59Z`);
 
-      const data = await apiRequest('GET', `/orders?${params.toString()}`);
+      const data = await apiRequest('GET', `/payments/orders?${params.toString()}`);
       if (seq !== fetchSeqRef.current) return;
       setOrders(data.orders || []);
       setTotal(data.total || 0);
       setHasLoadedOnce(true);
     } catch (e) {
       if (seq !== fetchSeqRef.current) return;
-      console.error(e);
+      setLoadError(paymentError(e));
       setHasLoadedOnce(true);
     } finally {
       if (seq === fetchSeqRef.current) {
         setLoading(false);
       }
     }
-  }, [queryState]);
+  }, [queryState, linkedOrder, linkedUser, provider, environment, account_id]);
 
   useEffect(() => {
     void fetchOrders();
@@ -160,7 +198,7 @@ export default function OrdersTab() {
     setDetailModalOpen(true);
     setDetailLoading(true);
     try {
-      const res = await apiRequest('GET', `/orders/${orderId}/payment-details`);
+      const res = await apiRequest('GET', `/payments/orders/${orderId}/payment-details`);
       if (seq !== detailSeqRef.current) return;
       setPaymentDetails(res.details || null);
     } catch (err) {
@@ -184,11 +222,17 @@ export default function OrdersTab() {
       return false;
     }
     setDateError('');
+    const userId = nextDraft.userId.trim();
+    if (userId !== linkedUser) {
+      const next = new URLSearchParams(params);
+      if (userId) next.set('user_id', userId);
+      else next.delete('user_id');
+      setParams(next);
+    }
     setQueryState((prev) => ({
       ...prev,
       page: 1,
       nonce: prev.nonce + 1,
-      userId: nextDraft.userId.trim(),
       status: nextDraft.status,
       orderType: nextDraft.orderType,
       promotionLinkId: nextDraft.promotionLinkId.trim(),
@@ -201,6 +245,7 @@ export default function OrdersTab() {
   const resetFilters = () => {
     setDateError('');
     setDraft(EMPTY_FILTER);
+    if (linkedUser || linkedOrder) setParams(paymentParams({ provider, environment, account_id }));
     setQueryState((prev) => ({
       ...prev,
       page: 1,
@@ -219,7 +264,8 @@ export default function OrdersTab() {
       draft.promotionLinkId ||
       draft.paidStart ||
       draft.paidEnd ||
-      queryState.userId ||
+      linkedUser ||
+      linkedOrder ||
       queryState.status ||
       queryState.orderType ||
       queryState.promotionLinkId ||
@@ -229,15 +275,14 @@ export default function OrdersTab() {
 
   const filterChips = useMemo<FilterChip[]>(() => {
     const chips: FilterChip[] = [];
-    if (queryState.userId) {
+    if (linkedOrder) {
+      chips.push({ key: 'orderId', label: `订单 #${linkedOrder}`, onClear: () => clearNumber('order_id') });
+    }
+    if (linkedUser) {
       chips.push({
         key: 'userId',
-        label: `UID: ${queryState.userId}`,
-        onClear: () => {
-          const next = { ...draft, userId: '' };
-          setDraft(next);
-          setQueryState((prev) => ({ ...prev, page: 1, userId: '' }));
-        },
+        label: `UID ${linkedUser}`,
+        onClear: () => clearNumber('user_id'),
       });
     }
     if (queryState.status) {
@@ -284,7 +329,7 @@ export default function OrdersTab() {
       });
     }
     return chips;
-  }, [draft, queryState]);
+  }, [linkedOrder, linkedUser, clearNumber, queryState]);
 
   const columnOptions: ColumnOption[] = [
     { key: 'attribution', label: '推广 / 书籍归因', visible: visibleCols.attribution },
@@ -298,6 +343,10 @@ export default function OrdersTab() {
   return (
     <div className="space-y-4 animate-fade-in">
       {/* Unified Borderless Filter Strip */}
+      <PaymentScopeBar scope={{ provider, environment, account_id }} allEnvironments onChange={(scope) => {
+        setQueryState((previous) => ({ ...previous, page: 1 }));
+        setParams(paymentParams({ ...scope, order_id: linkedOrder, user_id: linkedUser }));
+      }} />
       <search className="block space-y-2">
         <div className="flex flex-wrap items-center justify-between gap-2.5">
           <div className="flex flex-wrap items-center gap-2 flex-1 min-w-[260px]">
@@ -318,7 +367,7 @@ export default function OrdersTab() {
                 onClear={() => {
                   const next = { ...draft, userId: '' };
                   setDraft(next);
-                  if (queryState.userId) commitQuery(next);
+                  if (linkedUser) clearNumber('user_id');
                 }}
               />
             </form>
@@ -461,7 +510,8 @@ export default function OrdersTab() {
       </search>
 
       {/* Airy Orders Table + External Pagination */}
-      <TableRegion
+      {linkedOrder && <Link to={`/payments/orders?${paymentParams({ provider, environment, account_id })}`} className="btn-secondary">清除关联订单筛选 #{linkedOrder}</Link>}
+      {loadError ? <PaymentLoadError message={loadError} onRetry={() => void fetchOrders()} /> : <TableRegion
         ariaLabel="充值交易订单列表"
         footer={
           <Pagination
@@ -502,7 +552,7 @@ export default function OrdersTab() {
             ) : orders.length === 0 ? (
               <tr>
                 <td colSpan={colSpan} className="py-16 text-center text-[var(--cms-muted-fg)]">
-                  暂无充值交易订单记录
+                  <p role="status" className="text-[11px] text-[var(--cms-muted-fg)]">暂无充值交易订单记录</p>
                 </td>
               </tr>
             ) : (
@@ -528,9 +578,13 @@ export default function OrdersTab() {
                       >
                         <CreditCard size={13} className="text-[var(--cms-muted-fg)] shrink-0" aria-hidden="true" />
                         <span>
-                          {o.payment_method.toUpperCase()}: {o.external_ref_id || '无'}
+                          {providerLabels[o.payment_provider || ''] || '渠道待核对'} · {o.external_ref_id || '凭证待确认'}
                         </span>
                       </button>
+                      <div className="mt-0.5 text-[var(--cms-muted-fg)]">
+                        {environmentLabels[o.payment_environment || ''] || '环境待核对'}
+                        {o.payment_account_id && ` · 商户 #${o.payment_account_id}`}
+                      </div>
                     </td>
                     <td className="text-[var(--cms-muted-fg)] whitespace-nowrap">
                       {getOrderTypeLabel(o.order_type)}
@@ -570,14 +624,37 @@ export default function OrdersTab() {
                     <td>
                       <StatusDot tone={statusMeta.tone} label={statusMeta.label} />
                     </td>
-                    <td className="text-right">
-                      <button
-                        type="button"
-                        onClick={() => void handleOpenPaymentDetails(o.id)}
-                        className="btn-detail"
-                      >
+                    <td className="text-right whitespace-nowrap">
+                      <button type="button" onClick={() => void handleOpenPaymentDetails(o.id)} className="btn-detail">
                         详情
                       </button>
+                      {(canReadReconciliation || canReadRisk || canReadDisputes || canWriteRefunds) && (
+                        o.payment_environment ? (
+                          ([
+                            ['reconciliation', '流水', canReadReconciliation],
+                            ['risk', '风控', canReadRisk],
+                            ['disputes', '争议', canReadDisputes],
+                            ['refunds', '退款', canWriteRefunds],
+                          ] as const)
+                            .filter(([, , allowed]) => allowed)
+                            .map(([view, label]) => (
+                              <Link
+                                key={view}
+                                to={`/payments/${view}?${paymentParams({
+                                  order_id: String(o.id),
+                                  environment: o.payment_environment,
+                                  provider: providerLabels[o.payment_provider ?? ''] ? o.payment_provider : undefined,
+                                  account_id: o.payment_account_id,
+                                })}`}
+                                className="btn-detail"
+                              >
+                                {label}
+                              </Link>
+                            ))
+                        ) : (
+                          <span>渠道环境待核对</span>
+                        )
+                      )}
                     </td>
                   </tr>
                 );
@@ -585,7 +662,7 @@ export default function OrdersTab() {
             )}
           </tbody>
         </table>
-      </TableRegion>
+      </TableRegion>}
 
       <ThirdPartyPaymentModal
         isOpen={detailModalOpen}

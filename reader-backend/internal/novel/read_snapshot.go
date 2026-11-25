@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"reader-backend/internal/auth"
+	"reader-backend/internal/conversion"
 	"reader-backend/internal/db"
 	"reader-backend/internal/model"
 )
@@ -25,9 +26,9 @@ const chapterPricingJoin = `LEFT JOIN LATERAL (
     ELSE resolve_reader_promotion(reader.promo_id,'','') END
 ) pl ON TRUE`
 
-const paidAccessSQL = `(
-    EXISTS(SELECT 1 FROM user_subscriptions WHERE user_id=reader.user_id AND ` + PaidSubscriptionPredicate + `)
-    OR EXISTS(SELECT 1 FROM recharge_orders WHERE recharge_orders.user_id=reader.user_id AND recharge_orders.novel_id=book.id AND ` + WholeBookEntitlementPredicate + `)
+var paidAccessSQL = `(
+    EXISTS(SELECT 1 FROM user_subscriptions WHERE user_id=reader.user_id AND payment_subscription_environment(user_subscriptions)=$6 AND ` + PaidSubscriptionPredicate + `)
+    OR EXISTS(SELECT 1 FROM recharge_orders WHERE recharge_orders.user_id=reader.user_id AND recharge_orders.novel_id=book.id AND ` + WholeBookEntitlementPredicate + ` AND ` + WholeBookEnvironmentPredicate("$6") + `)
 )`
 
 // ReadSnapshot keeps pricing, publication and access in one database snapshot.
@@ -97,7 +98,7 @@ func (r *dbRepository) ReadSnapshot(ctx context.Context, userID, novelID int64, 
 		    CASE WHEN id IS NOT NULL AND NOT pass AND NOT unlocked AND $5>=start_pay-1 AND cost>0
 		        THEN COALESCE(content_preview, (SELECT reader_chapter_preview(c.content) FROM chapters c WHERE c.id=access.id), '')
 		        ELSE '' END
-		FROM access`, userID, identity.sessionHash, novelID, promoID, index).Scan(
+		FROM access`, userID, identity.sessionHash, novelID, promoID, index, conversion.Environment()).Scan(
 		&snapshot.userID, &accountActive, &snapshot.version, &snapshot.start, &snapshot.cost, &snapshot.pass,
 		&snapshot.unlocked, &snapshot.review, &id, &chapter.Title, &chapter.WordCount, &created,
 		&chapter.ObjectKey, &chapter.ContentHash, &chapter.BodyRevision, &snapshot.preview)

@@ -21,48 +21,58 @@ func (h *AuthHandler) RegisterRoutes(rg *gin.RouterGroup) {
 	authGroup := rg.Group("/auth")
 	{
 		authGroup.POST("/login", h.Login)
-		authGroup.POST("/register", h.Register) // Used for seeding and testing
 		authGroup.GET("/me", AuthMiddleware(), h.Me)
-		authGroup.GET("/admins", AuthMiddleware(), RoleMiddleware("SuperAdmin"), h.ListAdmins)
-		authGroup.PUT("/admins/:id", AuthMiddleware(), RoleMiddleware("SuperAdmin"), h.UpdateAdmin)
-		authGroup.DELETE("/admins/:id", AuthMiddleware(), RoleMiddleware("SuperAdmin"), h.DeleteAdmin)
+		authGroup.GET("/permissions", AuthMiddleware(), RequireAnyPermission(PermSystemRolesRead, PermSystemAccountsRead), h.Permissions)
+		authGroup.GET("/admins", AuthMiddleware(), RequirePermission(PermSystemAccountsRead), h.ListAdmins)
+		authGroup.POST("/admins", AuthMiddleware(), RequireSuperAdmin(), h.CreateAdmin)
+		authGroup.POST("/register", AuthMiddleware(), RequireSuperAdmin(), h.CreateAdmin)
+		authGroup.PUT("/admins/:id", AuthMiddleware(), RequireSuperAdmin(), h.UpdateAdmin)
+		authGroup.DELETE("/admins/:id", AuthMiddleware(), RequireSuperAdmin(), h.DeleteAdmin)
 	}
 }
 
-type RegisterReq struct {
-	Username string `json:"username" binding:"required,min=4"`
+type CreateAdminHTTPReq struct {
+	Username string `json:"username" binding:"required,min=4,max=50"`
 	Password string `json:"password" binding:"required,min=6"`
-	Nickname string `json:"nickname" binding:"required"`
-	Role     string `json:"role" binding:"required,oneof=SuperAdmin Admin Editor Support MediaBuyer Finance"`
+	Nickname string `json:"nickname" binding:"required,max=50"`
+	RoleID   int64  `json:"role_id"`
+	Role     string `json:"role"`
+	Status   *int16 `json:"status"`
 }
 
-func (h *AuthHandler) Register(c *gin.Context) {
-	var req RegisterReq
+func (h *AuthHandler) CreateAdmin(c *gin.Context) {
+	principal, ok := PrincipalFromContext(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Authentication required"})
+		return
+	}
+
+	var req CreateAdminHTTPReq
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	if req.RoleID <= 0 && req.Role == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "role_id is required"})
+		return
+	}
 
-	ctx := c.Request.Context()
-	admin, err := h.service.Register(ctx, req.Username, req.Password, req.Nickname, req.Role)
+	admin, err := h.service.CreateAdmin(c.Request.Context(), principal.ID, c.ClientIP(), CreateAdminRequest{
+		Username: req.Username,
+		Password: req.Password,
+		Nickname: req.Nickname,
+		RoleID:   req.RoleID,
+		RoleCode: req.Role,
+		Status:   req.Status,
+	})
 	if err != nil {
-		if errors.Is(err, ErrUsernameExists) {
-			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
-			return
-		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		writeAdminError(c, err)
 		return
 	}
 
 	c.JSON(http.StatusCreated, gin.H{
 		"message": "Admin user registered successfully",
-		"admin": gin.H{
-			"id":         admin.ID,
-			"username":   admin.Username,
-			"nickname":   admin.Nickname,
-			"role":       admin.Role,
-			"created_at": admin.CreatedAt,
-		},
+		"admin":   admin,
 	})
 }
 
@@ -78,15 +88,14 @@ func (h *AuthHandler) Login(c *gin.Context) {
 		return
 	}
 
-	ctx := c.Request.Context()
-	admin, token, err := h.service.Login(ctx, req.Username, req.Password)
+	principal, token, err := h.service.Login(c.Request.Context(), req.Username, req.Password)
 	if err != nil {
 		if errors.Is(err, ErrInvalidLogin) {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
 			return
 		}
 		if errors.Is(err, ErrSuspended) {
-			c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
+			c.JSON(http.StatusForbidden, gin.H{"error": err.Error(), "code": "account_inactive"})
 			return
 		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Login failed"})
@@ -95,97 +104,107 @@ func (h *AuthHandler) Login(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{
 		"token": token,
-		"admin": gin.H{
-			"id":       admin.ID,
-			"username": admin.Username,
-			"nickname": admin.Nickname,
-			"role":     admin.Role,
-		},
+		"admin": principal,
 	})
 }
 
 func (h *AuthHandler) Me(c *gin.Context) {
-	adminID, _ := c.Get("admin_id")
-	role, _ := c.Get("admin_role")
-	println("[DEBUG] Me handler called. adminID =", adminID, "role =", role)
-
-	ctx := c.Request.Context()
-	admin, err := h.service.GetAdminByID(ctx, adminID.(string))
-	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Admin profile not found"})
+	principal, ok := PrincipalFromContext(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Authentication required"})
 		return
 	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"id":       admin.ID,
-		"username": admin.Username,
-		"nickname": admin.Nickname,
-		"role":     role,
-	})
+	c.JSON(http.StatusOK, principal)
 }
 
-type AdminResponse struct {
-	ID        string    `json:"id"`
-	Username  string    `json:"username"`
-	Nickname  string    `json:"nickname"`
-	Role      string    `json:"role"`
-	Status    int16     `json:"status"`
-	CreatedAt string    `json:"created_at"`
+func (h *AuthHandler) Permissions(c *gin.Context) {
+	c.JSON(http.StatusOK, PermissionCatalog())
 }
 
 func (h *AuthHandler) ListAdmins(c *gin.Context) {
-	ctx := c.Request.Context()
-	admins, err := h.service.ListAdmins(ctx)
+	admins, err := h.service.ListAdmins(c.Request.Context())
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-
+	if admins == nil {
+		admins = make([]Admin, 0)
+	}
 	c.JSON(http.StatusOK, admins)
 }
 
-type UpdateAdminReq struct {
-	Nickname string `json:"nickname" binding:"required"`
-	Role     string `json:"role" binding:"required,oneof=SuperAdmin Admin Editor Support MediaBuyer Finance"`
-	Password string `json:"password"`
+type UpdateAdminHTTPReq struct {
+	Nickname *string `json:"nickname"`
+	RoleID   *int64  `json:"role_id"`
+	Role     *string `json:"role"`
+	Status   *int16  `json:"status"`
+	Password string  `json:"password"`
 }
 
 func (h *AuthHandler) UpdateAdmin(c *gin.Context) {
+	principal, ok := PrincipalFromContext(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Authentication required"})
+		return
+	}
+
 	id := c.Param("id")
-	var req UpdateAdminReq
+	var req UpdateAdminHTTPReq
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
-	ctx := c.Request.Context()
-	err := h.service.UpdateAdmin(ctx, id, req.Nickname, req.Role, req.Password)
+	updated, err := h.service.UpdateAdmin(c.Request.Context(), principal.ID, c.ClientIP(), id, UpdateAdminRequest{
+		Nickname: req.Nickname,
+		RoleID:   req.RoleID,
+		RoleCode: req.Role,
+		Status:   req.Status,
+		Password: req.Password,
+	})
 	if err != nil {
-		if errors.Is(err, ErrAdminNotFound) {
-			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
-			return
-		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		writeAdminError(c, err)
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"message": "Admin updated successfully"})
+	c.JSON(http.StatusOK, gin.H{
+		"message": "Admin updated successfully",
+		"admin":   updated,
+	})
 }
 
 func (h *AuthHandler) DeleteAdmin(c *gin.Context) {
-	id := c.Param("id")
-	callerID, _ := c.Get("admin_id")
-	if callerID == id {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "You cannot delete your own account"})
+	principal, ok := PrincipalFromContext(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Authentication required"})
 		return
 	}
 
-	ctx := c.Request.Context()
-	err := h.service.DeleteAdmin(ctx, id)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+	id := c.Param("id")
+	if err := h.service.DeleteAdmin(c.Request.Context(), principal.ID, c.ClientIP(), id); err != nil {
+		writeAdminError(c, err)
 		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "Admin deleted successfully"})
+}
+
+func writeAdminError(c *gin.Context, err error) {
+	switch {
+	case errors.Is(err, ErrAccountInactive):
+		c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error(), "code": "account_inactive"})
+	case errors.Is(err, ErrSuperAdminRequired):
+		c.JSON(http.StatusForbidden, gin.H{"error": err.Error(), "code": "super_admin_required"})
+	case errors.Is(err, ErrPermissionDenied):
+		c.JSON(http.StatusForbidden, gin.H{"error": err.Error(), "code": "permission_denied"})
+	case errors.Is(err, ErrUsernameExists):
+		c.JSON(http.StatusConflict, gin.H{"error": err.Error(), "code": "username_exists"})
+	case errors.Is(err, ErrAdminNotFound), errors.Is(err, ErrRoleNotFound):
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+	case errors.Is(err, ErrSelfModifyForbidden), errors.Is(err, ErrLastSuperAdmin),
+		errors.Is(err, ErrRoleInactive), errors.Is(err, ErrInvalidAdminReq):
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+	default:
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+	}
 }

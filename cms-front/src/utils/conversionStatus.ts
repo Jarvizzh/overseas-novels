@@ -19,6 +19,9 @@ export interface StatusMeta {
 
 const STATUS_META_MAP: Record<string, StatusMeta> = {
   policy_selected: { label: '已选中回传', tone: 'success' },
+  configuration_skipped: { label: '按接入白名单跳过', tone: 'muted' },
+  environment_unknown: { label: '订单环境待核实', tone: 'muted' },
+  environment_conflict: { label: '订单环境证据冲突', tone: 'warning' },
   policy_skipped: { label: '按规则跳过', tone: 'muted' },
   policy_historical: { label: '历史订单', tone: 'muted' },
   policy_pending: { label: '待核查规则数据', tone: 'warning' },
@@ -86,7 +89,15 @@ const REASON_LABELS: Record<string, string> = {
   deadline_exhausted: '已过投递有效期截止时间',
   retry_budget_exhausted: '自动重试预算已耗尽（需人工排查后重置）',
   meta_no_confirmation: '一直未获得 Meta 明确单事件接收确认',
-  meta_retryable_rejection: 'Meta 返回可重试拒绝或限流，等待退避',
+  meta_retryable_rejection: 'Meta 返回可重试拒绝，等待退避',
+  meta_rate_limited: 'Meta 已明确限流，Pixel 暂停领取',
+  meta_batch_parameter_rejected: 'Meta 确认整批未接收，等待较小批次重试',
+  duplicate_meta_event_identity: '同一请求已有相同事件名与 Meta 事件 ID',
+  event_time_outside_meta_window: '事件时间超出 Meta 接收窗口',
+  pixel_cooling_down: 'Pixel 等待冷却结束',
+  meta_credential_paused: 'Pixel 等待更新 Meta 凭据',
+  event_not_allowed: '接入白名单未授权该事件，已跳过',
+  reader_route_not_authorized: 'Reader 接入已停用或该 Pixel 授权已撤销',
   original_target_unavailable: '原目标 Pixel 不可用或未获接入授权',
   legacy_original_target_unavailable: '历史记录缺少可用原目标 Pixel',
   destination_or_credential_unavailable: '目标 Pixel 不存在或凭据缺失',
@@ -127,6 +138,7 @@ const RECOVERABLE_BLOCKED_REASONS = new Set([
   'destination_disabled',
   'promotion_pixel_mismatch',
   'partner_route_not_authorized',
+  'reader_route_not_authorized',
   'rule_fact_missing',
 ]);
 
@@ -135,6 +147,14 @@ const ALERT_LABELS: Record<string, string> = {
   meta_queue_delayed: 'Meta 待发队列超时',
   meta_credentials: 'Meta 凭据或路由绑定异常',
   meta_outcome_unknown: 'Meta 接收结果未知待确认',
+  meta_outcome_unknown_recent: '近期定稿的 Meta 接收结果未知',
+  meta_delivery_expired: '近期投递到期',
+  meta_parameter_rejected: 'Meta 拒绝事件参数',
+  meta_delivery_failed: 'Meta 投递失败',
+  meta_local_validation_failed: '本地投递校验失败',
+  meta_rate_limited: 'Meta 明确限流',
+  meta_batch_no_confirmation: 'Meta 请求缺少完整回执',
+  meta_credential_paused: 'Meta 凭据失效，Pixel 已暂停领取',
   worker_heartbeat_missing: 'Worker 心跳缺失',
   worker_stalled: 'Worker 队列推进停滞',
   purchase_missing_outbox: '已履约支付缺少入队',
@@ -262,7 +282,11 @@ export function getDeliveryRetryEligibility(
   }
 
   if (delivery.state === 'pending') {
-    if (delivery.reason === 'meta_retryable_rejection') {
+    if (
+      ['meta_retryable_rejection', 'meta_rate_limited', 'meta_batch_parameter_rejected'].includes(
+        delivery.reason ?? '',
+      )
+    ) {
       return { allowed: false, isTerminal: false, hint: 'Meta 限流/可重试拒绝正由系统退避调度' };
     }
     const nextMs = delivery.next_attempt_at ? Date.parse(delivery.next_attempt_at) : NaN;

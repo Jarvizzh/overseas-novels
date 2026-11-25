@@ -44,6 +44,10 @@ func (s Service) RepairMissing(ctx context.Context, operator Operator, input Rep
 		return OperationResult{}, err
 	}
 	input.Evidence = evidence
+	operator, err = requireBusinessPermission(operator, PermissionAdsConversionsWrite)
+	if err != nil {
+		return OperationResult{}, err
+	}
 	return s.operate(ctx, operator, input.Reason, func(tx pgx.Tx, actor Operator, reason string) (OperationResult, error) {
 		input.Reason = reason
 		return s.repairTx(ctx, tx, actor, input)
@@ -99,8 +103,15 @@ func (s Service) repairTx(ctx context.Context, tx pgx.Tx, actor Operator, input 
 		return OperationResult{}, ErrOperationConflict
 	}
 	var integrationID int64
-	err := tx.QueryRow(ctx, `SELECT id FROM conversion.integrations
-		WHERE environment=$1 AND source='starnovel' AND account_key='reader'`, s.Environment).Scan(&integrationID)
+	query = `SELECT id FROM conversion.integrations
+        WHERE environment=$1 AND source='starnovel' AND account_key='reader' AND enabled AND $2=ANY(allowed_events)`
+	if input.Apply {
+		query += " FOR SHARE"
+	}
+	err := tx.QueryRow(ctx, query, s.Environment, input.EventName).Scan(&integrationID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return OperationResult{}, ErrOperationConflict
+	}
 	if err != nil {
 		return OperationResult{}, err
 	}
@@ -136,10 +147,11 @@ func readRepairFact(ctx context.Context, tx pgx.Tx, input RepairRequest, environ
 func (s Service) restoreRepairFact(ctx context.Context, tx pgx.Tx, actor Operator, input RepairRequest, fact repairFacts, orderID string, integrationID int64) (OperationResult, error) {
 	var eventID, originalID *int64
 	var originalPixel *string
-	var queued, consumed, legacy bool
+	var queued, consumed, legacy, excluded bool
 	err := tx.QueryRow(ctx, `
 		SELECT e.id,d.id,x.pixel_id,
 		       q.business_key IS NOT NULL,q.consumed_at IS NOT NULL,
+           COALESCE(e.reason=$5,false),
 		       EXISTS(SELECT 1 FROM conversion.legacy_outbox_imports WHERE legacy_event_id=$2)
 		         OR EXISTS(SELECT 1 FROM payment_event_outbox WHERE event_id=$2)
 		FROM (VALUES (1)) anchor(n)
@@ -147,13 +159,15 @@ func (s Service) restoreRepairFact(ctx context.Context, tx pgx.Tx, actor Operato
 		LEFT JOIN conversion.deliveries d ON d.event_id=e.id AND d.role='original'
 		LEFT JOIN conversion.destinations x ON x.id=d.destination_id
 		LEFT JOIN reader_conversion_outbox q ON q.business_key=$2 AND q.environment=$4`,
-		integrationID, fact.key, input.EventName, s.Environment).
-		Scan(&eventID, &originalID, &originalPixel, &queued, &consumed, &legacy)
+		integrationID, fact.key, input.EventName, s.Environment, readerEventExcluded).
+		Scan(&eventID, &originalID, &originalPixel, &queued, &consumed, &excluded, &legacy)
 	if err != nil {
 		return OperationResult{}, err
 	}
 	out := OperationResult{ID: fact.key, DryRun: !input.Apply}
 	switch {
+	case excluded:
+		return OperationResult{}, ErrOperationConflict
 	case originalID != nil && originalPixel != nil && *originalPixel == fact.pixel:
 		out.ID, out.Action, out.Existing = strconv.FormatInt(*originalID, 10), "restore_original", true
 		return out, nil
@@ -194,17 +208,7 @@ func (s Service) restoreRepairFact(ctx context.Context, tx pgx.Tx, actor Operato
 			return OperationResult{}, ErrOperationConflict
 		}
 	}
-	var target int64
-	if event.readerPayment != nil {
-		target, err = readerAuthorizedOriginalTx(ctx, tx, s.Environment, integrationID, fact.pixel, input.Apply)
-	} else {
-		targetQuery := `SELECT x.id FROM conversion.integration_destinations r JOIN conversion.destinations x ON x.id=r.destination_id
-			WHERE r.integration_id=$1 AND x.pixel_id=$2`
-		if input.Apply {
-			targetQuery += " FOR SHARE OF r,x"
-		}
-		err = tx.QueryRow(ctx, targetQuery, integrationID, fact.pixel).Scan(&target)
-	}
+	target, err := readerAuthorizedOriginalTx(ctx, tx, s.Environment, integrationID, fact.pixel, orderID, fact.createdAt, input.Apply)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return OperationResult{}, ErrOperationConflict
 	}

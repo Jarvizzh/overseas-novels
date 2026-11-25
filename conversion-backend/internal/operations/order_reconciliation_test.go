@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -59,31 +60,35 @@ func TestOrderReconciliation(t *testing.T) {
 	`)
 	handler := NewHandler(Repository{Pool: pool, Environment: "test"}, "service-fixture")
 	for _, tt := range []struct {
-		path, token, role string
-		status            int
-		want              string
+		path, token, role, access string
+		status                    int
+		want                      string
 	}{
-		{"/200", "", "Finance", 401, "service_auth_required"},
-		{"/200", "service-fixture", "Editor", 403, "operator_forbidden"},
-		{"/abc", "service-fixture", "Finance", 400, "invalid_order_key"},
-		{"/9999", "service-fixture", "Finance", 404, "order_not_found"},
-		{"/200", "service-fixture", "Finance", 200, "missing_outbox"},
-		{"/201", "service-fixture", "MediaBuyer", 200, "awaiting_normalization"},
-		{"/202", "service-fixture", "Admin", 200, "missing_target"},
-		{"/203", "service-fixture", "SuperAdmin", 200, "test-confirmed-original"},
-		{"/100", "service-fixture", "Finance", 200, "confirmed"},
-		{"/external-1?integration_id=1", "service-fixture", "Finance", 200, "quarantined"},
-		{"/external-1?integration_id=2", "service-fixture", "Finance", 404, "order_not_found"},
-		{"/shared-order?integration_id=1", "service-fixture", "Finance", 409, `"app_ids":["1","2"]`},
-		{"/shared-order?integration_id=1&app_id=1", "service-fixture", "Finance", 200, "duplicate_payment_event"},
-		{"/shared-order?integration_id=1&app_id=2", "service-fixture", "Finance", 200, "app-2-payment"},
-		{"/shared-order?integration_id=1&app_id=3", "service-fixture", "Finance", 404, "order_not_found"},
+		{"/200", "", "FinanceManager", "read", 401, "service_auth_required"},
+		{"/200", "service-fixture", "FinanceManager", "", 403, "operator_forbidden"},
+		{"/200", "service-fixture", "FinanceManager", "admin", 403, "operator_forbidden"},
+		{"/abc", "service-fixture", "FinanceManager", "read", 400, "invalid_order_key"},
+		{"/9999", "service-fixture", "FinanceManager", "read", 404, "order_not_found"},
+		{"/200", "service-fixture", "FinanceManager", "read", 200, "missing_outbox"},
+		{"/201", "service-fixture", "AdOptimizer", "read", 200, "awaiting_normalization"},
+		{"/202", "service-fixture", "Admin", "write", 200, "missing_target"},
+		{"/203", "service-fixture", "Admin", "write", 200, "test-confirmed-original"},
+		{"/100", "service-fixture", "FinanceManager", "read", 200, "confirmed"},
+		{"/external-1?integration_id=1", "service-fixture", "FinanceManager", "read", 200, "quarantined"},
+		{"/external-1?integration_id=2", "service-fixture", "FinanceManager", "read", 404, "order_not_found"},
+		{"/shared-order?integration_id=1", "service-fixture", "FinanceManager", "read", 409, `"app_ids":["1","2"]`},
+		{"/shared-order?integration_id=1&app_id=1", "service-fixture", "FinanceManager", "read", 200, "duplicate_payment_event"},
+		{"/shared-order?integration_id=1&app_id=2", "service-fixture", "FinanceManager", "read", 200, "app-2-payment"},
+		{"/shared-order?integration_id=1&app_id=3", "service-fixture", "FinanceManager", "read", 404, "order_not_found"},
 	} {
-		t.Run(tt.path+"/"+tt.role+"/"+tt.want, func(t *testing.T) {
+		t.Run(tt.path+"/"+tt.role+"/"+tt.access+"/"+tt.want, func(t *testing.T) {
 			req := httptest.NewRequest(http.MethodGet, "/internal/conversion/orders"+tt.path, nil)
 			req.Header.Set("Authorization", "Bearer "+tt.token)
 			req.Header.Set("X-Operator-ID", "test-admin")
 			req.Header.Set("X-Operator-Role", tt.role)
+			if tt.access != "" {
+				req.Header.Set("X-Operator-Access", tt.access)
+			}
 			response := httptest.NewRecorder()
 			handler.ServeHTTP(response, req)
 			if response.Code != tt.status || !strings.Contains(response.Body.String(), tt.want) || !json.Valid(response.Body.Bytes()) {
@@ -129,10 +134,12 @@ func operationsTestPool(t *testing.T) (context.Context, *pgxpool.Pool) {
 		t.Fatal(err)
 	}
 	t.Cleanup(pool.Close)
-	for _, asset := range []string{"schema.sql", "migrations/2026111702.sql", "migrations/2026111703.sql",
-		"migrations/2026111704.sql", "migrations/2026111901.sql", "migrations/2026111902.sql", "migrations/2026111903.sql",
-		"migrations/2026111904.sql", "migrations/2026111905.sql", "migrations/2026111906.sql", "migrations/2026111907.sql", "migrations/2026111908.sql", "migrations/2026111909.sql", "migrations/2026111910.sql", "migrations/2026111911.sql", "migrations/2026111912.sql", "migrations/2026111913.sql", "migrations/2026111914.sql", "migrations/2026111915.sql"} {
-		sql, err := os.ReadFile("../../../cms-backend/db/" + asset)
+	migrations, err := filepath.Glob("../../../cms-backend/db/migrations/*.sql")
+	if err != nil || len(migrations) == 0 {
+		t.Fatalf("CMS migrations: %v", err)
+	}
+	for _, asset := range append([]string{"../../../cms-backend/db/schema.sql"}, migrations...) {
+		sql, err := os.ReadFile(asset)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -168,7 +175,8 @@ func TestEventDetailShowsBoundedPartnerAttemptEvidence(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/internal/conversion/events/1", nil)
 	req.Header.Set("Authorization", "Bearer service-fixture")
 	req.Header.Set("X-Operator-ID", "test-admin")
-	req.Header.Set("X-Operator-Role", "Finance")
+	req.Header.Set("X-Operator-Role", "FinanceManager")
+	req.Header.Set("X-Operator-Access", "read")
 	response := httptest.NewRecorder()
 	NewHandler(Repository{Pool: pool, Environment: "test"}, "service-fixture").ServeHTTP(response, req)
 	if response.Code != http.StatusOK || strings.Contains(response.Body.String(), "private-") {
@@ -216,7 +224,8 @@ func TestEventsFilterValidation(t *testing.T) {
 			req := httptest.NewRequest(http.MethodGet, "/internal/conversion/events"+tc.query, nil)
 			req.Header.Set("Authorization", "Bearer service-fixture")
 			req.Header.Set("X-Operator-ID", "test-admin")
-			req.Header.Set("X-Operator-Role", "Finance")
+			req.Header.Set("X-Operator-Role", "FinanceManager")
+			req.Header.Set("X-Operator-Access", "read")
 			res := httptest.NewRecorder()
 			handler.ServeHTTP(res, req)
 			if res.Code != http.StatusBadRequest || !strings.Contains(res.Body.String(), "invalid_filter") {
@@ -247,7 +256,8 @@ func TestEventsListProjectionAndFilters(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/internal/conversion"+target, nil)
 		req.Header.Set("Authorization", "Bearer service-fixture")
 		req.Header.Set("X-Operator-ID", "test-admin")
-		req.Header.Set("X-Operator-Role", "Finance")
+		req.Header.Set("X-Operator-Role", "FinanceManager")
+		req.Header.Set("X-Operator-Access", "read")
 		res := httptest.NewRecorder()
 		handler.ServeHTTP(res, req)
 		return res.Code, res.Body.Bytes()

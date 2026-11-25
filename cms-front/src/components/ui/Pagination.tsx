@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { ChevronLeft, ChevronRight } from 'lucide-react';
+import { ChevronLeft, ChevronRight, ChevronsLeft } from 'lucide-react';
 
 interface PaginationProps {
   page: number;
@@ -14,6 +14,50 @@ interface PaginationProps {
 }
 
 const DEFAULT_PAGE_SIZE_OPTIONS = [10, 20, 50, 100];
+
+const footerClass = 'pt-0.5 flex flex-wrap items-center justify-between gap-3 text-xs text-[var(--cms-muted-fg)]';
+const arrowClass =
+  'focus-ring w-7 h-7 rounded-lg hover:bg-[var(--cms-secondary)] text-[var(--cms-muted-fg)] hover:text-[var(--cms-fg)] inline-flex items-center justify-center cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed transition-colors';
+
+export function CursorPagination({
+  page,
+  count,
+  hasNext,
+  onFirst,
+  onPrevious,
+  onNext,
+}: {
+  page: number;
+  count: number;
+  hasNext: boolean;
+  onFirst: () => void;
+  onPrevious: () => void;
+  onNext: () => void;
+}) {
+  return (
+    <div className={footerClass}>
+      <span className="tabular-nums">本页 {count} 条</span>
+      <nav aria-label="分页导航" className="flex items-center gap-1">
+        <button type="button" aria-label="首页" className={arrowClass} disabled={page <= 1} onClick={onFirst}>
+          <ChevronsLeft size={14} aria-hidden="true" />
+        </button>
+        <button type="button" aria-label="上一页" className={arrowClass} disabled={page <= 1} onClick={onPrevious}>
+          <ChevronLeft size={14} aria-hidden="true" />
+        </button>
+        <span
+          aria-current="page"
+          aria-label={`第 ${page} 页`}
+          className="cta-primary min-w-7 h-7 px-2 rounded-lg inline-flex items-center justify-center font-medium tabular-nums"
+        >
+          {page}
+        </span>
+        <button type="button" aria-label="下一页" className={arrowClass} disabled={!hasNext} onClick={onNext}>
+          <ChevronRight size={14} aria-hidden="true" />
+        </button>
+      </nav>
+    </div>
+  );
+}
 
 function resolvePageSizeOptions(pageSize: number, options: number[] = DEFAULT_PAGE_SIZE_OPTIONS): number[] {
   const merged = new Set(options.filter((n) => Number.isInteger(n) && n > 0));
@@ -86,7 +130,7 @@ export const Pagination: React.FC<PaginationProps> = ({
       className={
         insideCard
           ? 'px-4 py-2.5 border-t border-[var(--cms-border)] flex flex-wrap items-center justify-between gap-2 bg-[var(--cms-card)] text-xs text-[var(--cms-muted-fg)]'
-          : 'pt-0.5 flex flex-wrap items-center justify-between gap-3 text-xs text-[var(--cms-muted-fg)]'
+          : footerClass
       }
     >
       <div className="tabular-nums">
@@ -128,7 +172,7 @@ export const Pagination: React.FC<PaginationProps> = ({
               disabled={disabled || safePage <= 1}
               onClick={() => onPageChange(Math.max(1, safePage - 1))}
               aria-label="上一页"
-              className="focus-ring w-7 h-7 rounded-lg hover:bg-[var(--cms-secondary)] text-[var(--cms-muted-fg)] hover:text-[var(--cms-fg)] inline-flex items-center justify-center cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+              className={arrowClass}
             >
               <ChevronLeft size={14} aria-hidden="true" />
             </button>
@@ -163,7 +207,7 @@ export const Pagination: React.FC<PaginationProps> = ({
               disabled={disabled || safePage >= totalPages}
               onClick={() => onPageChange(Math.min(totalPages, safePage + 1))}
               aria-label="下一页"
-              className="focus-ring w-7 h-7 rounded-lg hover:bg-[var(--cms-secondary)] text-[var(--cms-muted-fg)] hover:text-[var(--cms-fg)] inline-flex items-center justify-center cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+              className={arrowClass}
             >
               <ChevronRight size={14} aria-hidden="true" />
             </button>

@@ -1,0 +1,31 @@
+# Local fixtures. Set the DSN to the isolated test database before starting services.
+common:
+  database_url: 'postgres://postgres:test-only@127.0.0.1:5433/star_novel_test?sslmode=disable'
+
+conversion:
+  environment: test
+  private_url: 'http://127.0.0.1:8092'
+  private_addr: '127.0.0.1:8092'
+  private_host_port: 8092
+  private_token: 'test-fixture-token-for-local-conversion-only'
+  credential_key_version: fixture
+  credential_keys_json: '{"fixture":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}'
+  callback_addr: '127.0.0.1:8093'
+  sinan_mock_enabled: true
+  partner_report_enabled: false
+  worker_instances: 2
+  db_max_conns: 8
+  worker_db_max_conns: 16
+  reader_normalizers: 2
+  inbox_normalizers: 2
+  normalizer_limit: 4
+  normalize_batch: 20
+  worker_poll_interval: 15s
+  worker_queue_probe_interval: 250ms
+  meta_enabled: false
+  meta_graph_version: v21.0
+  meta_batch_size: 1
+  meta_global_limit: 5
+  meta_concurrency: 5
+  meta_pixel_interval: 3s
+  meta_request_timeout: 5s

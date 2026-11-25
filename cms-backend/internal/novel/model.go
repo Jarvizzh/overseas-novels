@@ -68,3 +68,45 @@ type SystemConfig struct {
 	Value string `json:"value"`
 	Desc  string `json:"desc"`
 }
+
+type PromotionLinkNovelOption struct {
+	ID                   int64  `json:"id"`
+	Title                string `json:"title"`
+	CoinCostPerThousand  *int   `json:"coin_cost_per_thousand"`
+	StartPayChapterIndex int    `json:"start_pay_chapter_index"`
+}
+
+type PromotionLinkPixelOption struct {
+	ID      int    `json:"id"`
+	Name    string `json:"name"`
+	PixelID string `json:"pixel_id"`
+}
+
+type PromotionLinkTemplateOption struct {
+	ID        int    `json:"id"`
+	Name      string `json:"name"`
+	IsDefault bool   `json:"is_default"`
+}
+
+type PromotionLinkDomainOption struct {
+	ID        int    `json:"id"`
+	Name      string `json:"name"`
+	Domain    string `json:"domain"`
+	Type      string `json:"type"`
+	IsDefault bool   `json:"is_default"`
+}
+
+type PromotionLinkDefaults struct {
+	GlobalCoinCostPerThousand  int `json:"global_coin_cost_per_thousand"`
+	GlobalStartPayChapterIndex int `json:"global_start_pay_chapter_index"`
+}
+
+type PromotionLinkOptions struct {
+	Novels                     []PromotionLinkNovelOption    `json:"novels"`
+	Pixels                     []PromotionLinkPixelOption    `json:"pixels"`
+	Templates                  []PromotionLinkTemplateOption `json:"templates"`
+	Domains                    []PromotionLinkDomainOption   `json:"domains"`
+	GlobalCoinCostPerThousand  int                           `json:"global_coin_cost_per_thousand"`
+	GlobalStartPayChapterIndex int                           `json:"global_start_pay_chapter_index"`
+	Defaults                   PromotionLinkDefaults         `json:"defaults"`
+}

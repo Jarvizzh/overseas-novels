@@ -1,5 +1,6 @@
 import { useCallback, useMemo, useState } from 'react';
 import { History, Plus, RefreshCw } from 'lucide-react';
+import { usePermission } from '../../context/PermissionContext';
 import { sourceEventLabel, sourceLabel } from '../../utils/conversionStatus';
 import CustomSelect from '../CustomSelect';
 import {
@@ -37,7 +38,10 @@ export function ConversionIntegrationsPanel({
   loading,
   hasLoadedOnce,
   loadError = '',
-  canWrite,
+  canWriteIntegration,
+  canReadPolicy,
+  canWritePolicy,
+  canReadAudit,
   onRefresh,
 }: {
   integrations: ConversionIntegration[];
@@ -45,9 +49,17 @@ export function ConversionIntegrationsPanel({
   loading: boolean;
   hasLoadedOnce: boolean;
   loadError?: string;
-  canWrite: boolean;
+  canWriteIntegration?: boolean;
+  canReadPolicy?: boolean;
+  canWritePolicy?: boolean;
+  canReadAudit?: boolean;
   onRefresh: () => Promise<void> | void;
 }) {
+  const { canRead, canWrite } = usePermission();
+  const effectiveCanWriteIntegration = canWriteIntegration ?? canWrite('ads.pixels');
+  const effectiveCanReadPolicy = canReadPolicy ?? canRead('ads.conversions');
+  const effectiveCanWritePolicy = canWritePolicy ?? canWrite('ads.conversions');
+  const effectiveCanReadAudit = canReadAudit ?? canRead('ads.conversions');
   const [searchQuery, setSearchQuery] = useState('');
   const [sourceFilter, setSourceFilter] = useState('');
   const [statusFilter, setStatusFilter] = useState<IntegrationStatusFilter>('');
@@ -130,7 +142,7 @@ export function ConversionIntegrationsPanel({
     5 + (visibleCols.integration_id ? 1 : 0) + (visibleCols.allowed_apps ? 1 : 0);
 
   const openCreateDrawer = () => {
-    if (!canWrite) return;
+    if (!effectiveCanWriteIntegration) return;
     setEditingIntegration(null);
     setDrawerTab('config');
     setDrawerOpen(true);
@@ -196,7 +208,7 @@ export function ConversionIntegrationsPanel({
               <RefreshCw size={13} aria-hidden="true" />
               <span>刷新</span>
             </button>
-            {canWrite && (
+            {effectiveCanWriteIntegration && (
               <button
                 type="button"
                 onClick={openCreateDrawer}
@@ -392,15 +404,17 @@ export function ConversionIntegrationsPanel({
 
                     <td className="text-right whitespace-nowrap">
                       <div className="inline-flex items-center justify-end gap-1 whitespace-nowrap">
-                        <button
-                          type="button"
-                          onClick={() => openIntegrationDrawer(integ, 'audit')}
-                          className="btn-ghost text-xs whitespace-nowrap inline-flex items-center gap-1"
-                        >
-                          <History size={12} aria-hidden="true" />
-                          <span>审计</span>
-                        </button>
-                        {['starnovel', 'sinan'].includes(integ.source) && (
+                        {effectiveCanReadAudit && (
+                          <button
+                            type="button"
+                            onClick={() => openIntegrationDrawer(integ, 'audit')}
+                            className="btn-ghost text-xs whitespace-nowrap inline-flex items-center gap-1"
+                          >
+                            <History size={12} aria-hidden="true" />
+                            <span>审计</span>
+                          </button>
+                        )}
+                        {effectiveCanReadPolicy && ['starnovel', 'sinan'].includes(integ.source) && (
                           <button type="button" className="btn-ghost text-xs whitespace-nowrap"
                             onClick={() => openIntegrationDrawer(integ, 'policy')}>回传规则</button>
                         )}
@@ -409,7 +423,7 @@ export function ConversionIntegrationsPanel({
                           onClick={() => openIntegrationDrawer(integ, 'config')}
                           className="btn-detail whitespace-nowrap"
                         >
-                          {canWrite ? '路由与配置' : '查看详情'}
+                          {effectiveCanWriteIntegration ? '路由与配置' : '查看详情'}
                         </button>
                       </div>
                     </td>
@@ -426,7 +440,10 @@ export function ConversionIntegrationsPanel({
         editingIntegration={editingIntegration}
         initialTab={drawerTab}
         destinations={destinations}
-        canWrite={canWrite}
+        canWriteIntegration={effectiveCanWriteIntegration}
+        canReadPolicy={effectiveCanReadPolicy}
+        canWritePolicy={effectiveCanWritePolicy}
+        canReadAudit={effectiveCanReadAudit}
         onClose={() => setDrawerOpen(false)}
         onSuccess={async (msg) => {
           setDrawerOpen(false);

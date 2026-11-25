@@ -6,19 +6,13 @@ import { SearchInput, TableRegion } from '../ui/Primitives';
 import {
   getErrorMessage,
   getReasonLabel,
-  isServiceUnavailableError,
   partnerReportStatusLabel,
   sourceEventLabel,
   sourceLabel,
   status,
   timestamp,
 } from '../../utils/conversionStatus';
-import {
-  ConversionStatusDot,
-  CopyableText,
-  InlineErrorBanner,
-  ServiceUnavailableState,
-} from './ConversionShared';
+import { ConversionStatusDot, CopyableText, InlineErrorBanner } from './ConversionShared';
 import { PaymentDecisionSummary } from './PaymentDecisionSummary';
 import { TargetResultsTable } from './TargetResultsTable';
 import type {
@@ -31,19 +25,11 @@ export function ConversionOrdersTab({
   integrations,
   destinationByPixel,
   initialQuery,
-  serviceUnavailable,
-  retryingService = false,
-  onServiceUnavailable,
-  onRetryService,
   onOpenEventDrawer,
 }: {
   integrations: ConversionIntegration[];
   destinationByPixel: Map<string, ConversionDestination>;
   initialQuery: { orderId: string; integrationId: string; nonce: number } | null;
-  serviceUnavailable: boolean;
-  retryingService?: boolean;
-  onServiceUnavailable: () => void;
-  onRetryService: () => void;
   onOpenEventDrawer: (eventId: string) => void;
 }) {
   const headingId = useId();
@@ -54,6 +40,8 @@ export function ConversionOrdersTab({
   const [report, setReport] = useState<OrderReconciliationReport | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [lastUpdated, setLastUpdated] = useState('');
+  const lastQueryRef = useRef<{ order: string; integration: string; app: string } | null>(null);
 
   const abortRef = useRef<AbortController | null>(null);
   const lastAutoNonceRef = useRef(-1);
@@ -63,7 +51,6 @@ export function ConversionOrdersTab({
       targetOrderId: string,
       targetIntegrationId: string,
       targetAppId = '',
-      onServiceUnavailableRetryable?: () => void,
     ): AbortController | null => {
       const trimmedOrder = targetOrderId.trim();
       if (!trimmedOrder) {
@@ -77,7 +64,20 @@ export function ConversionOrdersTab({
 
       setLoading(true);
       setError('');
-      setReport(null);
+      const lastQuery = lastQueryRef.current;
+      if (
+        lastQuery?.order !== trimmedOrder ||
+        lastQuery.integration !== targetIntegrationId ||
+        lastQuery.app !== targetAppId
+      ) {
+        setReport(null);
+        setLastUpdated('');
+      }
+      lastQueryRef.current = {
+        order: trimmedOrder,
+        integration: targetIntegrationId,
+        app: targetAppId,
+      };
 
       const params = new URLSearchParams();
       if (targetIntegrationId) params.set('integration_id', targetIntegrationId.trim());
@@ -95,16 +95,13 @@ export function ConversionOrdersTab({
           );
           if (!controller.signal.aborted) {
             setReport(res);
+            setLastUpdated(new Date().toLocaleTimeString());
           }
         } catch (err) {
           if (!controller.signal.aborted) {
-            if (isServiceUnavailableError(err)) {
-              onServiceUnavailableRetryable?.();
-              onServiceUnavailable();
-            } else {
-              if (err instanceof ApiError && err.code === 'order_app_ambiguous') setAppChoices(err.appIds ?? []);
-              setError(getErrorMessage(err, '逐单对账查询失败'));
-            }
+            if (err instanceof ApiError && err.code === 'order_app_ambiguous')
+              setAppChoices(err.appIds ?? []);
+            setError(getErrorMessage(err, '逐单对账查询失败'));
           }
         } finally {
           if (abortRef.current === controller) {
@@ -118,7 +115,7 @@ export function ConversionOrdersTab({
 
       return controller;
     },
-    [onServiceUnavailable],
+    [],
   );
 
   useEffect(() => () => abortRef.current?.abort(), []);
@@ -127,8 +124,7 @@ export function ConversionOrdersTab({
     if (
       !initialQuery ||
       !initialQuery.orderId.trim() ||
-      initialQuery.nonce === lastAutoNonceRef.current ||
-      serviceUnavailable
+      initialQuery.nonce === lastAutoNonceRef.current
     ) {
       return;
     }
@@ -138,16 +134,7 @@ export function ConversionOrdersTab({
     setIntegrationId(initialQuery.integrationId);
     setAppId('');
     setAppChoices([]);
-    const controller = runOrderLookup(
-      initialQuery.orderId,
-      initialQuery.integrationId,
-      '',
-      () => {
-        if (lastAutoNonceRef.current === initialQuery.nonce) {
-          lastAutoNonceRef.current = prevNonce;
-        }
-      },
-    );
+    const controller = runOrderLookup(initialQuery.orderId, initialQuery.integrationId);
     return () => {
       // If React StrictMode unmounts/remounts before this auto-lookup settles, abort and
       // restore lastAutoNonceRef so the remount performs the lookup cleanly.
@@ -158,7 +145,7 @@ export function ConversionOrdersTab({
         }
       }
     };
-  }, [initialQuery, runOrderLookup, serviceUnavailable]);
+  }, [initialQuery, runOrderLookup]);
 
   const partnerAccountOptions = useMemo(() => {
     const partnerIntegrations = integrations.filter((item) => item.source !== 'starnovel');
@@ -182,15 +169,6 @@ export function ConversionOrdersTab({
     e.preventDefault();
     runOrderLookup(orderInput, integrationId, appId);
   };
-
-  if (serviceUnavailable) {
-    return (
-      <ServiceUnavailableState
-        retrying={retryingService}
-        onRetry={onRetryService}
-      />
-    );
-  }
 
   return (
     <div className="space-y-4 animate-fade-in">
@@ -224,7 +202,11 @@ export function ConversionOrdersTab({
             value={orderInput}
             onChange={setOrderInput}
             onClear={() => {
+              abortRef.current?.abort();
+              lastQueryRef.current = null;
               setReport(null);
+              setLastUpdated('');
+              setLoading(false);
               setError('');
             }}
           />
@@ -239,7 +221,19 @@ export function ConversionOrdersTab({
         </p>
       </search>
 
-      {error && <InlineErrorBanner message={error} />}
+      {error && (
+        <InlineErrorBanner
+          message={error}
+          onRetry={
+            lastQueryRef.current
+              ? () => {
+                  const query = lastQueryRef.current;
+                  if (query) runOrderLookup(query.order, query.integration, query.app);
+                }
+              : undefined
+          }
+        />
+      )}
 
       {loading && (
         <div className="space-y-3">
@@ -268,7 +262,17 @@ export function ConversionOrdersTab({
               </div>
               <div className="flex flex-wrap items-center gap-2 text-xs">
                 <span className="badge badge-blue">{sourceLabel(report.source)}</span>
-                <span className="badge badge-secondary">环境：{report.environment}</span>
+                <span className="badge badge-secondary">
+                  环境：
+                  {report.environment === 'unknown'
+                    ? '待核实'
+                    : report.environment === 'conflict'
+                      ? '证据冲突'
+                      : report.environment}
+                </span>
+                {lastUpdated && (
+                  <span className="text-[var(--cms-muted-fg)]">更新于 {lastUpdated}</span>
+                )}
                 {report.integration_id && (
                   <span className="badge badge-gray">接入 #{report.integration_id}</span>
                 )}
@@ -454,9 +458,13 @@ export function ConversionOrdersTab({
                       />
                     )}
                     {ev.deliveries_truncated && (
-                      <p className="text-[11px] text-[var(--cms-muted-fg)] m-0">
-                        仅展示前 50 个目标（原目标优先）。
-                      </p>
+                      <button
+                        type="button"
+                        className="btn-secondary text-xs"
+                        onClick={() => ev.id && onOpenEventDrawer(ev.id)}
+                      >
+                        查看全部投递目标
+                      </button>
                     )}
 
                     {ev.partner_report && (

@@ -7,6 +7,7 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "oxlint",
+    "test:catalog-regression": "node --test scripts/product-template-regression.test.mjs",
     "preview": "vite preview"
   },
   "dependencies": {

@@ -1,3 +1,4 @@
+import { readerStorage } from './readerStorage';
 const BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8080/api/v1';
 
 export class ApiError extends Error {
@@ -39,8 +40,7 @@ function getCookie(name: string): string {
   return '';
 }
 
-function buildHeaders(options: RequestInit, tokenOverride?: string | null): Headers {
-  const token = tokenOverride !== undefined ? tokenOverride : localStorage.getItem('auth-token');
+function buildHeaders(options: RequestInit, token: string | null): Headers {
   const headers = new Headers(options.headers || {});
 
   if (token) {
@@ -55,27 +55,30 @@ function buildHeaders(options: RequestInit, tokenOverride?: string | null): Head
 
   const fbp = getCookie('_fbp');
   const fbc = getCookie('_fbc');
-  const utmSource = localStorage.getItem('utm_source');
-  const utmCampaign = localStorage.getItem('utm_campaign');
-  const pixelId = localStorage.getItem('fb_pixel_id');
-  const templateId = localStorage.getItem('recharge_template_id');
-  const promoId = localStorage.getItem('promo_id');
+  const utmSource = readerStorage.getItem('utm_source');
+  const utmCampaign = readerStorage.getItem('utm_campaign');
+  const pixelId = readerStorage.getItem('fb_pixel_id');
+  const promoId = readerStorage.getItem('promo_id');
 
   if (fbp) headers.set('X-FB-FBP', fbp);
   if (fbc) headers.set('X-FB-FBC', fbc);
   if (utmSource && /^[\x20-\x7e]{1,100}$/.test(utmSource)) headers.set('X-UTM-Source', utmSource);
   if (utmCampaign && /^[\x20-\x7e]{1,100}$/.test(utmCampaign)) headers.set('X-UTM-Campaign', utmCampaign);
   if (pixelId) headers.set('X-FB-Pixel-ID', pixelId);
-  if (templateId) headers.set('X-Recharge-Template-ID', templateId);
   if (promoId) headers.set('X-Promo-ID', promoId);
-  headers.set('X-Event-Source-URL', window.location.href);
+  const source = new URL(window.location.href);
+  for (const key of ['purchase', 'vip_purchase', 'stripe_vip', 'token', 'subscription_id', 'PayerID', 'ba_token']) {
+    source.searchParams.delete(key);
+  }
+  headers.set('X-Event-Source-URL', source.href);
 
   return headers;
 }
 
-async function request<T>(endpoint: string, options: RequestInit & { authToken?: string } = {}, retried = false): Promise<T> {
+async function request<T>(endpoint: string, options: RequestInit & { authToken?: string | null } = {}, retried = false): Promise<T> {
   const { authToken, ...init } = options;
-  const headers = buildHeaders(init, authToken);
+  const requestToken = authToken === undefined ? readerStorage.getItem('auth-token') : authToken;
+  const headers = buildHeaders(init, requestToken);
   const response = await fetch(`${BASE_URL}${endpoint}`, {
     ...init,
     headers,
@@ -89,12 +92,15 @@ async function request<T>(endpoint: string, options: RequestInit & { authToken?:
     endpoint.startsWith('/auth/refresh');
 
   if (response.status === 401 && !isAuthCredentialEndpoint && !retried &&
-      (!authToken || authToken === localStorage.getItem('auth-token'))) {
+      requestToken === readerStorage.getItem('auth-token')) {
     if (authToken) {
       // Scoped work waits for the app to verify the refreshed session's owner.
       void runSingleFlightRefresh().catch(() => {});
-    } else if (await runSingleFlightRefresh()) {
-      return request<T>(endpoint, options, true);
+    } else {
+      const refreshedToken = await runSingleFlightRefresh();
+      if (refreshedToken && refreshedToken === readerStorage.getItem('auth-token')) {
+        return request<T>(endpoint, options, true);
+      }
     }
   }
 
@@ -108,6 +114,28 @@ async function request<T>(endpoint: string, options: RequestInit & { authToken?:
   }
 
   return response.json();
+}
+
+export interface PurchaseIntent {
+  intent_id: string;
+  slot_id: number;
+  product_id?: number;
+  novel_id?: number;
+  order_type: 'single' | 'whole_book' | 'subscription';
+  provider?: 'paypal' | 'stripe';
+  cycle?: 'day' | 'week' | 'month' | 'year' | string;
+  available_channels?: ('paypal' | 'stripe')[];
+  badge?: string;
+  display_alias?: string;
+  amount_minor: number;
+  currency: string;
+  coins: number;
+  status: 'ready' | 'awaiting_approval' | 'confirming' | 'review' | 'completed' | 'refunded' | 'retryable' | 'closed';
+  confirmation_message?: string;
+  confirmation_code?: string;
+  return_path?: string;
+  approve_url?: string;
+  order_id?: string;
 }
 
 export interface User {
@@ -234,6 +262,8 @@ export interface SubscriptionInfo {
   price_cents: number;
   currency: string;
   payment_method: string;
+  management?: 'stripe_portal' | 'stripe_link';
+  renewal_failed_at?: string;
   current_period_start?: string;
   current_period_end?: string;
   next_billing_time?: string;
@@ -270,9 +300,9 @@ async function sendShelfBatches<T>(
 
 export const api = {
   // === AUTH ===
-  refresh: () => request<{ token: string; user: User }>('/auth/refresh', { method: 'POST' }),
+  refresh: () => request<{ token: string; user: User }>('/auth/refresh', { method: 'POST', authToken: null }),
   logout: () => request<void>('/auth/logout', { method: 'POST' }),
-  guestLogin: () => request<{ token: string; user: User }>('/auth/guest', { method: 'POST' }),
+  guestLogin: () => request<{ token: string; user: User }>('/auth/guest', { method: 'POST', authToken: null }),
 
   register: (body: { email: string; password: string; nickname?: string }) =>
     request<{ token: string; user: User }>('/auth/register', {
@@ -403,12 +433,6 @@ export const api = {
       body: JSON.stringify({ amount_cents: amountCents, coins_amount: coinsAmount }),
     }),
 
-  createStripeIntent: (amountCents: number, coinsAmount: number) =>
-    request<{ client_secret: string }>('/wallet/recharge/stripe', {
-      method: 'POST',
-      body: JSON.stringify({ amount_cents: amountCents, coins_amount: coinsAmount }),
-    }),
-
   createPayPalOrder: (slotId: number, novelId: number = 0, returnUrl?: string, cancelUrl?: string) =>
     request<{ order_id: string; approve_url: string }>('/wallet/recharge/paypal/create-order', {
       method: 'POST',
@@ -426,6 +450,71 @@ export const api = {
       body: JSON.stringify({ order_id: orderId }),
     }),
 
+  getPaymentMethods: (signal?: AbortSignal) =>
+    request<{
+      paypal_single: boolean;
+      paypal_vip: boolean;
+      stripe_single?: boolean;
+      stripe_vip?: boolean;
+      environment?: string;
+      stripe_slots?: number[];
+      stripe_vip_slots?: number[];
+      stripe_sandbox?: boolean;
+    }>('/wallet/purchase-methods', { signal, cache: 'no-store' }),
+
+  preparePurchase: (
+    slotId: number,
+    novelId: number,
+    requestKey: string,
+    returnPath: string,
+    signal?: AbortSignal,
+    productId?: number,
+  ) =>
+    request<PurchaseIntent>('/wallet/purchase-intents', {
+      method: 'POST',
+      signal,
+      body: JSON.stringify({
+        slot_id: slotId,
+        ...(productId ? { product_id: productId } : {}),
+        novel_id: novelId,
+        request_key: requestKey,
+        return_path: returnPath,
+      }),
+    }),
+
+  startPayPalCheckout: (intentId: string, signal?: AbortSignal) =>
+    request<PurchaseIntent>(`/wallet/purchase-intents/${encodeURIComponent(intentId)}/checkout`, { method: 'POST', signal }),
+
+  startStripeCheckout: (intentId: string, signal?: AbortSignal) =>
+    request<PurchaseIntent>(`/wallet/purchase-intents/${encodeURIComponent(intentId)}/checkout/stripe`, { method: 'POST', signal }),
+
+  startStripeVIP: (slotId: number, returnPath: string, signal?: AbortSignal) =>
+    request<PurchaseIntent>('/wallet/subscription/stripe/checkout', {
+      method: 'POST',
+      body: JSON.stringify({ slot_id: slotId, return_path: returnPath }),
+      signal,
+    }),
+
+  getStripeVIPPurchase: (intentId: string, signal?: AbortSignal) =>
+    request<PurchaseIntent>(`/wallet/subscription/stripe/purchase/${encodeURIComponent(intentId)}`, { signal, cache: 'no-store' }),
+
+  openStripeVIPPortal: (subscriptionId: string) =>
+    request<{ portal_url: string }>('/wallet/subscription/stripe/portal', {
+      method: 'POST',
+      body: JSON.stringify({ subscription_id: subscriptionId }),
+    }),
+
+  getReturnedPurchase: (intentId: string, paypalOrderId: string, vip: boolean, signal?: AbortSignal) => {
+    const query = new URLSearchParams();
+    if (intentId) query.set('intent', intentId);
+    if (paypalOrderId) query.set('token', paypalOrderId);
+    const path = vip ? '/wallet/subscription/purchase-return' : '/wallet/purchase-intents/return';
+    return request<PurchaseIntent>(`${path}?${query}`, { signal, cache: 'no-store' });
+  },
+
+  getRecentPurchases: (signal?: AbortSignal) =>
+    request<{ purchases: PurchaseIntent[] }>('/wallet/purchase-intents', { signal, cache: 'no-store' }),
+
   getRechargeTemplates: (novelId?: number, signal?: AbortSignal) =>
     request<{
       id: number;
@@ -435,6 +524,9 @@ export const api = {
         id: number;
         template_id: number;
         slot_index: number;
+        product_id?: number;
+        product_code?: string;
+        product_type?: 'single' | 'whole_book' | 'vip';
         type: 'single' | 'subscription' | 'vip' | 'whole_book';
         coins: number;
         bonus: number;
@@ -442,6 +534,12 @@ export const api = {
         subscription_cycle?: string;
         vip_name: string;
         vip_desc: string;
+        badge?: string;
+        is_highlighted?: boolean;
+        display_alias?: string;
+        novel_scope_type?: string;
+        paypal_ready?: boolean;
+        stripe_ready?: boolean;
         price: string;
         price_cents: number;
       }>;
@@ -449,7 +547,7 @@ export const api = {
       signal,
     }),
 
-  createSubscription: (slotId: number, paymentMethod: string = 'paypal', returnUrl?: string, cancelUrl?: string) =>
+  createSubscription: (slotId: number, paymentMethod: string = 'paypal', returnUrl?: string, cancelUrl?: string, returnPath?: string) =>
     request<{ subscription_id: string; approve_url: string; status: string }>('/wallet/recharge/subscription/create', {
       method: 'POST',
       body: JSON.stringify({
@@ -457,6 +555,7 @@ export const api = {
         payment_method: paymentMethod,
         return_url: returnUrl,
         cancel_url: cancelUrl,
+        return_path: returnPath,
       }),
     }),
 

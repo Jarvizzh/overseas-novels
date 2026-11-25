@@ -1,9 +1,9 @@
 import { type KeyboardEvent, useCallback, useEffect, useId, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { ExternalLink, Layers, Radio } from 'lucide-react';
+import { usePermission } from '../context/PermissionContext';
 import { apiRequest } from '../utils/api';
 import { getErrorMessage, isServiceUnavailableError } from '../utils/conversionStatus';
-import { getCurrentAdminRole } from '../utils/promotion';
 import { ConversionIntegrationsPanel } from '../components/conversion/ConversionIntegrationsPanel';
 import { ConversionPixelsPanel } from '../components/conversion/ConversionPixelsPanel';
 import { InlineErrorBanner, ServiceUnavailableState } from '../components/conversion/ConversionShared';
@@ -18,11 +18,16 @@ function resolveTabKey(raw: string | null): PixelsTabKey {
 }
 
 export default function PixelsTab() {
+  const { canRead, canWrite } = usePermission();
+  const canWriteIntegration = canWrite('ads.pixels');
+  const canReadPolicy = canRead('ads.conversions');
+  const canWritePolicy = canWrite('ads.conversions');
+  const canReadAudit = canRead('ads.conversions');
+
   const headingId = useId();
   const tabsId = useId();
   const [searchParams, setSearchParams] = useSearchParams();
   const activeTab = resolveTabKey(searchParams.get('tab'));
-  const canWrite = ['Admin', 'SuperAdmin'].includes(getCurrentAdminRole());
 
   const [destinations, setDestinations] = useState<ConversionDestination[]>([]);
   const [integrations, setIntegrations] = useState<ConversionIntegration[]>([]);
@@ -149,15 +154,17 @@ export default function PixelsTab() {
           })}
         </div>
 
-        <div className="pb-1.5 flex items-center gap-2">
-          <Link
-            to="/conversions"
-            className="btn-ghost text-xs whitespace-nowrap no-underline inline-flex items-center gap-1 text-[var(--cms-muted-fg)] hover:text-[var(--cms-fg)]"
-          >
-            <span>前往回传中心</span>
-            <ExternalLink size={12} aria-hidden="true" />
-          </Link>
-        </div>
+        {canReadPolicy && (
+          <div className="pb-1.5 flex items-center gap-2">
+            <Link
+              to="/conversions"
+              className="btn-ghost text-xs whitespace-nowrap no-underline inline-flex items-center gap-1 text-[var(--cms-muted-fg)] hover:text-[var(--cms-fg)]"
+            >
+              <span>前往回传中心</span>
+              <ExternalLink size={12} aria-hidden="true" />
+            </Link>
+          </div>
+        )}
       </div>
 
       {serviceUnavailable ? (
@@ -186,7 +193,9 @@ export default function PixelsTab() {
                 loading={loading}
                 hasLoadedOnce={hasLoadedOnce}
                 loadError={error}
-                canWrite={canWrite}
+                canWrite={canWriteIntegration}
+                canReadAudit={canReadAudit}
+                canReadConversions={canReadPolicy}
                 onRefresh={loadData}
               />
             </div>
@@ -204,7 +213,10 @@ export default function PixelsTab() {
                 loading={loading}
                 hasLoadedOnce={hasLoadedOnce}
                 loadError={error}
-                canWrite={canWrite}
+                canWriteIntegration={canWriteIntegration}
+                canReadPolicy={canReadPolicy}
+                canWritePolicy={canWritePolicy}
+                canReadAudit={canReadAudit}
                 onRefresh={loadData}
               />
             </div>

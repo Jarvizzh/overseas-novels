@@ -67,8 +67,8 @@ func (s Service) legacyIntegrationTx(ctx context.Context, tx pgx.Tx) (int64, err
 		return 0, err
 	}
 	if _, err := tx.Exec(ctx, `
-		INSERT INTO conversion.integrations (source,account_key,environment,contract_version)
-		VALUES ('starnovel','reader',$1,'v1') ON CONFLICT (environment,source,account_key) DO NOTHING`,
+		INSERT INTO conversion.integrations (source,account_key,environment,contract_version,allowed_events)
+        VALUES ('starnovel','reader',$1,'v1',ARRAY['CompleteRegistration','InitiateCheckout','Purchase','Subscribe']) ON CONFLICT (environment,source,account_key) DO NOTHING`,
 		s.Environment); err != nil {
 		return 0, err
 	}

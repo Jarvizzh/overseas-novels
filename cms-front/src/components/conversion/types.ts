@@ -29,6 +29,16 @@ export interface ConversionDestination {
   created_at: string;
 }
 
+export interface ConversionBatchReceipt {
+  id: string;
+  position: number;
+  sent: number;
+  received?: number;
+  receipt_at?: string;
+  late_received?: number;
+  late_receipt_at?: string;
+}
+
 export interface DeliveryLastAttempt {
   number?: number;
   outcome?: string;
@@ -37,6 +47,7 @@ export interface DeliveryLastAttempt {
   graph_code?: number;
   graph_subcode?: number;
   events_received?: number;
+  batch?: ConversionBatchReceipt;
   fbtrace_id?: string;
   recorded_at?: string;
 }
@@ -70,6 +81,7 @@ export interface ConversionDeliveryAttempt {
   graph_code?: number;
   graph_subcode?: number;
   events_received?: number;
+  batch?: ConversionBatchReceipt;
   fbtrace_id?: string;
 }
 
@@ -268,6 +280,7 @@ export interface SummaryAlert {
     oldest_at?: string;
     sample_event_id?: string;
     pixel_id?: string;
+    affected_deliveries?: number;
     heartbeat_at?: string;
     last_progress_at?: string;
   };
@@ -283,6 +296,7 @@ export interface WorkerHeartbeat {
 }
 
 export interface ConversionSummaryData {
+  collector?: { state: 'waiting' | 'fresh' | 'stale'; sampled_at: string | null };
   payment_coverage?: { evaluated: number; selected: number };
   selected_confirmation?: { event_name: string; expected: number; confirmed: number }[];
   environment?: string;
@@ -290,6 +304,17 @@ export interface ConversionSummaryData {
   to_at?: string;
   population: SummaryPopulationRow[];
   targets: SummaryTargetRow[];
+  requests?: {
+    pixel_id: string;
+    requests: number;
+    sent: number;
+    mean_batch_size: number;
+    confirmed_members?: number;
+    http_429: number;
+    http_responses: number;
+    unknown_requests: number;
+    unknown_deliveries: number;
+  }[];
   reports: SummaryReportRow[];
   alerts: SummaryAlert[];
   heartbeats: WorkerHeartbeat[];
@@ -315,4 +340,9 @@ export interface ConversionAuditRecord {
 export interface ConversionAuditPage {
   records: ConversionAuditRecord[];
   has_more: boolean;
+}
+
+export interface ConversionDeliveryPage {
+  deliveries: ConversionDelivery[];
+  next_cursor: string | null;
 }
