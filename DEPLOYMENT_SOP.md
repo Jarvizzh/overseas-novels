@@ -2,7 +2,7 @@
 
 适用于 Reader H5、CMS、支付域和回传中心的首次部署及协调升级。当前发布线要求 CMS、Reader 和 Conversion 使用同一数据库版本 **`2026111935`**。发下一版时，以该次发布提交中的三个 schema 检查和 CMS 内嵌迁移为准。回传首发批量上限为 **1**。
 
-**发布顺序**　同一提交打包 → 网关进入维护并停旧写入及发送 → CMS 单次迁移 → 补并发索引和授权 → Redis、Conversion API、CMS → 核对支付账户和回传路由 → Collector、Conversion Worker（暂停发送）、Reader → 发布两个前端和验证 Webhook → 恢复业务并回补维护窗口事件 → 单独启用 Meta 发送。
+**发布顺序**　同一提交打包、核对存量管理员 → 网关进入维护并停旧写入及发送 → CMS 单次迁移 → 补并发索引和授权 → Redis、Conversion API、CMS 及新版 CMS 前端 → 验证 RBAC、核对支付账户和回传路由 → Collector、Conversion Worker（暂停发送）、Reader → 发布 H5 和验证 Webhook → 恢复业务并回补维护窗口事件 → 单独启用 Meta 发送。
 
 ## 1. 拓扑与网络
 
@@ -39,7 +39,7 @@ flowchart LR
 1. 选定已审核的提交和服务器 CPU 架构。确认 CMS、Reader、Conversion 和两个前端来自同一提交，检查工作区，避免将未审核的本地改动打入发布包。记录各环境当前 schema、容器镜像、前端版本和网关 upstream。
 2. 核对 RDS 恢复点可用性并记录恢复时间，保留上一版发布目录、镜像和两套前端。首次建库确认 UTF8、业务账号、迁移所需对象权限和 `pg_trgm`。现有生产按统一 `star_novel` 业务账号执行，确认能够迁移及访问 `public`、`conversion`、支付与目录对象。所有 Reader 节点使用同一 Reader JWT 密钥，CMS 使用独立的 `cms.jwt_secret`。
 3. 记录待处理的支付和回传状态。按账户和环境保存支付恢复游标、待处理回调、存量协议、收款与退款待核对项，以及待发、发送中、未知和已确认的转化。记下维护窗口起止时间及其时区，供 Webhook 补查。
-4. 确认网关维护切换方式、渠道控制台访问权限和回退负责人。空库首次发布不再内置固定密码超管账号，需在执行 `cms -migrate` 前通过 `CMS_BOOTSTRAP_ADMIN_PASSWORD`（可选配 `CMS_BOOTSTRAP_ADMIN_USERNAME` 默认 `admin`、`CMS_BOOTSTRAP_ADMIN_NICKNAME` 默认 `管理员`）注入强密码（长度 ≥ 12，至少包含大小写字母、数字、特殊字符中的 3 类，禁止 `admin123`/`password`/`changeme`/`<...>` 等弱口令或占位符）以安全引导首个超级管理员；初始化完成后可从环境文件中移除 `CMS_BOOTSTRAP_ADMIN_PASSWORD`，后续重跑 `-migrate` 会自动跳过且不会重置已有超管密码。
+4. 确认网关维护切换方式、渠道控制台访问权限和回退负责人。升级旧库先完成第 2.4 节的只读检查。需要引导超管时，提前通过受控密钥渠道准备 `CMS_BOOTSTRAP_ADMIN_PASSWORD`。密码至少 12 个字符，包含大小写字母、数字、特殊字符中的至少 3 类，且无首尾空白、弱口令或占位符。可选的 `CMS_BOOTSTRAP_ADMIN_USERNAME` 和 `CMS_BOOTSTRAP_ADMIN_NICKNAME` 默认分别为 `admin` 和 `管理员`，用户名须未被占用。
 
 ### 2.1 构建与装载
 
@@ -106,16 +106,36 @@ dc config --quiet
 dc build cms
 ```
 
+### 2.4 RBAC 存量库升级检查
+
+首次建库由迁移创建五个内置角色 `Admin`、`Leader`、`AdOptimizer`、`ContentOperations`、`FinanceManager`，其中 `Admin` 为超管。已有旧库且 schema 低于 `2026111935` 时，在维护前盘点所有管理员（含停用账号），按原业务权限确认每个账号在新版的角色。以下查询仅用于已存在 `admins` 表的旧库。
+
+```bash
+PGSERVICE=star_novel_release psql -X -v ON_ERROR_STOP=1 \
+  -c 'SELECT role, status, count(*) FROM public.admins GROUP BY role, status ORDER BY role, status;'
+```
+
+`2026111935` 只按旧 `admins.role` 与新角色代码的精确匹配回填，随后要求 `admins.role_id` 非空。旧 `SuperAdmin` 等未匹配值会阻断迁移，旧普通 `Admin` 还可能被映射成新版超管。发现上述情况须暂停发布，由业务负责人逐账号确认角色映射和降权边界，并在生产副本上演练经评审的迁移方案。首次超管引导发生在这一步之后，无法处理旧角色映射失败。 [RBAC 迁移 SQL](cms-backend/db/migrations/2026111935.sql)
+
 ## 3. 维护窗口与数据库切换
 
 1. 网关进入维护，停止新结账、履约、CMS 写入和配置发布。支付 Webhook 暂时不可接收时返回可重试的 `503`，保留渠道重投和事件补查的证据。
 2. 停止旧 Meta Worker 的新领取，等待在途请求和回执收尾。单独记录失租、结果未知和待核对任务。停止全部旧 Reader 实例及其支付任务、CMS、Conversion API、Worker 和 Collector。已运行的分销 Callback 与回告 Worker 一并停用。已有 Compose 部署从旧 `current` 目录用该版本的 Compose 文件停服务；首次从独立容器切换时核对实际容器名再停用。保留旧镜像、配置及 Redis 数据卷。
-3. 确认迁移连接指向正确 RDS。只由新包中的 CMS 执行迁移。新库会初始化基线、基础种子、5 个内置 RBAC 角色并通过 `CMS_BOOTSTRAP_ADMIN_*` 环境变量创建首个超级管理员（空库缺少或传入弱 `CMS_BOOTSTRAP_ADMIN_PASSWORD` 将直接拒绝迁移）；旧库按版本执行待应用的迁移（若已存在启用态超级管理员则自动跳过引导）。用接近生产数据量的库预演，当前进程迁移时限为 90 秒，单条 SQL 上限 60 秒，业务表锁等待上限 3 秒。迁移失败时检查退出码、账本和锁等待，解除阻塞后再重试。
+3. 确认迁移连接指向正确 RDS。只由新包中的 CMS 执行迁移。新库会初始化基线、基础种子和内置 RBAC 角色。旧库按版本执行待应用的迁移。用接近生产数据量的库预演，当前进程迁移时限为 90 秒，单条 SQL 上限 60 秒，业务表锁等待上限 3 秒。迁移失败时检查退出码和版本账本，按具体错误解除阻塞后再重试。
 
 ```bash
-# 从新版 releases 目录执行（空库首次发布需在 cms.env 或本次命令中传入强密码 CMS_BOOTSTRAP_ADMIN_PASSWORD）
+# 已确认迁移后至少保留一名启用态超管
 dc run --rm --no-deps cms -migrate
 ```
+
+空库或迁移完成后缺少启用态超管时，先用受控方式在当前 Shell 导出引导变量，再改用下列命令。命令行只传变量名。若使用自定义用户名或昵称，相应追加 `-e CMS_BOOTSTRAP_ADMIN_USERNAME` 或 `-e CMS_BOOTSTRAP_ADMIN_NICKNAME`，置于服务名 `cms` 之前。
+
+```bash
+dc run --rm --no-deps -e CMS_BOOTSTRAP_ADMIN_PASSWORD cms -migrate
+unset CMS_BOOTSTRAP_ADMIN_PASSWORD CMS_BOOTSTRAP_ADMIN_USERNAME CMS_BOOTSTRAP_ADMIN_NICKNAME
+```
+
+引导配置缺失或无效会使此次迁移事务失败。已存在启用态超管时，重跑迁移会保留其原密码。
 
 4. 用预先配置的 libpq 服务名或受控凭据连接同一个库，核对账本并运行独立索引脚本。以下示例使用 `PGSERVICE=star_novel_release`，需先将该服务名指向本次 RDS 目标。
 
@@ -136,7 +156,13 @@ dc ps
 curl -fsS http://127.0.0.1:8081/healthz
 ```
 
-Conversion API 在 Compose 中没有 HTTP 健康检查。`dc ps` 后，在 CMS 登录验证回传概要和吞吐查询成功，分别使用 `/api/v1/admin/conversion/summary` 和 `/api/v1/admin/conversion/throughput` 检查私网鉴权、角色与数据库读取。首次新建后台可先发布 CMS 静态产物到受控管理入口，以完成第 4 节配置。
+Conversion API 在 Compose 中没有 HTTP 健康检查。旧版 CMS、Reader 和 Conversion 均不能通过新 schema 的版本检查，CMS 与私网 Conversion API 也需使用同版的操作人权限头。保持维护状态，按第 5 节发布同版本 CMS 静态产物到受控管理入口，重新登录后执行下列 RBAC 验收，再进行第 4 节配置。
+
+### 3.1 RBAC 上线验收
+
+- 通过 `/api/v1/admin/auth/me` 核对超管身份、角色和权限，在「账号管理」检查启用态超管名单与迁移前批准的名单一致。首次引导时核对 `bootstrap_super_admin` 审计。超管可管理角色及账号，普通管理员直调相关写接口须返回 `403`。
+- 用最小权限账号验证页面、菜单和 API 一致。仅有 `ads.conversions:read` 的账号可通过 CMS 查询回传概要和吞吐，直调投递重排返回 `403`。在隔离环境验证授权写入后撤权，同一登录会话再次调用写接口时须被拒绝；停用账号或角色后受保护接口须返回 `401`。回传详情或写入异常时同时检查 CMS 代理鉴权和 Conversion 的数据库权限函数。
+- 若部署使用独立数据库角色，迁移后由迁移所有者重跑新版 [角色授权脚本](cms-backend/db/conversion_role_grants.sql)。用实际运行账号验证 CMS 角色增改与序列权限、Conversion API 的写权限函数、Reader 支付后台的操作人检查，以及超管专属的回传保留期清理权限。实际写入与清理演练使用隔离环境。统一账号部署按第 3 节核对对象权限。
 
 ## 4. 配置业务并启动 Reader
 
@@ -231,7 +257,7 @@ ln -sfn "$(pwd -P)" /www/star-novel-server/current
 
 | 故障范围 | 操作 |
 | --- | --- |
-| 前端静态发布 | 切回上一套与运行中 API 兼容的 H5 或 CMS 静态目录，验证入口 HTML 和支付返回地址。 |
+| 前端静态发布 | 切回与运行中 API 兼容的静态目录。RBAC 上线后，CMS 前端回退也须支持新版权限数据与路由。验证 CMS 登录与菜单、H5 入口及支付返回地址。 |
 | 新结账或渠道配置 | 关闭受影响账户的新单或订阅，必要时关闭对应 Reader Stripe 开关。保留原账户、回调、对账和售后，以核实的上一份有效配置重新发布或以新凭据前滚。 |
 | Meta 投递 | 将 `conversion.meta_enabled` 设为 `false`，重新生成并重建 Worker。保留 Outbox、归一化、Collector、请求账本及在途回执证据。结果未知进入人工核对，重排沿用原事件身份。 |
 | 同 schema 应用故障 | 用已验证支持当前 schema、支付记录和批次账本的上一版镜像与配置恢复。先看仓内 `RequiredSchemaVersion` 和实际发布记录，从对应版本目录重建相关进程并验收，再更新 `current`。 |
