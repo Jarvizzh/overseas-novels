@@ -430,6 +430,14 @@ func TestIsUnapprovedPayPalCancelRejected(t *testing.T) {
 	if !isUnapprovedPayPalCancelRejected(statusInvalid) {
 		t.Fatal("expected SUBSCRIPTION_STATUS_INVALID APIError to be recognized")
 	}
+	resourceNotFound := &paypal.APIError{
+		Status: 404,
+		Name:   "RESOURCE_NOT_FOUND",
+		Issues: []string{"INVALID_RESOURCE_ID"},
+	}
+	if !isUnapprovedPayPalCancelRejected(resourceNotFound) {
+		t.Fatal("expected HTTP 404 RESOURCE_NOT_FOUND / INVALID_RESOURCE_ID APIError to be recognized")
+	}
 	if isUnapprovedPayPalCancelRejected(context.DeadlineExceeded) {
 		t.Fatal("timeout error must NOT be treated as unapproved cancel rejection")
 	}
@@ -439,5 +447,22 @@ func TestIsUnapprovedPayPalCancelRejected(t *testing.T) {
 	}
 	if isUnapprovedPayPalCancelRejected(otherAPI) {
 		t.Fatal("5xx PayPal error must NOT be treated as unapproved cancel rejection")
+	}
+	authAPI := &paypal.APIError{
+		Status:         401,
+		Name:           "INVALID_CLIENT",
+		Authentication: true,
+	}
+	if isUnapprovedPayPalCancelRejected(authAPI) {
+		t.Fatal("401 auth error must NOT be treated as unapproved cancel rejection")
+	}
+	authNotFound := &paypal.APIError{
+		Status:         404,
+		Name:           "RESOURCE_NOT_FOUND",
+		Issues:         []string{"INVALID_RESOURCE_ID"},
+		Authentication: true,
+	}
+	if isUnapprovedPayPalCancelRejected(authNotFound) {
+		t.Fatal("authenticated=true 404 error must NOT be treated as unapproved cancel rejection")
 	}
 }

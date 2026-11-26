@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"net/http"
 	"slices"
 	"time"
 
@@ -30,18 +31,18 @@ const vipSwitchSourcePredicate = `intent_id=$1 AND user_id=$2 AND checkout_envir
 	AND active_provider=$4 AND CASE WHEN $4='paypal' THEN paypal_intent_id=$5::uuid ELSE stripe_intent_id=$5::uuid END`
 
 // A persisted switch is resolved before checking whether the destination
-// can still accept a new checkout.
-func (s *service) resumeVIPSwitch(ctx context.Context, row *vipCheckoutIntentRow, target string) error {
+// can still accept a new checkout. Regardless of which channel the buyer clicks
+// next, finish closing the previous channel first rather than leaving the intent
+// permanently wedged on a mismatched switch_to_provider.
+func (s *service) resumeVIPSwitch(ctx context.Context, row *vipCheckoutIntentRow, _ string) error {
 	if row.switchTo == "" {
 		return nil
 	}
-	if row.switchTo != target {
-		return ErrCheckoutPending
-	}
-	if err := s.switchVIPChannel(ctx, *row, target); err != nil {
+	if err := s.switchVIPChannel(ctx, *row, row.switchTo); err != nil {
 		return err
 	}
 	row.activeProvider, row.switchTo = "", ""
+	row.paypalIntentID, row.stripeIntentID, row.subscriptionID = "", "", ""
 	return nil
 }
 
@@ -223,7 +224,18 @@ func (s *service) sendUnifiedPayPalVIP(ctx context.Context, row vipCheckoutInten
 
 func isUnapprovedPayPalCancelRejected(err error) bool {
 	var providerErr *paypal.APIError
-	return errors.As(err, &providerErr) && providerErr.HasIssue("SUBSCRIPTION_STATUS_INVALID")
+	if !errors.As(err, &providerErr) || providerErr.Authentication {
+		return false
+	}
+	if providerErr.HasIssue("SUBSCRIPTION_STATUS_INVALID") {
+		return true
+	}
+	// PayPal Subscriptions v1 rejects /cancel on APPROVAL_PENDING agreements with
+	// HTTP 404 RESOURCE_NOT_FOUND (INVALID_RESOURCE_ID) even though GET confirms
+	// the subscription exists in APPROVAL_PENDING. Caller always re-reads GET to
+	// verify status remains APPROVAL_PENDING with no payment before detaching.
+	return providerErr.Status == http.StatusNotFound &&
+		(providerErr.HasIssue("RESOURCE_NOT_FOUND") || providerErr.HasIssue("INVALID_RESOURCE_ID"))
 }
 
 func (s *service) closePayPalVIPForSwitch(ctx context.Context, row vipCheckoutIntentRow) error {
@@ -274,9 +286,10 @@ func (s *service) closePayPalVIPForSwitch(ctx context.Context, row vipCheckoutIn
 			if err != nil {
 				return err
 			}
-			// PayPal Subscriptions API rejects /cancel on APPROVAL_PENDING with
-			// SUBSCRIPTION_STATUS_INVALID because unapproved agreements cannot be
-			// cancelled via API. Re-reading confirms it is still unapproved with no payment.
+			// PayPal Subscriptions API rejects /cancel on APPROVAL_PENDING (with HTTP 422
+			// SUBSCRIPTION_STATUS_INVALID or HTTP 404 RESOURCE_NOT_FOUND / INVALID_RESOURCE_ID)
+			// because unapproved agreements cannot be cancelled via API. Re-reading confirms
+			// it is still unapproved with no payment.
 			if unapprovedNotCancellable && details.Status == "APPROVAL_PENDING" && details.LastPaymentTime == nil {
 				return closeUnifiedPayPalChild(ctx, row, subID)
 			}
@@ -333,6 +346,7 @@ func closeUnifiedPayPalChild(ctx context.Context, row vipCheckoutIntentRow, subI
 func (s *service) closeStripeVIPForSwitch(ctx context.Context, row vipCheckoutIntentRow) error {
 	account, err := stripeVIPAccountForOwner(ctx, row.userID, row.stripeIntentID, true)
 	if err != nil {
+		log.Printf("task=vip_switch action=stripe_account intent=%s stripe_intent=%s error=%v", row.intentID, row.stripeIntentID, err)
 		return ErrCheckoutPending
 	}
 	intent, err := findStripeVIPIntent(ctx, db.Pool(ctx), account, row.stripeIntentID)
@@ -352,16 +366,19 @@ func (s *service) closeStripeVIPForSwitch(ctx context.Context, row vipCheckoutIn
 			CloseStripeVIPCheckout(context.Context, string, string, string) (payment.StripeVIPCheckout, error)
 		})
 		if !ok || !canClose {
+			log.Printf("task=vip_switch action=stripe_adapter intent=%s stripe_intent=%s ok=%v can_close=%v", row.intentID, intent.ID, ok, canClose)
 			return ErrCheckoutPending
 		}
 		if sessionID == "" {
 			sessionID, err = findUnidentifiedStripeVIPCheckout(ctx, adapter, intent)
 			if err != nil || sessionID == "" {
+				log.Printf("task=vip_switch action=find_stripe_session intent=%s stripe_intent=%s error=%v", row.intentID, intent.ID, err)
 				return ErrCheckoutPending
 			}
 		}
 		proof, err := closer.CloseStripeVIPCheckout(ctx, sessionID, intent.ID, intent.Offer.SalesMode)
 		if err != nil || proof.ID != sessionID || proof.IntentID != intent.ID {
+			log.Printf("task=vip_switch action=close_stripe intent=%s stripe_intent=%s session=%s error=%v", row.intentID, intent.ID, sessionID, err)
 			return ErrCheckoutPending
 		}
 		if proof.SubscriptionID != "" {
@@ -371,6 +388,7 @@ func (s *service) closeStripeVIPForSwitch(ctx context.Context, row vipCheckoutIn
 			return ErrSubscriptionConflict
 		}
 		if !proof.Expired {
+			log.Printf("task=vip_switch action=stripe_not_expired intent=%s stripe_intent=%s session=%s awaiting_buyer=%v", row.intentID, intent.ID, sessionID, proof.AwaitingBuyer)
 			return ErrCheckoutPending
 		}
 	}
@@ -390,6 +408,7 @@ func (s *service) closeStripeVIPForSwitch(ctx context.Context, row vipCheckoutIn
 		return err
 	}
 	if tag.RowsAffected() != 1 {
+		log.Printf("task=vip_switch action=update_stripe_intent intent=%s stripe_intent=%s rows=%d", row.intentID, intent.ID, tag.RowsAffected())
 		return ErrCheckoutPending
 	}
 	if err := detachVIPChannelTx(ctx, tx, row); err != nil {

@@ -165,6 +165,31 @@ func (s *service) confirmPayPalCancellation(ctx context.Context, id, reason stri
 	switch details.Status {
 	case "CANCELLED", "EXPIRED":
 		return s.repo.UpdateUserSubscriptionStatus(ctx, id, details.Status)
+	case "APPROVAL_PENDING":
+		if details.LastPaymentTime == nil {
+			cancelErr := client.CancelSubscription(ctx, id, reason)
+			if cancelErr == nil {
+				return s.repo.UpdateUserSubscriptionStatus(ctx, id, "CANCELLED")
+			}
+			if !isUnapprovedPayPalCancelRejected(cancelErr) {
+				return cancelErr
+			}
+			verified, verifyErr := client.GetSubscription(ctx, id)
+			if verifyErr != nil {
+				return verifyErr
+			}
+			if verified.SubscriptionID != id {
+				return errors.New("unexpected subscription ID")
+			}
+			if verified.Status == "CANCELLED" || verified.Status == "EXPIRED" {
+				return s.repo.UpdateUserSubscriptionStatus(ctx, id, verified.Status)
+			}
+			if verified.Status == "APPROVAL_PENDING" && verified.LastPaymentTime == nil {
+				return s.repo.UpdateUserSubscriptionStatus(ctx, id, "CANCELLED")
+			}
+			return cancelErr
+		}
+		fallthrough
 	default:
 		if err := client.CancelSubscription(ctx, id, reason); err != nil {
 			return err
@@ -217,12 +242,19 @@ func (s *service) reconcileSubscriptionWindow(ctx context.Context, id string, fr
 	if details.SubscriptionID != id || details.PlanID != sub.PlanID {
 		return ErrCheckoutUnavailable
 	}
-	switch details.Status {
-	case "APPROVED":
-		return s.activateApprovedPayPalVIP(ctx, id)
-	case "ACTIVE", "CANCELLED", "SUSPENDED", "EXPIRED":
-		if err := s.repo.UpdateUserSubscriptionStatus(ctx, id, details.Status); err != nil {
+	if sub.Status == "CANCELLED" && (details.Status == "APPROVED" || details.Status == "ACTIVE" || details.Status == "SUSPENDED") {
+		log.Printf("task=subscription action=requeue_late_cancel sub=%s live_status=%s", sub.SubscriptionID, details.Status)
+		if err := requeueLateApprovedPayPalCancellation(ctx, sub.SubscriptionID, "Superseded PayPal subscription approved after cancellation"); err != nil {
 			return err
+		}
+	} else {
+		switch details.Status {
+		case "APPROVED":
+			return s.activateApprovedPayPalVIP(ctx, id)
+		case "ACTIVE", "CANCELLED", "SUSPENDED", "EXPIRED":
+			if err := s.repo.UpdateUserSubscriptionStatus(ctx, id, details.Status); err != nil {
+				return err
+			}
 		}
 	}
 	if details.Status == "APPROVAL_PENDING" {

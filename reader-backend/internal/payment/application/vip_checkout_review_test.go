@@ -14,6 +14,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"reader-backend/internal/payment"
+	"reader-backend/internal/payment/paypal"
 )
 
 func testUnifiedVIPReview(t *testing.T, svc *service, pool *pgxpool.Pool, pp *sixFlowPayPalAdapter, stripe *sixFlowStripeAdapter, origin string) {
@@ -57,7 +58,8 @@ func testUnifiedVIPReview(t *testing.T, svc *service, pool *pgxpool.Pool, pp *si
 		}
 		return result
 	}
-	exec(`INSERT INTO users(id) SELECT generate_series(610,627)`)
+	exec(`INSERT INTO users(id) SELECT generate_series(610,629)`)
+	exec(`INSERT INTO users(id) SELECT generate_series(680,684)`)
 
 	t.Run("PayPal cancellation uncertainty keeps original checkout", func(t *testing.T) {
 		intent := prepare(610, 605, uuid.NewString())
@@ -83,6 +85,154 @@ func testUnifiedVIPReview(t *testing.T, svc *service, pool *pgxpool.Pool, pp *si
 		cancellations := len(pp.cancelledSubs)
 		if got := startStripe(610, intent.ID); got.Status != "awaiting_approval" || stripe.vipSessionSeq != before+1 || len(pp.cancelledSubs) != cancellations {
 			t.Fatalf("verified switch did not recover: %+v", got)
+		}
+	})
+
+	t.Run("unapproved PayPal 404 cancel rejection allows VIP switch to Stripe", func(t *testing.T) {
+		intent := prepare(628, 605, uuid.NewString())
+		old := startPayPal(628, intent.ID)
+		before := stripe.vipSessionSeq
+		pp.cancelFault = func(string) error {
+			return &paypal.APIError{
+				Status: http.StatusNotFound,
+				Name:   "RESOURCE_NOT_FOUND",
+				Issues: []string{"INVALID_RESOURCE_ID"},
+			}
+		}
+		defer func() { pp.cancelFault = nil }()
+		got := startStripe(628, intent.ID)
+		row := read(628, intent.ID)
+		if got.Status != "awaiting_approval" || got.ApprovalURL == "" || stripe.vipSessionSeq != before+1 ||
+			row.activeProvider != payment.ProviderStripe || row.switchTo != "" || row.paypalIntentID != "" {
+			t.Fatalf("404 unapproved cancel did not switch to Stripe: got=%+v row=%+v", got, row)
+		}
+		if sub, err := repo.GetSubscriptionByID(ctx, old.ExternalOrderID); err != nil || sub == nil || sub.Status != "CANCELLED" {
+			t.Fatalf("old unapproved PayPal subscription not marked CANCELLED: sub=%+v err=%v", sub, err)
+		}
+	})
+
+	t.Run("stuck switch_to_provider recovers when buyer clicks original channel", func(t *testing.T) {
+		intent := prepare(629, 605, uuid.NewString())
+		old := startPayPal(629, intent.ID)
+		pp.cancelFault = func(string) error { return context.DeadlineExceeded }
+		if _, err := svc.StartStripeCheckout(ctx, 629, intent.ID, origin); !errors.Is(err, ErrCheckoutPending) {
+			t.Fatalf("expected initial switch failure, got %v", err)
+		}
+		// Now simulate PayPal returning 404 RESOURCE_NOT_FOUND for the unapproved subscription
+		// while the buyer retries PayPal directly (instead of clicking Stripe again).
+		pp.cancelFault = func(string) error {
+			return &paypal.APIError{
+				Status: http.StatusNotFound,
+				Name:   "RESOURCE_NOT_FOUND",
+				Issues: []string{"INVALID_RESOURCE_ID"},
+			}
+		}
+		defer func() { pp.cancelFault = nil }()
+		got := startPayPal(629, intent.ID)
+		row := read(629, intent.ID)
+		if got.Status != "awaiting_approval" || got.ApprovalURL == "" || got.ExternalOrderID == old.ExternalOrderID ||
+			row.activeProvider != payment.ProviderPayPal || row.switchTo != "" {
+			t.Fatalf("stuck switch did not recover on PayPal retry: got=%+v row=%+v old=%s", got, row, old.ExternalOrderID)
+		}
+	})
+
+	t.Run("late PayPal approval after switch requeues PayPal cancellation", func(t *testing.T) {
+		intent := prepare(680, 605, uuid.NewString())
+		old := startPayPal(680, intent.ID)
+		pp.cancelFault = func(string) error {
+			return &paypal.APIError{
+				Status: http.StatusNotFound,
+				Name:   "RESOURCE_NOT_FOUND",
+				Issues: []string{"INVALID_RESOURCE_ID"},
+			}
+		}
+		_ = startStripe(680, intent.ID)
+		pp.cancelFault = nil
+
+		// Simulate buyer later approving the old PayPal link in another tab.
+		pp.subDetailsByID[old.ExternalOrderID].Status = "ACTIVE"
+		if err := svc.applyPayPalEvent(ctx, pp, &payment.WebhookEventResult{
+			EventType:      "subscription_activated",
+			SubscriptionID: old.ExternalOrderID,
+			Account:        pp.account,
+		}); err != nil {
+			t.Fatalf("applyPayPalEvent failed: %v", err)
+		}
+		if sub, err := repo.GetSubscriptionByID(ctx, old.ExternalOrderID); err != nil || sub == nil || sub.Status != "CANCEL_PENDING" {
+			t.Fatalf("expected late-approved PayPal sub to enter CANCEL_PENDING: sub=%+v err=%v", sub, err)
+		}
+		svc.reconcilePayPalCancellations(ctx)
+		if pp.subDetailsByID[old.ExternalOrderID].Status != "CANCELLED" {
+			t.Fatalf("expected reconciliation to cancel late-approved PayPal sub remotely, got %s", pp.subDetailsByID[old.ExternalOrderID].Status)
+		}
+		if sub, err := repo.GetSubscriptionByID(ctx, old.ExternalOrderID); err != nil || sub == nil || sub.Status != "CANCELLED" {
+			t.Fatalf("expected local sub to return to CANCELLED after remote cancel: sub=%+v err=%v", sub, err)
+		}
+
+		// Also verify the periodic reconciliation window catches late approvals without a webhook.
+		intent2 := prepare(681, 605, uuid.NewString())
+		old2 := startPayPal(681, intent2.ID)
+		pp.cancelFault = func(string) error {
+			return &paypal.APIError{
+				Status: http.StatusNotFound,
+				Name:   "RESOURCE_NOT_FOUND",
+				Issues: []string{"INVALID_RESOURCE_ID"},
+			}
+		}
+		_ = startStripe(681, intent2.ID)
+		pp.cancelFault = nil
+		pp.subDetailsByID[old2.ExternalOrderID].Status = "ACTIVE"
+		now := time.Now().UTC()
+		if err := svc.reconcileSubscriptionWindow(ctx, old2.ExternalOrderID, now.Add(-time.Hour), now); err != nil {
+			t.Fatalf("reconcileSubscriptionWindow failed: %v", err)
+		}
+		if sub, err := repo.GetSubscriptionByID(ctx, old2.ExternalOrderID); err != nil || sub == nil || sub.Status != "CANCEL_PENDING" {
+			t.Fatalf("expected reconcileSubscriptionWindow to requeue CANCEL_PENDING: sub=%+v err=%v", sub, err)
+		}
+	})
+
+	t.Run("confirmPayPalCancellation resolves unapproved 404 cancel rejection", func(t *testing.T) {
+		intent := prepare(682, 605, uuid.NewString())
+		old := startPayPal(682, intent.ID)
+		if err := svc.CancelSubscription(ctx, 682, old.ExternalOrderID, "changed mind"); err != nil {
+			t.Fatalf("CancelSubscription failed: %v", err)
+		}
+		pp.cancelFault = func(string) error {
+			return &paypal.APIError{
+				Status: http.StatusNotFound,
+				Name:   "RESOURCE_NOT_FOUND",
+				Issues: []string{"INVALID_RESOURCE_ID"},
+			}
+		}
+		defer func() { pp.cancelFault = nil }()
+		if err := svc.confirmPayPalCancellation(ctx, old.ExternalOrderID, "changed mind"); err != nil {
+			t.Fatalf("confirmPayPalCancellation should resolve unapproved 404 cleanly: %v", err)
+		}
+		if sub, err := repo.GetSubscriptionByID(ctx, old.ExternalOrderID); err != nil || sub == nil || sub.Status != "CANCELLED" {
+			t.Fatalf("expected unapproved subscription to become CANCELLED: sub=%+v err=%v", sub, err)
+		}
+	})
+
+	t.Run("expired PayPal VIP child detaches cleanly on same-channel retry", func(t *testing.T) {
+		intent := prepare(683, 605, uuid.NewString())
+		old := startPayPal(683, intent.ID)
+		exec(`UPDATE user_subscriptions SET status='EXPIRED' WHERE subscription_id=$1`, old.ExternalOrderID)
+		got := startPayPal(683, intent.ID)
+		if got.Status != "awaiting_approval" || got.ApprovalURL == "" || got.ExternalOrderID == old.ExternalOrderID {
+			t.Fatalf("same-channel retry after PayPal expiry did not create fresh checkout: got=%+v old=%s", got, old.ExternalOrderID)
+		}
+	})
+
+	t.Run("closed Stripe VIP child detaches cleanly on same-channel retry", func(t *testing.T) {
+		intent := prepare(684, 605, uuid.NewString())
+		old := startStripe(684, intent.ID)
+		before := stripe.vipSessionSeq
+		row := read(684, intent.ID)
+		exec(`UPDATE payment_stripe_subscription_intents SET status='closed', approval_url=NULL WHERE id=$1`, row.stripeIntentID)
+		got := startStripe(684, intent.ID)
+		if got.Status != "awaiting_approval" || got.ApprovalURL == "" || got.ApprovalURL == old.ApprovalURL || stripe.vipSessionSeq != before+1 {
+			t.Fatalf("same-channel retry after Stripe session expiry did not create fresh checkout: got=%+v old=%+v seq=%d/%d",
+				got, old, stripe.vipSessionSeq, before+1)
 		}
 	})
 

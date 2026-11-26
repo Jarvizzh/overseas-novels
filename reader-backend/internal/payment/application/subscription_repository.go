@@ -320,6 +320,26 @@ func (r *dbRepository) enqueuePayPalCancellation(ctx context.Context, id string,
 	return err
 }
 
+// requeueLateApprovedPayPalCancellation moves a locally CANCELLED PayPal agreement
+// back to CANCEL_PENDING when PayPal's live API reports it was still approved or
+// activated (e.g. a buyer approved an old APPROVAL_PENDING link after switching
+// channels), so reconciliation cancels it on PayPal and stops recurring charges.
+func requeueLateApprovedPayPalCancellation(ctx context.Context, subscriptionID, reason string) error {
+	if db.Pool(ctx) == nil {
+		return nil
+	}
+	_, err := db.Pool(ctx).Exec(ctx, `UPDATE user_subscriptions
+		SET status='CANCEL_PENDING',
+		    cancel_reason=COALESCE(NULLIF(cancel_reason,''), $2),
+		    cancel_next_attempt_at=now(),
+		    cancel_last_error=NULL,
+		    next_billing_time=NULL,
+		    updated_at=now()
+		WHERE subscription_id=$1 AND payment_method='paypal' AND status='CANCELLED'`,
+		subscriptionID, reason)
+	return err
+}
+
 // A late failure cannot overwrite the status set by a newer verified payment.
 func recordPayPalRenewalFailure(ctx context.Context, subscriptionID string, failedAt time.Time, observedStatus string) error {
 	_, err := db.Pool(ctx).Exec(ctx, `UPDATE user_subscriptions SET

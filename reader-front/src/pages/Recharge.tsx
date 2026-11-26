@@ -352,7 +352,6 @@ export const Recharge: React.FC<RechargeProps> = ({
 
     draft.intentId = intent.intent_id;
     saveDraft();
-    showPurchase(intent.intent_id);
     if (['ready', 'retryable', 'awaiting_approval', 'confirming'].includes(intent.status)) {
       if (isSubscriptionSlot(tSlot)) {
         try {
@@ -363,6 +362,7 @@ export const Recharge: React.FC<RechargeProps> = ({
       }
       const checkout = await startCheckout(provider, intent.intent_id, signal);
       if (signal?.aborted) return;
+      showPurchase(intent.intent_id);
       if (checkout.approve_url) {
         window.location.assign(checkout.approve_url);
       } else {
@@ -371,8 +371,11 @@ export const Recharge: React.FC<RechargeProps> = ({
         }
         setPurchaseRefresh((value) => value + 1);
       }
-    } else if (intent.confirmation_message) {
-      showToast(intent.confirmation_message, 'error');
+    } else {
+      showPurchase(intent.intent_id);
+      if (intent.confirmation_message) {
+        showToast(intent.confirmation_message, 'error');
+      }
     }
   };
 

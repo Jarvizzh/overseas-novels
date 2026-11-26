@@ -178,7 +178,6 @@ func buildVIPPurchaseIntentView(ctx context.Context, q checkoutQueryer, r vipChe
 			out.Status, out.ConfirmationMessage = "confirming", "Confirming the previous VIP checkout before switching payment methods."
 		}
 		out.ApprovalURL = ""
-		out.AvailableChannels = []string{r.switchTo}
 	}
 	return out, nil
 }
@@ -493,6 +492,93 @@ func vipCheckoutReturnURLs(site *url.URL, id string) (string, string) {
 	return returnURL, site.String()
 }
 
+func detachClosedPayPalVIPChild(ctx context.Context, row *vipCheckoutIntentRow) (bool, error) {
+	if row.activeProvider != payment.ProviderPayPal || row.paypalIntentID == "" || row.switchTo != "" {
+		return false, nil
+	}
+	tx, err := db.Pool(ctx).Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback(context.WithoutCancel(ctx))
+	var subID string
+	err = tx.QueryRow(ctx, `
+		SELECT COALESCE(i.subscription_id, '')
+		FROM paypal_subscription_intents i
+		JOIN user_subscriptions s ON s.subscription_id = i.subscription_id
+		  AND s.user_id = i.user_id AND s.checkout_intent_id = i.intent_id
+		  AND s.payment_method = 'paypal'
+		WHERE i.intent_id = $1 AND i.user_id = $2 AND i.checkout_environment = $3
+		  AND s.status IN ('CANCELLED', 'EXPIRED')
+		  AND s.last_payment_time IS NULL
+		  AND s.paypal_activation_requested_at IS NULL
+		FOR UPDATE OF i, s`, row.paypalIntentID, row.userID, row.environment).Scan(&subID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM paypal_subscription_intents WHERE intent_id = $1 AND user_id = $2`, row.paypalIntentID, row.userID); err != nil {
+		return false, err
+	}
+	tag, err := tx.Exec(ctx, `UPDATE payment_vip_checkout_intents
+		SET active_provider = NULL, paypal_intent_id = NULL, stripe_intent_id = NULL, subscription_id = NULL, updated_at = now()
+		WHERE intent_id = $1 AND user_id = $2 AND checkout_environment = $3
+		  AND status = 'Pending' AND active_provider = 'paypal' AND paypal_intent_id = $4::uuid
+		  AND switch_to_provider IS NULL`, row.intentID, row.userID, row.environment, row.paypalIntentID)
+	if err != nil {
+		return false, err
+	}
+	if tag.RowsAffected() != 1 {
+		return false, nil
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, err
+	}
+	row.activeProvider, row.paypalIntentID, row.subscriptionID = "", "", ""
+	return true, nil
+}
+
+func detachClosedStripeVIPChild(ctx context.Context, row *vipCheckoutIntentRow) (bool, error) {
+	if row.activeProvider != payment.ProviderStripe || row.stripeIntentID == "" || row.switchTo != "" {
+		return false, nil
+	}
+	tx, err := db.Pool(ctx).Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback(context.WithoutCancel(ctx))
+	var childID string
+	err = tx.QueryRow(ctx, `
+		SELECT id::text FROM payment_stripe_subscription_intents
+		WHERE id = $1 AND user_id = $2 AND checkout_environment = $3
+		  AND status = 'closed' AND subscription_ref IS NULL
+		FOR UPDATE`, row.stripeIntentID, row.userID, row.environment).Scan(&childID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	tag, err := tx.Exec(ctx, `UPDATE payment_vip_checkout_intents
+		SET active_provider = NULL, paypal_intent_id = NULL, stripe_intent_id = NULL, subscription_id = NULL, updated_at = now()
+		WHERE intent_id = $1 AND user_id = $2 AND checkout_environment = $3
+		  AND status = 'Pending' AND active_provider = 'stripe' AND stripe_intent_id = $4::uuid
+		  AND switch_to_provider IS NULL`, row.intentID, row.userID, row.environment, childID)
+	if err != nil {
+		return false, err
+	}
+	if tag.RowsAffected() != 1 {
+		return false, nil
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, err
+	}
+	row.activeProvider, row.stripeIntentID, row.subscriptionID = "", "", ""
+	return true, nil
+}
+
 func (s *service) startVIPPayPalCheckout(ctx context.Context, userID int64, intentID, origin string) (*PurchaseIntent, error) {
 	row, err := readVIPCheckoutIntent(ctx, userID, intentID)
 	if err != nil {
@@ -506,6 +592,11 @@ func (s *service) startVIPPayPalCheckout(ctx context.Context, userID int64, inte
 	}
 	if err := s.resumeVIPSwitch(ctx, &row, payment.ProviderPayPal); err != nil {
 		return nil, err
+	}
+	if row.activeProvider == payment.ProviderPayPal {
+		if _, err := detachClosedPayPalVIPChild(ctx, &row); err != nil {
+			return nil, err
+		}
 	}
 	if row.activeProvider != payment.ProviderPayPal {
 		site, err := s.checkoutSite(ctx, origin)
@@ -551,27 +642,53 @@ func (s *service) startVIPStripeCheckout(ctx context.Context, userID int64, inte
 	if err := s.resumeVIPSwitch(ctx, &row, payment.ProviderStripe); err != nil {
 		return nil, err
 	}
-	if row.activeProvider != payment.ProviderStripe {
+	if row.activeProvider == payment.ProviderStripe {
+		if _, err := detachClosedStripeVIPChild(ctx, &row); err != nil {
+			return nil, err
+		}
+	}
+	reserveStripe := func() error {
 		adapter, available := s.stripeVIPAdapter()
 		if !available || !stripeVIPCheckoutEnabled(ctx) {
-			return nil, ErrCheckoutPaused
+			return ErrCheckoutPaused
 		}
 		site, err := s.checkoutSite(ctx, origin)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		if row.activeProvider == payment.ProviderPayPal {
 			if err := s.switchVIPChannel(ctx, row, payment.ProviderStripe); err != nil {
-				return nil, err
+				return err
 			}
 		}
 		returnURL, cancelURL := vipCheckoutReturnURLs(site, row.intentID)
 		row.stripeIntentID, err = reserveUnifiedStripeVIPIntentTx(ctx, row, returnURL, cancelURL, adapter.AccountScope())
 		if err != nil {
+			return err
+		}
+		row.activeProvider = payment.ProviderStripe
+		return nil
+	}
+	createdFresh := false
+	if row.activeProvider != payment.ProviderStripe {
+		if err := reserveStripe(); err != nil {
 			return nil, err
 		}
+		createdFresh = true
 	}
 	s.refreshUnifiedStripeVIP(ctx, row)
+	if !createdFresh {
+		// If refresh just observed that Stripe expired the previous Checkout Session,
+		// detach the closed child and create a fresh session in the same click.
+		if detached, err := detachClosedStripeVIPChild(ctx, &row); err != nil {
+			return nil, err
+		} else if detached {
+			if err := reserveStripe(); err != nil {
+				return nil, err
+			}
+			s.refreshUnifiedStripeVIP(ctx, row)
+		}
+	}
 	return s.unifiedVIPPurchaseView(ctx, userID, intentID)
 }
 
