@@ -26,7 +26,11 @@ interface RechargeProps {
   novelTitle?: string;
   onRefreshStatus?: () => Promise<void>;
   onBack: () => void;
-  onNavigate?: (pageOrPath: string, params?: Record<string, unknown>) => void;
+  onNavigate?: (
+    pageOrPath: string,
+    params?: Record<string, unknown>,
+    options?: { replace?: boolean }
+  ) => void;
 }
 
 function initialPurchaseLocator() {
@@ -486,14 +490,14 @@ export const Recharge: React.FC<RechargeProps> = ({
 
     if (returnPath) {
       if (onNavigate) {
-        onNavigate(returnPath);
+        onNavigate(returnPath, undefined, { replace: true });
       } else {
-        window.location.href = returnPath;
+        window.location.replace(returnPath);
       }
     } else if (novelId && onNavigate) {
-      onNavigate('reader', { id: novelId });
+      onNavigate('reader', { id: novelId }, { replace: true });
     } else if (onNavigate) {
-      onNavigate('shelf');
+      onNavigate('shelf', undefined, { replace: true });
     } else {
       onBack();
     }

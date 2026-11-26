@@ -488,32 +488,80 @@ function AppContent() {
     [searchParams]
   );
 
+  const pendingBackRef = useRef<{ key: string; at: number } | null>(null);
+  useEffect(() => {
+    pendingBackRef.current = null;
+  }, [location.key]);
+
   const navigateTo = useCallback(
-    (pageOrPath: string, params: Record<string, unknown> | null = null) => {
+    (
+      pageOrPath: string,
+      params: Record<string, unknown> | null = null,
+      options?: { replace?: boolean }
+    ) => {
       const finalUrl = buildMergedUrl(pageOrPath, params);
-      runWithViewTransition(() => navigate(finalUrl));
+      const targetNovelId =
+        typeof params?.id === 'number' || typeof params?.id === 'string'
+          ? Number(params.id)
+          : NaN;
+      const currentDetailNovelId = Number(searchParams.get('novel_id') || '0');
+      const state =
+        !options?.replace &&
+        location.pathname === '/detail' &&
+        pageOrPath === 'reader' &&
+        Number.isFinite(targetNovelId) &&
+        targetNovelId > 0 &&
+        targetNovelId === currentDetailNovelId
+          ? { fromDetailNovelId: targetNovelId }
+          : undefined;
+      const navOptions =
+        options?.replace || state
+          ? { ...(options?.replace ? { replace: true } : {}), ...(state ? { state } : {}) }
+          : undefined;
+      runWithViewTransition(() => navigate(finalUrl, navOptions));
     },
-    [buildMergedUrl, navigate]
+    [buildMergedUrl, location.pathname, navigate, searchParams]
   );
 
   const syncReaderChapterUrl = useCallback(
     (bookId: number, chapterIndex: number) => {
       const finalUrl = buildMergedUrl('reader', { id: bookId, chapterIndex });
-      navigate(finalUrl, { replace: true });
+      navigate(finalUrl, { replace: true, state: location.state });
     },
-    [buildMergedUrl, navigate]
+    [buildMergedUrl, location.state, navigate]
   );
+
+  const goBackOnce = useCallback(() => {
+    const now = Date.now();
+    const pendingBack = pendingBackRef.current;
+    if (pendingBack && pendingBack.key === location.key && now - pendingBack.at < 800) {
+      return;
+    }
+    pendingBackRef.current = { key: location.key, at: now };
+    runWithViewTransition(() => navigate(-1));
+  }, [location.key, navigate]);
 
   const navigateBack = useCallback(() => {
     const historyIdx = typeof window.history.state?.idx === 'number' ? window.history.state.idx : 0;
-    runWithViewTransition(() => {
-      if (historyIdx > 0) {
-        navigate(-1);
+    if (historyIdx > 0) {
+      goBackOnce();
+    } else {
+      runWithViewTransition(() => navigate(buildMergedUrl('home'), { replace: true }));
+    }
+  }, [buildMergedUrl, goBackOnce, navigate]);
+
+  const navigateBackFromReader = useCallback(
+    (bookId: number) => {
+      const historyIdx = typeof window.history.state?.idx === 'number' ? window.history.state.idx : 0;
+      const navState = location.state as { fromDetailNovelId?: number } | null;
+      if (historyIdx > 0 && navState?.fromDetailNovelId === bookId) {
+        goBackOnce();
       } else {
-        navigate(buildMergedUrl('home'));
+        runWithViewTransition(() => navigate(buildMergedUrl('detail', { id: bookId }), { replace: true }));
       }
-    });
-  }, [navigate, buildMergedUrl]);
+    },
+    [buildMergedUrl, goBackOnce, location.state, navigate]
+  );
 
   const handleLoadMoreNovels = useCallback(async () => {
     if (loadingMoreNovels || !hasMoreNovels) return;
@@ -929,6 +977,7 @@ function AppContent() {
                 chapterIndex={readerChapterIndex}
                 novels={novels}
                 onNavigate={navigateTo}
+                onBack={() => navigateBackFromReader(readerNovelId)}
                 onSyncChapterUrl={syncReaderChapterUrl}
                 shelfBookIds={shelf.ids}
                 onToggleShelf={shelf.toggle}

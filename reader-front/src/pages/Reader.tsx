@@ -16,7 +16,8 @@ interface ReaderProps {
   novelId: number;
   chapterIndex: number;
   novels: Novel[];
-  onNavigate: (page: string, params?: Record<string, unknown>) => void;
+  onNavigate: (page: string, params?: Record<string, unknown>, options?: { replace?: boolean }) => void;
+  onBack: () => void;
   onSyncChapterUrl: (bookId: number, chapterIndex: number) => void;
   shelfBookIds: number[];
   onToggleShelf: (bookId: number) => void;
@@ -68,6 +69,7 @@ export const Reader: React.FC<ReaderProps> = ({
   novelId,
   chapterIndex: initialChapterIndex,
   onNavigate,
+  onBack,
   onSyncChapterUrl,
   shelfBookIds,
   onToggleShelf,
@@ -563,7 +565,7 @@ export const Reader: React.FC<ReaderProps> = ({
           </div>
           <p style={{ fontWeight: 600, color: 'var(--text-primary)' }}>Story unavailable</p>
           <p style={{ fontSize: '0.8125rem' }}>This book is unavailable or has been taken offline.</p>
-          <button type="button" className="btn-cta-primary" style={{ marginTop: '12px' }} onClick={() => onNavigate('home')}>
+          <button type="button" className="btn-cta-primary" style={{ marginTop: '12px' }} onClick={() => onNavigate('home', undefined, { replace: true })}>
             Back to Store
           </button>
         </div>
@@ -590,7 +592,7 @@ export const Reader: React.FC<ReaderProps> = ({
           <button
             type="button"
             className="reader-hud-btn"
-            onClick={() => onNavigate('detail', { id: novelId })}
+            onClick={onBack}
             aria-label="Back to book details"
           >
             <ChevronLeft size={20} strokeWidth={1.8} aria-hidden="true" />
@@ -619,7 +621,7 @@ export const Reader: React.FC<ReaderProps> = ({
         onThemeChange={handleThemeChange}
         onOpenDrawer={() => setShowTOC(true)}
         novelTitle={novel.title}
-        onBack={() => onNavigate('detail', { id: novelId })}
+        onBack={onBack}
         isInShelf={isInShelf}
         onAddToShelf={handleToggleShelf}
       />

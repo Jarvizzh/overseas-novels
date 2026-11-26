@@ -8,7 +8,7 @@ interface DetailProps {
   sessionToken?: string;
   novelId: number;
   novels?: Novel[];
-  onNavigate: (page: string, params?: Record<string, unknown>) => void;
+  onNavigate: (page: string, params?: Record<string, unknown>, options?: { replace?: boolean }) => void;
   onBack: () => void;
   shelfBookIds: number[];
   onToggleShelf: (bookId: number) => void;
@@ -91,7 +91,7 @@ export const Detail: React.FC<DetailProps> = ({
             <BookOpen size={24} strokeWidth={1.65} aria-hidden="true" />
           </div>
           <p style={{ fontWeight: 600, color: 'var(--text-primary)' }}>Book not found.</p>
-          <button type="button" className="btn-cta-primary" style={{ marginTop: '12px' }} onClick={() => onNavigate('home')}>
+          <button type="button" className="btn-cta-primary" style={{ marginTop: '12px' }} onClick={() => onNavigate('home', undefined, { replace: true })}>
             Back to Store
           </button>
         </div>
