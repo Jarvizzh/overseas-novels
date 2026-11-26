@@ -307,7 +307,7 @@ BEGIN
             (2, 'COIN_POPULAR_999', 'POPULAR', true, 'Reader''s Choice'),
             (3, 'COIN_VALUE_1999', 'BEST VALUE', false, 'Value Bundle'),
             (4, 'WHOLE_BOOK_999', 'FULL BOOK', false, 'Unlock This Book'),
-            (5, 'VIP_DAY_99', '', false, '24h Pass'),
+            (5, 'VIP_DAY_99', '', false, 'Daily Pass'),
             (6, 'VIP_WEEK_499', 'HOT', false, 'Weekly Pass'),
             (7, 'VIP_MONTH_1499', 'RECOMMENDED', false, 'Monthly VIP'),
             (8, 'VIP_YEAR_9999', 'SAVE 45%', false, 'Annual VIP')
