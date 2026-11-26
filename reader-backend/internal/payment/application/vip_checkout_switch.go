@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"reader-backend/internal/db"
 	"reader-backend/internal/payment"
+	"reader-backend/internal/payment/paypal"
 )
 
 const (
@@ -220,6 +221,11 @@ func (s *service) sendUnifiedPayPalVIP(ctx context.Context, row vipCheckoutInten
 	return s.repo.finishSubscriptionIntent(ctx, intent, result)
 }
 
+func isUnapprovedPayPalCancelRejected(err error) bool {
+	var providerErr *paypal.APIError
+	return errors.As(err, &providerErr) && providerErr.HasIssue("SUBSCRIPTION_STATUS_INVALID")
+}
+
 func (s *service) closePayPalVIPForSwitch(ctx context.Context, row vipCheckoutIntentRow) error {
 	// PayPal's original create request can be replayed inside its idempotency
 	// window to recover a missing ID. An unsent child needs no provider call.
@@ -241,12 +247,14 @@ func (s *service) closePayPalVIPForSwitch(ctx context.Context, row vipCheckoutIn
 	if subID != "" {
 		client, err := s.payPalForScope(ctx, account)
 		if err != nil {
+			log.Printf("task=vip_switch action=paypal_scope intent=%s sub=%s error=%v", row.intentID, subID, err)
 			return ErrCheckoutPending
 		}
 		read := func() (*payment.SubscriptionDetails, error) {
 			details, err := client.GetSubscription(ctx, subID)
 			if err != nil || details == nil || details.SubscriptionID != subID ||
 				details.PlanID != planID || details.CustomID != row.paypalIntentID {
+				log.Printf("task=vip_switch action=read_paypal intent=%s sub=%s err=%v", row.intentID, subID, err)
 				return nil, ErrCheckoutPending
 			}
 			return details, nil
@@ -256,12 +264,21 @@ func (s *service) closePayPalVIPForSwitch(ctx context.Context, row vipCheckoutIn
 			return err
 		}
 		if details.Status == "APPROVAL_PENDING" && details.LastPaymentTime == nil {
-			if err := client.CancelSubscription(ctx, subID, "User switched VIP checkout to Stripe"); err != nil {
+			cancelErr := client.CancelSubscription(ctx, subID, "User switched VIP checkout to Stripe")
+			unapprovedNotCancellable := isUnapprovedPayPalCancelRejected(cancelErr)
+			if cancelErr != nil && !unapprovedNotCancellable {
+				log.Printf("task=vip_switch action=cancel_paypal intent=%s sub=%s error=%v", row.intentID, subID, cancelErr)
 				return ErrCheckoutPending
 			}
 			details, err = read()
 			if err != nil {
 				return err
+			}
+			// PayPal Subscriptions API rejects /cancel on APPROVAL_PENDING with
+			// SUBSCRIPTION_STATUS_INVALID because unapproved agreements cannot be
+			// cancelled via API. Re-reading confirms it is still unapproved with no payment.
+			if unapprovedNotCancellable && details.Status == "APPROVAL_PENDING" && details.LastPaymentTime == nil {
+				return closeUnifiedPayPalChild(ctx, row, subID)
 			}
 		}
 		if details.LastPaymentTime != nil || details.Status == "APPROVED" || details.Status == "ACTIVE" || details.Status == "SUSPENDED" {
@@ -271,6 +288,7 @@ func (s *service) closePayPalVIPForSwitch(ctx context.Context, row vipCheckoutIn
 			return ErrSubscriptionConflict
 		}
 		if details.Status != "CANCELLED" && details.Status != "EXPIRED" {
+			log.Printf("task=vip_switch action=unexpected_paypal_status intent=%s sub=%s status=%s", row.intentID, subID, details.Status)
 			return ErrCheckoutPending
 		}
 	}

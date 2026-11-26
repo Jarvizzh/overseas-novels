@@ -2139,7 +2139,7 @@
   min-width: 0;
   min-block-size: 48px;
   padding: 10px 14px;
-  border-radius: 14px;
+  border-radius: 999px;
   font-size: 0.9375rem;
   font-weight: 700;
   display: inline-flex;
@@ -2148,10 +2148,10 @@
   gap: 7px;
   white-space: nowrap;
   overflow: hidden;
-  background-color: #FFFFFF;
-  color: var(--text-primary);
-  border: 1px solid rgba(154, 113, 50, 0.36);
-  box-shadow: 0 1px 2px rgba(24, 24, 27, 0.05);
+  background: linear-gradient(180deg, #E8CA82 0%, #D4AE58 100%);
+  color: #1F1D1B;
+  border: 1px solid rgba(154, 113, 50, 0.3);
+  box-shadow: 0 2px 6px rgba(154, 113, 50, 0.2);
   cursor: pointer;
   transition: var(--transition-fast);
 }
@@ -2163,7 +2163,7 @@
 }
 
 .recharge-pay-btn:hover:not(:disabled) {
-  background-color: var(--bg-tertiary);
+  filter: brightness(0.96);
 }
 
 .recharge-pay-btn:active:not(:disabled) {
@@ -2187,35 +2187,19 @@
   fill: #001C64;
 }
 
-@supports (color: light-dark(white, black)) {
-  .recharge-pay-btn {
-    background-color: light-dark(#FFFFFF, #22201D);
-    border-color: light-dark(rgba(154, 113, 50, 0.36), rgba(212, 174, 104, 0.36));
-  }
-  .recharge-paypal-back {
-    fill: light-dark(#003087, #60A5FA);
-  }
-  .recharge-paypal-front {
-    fill: light-dark(#0079C1, #38BDF8);
-  }
-  .recharge-paypal-overlap {
-    fill: light-dark(#001C64, #2563EB);
-  }
+:root[data-user-theme="dark"] .recharge-pay-btn {
+  background: linear-gradient(180deg, #DFBE6E 0%, #C89F46 100%);
+  color: #161411;
+  border-color: rgba(226, 187, 107, 0.38);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.32);
 }
 
 @media (prefers-color-scheme: dark) {
   :root:not([data-user-theme="light"]) .recharge-pay-btn {
-    background-color: #22201D;
-    border-color: rgba(212, 174, 104, 0.36);
-  }
-  :root:not([data-user-theme="light"]) .recharge-paypal-back {
-    fill: #60A5FA;
-  }
-  :root:not([data-user-theme="light"]) .recharge-paypal-front {
-    fill: #38BDF8;
-  }
-  :root:not([data-user-theme="light"]) .recharge-paypal-overlap {
-    fill: #2563EB;
+    background: linear-gradient(180deg, #DFBE6E 0%, #C89F46 100%);
+    color: #161411;
+    border-color: rgba(226, 187, 107, 0.38);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.32);
   }
 }
 

@@ -3,6 +3,7 @@ package application
 import (
 	"context"
 	"errors"
+	"log"
 	"slices"
 
 	"github.com/google/uuid"
@@ -47,6 +48,8 @@ func (s *service) closeStripeForCheckoutSwitch(ctx context.Context, user int64, 
 		return err
 	}
 	if !proof.Expired && !proof.Failed {
+		log.Printf("task=checkout_switch action=close_stripe intent=%s attempt=%s session=%s awaiting_buyer=%v paid=%v",
+			intent.ID, attempt.ID, attempt.SessionID, proof.AwaitingBuyer, proof.Receipt != nil)
 		return ErrCheckoutPending
 	}
 	return nil
@@ -96,6 +99,7 @@ func (s *service) verifyPayPalCheckoutSwitch(ctx context.Context, client paypalC
 		return err
 	}
 	if !closed {
+		log.Printf("task=checkout_switch action=close_paypal intent=%s order=%s closed=false", intent.ID, ref)
 		return ErrCheckoutPending
 	}
 	tag, err := db.Pool(ctx).Exec(ctx, `UPDATE payment_checkout_attempts SET status='closed',paypal_switch_token=NULL

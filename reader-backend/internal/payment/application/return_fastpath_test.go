@@ -420,3 +420,24 @@ func TestRunReconciliationWakesImmediatelyOnWebhookSignal(t *testing.T) {
 		t.Fatal("ErrOrderCreated must remain distinct from ErrOrderApproved")
 	}
 }
+
+func TestIsUnapprovedPayPalCancelRejected(t *testing.T) {
+	statusInvalid := &paypal.APIError{
+		Status: 422,
+		Name:   "UNPROCESSABLE_ENTITY",
+		Issues: []string{"SUBSCRIPTION_STATUS_INVALID"},
+	}
+	if !isUnapprovedPayPalCancelRejected(statusInvalid) {
+		t.Fatal("expected SUBSCRIPTION_STATUS_INVALID APIError to be recognized")
+	}
+	if isUnapprovedPayPalCancelRejected(context.DeadlineExceeded) {
+		t.Fatal("timeout error must NOT be treated as unapproved cancel rejection")
+	}
+	otherAPI := &paypal.APIError{
+		Status: 500,
+		Name:   "INTERNAL_SERVER_ERROR",
+	}
+	if isUnapprovedPayPalCancelRejected(otherAPI) {
+		t.Fatal("5xx PayPal error must NOT be treated as unapproved cancel rejection")
+	}
+}

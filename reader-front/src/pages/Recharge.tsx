@@ -538,7 +538,7 @@ export const Recharge: React.FC<RechargeProps> = ({
                       color: isSelected ? 'var(--hero-text)' : 'var(--text-primary)',
                       borderRadius: '16px',
                       padding: '16px 18px',
-                      border: isSelected ? '1.5px solid var(--accent-color)' : '1px solid var(--border-color)',
+                      border: isSelected ? '1.5px solid #D4AE68' : '1px solid var(--border-color)',
                       cursor: 'pointer',
                       transition: 'var(--transition-fast)',
                     }}
