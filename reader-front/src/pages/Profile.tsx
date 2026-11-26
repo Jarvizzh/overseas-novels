@@ -122,6 +122,12 @@ export const Profile: React.FC<ProfileProps> = ({
 
   const isGuest = !currentUser || !currentUser.email;
 
+  useEffect(() => {
+    if (isGuest && editOpen) {
+      setEditOpen(false);
+    }
+  }, [isGuest, editOpen]);
+
   const isValidEmailFormat = (value: string) => {
     const trimmed = value.trim();
     return trimmed.length > 0 && trimmed.length <= 255 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmed);
@@ -164,6 +170,7 @@ export const Profile: React.FC<ProfileProps> = ({
   };
 
   const openEditModal = () => {
+    if (isGuest) return;
     setEditNickname(currentUser?.nickname || '');
     setEditEmail(currentUser?.email || '');
     setEditEmailTouched(false);
@@ -237,6 +244,7 @@ export const Profile: React.FC<ProfileProps> = ({
 
   const handleEditSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isGuest) return;
     setEditError(null);
 
     const trimmedNickname = editNickname.trim();
@@ -323,7 +331,7 @@ export const Profile: React.FC<ProfileProps> = ({
               </div>
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0 }}>
-              {currentUser && (
+              {!isGuest && (
                 <button
                   type="button"
                   className="btn-cta-secondary"
@@ -415,11 +423,11 @@ export const Profile: React.FC<ProfileProps> = ({
           <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
             {/* Membership & Appearance */}
             <div className="settings-list">
-              {currentUser && (
+              {!isGuest && (
                 <button type="button" className="settings-item" onClick={openEditModal}>
                   <span>Account Profile</span>
                   <span className="settings-item-value">
-                    <span>{isGuest ? 'Edit Nickname' : 'Nickname, Email & Password'}</span>
+                    <span>Nickname, Email &amp; Password</span>
                     <ChevronRight size={15} strokeWidth={1.8} aria-hidden="true" />
                   </span>
                 </button>
@@ -858,7 +866,7 @@ export const Profile: React.FC<ProfileProps> = ({
       >
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '14px' }}>
           <h2 id={editTitleId} style={{ fontFamily: 'var(--font-display)', fontSize: '1.25rem', fontWeight: 600 }}>
-            {isGuest ? 'Edit Nickname' : 'Edit Profile'}
+            Edit Profile
           </h2>
           <button type="button" className="header-btn" onClick={closeEditModal} aria-label="Close dialog">
             <X size={18} strokeWidth={1.8} aria-hidden="true" />
@@ -866,9 +874,7 @@ export const Profile: React.FC<ProfileProps> = ({
         </div>
 
         <p style={{ fontSize: '0.75rem', color: 'var(--text-tertiary)', marginBottom: '16px', lineHeight: 1.5 }}>
-          {isGuest
-            ? 'Update your display nickname. Bind an email address via Sign In anytime to secure your account.'
-            : 'Update your nickname, email address, or password. Changing email or password requires your current password.'}
+          Update your nickname, email address, or password. Changing email or password requires your current password.
         </p>
 
         <form onSubmit={handleEditSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>

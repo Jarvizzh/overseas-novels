@@ -312,6 +312,9 @@ func (s *authService) UpdateProfile(ctx context.Context, userID int64, nickname 
 	if current.Status == 2 {
 		return nil, false, ErrAccountBanned
 	}
+	if current.Email == nil {
+		return nil, false, ErrBindRequired
+	}
 
 	nextNickname := current.Nickname
 	if nickname != nil {

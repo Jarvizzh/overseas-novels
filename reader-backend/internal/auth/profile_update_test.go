@@ -18,11 +18,10 @@ func TestUpdateProfileNicknameEmailAndPassword(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Guest can update nickname
+	// Guest cannot update nickname without binding an email
 	nick := "ReaderOne"
-	updatedGuest, rotated, err := svc.UpdateProfile(ctx, guest.ID, &nick, nil, "", "")
-	if err != nil || rotated || updatedGuest.Nickname != "ReaderOne" {
-		t.Fatalf("guest nickname update failed: user=%+v rotated=%v err=%v", updatedGuest, rotated, err)
+	if _, _, err := svc.UpdateProfile(ctx, guest.ID, &nick, nil, "", ""); !errors.Is(err, ErrBindRequired) {
+		t.Fatalf("expected ErrBindRequired for guest nickname update, got %v", err)
 	}
 	// Guest cannot change email without binding
 	emailTry := "guest-new@example.invalid"
