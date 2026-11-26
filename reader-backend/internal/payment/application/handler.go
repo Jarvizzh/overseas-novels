@@ -197,7 +197,20 @@ func writePurchase(c *gin.Context, intent *PurchaseIntent, err error) {
 }
 
 func writePurchaseError(c *gin.Context, err error) {
+	var planSwitchErr *VIPPlanSwitchBlockedError
 	switch {
+	case errors.As(err, &planSwitchErr):
+		c.AbortWithStatusJSON(http.StatusConflict, gin.H{
+			"code":  planSwitchErr.Code,
+			"error": planSwitchErr.Message,
+			"current_intent": gin.H{
+				"intent_id":  planSwitchErr.CurrentIntentID,
+				"slot_id":    planSwitchErr.CurrentSlotID,
+				"product_id": planSwitchErr.CurrentProduct,
+				"cycle":      planSwitchErr.CurrentCycle,
+				"name":       planSwitchErr.CurrentName,
+			},
+		})
 	case errors.Is(err, ErrCheckoutUnavailable):
 		httpx.Fail(c, http.StatusNotFound, "resource_unavailable", "Checkout unavailable for this account", nil)
 	case errors.Is(err, ErrCheckoutKeyConflict):

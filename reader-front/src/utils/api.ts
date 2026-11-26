@@ -1,14 +1,24 @@
 import { readerStorage } from './readerStorage';
 const BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8080/api/v1';
 
+export interface CurrentIntentSummary {
+  intent_id: string;
+  slot_id: number;
+  product_id: number;
+  cycle?: string;
+  name?: string;
+}
+
 export class ApiError extends Error {
   status: number;
   readonly code?: string;
-  constructor(message: string, status: number, code?: string) {
+  readonly currentIntent?: CurrentIntentSummary;
+  constructor(message: string, status: number, code?: string, currentIntent?: CurrentIntentSummary) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
     this.code = code;
+    this.currentIntent = currentIntent;
   }
 }
 
@@ -106,7 +116,16 @@ async function request<T>(endpoint: string, options: RequestInit & { authToken?:
 
   if (!response.ok) {
     const errorBody = await response.json().catch(() => ({}));
-    throw new ApiError(errorBody.error || `HTTP error! Status: ${response.status}`, response.status, errorBody.code);
+    const currentIntent =
+      errorBody?.current_intent && typeof errorBody.current_intent.intent_id === 'string'
+        ? (errorBody.current_intent as CurrentIntentSummary)
+        : undefined;
+    throw new ApiError(
+      errorBody.error || `HTTP error! Status: ${response.status}`,
+      response.status,
+      errorBody.code,
+      currentIntent,
+    );
   }
 
   if (response.status === 204) {

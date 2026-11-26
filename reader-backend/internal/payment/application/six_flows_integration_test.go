@@ -32,9 +32,11 @@ type sixFlowPayPalAdapter struct {
 	subByRequest   map[string]string
 	createFault    string
 	cancelFault    func(string) error
+	getSubFault    func(string) error
 	beforeCreate   func()
 	listTxCalls    int
 	activateCalls  int
+	subTxByID      map[string][]payment.SubscriptionTransaction
 }
 
 func (a *sixFlowPayPalAdapter) CreateOrder(_ context.Context, _ payment.WebhookAccount, _ int64, customID, _, _, _, _ string) (string, string, error) {
@@ -99,6 +101,11 @@ func (a *sixFlowPayPalAdapter) CreateSubscription(_ context.Context, p payment.C
 }
 
 func (a *sixFlowPayPalAdapter) GetSubscription(_ context.Context, id string) (*payment.SubscriptionDetails, error) {
+	if a.getSubFault != nil {
+		if err := a.getSubFault(id); err != nil {
+			return nil, err
+		}
+	}
 	if d, ok := a.subDetailsByID[id]; ok {
 		return d, nil
 	}
@@ -119,8 +126,11 @@ func (a *sixFlowPayPalAdapter) CancelSubscription(_ context.Context, id, _ strin
 	return nil
 }
 
-func (a *sixFlowPayPalAdapter) ListSubscriptionTransactions(context.Context, string, time.Time, time.Time) ([]payment.SubscriptionTransaction, error) {
+func (a *sixFlowPayPalAdapter) ListSubscriptionTransactions(_ context.Context, id string, _, _ time.Time) ([]payment.SubscriptionTransaction, error) {
 	a.listTxCalls++
+	if a.subTxByID != nil {
+		return a.subTxByID[id], nil
+	}
 	return nil, nil
 }
 

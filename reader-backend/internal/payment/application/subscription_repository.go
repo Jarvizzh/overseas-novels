@@ -3,6 +3,7 @@ package application
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -131,11 +132,39 @@ func (r *dbRepository) UpdateUserSubscriptionStatus(ctx context.Context, subID s
 		cancelled_at=CASE WHEN $1='CANCELLED' THEN COALESCE(cancelled_at,now()) ELSE cancelled_at END,
 		next_billing_time=CASE WHEN $1='CANCELLED' THEN NULL ELSE next_billing_time END,
 		cancel_next_attempt_at=CASE WHEN $1='CANCELLED' THEN NULL ELSE cancel_next_attempt_at END,
-		cancel_last_error=CASE WHEN $1='CANCELLED' THEN NULL ELSE cancel_last_error END
-		WHERE subscription_id=$2 AND (status<>'CANCELLED' OR $1='CANCELLED')
+		cancel_last_error=CASE WHEN $1='CANCELLED' THEN NULL ELSE cancel_last_error END,
+		attribution=CASE WHEN $1 IN ('CANCELLED','EXPIRED')
+			THEN COALESCE(attribution,'{}'::jsonb) || jsonb_build_object('termination_source','provider_confirmed','remote_termination_confirmed',true)
+			ELSE attribution END
+		WHERE subscription_id=$2
+		AND (status<>'CANCELLED' OR $1='CANCELLED'
+			OR ($1='EXPIRED' AND COALESCE((attribution->>'remote_termination_confirmed')::boolean, false) = false))
 		AND (status<>'CANCEL_PENDING' OR $1 IN ('CANCELLED','EXPIRED'))
-		AND (status<>$1 OR ($1='CANCELLED' AND (cancelled_at IS NULL OR next_billing_time IS NOT NULL
-		     OR cancel_next_attempt_at IS NOT NULL OR cancel_last_error IS NOT NULL)))`, status, subID)
+		AND (status<>$1
+			OR ($1='CANCELLED' AND (cancelled_at IS NULL OR next_billing_time IS NOT NULL
+			    OR cancel_next_attempt_at IS NOT NULL OR cancel_last_error IS NOT NULL
+			    OR COALESCE((attribution->>'remote_termination_confirmed')::boolean, false) = false))
+			OR ($1='EXPIRED' AND COALESCE((attribution->>'remote_termination_confirmed')::boolean, false) = false))`, status, subID)
+	return err
+}
+
+// markPayPalSubscriptionLocallyCancelled records a local CANCELLED status when
+// PayPal rejects /cancel on an APPROVAL_PENDING agreement (HTTP 404/422) and
+// the remote approval link may still be open. Callers that replace a VIP plan
+// must re-verify such agreements with PayPal before releasing the original intent.
+func markPayPalSubscriptionLocallyCancelled(ctx context.Context, subID string) error {
+	if db.Pool(ctx) == nil {
+		return nil
+	}
+	_, err := db.Pool(ctx).Exec(ctx, `UPDATE user_subscriptions SET status='CANCELLED',updated_at=now(),
+		cancelled_at=COALESCE(cancelled_at,now()),
+		next_billing_time=NULL,
+		cancel_next_attempt_at=NULL,
+		cancel_last_error=NULL,
+		attribution=COALESCE(attribution,'{}'::jsonb) || jsonb_build_object('termination_source','local_unapproved_cancel','remote_termination_confirmed',false)
+		WHERE subscription_id=$1 AND payment_method='paypal'
+		  AND status IN ('PENDING','CANCEL_PENDING','CANCELLED')
+		  AND COALESCE((attribution->>'remote_termination_confirmed')::boolean, false) = false`, subID)
 	return err
 }
 
@@ -151,9 +180,96 @@ func (r *dbRepository) RecordSubscriptionRenewalOrderTx(
 	if err := lockPayPalCapture(ctx, tx, externalRefID); err != nil {
 		return false, err
 	}
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('vip-settlement:'||$1::bigint::text||':'||$2,0))`,
+		sub.UserID, sub.Environment); err != nil {
+		return false, err
+	}
+
+	var subStatus, cancelReason, supersededVIPIntentID, checkoutIntentID string
+	var subLastPayment, cancelledAt *time.Time
+	var paypalIntentExists bool
+	if err := tx.QueryRow(ctx, `
+		SELECT s.status, s.last_payment_time, s.cancelled_at,
+		       COALESCE(s.cancel_reason,''),
+		       COALESCE(s.attribution->>'superseded_vip_intent_id',''),
+		       COALESCE(s.checkout_intent_id::text,''),
+		       CASE WHEN s.checkout_intent_id IS NULL THEN false
+		            ELSE EXISTS(SELECT 1 FROM paypal_subscription_intents i WHERE i.intent_id=s.checkout_intent_id)
+		       END
+		FROM user_subscriptions s WHERE s.subscription_id=$1`, sub.SubscriptionID).
+		Scan(&subStatus, &subLastPayment, &cancelledAt, &cancelReason, &supersededVIPIntentID, &checkoutIntentID, &paypalIntentExists); err != nil {
+		return false, err
+	}
+	supersededDuplicate := false
+	if supersededVIPIntentID != "" {
+		// Serialize with Stripe or replacement PayPal settlement on the original purchase intent.
+		var parentStatus, parentSubID, parentActiveProvider string
+		err = tx.QueryRow(ctx, `SELECT status, COALESCE(subscription_id,''), COALESCE(active_provider,'')
+			FROM payment_vip_checkout_intents WHERE intent_id=$1::uuid FOR UPDATE`, supersededVIPIntentID).
+			Scan(&parentStatus, &parentSubID, &parentActiveProvider)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return false, err
+		}
+		// Any agreement detached during a VIP channel switch must never double-fulfill
+		// the original purchase intent. Keep the real payment on the ledger for refund/review.
+		supersededDuplicate = true
+		_ = parentStatus
+		_ = parentSubID
+		_ = parentActiveProvider
+	} else if !periodEnd.IsZero() && subLastPayment == nil {
+		// On any initial PayPal subscription payment (whether the agreement is active,
+		// pending, or cancelled), never double-fulfill a billing period already fulfilled
+		// by another VIP subscription for the same user and environment (e.g. legacy
+		// PayPal -> Stripe -> PayPal where the older agreement settled first).
+		var overlappingOtherVIP bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS(
+			SELECT 1 FROM recharge_orders o
+			WHERE o.user_id=$1
+			  AND o.order_type='subscription'
+			  AND COALESCE(o.subscription_id,'')<>$2
+			  AND o.checkout_environment=$3
+			  AND o.fulfilled_at IS NOT NULL
+			  AND o.status IN ('Success','Paid','RefundPending')
+			  AND o.paid_period_end IS NOT NULL
+			  AND COALESCE(o.paid_period_start, o.paid_at, o.created_at) < $5
+			  AND o.paid_period_end > $4
+		)`, sub.UserID, sub.SubscriptionID, sub.Environment, paidAt, periodEnd).Scan(&overlappingOtherVIP); err != nil {
+			return false, err
+		}
+		if overlappingOtherVIP {
+			supersededDuplicate = true
+		} else if (subStatus == "CANCELLED" || subStatus == "CANCEL_PENDING") && checkoutIntentID != "" && !paypalIntentExists {
+			// Legacy pre-upgrade agreements switched before superseded_vip_intent_id existed:
+			// treat a missing paypal_subscription_intents row only as a clue — normal
+			// cancellation followed by reopening checkout also deletes the old child intent.
+			// Only classify as a legacy superseded duplicate without an overlapping paid order
+			// when payment/provider evidence shows a post-cancel late approval alongside a VIP
+			// checkout intent that was already switched to Stripe or a newer PayPal child before
+			// cancellation.
+			lateApprovedOrPostCancel := providerStatus == "ACTIVE" || providerStatus == "SUSPENDED" ||
+				strings.HasPrefix(cancelReason, "Superseded ") ||
+				(cancelledAt != nil && paidAt.After(*cancelledAt))
+			if lateApprovedOrPostCancel {
+				var hasSwitchedIntent bool
+				if err := tx.QueryRow(ctx, `SELECT EXISTS(
+					SELECT 1 FROM payment_vip_checkout_intents v
+					WHERE v.user_id=$1 AND v.checkout_environment=$2
+					  AND v.status IN ('Pending','Completed')
+					  AND (v.active_provider='stripe' OR v.stripe_intent_id IS NOT NULL
+					    OR (v.paypal_intent_id IS NOT NULL AND v.paypal_intent_id <> $4::uuid))
+					  AND ($3::timestamptz IS NULL OR v.created_at <= $3::timestamptz)
+				)`, sub.UserID, sub.Environment, cancelledAt, checkoutIntentID).Scan(&hasSwitchedIntent); err != nil {
+					return false, err
+				}
+				if hasSwitchedIntent {
+					supersededDuplicate = true
+				}
+			}
+		}
+	}
 
 	var confirmedEnd *time.Time
-	if !periodEnd.IsZero() {
+	if !periodEnd.IsZero() && !supersededDuplicate {
 		confirmedEnd = &periodEnd
 	}
 	reportedRefund := tpOrder.Status == "REFUNDED"
@@ -168,6 +284,7 @@ func (r *dbRepository) RecordSubscriptionRenewalOrderTx(
 			(SELECT product_snapshot FROM user_subscriptions WHERE subscription_id=$7::text),
 			CASE WHEN $10::timestamptz IS NOT NULL THEN $6::timestamptz END,$10,COALESCE((SELECT attribution->>'utm_source' FROM user_subscriptions WHERE subscription_id=$7::text),u.utm_source),COALESCE((SELECT attribution->>'utm_campaign' FROM user_subscriptions WHERE subscription_id=$7::text),u.utm_campaign),p.id,p.novel_id,
  CASE WHEN $11 THEN 'PayPal reports refunded sale; match refund ID'
+ WHEN $15 THEN 'Duplicate payment from superseded VIP checkout; manual review or refund required'
  WHEN $10::timestamptz IS NULL AND $3::int < $14::int THEN 'PayPal settled amount is below the agreement price; billing period needs review'
  WHEN $10::timestamptz IS NULL THEN 'PayPal settled amount verified; billing period needs review' END,$11,(SELECT attribution FROM user_subscriptions WHERE subscription_id=$7::text) || jsonb_build_object('payer_email',$12::text),NULLIF($13,'')
 		FROM users u LEFT JOIN LATERAL (
@@ -186,7 +303,7 @@ func (r *dbRepository) RecordSubscriptionRenewalOrderTx(
 			AND recharge_orders.subscription_id=EXCLUDED.subscription_id AND recharge_orders.payment_method=EXCLUDED.payment_method
 			AND recharge_orders.amount_cents=EXCLUDED.amount_cents AND recharge_orders.currency=EXCLUDED.currency
 		RETURNING id`,
-		sub.UserID, externalRefID, amountCents, currency, sub.PaymentMethod, paidAt, sub.SubscriptionID, sub.SlotID, sub.TemplateID, confirmedEnd, reportedRefund, tpOrder.PayerEmail, sub.Environment, sub.PriceCents).Scan(&orderID)
+		sub.UserID, externalRefID, amountCents, currency, sub.PaymentMethod, paidAt, sub.SubscriptionID, sub.SlotID, sub.TemplateID, confirmedEnd, reportedRefund, tpOrder.PayerEmail, sub.Environment, sub.PriceCents, supersededDuplicate).Scan(&orderID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}
@@ -228,7 +345,7 @@ func (r *dbRepository) RecordSubscriptionRenewalOrderTx(
 		}
 		return false, tx.Commit(ctx)
 	}
-	if !reportedRefund && !periodEnd.IsZero() {
+	if !reportedRefund && confirmedEnd != nil {
 		hold, err := aftercare.EvaluateFulfillment(ctx, tx, orderID, receiptID)
 		if err != nil {
 			return false, err
@@ -262,7 +379,7 @@ func (r *dbRepository) RecordSubscriptionRenewalOrderTx(
 		return false, tx.Commit(ctx)
 	}
 
-	if periodEnd.IsZero() {
+	if confirmedEnd == nil {
 		return false, tx.Commit(ctx)
 	}
 

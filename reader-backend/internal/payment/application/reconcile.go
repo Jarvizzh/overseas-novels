@@ -185,7 +185,7 @@ func (s *service) confirmPayPalCancellation(ctx context.Context, id, reason stri
 				return s.repo.UpdateUserSubscriptionStatus(ctx, id, verified.Status)
 			}
 			if verified.Status == "APPROVAL_PENDING" && verified.LastPaymentTime == nil {
-				return s.repo.UpdateUserSubscriptionStatus(ctx, id, "CANCELLED")
+				return markPayPalSubscriptionLocallyCancelled(ctx, id)
 			}
 			return cancelErr
 		}

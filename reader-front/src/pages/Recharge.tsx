@@ -3,7 +3,7 @@ import React, { useState, useEffect, useCallback, useRef, useId } from 'react';
 import { ChevronLeft, Crown, Check, Sparkles, BookOpen, CreditCard } from 'lucide-react';
 import { useToast } from '../context/toastStore';
 import { GoldCoin } from '../components/GoldCoin';
-import { api, ApiError } from '../utils/api';
+import { api, ApiError, type PurchaseIntent } from '../utils/api';
 import { LegalModal, type LegalModalType } from '../components/LegalModal';
 import {
   buildCoinPacks,
@@ -11,6 +11,11 @@ import {
   formatCoinPackSubtitle,
   type RechargeSlotItem,
 } from '../utils/rechargeCatalogHelpers';
+import {
+  isPendingPurchaseStatus,
+  resolveRechargeSelection,
+  type ReturnedLookupState,
+} from '../utils/rechargeSelectionHelpers';
 
 type PaymentProvider = 'paypal' | 'stripe';
 
@@ -108,6 +113,14 @@ export const Recharge: React.FC<RechargeProps> = ({
   const pendingReturnPathRef = useRef('');
   const [purchaseLocator, setPurchaseLocator] = useState(initialPurchaseLocator);
   const [purchaseRefresh, setPurchaseRefresh] = useState(0);
+  const [returnedPendingIntent, setReturnedPendingIntent] = useState<PurchaseIntent | null>(null);
+  const [returnedLookupState, setReturnedLookupState] = useState<ReturnedLookupState>(
+    () => (purchaseLocator.intent || purchaseLocator.token ? 'loading' : 'none'),
+  );
+  const selectedPackRef = useRef<number | null>(null);
+  selectedPackRef.current = selectedPack;
+  const userManuallySelectedRef = useRef(false);
+  const staleReturnedIntentToastRef = useRef('');
   const shownPurchaseRef = useRef('');
   const shownFailureRef = useRef('');
   const purchaseStarting = useRef(false);
@@ -163,21 +176,6 @@ export const Recharge: React.FC<RechargeProps> = ({
         stripe_vip_slots: methods.stripe_vip_slots ?? [],
         stripe_sandbox: methods.stripe_sandbox ?? false,
       });
-
-      const visibleIds = new Set([
-        ...buildSubscriptionPacks(slotList).map((pack) => pack.id),
-        ...buildCoinPacks(slotList, novelId).map((pack) => pack.id),
-      ]);
-      const visibleSlots = slotList.filter((slot) => visibleIds.has(slot.id));
-      if (visibleSlots.length === 0) {
-        setSelectedPack(null);
-      } else {
-        const highlightedSlot = visibleSlots.find((s) => s.is_highlighted);
-        const subSlot = visibleSlots.find(isSubscriptionSlot);
-        setSelectedPack((prev) =>
-          visibleSlots.some((slot) => slot.id === prev) ? prev : (highlightedSlot || subSlot || visibleSlots[0]).id,
-        );
-      }
     } catch (err) {
       if (controller.signal.aborted) return;
       setSlots([]);
@@ -188,6 +186,41 @@ export const Recharge: React.FC<RechargeProps> = ({
       if (!controller.signal.aborted) setLoadingTemplates(false);
     }
   }, [novelId]);
+
+  useEffect(() => {
+    if (loadingTemplates || offersNovelId !== novelId) return;
+    const visibleIds = new Set([
+      ...buildSubscriptionPacks(slots).map((pack) => pack.id),
+      ...buildCoinPacks(slots, novelId).map((pack) => pack.id),
+    ]);
+    const visibleSlots = slots.filter((slot) => visibleIds.has(slot.id));
+    const { selectedSlotId, staleReturnedIntent } = resolveRechargeSelection({
+      visibleSlots,
+      currentSelected: selectedPackRef.current,
+      userManuallySelected: userManuallySelectedRef.current,
+      returnedLookupState,
+      returnedPendingIntent,
+    });
+    if (selectedSlotId !== selectedPackRef.current) {
+      setSelectedPack(selectedSlotId);
+    }
+    if (
+      staleReturnedIntent &&
+      returnedPendingIntent &&
+      staleReturnedIntentToastRef.current !== returnedPendingIntent.intent_id
+    ) {
+      staleReturnedIntentToastRef.current = returnedPendingIntent.intent_id;
+      showToastRef.current(
+        'Your previous package is no longer available. Please select a package to continue.',
+        'error',
+      );
+    }
+  }, [slots, offersNovelId, novelId, loadingTemplates, returnedPendingIntent, returnedLookupState]);
+
+  const handleSelectPack = (packId: number) => {
+    userManuallySelectedRef.current = true;
+    setSelectedPack(packId);
+  };
 
   useEffect(() => {
     if (!authReady) return;
@@ -241,6 +274,8 @@ export const Recharge: React.FC<RechargeProps> = ({
         if (controller.signal.aborted) return;
         hasReturnedFromPaymentRef.current = true;
         pendingReturnPathRef.current = intent.return_path || '';
+        setReturnedPendingIntent(isPendingPurchaseStatus(intent.status) ? intent : null);
+        setReturnedLookupState('resolved');
         if (intent.status === 'completed' || intent.status === 'refunded') {
           const storageKey = purchaseRequestStorageKey(userId, intent.slot_id, intent.product_id || 0, intent.novel_id || 0);
           try {
@@ -284,15 +319,19 @@ export const Recharge: React.FC<RechargeProps> = ({
         const isPermanentLookupError = error instanceof ApiError && [400, 401, 403, 404].includes(error.status);
         const canRetry = !isPermanentLookupError && !purchaseLocator.cancelled && Date.now() < endAt;
         if (canRetry) {
+          setReturnedLookupState((prev) => (prev === 'resolved' ? prev : 'loading'));
           const delayMs = Date.now() - startedAt < 10_000 ? 1500 : 3000;
           timer = window.setTimeout(() => void lookup(), delayMs);
-        } else if (!purchaseLocator.cancelled) {
-          showToastRef.current(
-            isPermanentLookupError
-              ? 'This checkout could not be found. Please make sure you are signed in with the account that paid.'
-              : 'Payment status is temporarily unavailable. Please try again later.',
-            'error',
-          );
+        } else {
+          setReturnedLookupState((prev) => (prev === 'resolved' ? prev : 'unresolved'));
+          if (!purchaseLocator.cancelled) {
+            showToastRef.current(
+              isPermanentLookupError
+                ? 'This checkout could not be found. Please make sure you are signed in with the account that paid.'
+                : 'Payment status is temporarily unavailable. Please try again later.',
+              'error',
+            );
+          }
         }
       } finally {
         loading = false;
@@ -338,7 +377,16 @@ export const Recharge: React.FC<RechargeProps> = ({
       }
     };
     saveDraft();
-    let intent = await api.preparePurchase(tSlot.id, book, draft.requestKey, draft.returnPath, signal, tSlot.product_id);
+    const canReuseReturnedSingleIntent =
+      !isSubscriptionSlot(tSlot) &&
+      returnedPendingIntent &&
+      isPendingPurchaseStatus(returnedPendingIntent.status) &&
+      returnedPendingIntent.slot_id === tSlot.id &&
+      (!returnedPendingIntent.product_id || !tSlot.product_id || returnedPendingIntent.product_id === tSlot.product_id) &&
+      (returnedPendingIntent.novel_id || 0) === book;
+    let intent = canReuseReturnedSingleIntent
+      ? returnedPendingIntent
+      : await api.preparePurchase(tSlot.id, book, draft.requestKey, draft.returnPath, signal, tSlot.product_id);
     if (signal?.aborted) return;
 
     const repeatablePurchase = tSlot.type !== 'whole_book';
@@ -360,7 +408,16 @@ export const Recharge: React.FC<RechargeProps> = ({
           // Server-persisted return_path remains available on redirect.
         }
       }
-      const checkout = await startCheckout(provider, intent.intent_id, signal);
+      let checkout;
+      try {
+        checkout = await startCheckout(provider, intent.intent_id, signal);
+      } catch (err) {
+        if (!signal?.aborted && err instanceof ApiError && err.status === 409 && err.code === 'checkout_pending') {
+          showPurchase(intent.intent_id);
+          setPurchaseRefresh((value) => value + 1);
+        }
+        throw err;
+      }
       if (signal?.aborted) return;
       showPurchase(intent.intent_id);
       if (checkout.approve_url) {
@@ -396,6 +453,22 @@ export const Recharge: React.FC<RechargeProps> = ({
     } catch (err) {
       setIsProcessing(false);
       setPaymentStep(0);
+      if (err instanceof ApiError && err.status === 409) {
+        if (
+          err.code &&
+          ['vip_plan_switch_approval_open', 'vip_plan_switch_pending', 'vip_plan_switch_confirming'].includes(err.code)
+        ) {
+          if (err.currentIntent?.intent_id) {
+            showPurchase(err.currentIntent.intent_id);
+            setPurchaseRefresh((value) => value + 1);
+          }
+          if (err.code === 'vip_plan_switch_confirming') {
+            void onRefreshStatusRef.current?.();
+          }
+        } else if (err.code === 'subscription_conflict') {
+          void onRefreshStatusRef.current?.();
+        }
+      }
       if (err instanceof ApiError && [400, 404, 409].includes(err.status)) {
         await fetchStatusAndTemplates();
       }
@@ -429,7 +502,7 @@ export const Recharge: React.FC<RechargeProps> = ({
       ? paymentMethods.stripe_vip || paymentMethods.stripe_vip_slots.includes(selectedSlot.id)
       : paymentMethods.stripe_single || paymentMethods.stripe_slots.includes(selectedSlot.id)),
   );
-  const cardLabel = paymentMethods.stripe_sandbox ? 'Card (test)' : 'Card';
+  const cardLabel = 'Card';
   const selectedSummaryTitle = !selectedSlot
     ? ''
     : selectedSubscriptionPack
@@ -494,460 +567,468 @@ export const Recharge: React.FC<RechargeProps> = ({
         </div>
       ) : (
         <div className="page-container-full animate-fade-in" style={{ backgroundColor: 'var(--bg-primary)' }}>
-      {/* Top Bar */}
-      <header className="detail-top-bar glass-panel">
-        <div className="sn-narrow-container" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-          <button
-            type="button"
-            className="header-btn"
-            onClick={() => {
-              if (hasReturnedFromPaymentRef.current) {
-                handleReturnToContent();
-              } else {
-                onBack();
-              }
-            }}
-            aria-label="Go back"
-          >
-            <ChevronLeft size={20} strokeWidth={1.8} aria-hidden="true" />
-          </button>
-          <h1 className="header-title">Membership &amp; Coins</h1>
-          <div style={{ width: '40px' }} />
-        </div>
-      </header>
+          {/* Top Bar */}
+          <header className="detail-top-bar glass-panel">
+            <div className="sn-narrow-container" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <button
+                type="button"
+                className="header-btn"
+                onClick={() => {
+                  if (hasReturnedFromPaymentRef.current) {
+                    handleReturnToContent();
+                  } else {
+                    onBack();
+                  }
+                }}
+                aria-label="Go back"
+              >
+                <ChevronLeft size={20} strokeWidth={1.8} aria-hidden="true" />
+              </button>
+              <h1 className="header-title">Membership &amp; Coins</h1>
+              <div style={{ width: '40px' }} />
+            </div>
+          </header>
 
-      <div className="scroll-container" style={{ flex: 1, minHeight: 0 }}>
-        <div className="sn-narrow-container" style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
-          {/* VIP Passes */}
-          {subscriptionPacks.length > 0 && (
-            <section style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-              <h2 className="hot-tags-title" style={{ margin: 0 }}>Unlimited Membership</h2>
-              {subscriptionPacks.map((pack) => {
-                const isSelected = selectedPack === pack.id;
-                return (
-                  <button
-                    type="button"
-                    key={pack.id}
-                    onClick={() => setSelectedPack(pack.id)}
-                    aria-pressed={isSelected}
-                    style={{
-                      width: '100%',
-                      textAlign: 'left',
-                      display: 'flex',
-                      justifyContent: 'space-between',
-                      alignItems: 'center',
-                      gap: '16px',
-                      backgroundColor: isSelected ? 'var(--hero-bg)' : 'var(--bg-secondary)',
-                      color: isSelected ? 'var(--hero-text)' : 'var(--text-primary)',
-                      borderRadius: '16px',
-                      padding: '16px 18px',
-                      border: isSelected ? '1.5px solid #D4AE68' : '1px solid var(--border-color)',
-                      cursor: 'pointer',
-                      transition: 'var(--transition-fast)',
-                    }}
-                  >
-                    <div style={{ display: 'flex', gap: '12px', alignItems: 'flex-start', minWidth: 0 }}>
-                      <Crown
-                        size={20}
-                        strokeWidth={1.8}
-                        style={{ color: isSelected ? '#E2BB6B' : 'var(--accent-color)', marginTop: '2px', flexShrink: 0 }}
-                        aria-hidden="true"
-                      />
-                      <div style={{ minWidth: 0 }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
-                          <span style={{ fontFamily: 'var(--font-display)', fontSize: '1.0625rem', fontWeight: 600 }}>
-                            {pack.name}
-                          </span>
-                          <span
-                            style={{
-                              fontSize: '0.625rem',
-                              backgroundColor: isSelected ? 'rgba(212, 174, 104, 0.2)' : 'var(--accent-light)',
-                              color: isSelected ? '#E2BB6B' : 'var(--accent-text)',
-                              fontWeight: 600,
-                              padding: '2px 8px',
-                              borderRadius: '999px',
-                              textTransform: 'uppercase',
-                            }}
-                          >
-                            {pack.cycle}
-                          </span>
-                          {pack.badge && (
-                            <span
-                              style={{
-                                fontSize: '0.625rem',
-                                backgroundColor: isSelected ? 'rgba(226, 187, 107, 0.28)' : 'var(--bg-tertiary)',
-                                color: isSelected ? '#FAF8F5' : 'var(--text-primary)',
-                                border: isSelected ? '1px solid rgba(226, 187, 107, 0.45)' : '1px solid var(--border-color)',
-                                fontWeight: 700,
-                                padding: '2px 8px',
-                                borderRadius: '999px',
-                              }}
-                            >
-                              {pack.badge}
-                            </span>
-                          )}
-                        </div>
-                        <p
-                          style={{
-                            fontSize: '0.75rem',
-                            color: isSelected ? 'rgba(250, 248, 245, 0.74)' : 'var(--text-secondary)',
-                            marginTop: '4px',
-                            lineHeight: 1.45,
-                          }}
-                        >
-                          {pack.desc}
-                        </p>
-                      </div>
-                    </div>
-
-                    <div style={{ textAlign: 'right', flexShrink: 0 }}>
-                      <div className="tabular-nums" style={{ fontSize: '1.0625rem', fontWeight: 700 }}>
-                        {pack.price}
-                      </div>
-                      <div style={{ fontSize: '0.6875rem', opacity: 0.7 }}>/{pack.cycle}</div>
-                    </div>
-                  </button>
-                );
-              })}
-            </section>
-          )}
-
-          {/* Coin Packs Grid */}
-          {coinPacks.length > 0 && (
-            <section style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
-                <h2 className="hot-tags-title" style={{ margin: 0 }}>Single Purchases</h2>
-                <span style={{ fontSize: '0.6875rem', color: 'var(--text-tertiary)' }}>Never expire</span>
-              </div>
-
-              <div className="coin-packs-grid">
-                {coinPacks.map((pack) => {
-                  const isSelected = selectedPack === pack.id;
-                  return (
-                    <button
-                      type="button"
-                      key={pack.id}
-                      onClick={() => setSelectedPack(pack.id)}
-                      aria-pressed={isSelected}
-                      style={{
-                        backgroundColor: 'var(--bg-secondary)',
-                        color: 'var(--text-primary)',
-                        borderRadius: '14px',
-                        padding: '14px 12px',
-                        border: isSelected ? '1.5px solid var(--accent-color)' : '1px solid var(--border-color)',
-                        boxShadow: isSelected ? '0 0 0 1px var(--accent-color)' : 'none',
-                        cursor: 'pointer',
-                        display: 'flex',
-                        flexDirection: 'column',
-                        alignItems: 'stretch',
-                        justifyContent: 'space-between',
-                        gap: '10px',
-                        textAlign: 'left',
-                        transition: 'var(--transition-fast)',
-                      }}
-                    >
-                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '6px' }}>
-                        {pack.type === 'whole_book' ? (
-                          <span
-                            style={{
-                              backgroundColor: 'var(--accent-light)',
-                              color: 'var(--accent-text)',
-                              fontSize: '0.625rem',
-                              fontWeight: 600,
-                              padding: '2px 7px',
-                              borderRadius: '999px',
-                            }}
-                          >
-                            {pack.badge || 'Full Book'}
-                          </span>
-                        ) : pack.badge ? (
-                          <span
-                            style={{
-                              backgroundColor: 'var(--accent-light)',
-                              color: 'var(--accent-text)',
-                              fontSize: '0.625rem',
-                              fontWeight: 600,
-                              padding: '2px 7px',
-                              borderRadius: '999px',
-                            }}
-                          >
-                            {pack.badge}
-                          </span>
-                        ) : pack.bonus > 0 ? (
-                          <span
-                            className="tabular-nums"
-                            style={{
-                              backgroundColor: 'var(--accent-light)',
-                              color: 'var(--accent-text)',
-                              fontSize: '0.625rem',
-                              fontWeight: 600,
-                              padding: '2px 7px',
-                              borderRadius: '999px',
-                            }}
-                          >
-                            +{pack.bonus} bonus
-                          </span>
-                        ) : (
-                          <span />
-                        )}
-
-                        <span
-                          aria-hidden="true"
-                          style={{
-                            width: '16px',
-                            height: '16px',
-                            borderRadius: '50%',
-                            border: isSelected ? 'none' : '1.5px solid var(--border-strong)',
-                            backgroundColor: isSelected ? 'var(--accent-color)' : 'transparent',
-                            color: '#FFFFFF',
-                            display: 'inline-flex',
-                            alignItems: 'center',
-                            justifyContent: 'center',
-                            flexShrink: 0,
-                          }}
-                        >
-                          {isSelected && <Check size={11} strokeWidth={2.6} />}
-                        </span>
-                      </div>
-
-                      {pack.type === 'whole_book' ? (
-                        <div>
-                          <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                            <BookOpen size={15} strokeWidth={1.9} style={{ color: 'var(--accent-color)', flexShrink: 0 }} aria-hidden="true" />
-                            <span style={{ fontSize: '0.9375rem', fontWeight: 700, color: 'var(--text-primary)', lineHeight: 1.25 }}>
-                              {pack.name || 'Unlock Entire Novel'}
-                            </span>
-                          </div>
-                          <span
-                            style={{
-                              fontSize: '0.6875rem',
-                              color: 'var(--text-tertiary)',
-                              display: 'block',
-                              marginTop: '3px',
-                              overflow: 'hidden',
-                              textOverflow: 'ellipsis',
-                              whiteSpace: 'nowrap',
-                            }}
-                          >
-                            {novelTitle ? `${novelTitle} · Forever access` : 'One-time unlock · Forever access'}
-                          </span>
-                        </div>
-                      ) : (
-                        <div>
-                          <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                            <GoldCoin size={16} />
-                            <span className="tabular-nums" style={{ fontSize: '1.125rem', fontWeight: 700, color: 'var(--text-primary)' }}>
-                              {pack.coins.toLocaleString()}
-                            </span>
-                          </div>
-                          <span className="tabular-nums" style={{ fontSize: '0.6875rem', color: 'var(--text-tertiary)', display: 'block', marginTop: '2px' }}>
-                            {formatCoinPackSubtitle(pack)}
-                          </span>
-                        </div>
-                      )}
-
-                      <div
-                        className="tabular-nums"
+          <div className="scroll-container" style={{ flex: 1, minHeight: 0 }}>
+            <div className="sn-narrow-container" style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
+              {/* VIP Passes */}
+              {subscriptionPacks.length > 0 && (
+                <section style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                  <h2 className="hot-tags-title" style={{ margin: 0 }}>Unlimited Membership</h2>
+                  {subscriptionPacks.map((pack) => {
+                    const isSelected = selectedPack === pack.id;
+                    return (
+                      <button
+                        type="button"
+                        key={pack.id}
+                        onClick={() => handleSelectPack(pack.id)}
+                        aria-pressed={isSelected}
                         style={{
-                          fontSize: '0.8125rem',
-                          fontWeight: 600,
-                          backgroundColor: isSelected ? 'var(--cta-bg)' : 'var(--bg-tertiary)',
-                          color: isSelected ? 'var(--cta-text)' : 'var(--text-primary)',
-                          textAlign: 'center',
-                          padding: '7px 0',
-                          borderRadius: '8px',
+                          width: '100%',
+                          textAlign: 'left',
+                          display: 'flex',
+                          justifyContent: 'space-between',
+                          alignItems: 'center',
+                          gap: '16px',
+                          backgroundColor: isSelected ? 'var(--hero-bg)' : 'var(--bg-secondary)',
+                          color: isSelected ? 'var(--hero-text)' : 'var(--text-primary)',
+                          borderRadius: '16px',
+                          padding: '16px 18px',
+                          border: isSelected ? '1.5px solid #D4AE68' : '1px solid var(--border-color)',
+                          cursor: 'pointer',
+                          transition: 'var(--transition-fast)',
                         }}
                       >
-                        {pack.price}
-                      </div>
-                    </button>
-                  );
-                })}
-              </div>
-            </section>
-          )}
+                        <div style={{ display: 'flex', gap: '12px', alignItems: 'flex-start', minWidth: 0 }}>
+                          <Crown
+                            size={20}
+                            strokeWidth={1.8}
+                            style={{ color: isSelected ? '#E2BB6B' : 'var(--accent-color)', marginTop: '2px', flexShrink: 0 }}
+                            aria-hidden="true"
+                          />
+                          <div style={{ minWidth: 0 }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                              <span style={{ fontFamily: 'var(--font-display)', fontSize: '1.0625rem', fontWeight: 600 }}>
+                                {pack.name}
+                              </span>
+                              <span
+                                style={{
+                                  fontSize: '0.625rem',
+                                  backgroundColor: isSelected ? 'rgba(212, 174, 104, 0.2)' : 'var(--accent-light)',
+                                  color: isSelected ? '#E2BB6B' : 'var(--accent-text)',
+                                  fontWeight: 600,
+                                  padding: '2px 8px',
+                                  borderRadius: '999px',
+                                  textTransform: 'uppercase',
+                                }}
+                              >
+                                {pack.cycle}
+                              </span>
+                              {pack.badge && (
+                                <span
+                                  style={{
+                                    fontSize: '0.625rem',
+                                    backgroundColor: isSelected ? 'rgba(226, 187, 107, 0.28)' : 'var(--bg-tertiary)',
+                                    color: isSelected ? '#FAF8F5' : 'var(--text-primary)',
+                                    border: isSelected ? '1px solid rgba(226, 187, 107, 0.45)' : '1px solid var(--border-color)',
+                                    fontWeight: 700,
+                                    padding: '2px 8px',
+                                    borderRadius: '999px',
+                                  }}
+                                >
+                                  {pack.badge}
+                                </span>
+                              )}
+                            </div>
+                            <p
+                              style={{
+                                fontSize: '0.75rem',
+                                color: isSelected ? 'rgba(250, 248, 245, 0.74)' : 'var(--text-secondary)',
+                                marginTop: '4px',
+                                lineHeight: 1.45,
+                              }}
+                            >
+                              {pack.desc}
+                            </p>
+                          </div>
+                        </div>
 
-          {/* Empty State if no packages are configured */}
-          {subscriptionPacks.length === 0 && coinPacks.length === 0 && (
+                        <div style={{ textAlign: 'right', flexShrink: 0 }}>
+                          <div className="tabular-nums" style={{ fontSize: '1.0625rem', fontWeight: 700 }}>
+                            {pack.price}
+                          </div>
+                          <div style={{ fontSize: '0.6875rem', opacity: 0.7 }}>/{pack.cycle}</div>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </section>
+              )}
+
+              {/* Coin Packs Grid */}
+              {coinPacks.length > 0 && (
+                <section style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+                    <h2 className="hot-tags-title" style={{ margin: 0 }}>Single Purchases</h2>
+                    <span style={{ fontSize: '0.6875rem', color: 'var(--text-tertiary)' }}>Never expire</span>
+                  </div>
+
+                  <div className="coin-packs-grid">
+                    {coinPacks.map((pack) => {
+                      const isSelected = selectedPack === pack.id;
+                      return (
+                        <button
+                          type="button"
+                          key={pack.id}
+                          onClick={() => handleSelectPack(pack.id)}
+                          aria-pressed={isSelected}
+                          style={{
+                            backgroundColor: 'var(--bg-secondary)',
+                            color: 'var(--text-primary)',
+                            borderRadius: '14px',
+                            padding: '14px 12px',
+                            border: isSelected ? '1.5px solid var(--accent-color)' : '1px solid var(--border-color)',
+                            boxShadow: isSelected ? '0 0 0 1px var(--accent-color)' : 'none',
+                            cursor: 'pointer',
+                            display: 'flex',
+                            flexDirection: 'column',
+                            alignItems: 'stretch',
+                            justifyContent: 'space-between',
+                            gap: '10px',
+                            textAlign: 'left',
+                            transition: 'var(--transition-fast)',
+                          }}
+                        >
+                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '6px' }}>
+                            {pack.type === 'whole_book' ? (
+                              <span
+                                style={{
+                                  backgroundColor: 'var(--accent-light)',
+                                  color: 'var(--accent-text)',
+                                  fontSize: '0.625rem',
+                                  fontWeight: 600,
+                                  padding: '2px 7px',
+                                  borderRadius: '999px',
+                                }}
+                              >
+                                {pack.badge || 'Full Book'}
+                              </span>
+                            ) : pack.badge ? (
+                              <span
+                                style={{
+                                  backgroundColor: 'var(--accent-light)',
+                                  color: 'var(--accent-text)',
+                                  fontSize: '0.625rem',
+                                  fontWeight: 600,
+                                  padding: '2px 7px',
+                                  borderRadius: '999px',
+                                }}
+                              >
+                                {pack.badge}
+                              </span>
+                            ) : pack.bonus > 0 ? (
+                              <span
+                                className="tabular-nums"
+                                style={{
+                                  backgroundColor: 'var(--accent-light)',
+                                  color: 'var(--accent-text)',
+                                  fontSize: '0.625rem',
+                                  fontWeight: 600,
+                                  padding: '2px 7px',
+                                  borderRadius: '999px',
+                                }}
+                              >
+                                +{pack.bonus} bonus
+                              </span>
+                            ) : (
+                              <span />
+                            )}
+
+                            <span
+                              aria-hidden="true"
+                              style={{
+                                width: '16px',
+                                height: '16px',
+                                borderRadius: '50%',
+                                border: isSelected ? 'none' : '1.5px solid var(--border-strong)',
+                                backgroundColor: isSelected ? 'var(--accent-color)' : 'transparent',
+                                color: '#FFFFFF',
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                flexShrink: 0,
+                              }}
+                            >
+                              {isSelected && <Check size={11} strokeWidth={2.6} />}
+                            </span>
+                          </div>
+
+                          {pack.type === 'whole_book' ? (
+                            <div>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                <BookOpen size={15} strokeWidth={1.9} style={{ color: 'var(--accent-color)', flexShrink: 0 }} aria-hidden="true" />
+                                <span style={{ fontSize: '0.9375rem', fontWeight: 700, color: 'var(--text-primary)', lineHeight: 1.25 }}>
+                                  {pack.name || 'Unlock Entire Novel'}
+                                </span>
+                              </div>
+                              <span
+                                style={{
+                                  fontSize: '0.6875rem',
+                                  color: 'var(--text-tertiary)',
+                                  display: 'block',
+                                  marginTop: '3px',
+                                  overflow: 'hidden',
+                                  textOverflow: 'ellipsis',
+                                  whiteSpace: 'nowrap',
+                                }}
+                              >
+                                {novelTitle ? `${novelTitle} · Forever access` : 'One-time unlock · Forever access'}
+                              </span>
+                            </div>
+                          ) : (
+                            <div>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                <GoldCoin size={16} />
+                                <span className="tabular-nums" style={{ fontSize: '1.125rem', fontWeight: 700, color: 'var(--text-primary)' }}>
+                                  {pack.coins.toLocaleString()}
+                                </span>
+                              </div>
+                              <span className="tabular-nums" style={{ fontSize: '0.6875rem', color: 'var(--text-tertiary)', display: 'block', marginTop: '2px' }}>
+                                {formatCoinPackSubtitle(pack)}
+                              </span>
+                            </div>
+                          )}
+
+                          <div
+                            className="tabular-nums"
+                            style={{
+                              fontSize: '0.8125rem',
+                              fontWeight: 600,
+                              backgroundColor: isSelected ? 'var(--cta-bg)' : 'var(--bg-tertiary)',
+                              color: isSelected ? 'var(--cta-text)' : 'var(--text-primary)',
+                              textAlign: 'center',
+                              padding: '7px 0',
+                              borderRadius: '8px',
+                            }}
+                          >
+                            {pack.price}
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </section>
+              )}
+
+              {/* Empty State if no packages are configured */}
+              {subscriptionPacks.length === 0 && coinPacks.length === 0 && (
+                <div
+                  style={{
+                    backgroundColor: 'var(--bg-secondary)',
+                    borderRadius: '16px',
+                    padding: '32px 20px',
+                    border: '1px solid var(--border-color)',
+                    textAlign: 'center',
+                    color: 'var(--text-secondary)',
+                    fontSize: '0.875rem',
+                  }}
+                >
+                  No membership or coin packages are currently available. Please try again later.
+                </div>
+              )}
+
+              {/* Payment Method Checkout Actions */}
+              {selectedSlot ? (
+                <section className="recharge-checkout-section" aria-label="Payment methods">
+                  <div className="recharge-checkout-summary">
+                    <span className="recharge-checkout-summary-title">{selectedSummaryTitle}</span>
+                    <span className="recharge-checkout-summary-price tabular-nums">{selectedSummaryPrice}</span>
+                  </div>
+
+                  {selectedPayPalAvailable || selectedStripeAvailable ? (
+                    <div
+                      className="recharge-checkout-actions"
+                      style={{
+                        gridTemplateColumns:
+                          selectedPayPalAvailable && selectedStripeAvailable ? 'repeat(2, minmax(0, 1fr))' : '1fr',
+                      }}
+                    >
+                      {selectedPayPalAvailable && (
+                        <button
+                          type="button"
+                          className="recharge-pay-btn"
+                          onClick={() => void handlePurchase('paypal')}
+                          disabled={isProcessing}
+                        >
+                          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true" style={{ flexShrink: 0 }}>
+                            <defs>
+                              <clipPath id={paypalClipId}>
+                                <path d="M5.8 1.5h7.4c4.2 0 6.4 2 5.6 6-.7 3.6-3.4 5.5-7.4 5.5H8.5l-1.1 7.2H3.0L5.8 1.5Z" />
+                              </clipPath>
+                            </defs>
+                            <path
+                              className="recharge-paypal-back"
+                              d="M5.8 1.5h7.4c4.2 0 6.4 2 5.6 6-.7 3.6-3.4 5.5-7.4 5.5H8.5l-1.1 7.2H3.0L5.8 1.5Z"
+                            />
+                            <path
+                              className="recharge-paypal-front"
+                              d="M8.5 5.2h6.3c3.9 0 5.9 1.9 5.2 5.5-.7 3.3-3.1 5.1-6.8 5.1h-2.5l-1.1 6.7H5.9L8.5 5.2Z"
+                            />
+                            <path
+                              className="recharge-paypal-overlap"
+                              clipPath={`url(#${paypalClipId})`}
+                              d="M8.5 5.2h6.3c3.9 0 5.9 1.9 5.2 5.5-.7 3.3-3.1 5.1-6.8 5.1h-2.5l-1.1 6.7H5.9L8.5 5.2Z"
+                            />
+                          </svg>
+                          <span className="recharge-btn-label">{isProcessing && activeCheckoutProvider === 'paypal' ? 'Connecting...' : 'PayPal'}</span>
+                        </button>
+                      )}
+
+                      {selectedStripeAvailable && (
+                        <button
+                          type="button"
+                          className="recharge-pay-btn"
+                          disabled={isProcessing}
+                          onClick={() => void handlePurchase('stripe')}
+                        >
+                          <CreditCard size={18} strokeWidth={2} aria-hidden="true" style={{ flexShrink: 0 }} />
+                          <span className="recharge-btn-label">{isProcessing && activeCheckoutProvider === 'stripe' ? 'Connecting...' : cardLabel}</span>
+                        </button>
+                      )}
+                    </div>
+                  ) : (
+                    <p role="status" style={{ textAlign: 'center', fontSize: '0.8125rem', color: 'var(--text-secondary)', margin: 0 }}>
+                      No payment channel is currently active for the selected item.
+                    </p>
+                  )}
+                </section>
+              ) : (subscriptionPacks.length > 0 || coinPacks.length > 0) ? (
+                <section className="recharge-checkout-section" aria-label="Package selection prompt">
+                  <p role="status" style={{ textAlign: 'center', fontSize: '0.8125rem', color: 'var(--text-secondary)', margin: 0 }}>
+                    {returnedLookupState === 'loading'
+                      ? 'Checking your previous checkout… or select a package above to continue.'
+                      : 'Select a package above to continue.'}
+                  </p>
+                </section>
+              ) : null}
+
+              {/* Notes */}
+              <div
+                style={{
+                  backgroundColor: 'var(--bg-secondary)',
+                  borderRadius: '14px',
+                  padding: '14px 16px',
+                  border: '1px solid var(--border-color)',
+                  fontSize: '0.75rem',
+                  color: 'var(--text-secondary)',
+                  lineHeight: 1.65,
+                }}
+              >
+                <p>• <strong>VIP Unlimited Pass:</strong> Instant access to all novel chapters across the site without consuming coins.</p>
+                <p>• <strong>Coin Top-up:</strong> Permanent coins to unlock individual chapters across StarNovel.</p>
+                <p>
+                  • Need help?{' '}
+                  <button
+                    type="button"
+                    onClick={() => setActiveLegalModal('contact')}
+                    style={{ background: 'none', border: 'none', padding: 0, color: 'var(--accent-text)', fontWeight: 600, textDecoration: 'underline', cursor: 'pointer' }}
+                  >
+                    Contact Customer Support
+                  </button>.
+                </p>
+              </div>
+
+              {/* Legal Links */}
+              <div
+                style={{
+                  display: 'flex',
+                  flexWrap: 'wrap',
+                  justifyContent: 'center',
+                  alignItems: 'center',
+                  gap: '8px 12px',
+                  paddingBottom: '12px',
+                  fontSize: '0.75rem',
+                  color: 'var(--text-tertiary)',
+                }}
+              >
+                <button type="button" onClick={() => setActiveLegalModal('terms')} style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', textDecoration: 'underline' }}>
+                  Terms of Service
+                </button>
+                <span aria-hidden="true">·</span>
+                <button type="button" onClick={() => setActiveLegalModal('privacy')} style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', textDecoration: 'underline' }}>
+                  Privacy Policy
+                </button>
+                <span aria-hidden="true">·</span>
+                <button type="button" onClick={() => setActiveLegalModal('refund')} style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', textDecoration: 'underline' }}>
+                  Refund Policy
+                </button>
+                <span aria-hidden="true">·</span>
+                <button type="button" onClick={() => setActiveLegalModal('contact')} style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', textDecoration: 'underline' }}>
+                  Contact Us
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {/* Payment Processing Loading Overlay */}
+          {isProcessing && (
             <div
+              aria-busy="true"
               style={{
-                backgroundColor: 'var(--bg-secondary)',
-                borderRadius: '16px',
-                padding: '32px 20px',
-                border: '1px solid var(--border-color)',
+                position: 'fixed',
+                inset: 0,
+                backgroundColor: 'rgba(15, 15, 15, 0.72)',
+                backdropFilter: 'blur(6px)',
+                zIndex: 9999,
+                display: 'flex',
+                flexDirection: 'column',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: '14px',
+                color: '#FAF8F5',
+                padding: '24px',
                 textAlign: 'center',
-                color: 'var(--text-secondary)',
-                fontSize: '0.875rem',
               }}
             >
-              No membership or coin packages are currently available. Please try again later.
+              <div className="sn-spinner" />
+              <p style={{ fontSize: '1rem', fontWeight: 600 }}>
+                {activeCheckoutProvider === 'stripe'
+                  ? paymentStep === 1
+                    ? 'Redirecting to card checkout...'
+                    : 'Completing card payment...'
+                  : paymentStep === 1
+                    ? 'Redirecting to PayPal Checkout...'
+                    : 'Completing PayPal transaction...'}
+              </p>
+              <p style={{ fontSize: '0.8125rem', color: 'rgba(250, 248, 245, 0.72)' }}>Please keep this window open</p>
             </div>
           )}
 
-          {/* Payment Method Checkout Actions */}
-          {selectedSlot && (
-            <section className="recharge-checkout-section" aria-label="Payment methods">
-              <div className="recharge-checkout-summary">
-                <span className="recharge-checkout-summary-title">{selectedSummaryTitle}</span>
-                <span className="recharge-checkout-summary-price tabular-nums">{selectedSummaryPrice}</span>
-              </div>
-
-              {selectedPayPalAvailable || selectedStripeAvailable ? (
-                <div
-                  className="recharge-checkout-actions"
-                  style={{
-                    gridTemplateColumns:
-                      selectedPayPalAvailable && selectedStripeAvailable ? 'repeat(2, minmax(0, 1fr))' : '1fr',
-                  }}
-                >
-                  {selectedPayPalAvailable && (
-                    <button
-                      type="button"
-                      className="recharge-pay-btn"
-                      onClick={() => void handlePurchase('paypal')}
-                      disabled={isProcessing}
-                    >
-                      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true" style={{ flexShrink: 0 }}>
-                        <defs>
-                          <clipPath id={paypalClipId}>
-                            <path d="M5.8 1.5h7.4c4.2 0 6.4 2 5.6 6-.7 3.6-3.4 5.5-7.4 5.5H8.5l-1.1 7.2H3.0L5.8 1.5Z" />
-                          </clipPath>
-                        </defs>
-                        <path
-                          className="recharge-paypal-back"
-                          d="M5.8 1.5h7.4c4.2 0 6.4 2 5.6 6-.7 3.6-3.4 5.5-7.4 5.5H8.5l-1.1 7.2H3.0L5.8 1.5Z"
-                        />
-                        <path
-                          className="recharge-paypal-front"
-                          d="M8.5 5.2h6.3c3.9 0 5.9 1.9 5.2 5.5-.7 3.3-3.1 5.1-6.8 5.1h-2.5l-1.1 6.7H5.9L8.5 5.2Z"
-                        />
-                        <path
-                          className="recharge-paypal-overlap"
-                          clipPath={`url(#${paypalClipId})`}
-                          d="M8.5 5.2h6.3c3.9 0 5.9 1.9 5.2 5.5-.7 3.3-3.1 5.1-6.8 5.1h-2.5l-1.1 6.7H5.9L8.5 5.2Z"
-                        />
-                      </svg>
-                      <span className="recharge-btn-label">{isProcessing && activeCheckoutProvider === 'paypal' ? 'Connecting...' : 'PayPal'}</span>
-                    </button>
-                  )}
-
-                  {selectedStripeAvailable && (
-                    <button
-                      type="button"
-                      className="recharge-pay-btn"
-                      disabled={isProcessing}
-                      onClick={() => void handlePurchase('stripe')}
-                    >
-                      <CreditCard size={18} strokeWidth={2} aria-hidden="true" style={{ flexShrink: 0 }} />
-                      <span className="recharge-btn-label">{isProcessing && activeCheckoutProvider === 'stripe' ? 'Connecting...' : cardLabel}</span>
-                    </button>
-                  )}
-                </div>
-              ) : (
-                <p role="status" style={{ textAlign: 'center', fontSize: '0.8125rem', color: 'var(--text-secondary)', margin: 0 }}>
-                  No payment channel is currently active for the selected item.
-                </p>
-              )}
-            </section>
-          )}
-
-          {/* Notes */}
-          <div
-            style={{
-              backgroundColor: 'var(--bg-secondary)',
-              borderRadius: '14px',
-              padding: '14px 16px',
-              border: '1px solid var(--border-color)',
-              fontSize: '0.75rem',
-              color: 'var(--text-secondary)',
-              lineHeight: 1.65,
-            }}
-          >
-            <p>• <strong>VIP Unlimited Pass:</strong> Instant access to all novel chapters across the site without consuming coins.</p>
-            <p>• <strong>Coin Top-up:</strong> Permanent coins to unlock individual chapters across StarNovel.</p>
-            <p>
-              • Need help?{' '}
-              <button
-                type="button"
-                onClick={() => setActiveLegalModal('contact')}
-                style={{ background: 'none', border: 'none', padding: 0, color: 'var(--accent-text)', fontWeight: 600, textDecoration: 'underline', cursor: 'pointer' }}
-              >
-                Contact Customer Support
-              </button>.
-            </p>
-          </div>
-
-          {/* Legal Links */}
-          <div
-            style={{
-              display: 'flex',
-              flexWrap: 'wrap',
-              justifyContent: 'center',
-              alignItems: 'center',
-              gap: '8px 12px',
-              paddingBottom: '12px',
-              fontSize: '0.75rem',
-              color: 'var(--text-tertiary)',
-            }}
-          >
-            <button type="button" onClick={() => setActiveLegalModal('terms')} style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', textDecoration: 'underline' }}>
-              Terms of Service
-            </button>
-            <span aria-hidden="true">·</span>
-            <button type="button" onClick={() => setActiveLegalModal('privacy')} style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', textDecoration: 'underline' }}>
-              Privacy Policy
-            </button>
-            <span aria-hidden="true">·</span>
-            <button type="button" onClick={() => setActiveLegalModal('refund')} style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', textDecoration: 'underline' }}>
-              Refund Policy
-            </button>
-            <span aria-hidden="true">·</span>
-            <button type="button" onClick={() => setActiveLegalModal('contact')} style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', textDecoration: 'underline' }}>
-              Contact Us
-            </button>
-          </div>
-        </div>
-      </div>
-
-      {/* Payment Processing Loading Overlay */}
-      {isProcessing && (
-        <div
-          aria-busy="true"
-          style={{
-            position: 'fixed',
-            inset: 0,
-            backgroundColor: 'rgba(15, 15, 15, 0.72)',
-            backdropFilter: 'blur(6px)',
-            zIndex: 9999,
-            display: 'flex',
-            flexDirection: 'column',
-            alignItems: 'center',
-            justifyContent: 'center',
-            gap: '14px',
-            color: '#FAF8F5',
-            padding: '24px',
-            textAlign: 'center',
-          }}
-        >
-          <div className="sn-spinner" />
-          <p style={{ fontSize: '1rem', fontWeight: 600 }}>
-            {activeCheckoutProvider === 'stripe'
-              ? paymentStep === 1
-                ? 'Redirecting to card checkout...'
-                : 'Completing card payment...'
-              : paymentStep === 1
-                ? 'Redirecting to PayPal Checkout...'
-                : 'Completing PayPal transaction...'}
-          </p>
-          <p style={{ fontSize: '0.8125rem', color: 'rgba(250, 248, 245, 0.72)' }}>Please keep this window open</p>
-        </div>
-      )}
-
-      <LegalModal
-        isOpen={activeLegalModal !== null}
-        type={activeLegalModal || 'contact'}
-        onClose={() => setActiveLegalModal(null)}
-      />
+          <LegalModal
+            isOpen={activeLegalModal !== null}
+            type={activeLegalModal || 'contact'}
+            onClose={() => setActiveLegalModal(null)}
+          />
         </div>
       )}
 

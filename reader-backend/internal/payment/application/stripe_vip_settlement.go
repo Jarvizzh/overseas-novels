@@ -29,6 +29,10 @@ func settleStripeVIPInvoice(ctx context.Context, v stripeVIPIntent, proof paymen
 	if err := lockStripeVIPCharges(ctx, tx, proof.Allocations); err != nil {
 		return err
 	}
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('vip-settlement:'||$1::bigint::text||':'||$2,0))`,
+		v.UserID, conversion.Environment()); err != nil {
+		return err
+	}
 	// An intent serializes admission of all its invoices. Lock the order before
 	// the agreement so that refunds and dispute adjustments use the same order.
 	if _, err := tx.Exec(ctx, `SELECT id FROM payment_stripe_subscription_intents WHERE id=$1 AND account_id=$2 FOR UPDATE`, v.ID, v.AccountID); err != nil {
@@ -238,6 +242,38 @@ func stripeVIPAdmissionNote(ctx context.Context, tx pgx.Tx, v stripeVIPIntent, p
 	}
 	if overlapping {
 		return "Stripe VIP invoice overlaps an already admitted period", nil
+	}
+	var parentFulfilledElsewhere bool
+	err = tx.QueryRow(ctx, `SELECT EXISTS(
+		SELECT 1 FROM payment_vip_checkout_intents
+		WHERE stripe_intent_id=$1::uuid AND status='Completed'
+		  AND COALESCE(subscription_id,'')<>'' AND subscription_id<>$2)`, v.ID, proof.Subscription.ID).Scan(&parentFulfilledElsewhere)
+	if err != nil {
+		return "", err
+	}
+	if parentFulfilledElsewhere {
+		return "Duplicate payment for an already completed VIP checkout intent; manual review or refund required", nil
+	}
+	if proof.BillingReason == "subscription_create" {
+		var overlappingOtherVIP bool
+		err = tx.QueryRow(ctx, `SELECT EXISTS(
+			SELECT 1 FROM recharge_orders o
+			WHERE o.user_id=$1
+			  AND o.order_type='subscription'
+			  AND COALESCE(o.subscription_id,'')<>$2
+			  AND o.checkout_environment=$3
+			  AND o.fulfilled_at IS NOT NULL
+			  AND o.status IN ('Success','Paid','RefundPending')
+			  AND o.paid_period_end IS NOT NULL
+			  AND COALESCE(o.paid_period_start, o.paid_at, o.created_at) < $5
+			  AND o.paid_period_end > $4
+		)`, v.UserID, proof.Subscription.ID, conversion.Environment(), proof.StartsAt, proof.EndsAt).Scan(&overlappingOtherVIP)
+		if err != nil {
+			return "", err
+		}
+		if overlappingOtherVIP {
+			return "Duplicate payment overlapping an already fulfilled VIP subscription; manual review or refund required", nil
+		}
 	}
 	var conflictingVoid bool
 	err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM payment_stripe_invoice_periods WHERE intent_id=$1

@@ -30,7 +30,7 @@ func Policy() gin.HandlerFunc {
 		path := c.FullPath()
 		if strings.Contains(path, "/wallet/webhook/") {
 			budget, maxBody = 30*time.Second, MaxWebhookBytes
-		} else if strings.Contains(path, "/wallet/recharge/") || strings.HasSuffix(path, "/subscription/cancel") {
+		} else if strings.Contains(path, "/wallet/recharge/") || strings.Contains(path, "/wallet/purchase-intents") || strings.HasSuffix(path, "/subscription/cancel") {
 			budget = 60 * time.Second
 		} else if path == "/healthz" {
 			budget = 2 * time.Second

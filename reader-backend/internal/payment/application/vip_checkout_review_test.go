@@ -59,7 +59,7 @@ func testUnifiedVIPReview(t *testing.T, svc *service, pool *pgxpool.Pool, pp *si
 		return result
 	}
 	exec(`INSERT INTO users(id) SELECT generate_series(610,629)`)
-	exec(`INSERT INTO users(id) SELECT generate_series(680,689)`)
+	exec(`INSERT INTO users(id) SELECT generate_series(680,711)`)
 
 	t.Run("PayPal cancellation uncertainty keeps original checkout", func(t *testing.T) {
 		intent := prepare(610, 605, uuid.NewString())
@@ -335,6 +335,761 @@ func testUnifiedVIPReview(t *testing.T, svc *service, pool *pgxpool.Pool, pp *si
 		}
 	})
 
+	t.Run("superseded PayPal late payment after Stripe fulfillment stays on ledger without double VIP fulfillment", func(t *testing.T) {
+		intent := prepare(690, 605, uuid.NewString())
+		oldPP := startPayPal(690, intent.ID)
+		pp.cancelFault = func(string) error {
+			return &paypal.APIError{
+				Status: http.StatusNotFound,
+				Name:   "RESOURCE_NOT_FOUND",
+				Issues: []string{"INVALID_RESOURCE_ID"},
+			}
+		}
+		_ = startStripe(690, intent.ID)
+		pp.cancelFault = nil
+
+		// Stripe completes and fulfills the VIP month purchase intent first.
+		row := read(690, intent.ID)
+		v, err := findStripeVIPIntent(ctx, pool, stripe.account, row.stripeIntentID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		now := time.Now().UTC().Truncate(time.Second)
+		periodEnd := now.AddDate(0, 1, 0)
+		stripeInvoice := payment.StripeVIPInvoice{
+			ID: "in_dup_guard_690", BillingReason: "subscription_create", Currency: "USD", Country: "US", Status: "paid",
+			DueMinor: 1499, StartsAt: now, EndsAt: periodEnd,
+			Subscription: payment.StripeVIPSubscription{
+				ID: "sub_DupGuard690", CustomerID: "cus_DupGuard690",
+				IntentID: v.ID, PriceID: v.Offer.PriceID, Status: "active",
+			},
+			Allocations: []payment.StripeVIPAllocation{{
+				ID: "inpay_dup_guard_690", AmountMinor: 1499,
+				Receipt: payment.SingleChargeProof{
+					ID: "ch_dup_guard_690", Currency: "USD", AmountMinor: 1499,
+					PaidAt: now, EligibleTerms: true, Evidence: []byte("{}"),
+				},
+			}},
+		}
+		if err := settleStripeVIPInvoice(ctx, v, stripeInvoice, nil); err != nil {
+			t.Fatalf("settleStripeVIPInvoice failed: %v", err)
+		}
+
+		// Now the superseded PayPal agreement is approved and billed late.
+		details := *pp.subDetailsByID[oldPP.ExternalOrderID]
+		details.Status = "ACTIVE"
+		details.LastPaymentTime = &now
+		details.LastPaymentCents = 1499
+		details.LastPaymentCurrency = "USD"
+		details.CurrentPeriodEnd = &periodEnd
+		pp.subDetailsByID[oldPP.ExternalOrderID] = &details
+
+		if err := svc.applyPayPalEvent(ctx, pp, &payment.WebhookEventResult{
+			EventType:      "subscription_activated",
+			SubscriptionID: oldPP.ExternalOrderID,
+			Account:        pp.account,
+		}); err != nil {
+			t.Fatalf("applyPayPalEvent failed: %v", err)
+		}
+		oldSub, err := repo.GetSubscriptionByID(ctx, oldPP.ExternalOrderID)
+		if err != nil || oldSub == nil {
+			t.Fatalf("old PayPal sub: %+v %v", oldSub, err)
+		}
+		lateSale := payment.SubscriptionTransaction{ID: "SALE-LATE-DUP-690", Status: "COMPLETED", Time: now}
+		lateSale.Amount.Gross.Currency, lateSale.Amount.Gross.Value = "USD", "14.99"
+		if err := svc.recordPayPalSubscriptionTransaction(ctx, oldSub, &details, lateSale); err != nil {
+			t.Fatalf("recordPayPalSubscriptionTransaction failed: %v", err)
+		}
+
+		// Verify: 2 real receipts kept on ledger, ONLY 1 VIP order fulfilled, duplicate PayPal flagged for review/refund.
+		var totalOrders, fulfilledOrders, totalReceipts int
+		if err := pool.QueryRow(ctx, `SELECT count(*), count(*) FILTER (WHERE fulfilled_at IS NOT NULL)
+			FROM recharge_orders WHERE user_id=690 AND order_type='subscription'`).Scan(&totalOrders, &fulfilledOrders); err != nil {
+			t.Fatal(err)
+		}
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM third_party_payment_orders tp
+			JOIN recharge_orders o ON o.id=tp.order_id WHERE o.user_id=690`).Scan(&totalReceipts); err != nil {
+			t.Fatal(err)
+		}
+		if totalOrders != 2 || totalReceipts != 2 || fulfilledOrders != 1 {
+			t.Fatalf("expected 2 ledger orders/receipts and exactly 1 fulfilled VIP order, got orders=%d receipts=%d fulfilled=%d",
+				totalOrders, totalReceipts, fulfilledOrders)
+		}
+		var dupUnfulfilled, dupFlagged, dupNoEvents bool
+		if err := pool.QueryRow(ctx, `SELECT o.fulfilled_at IS NULL AND o.paid_period_end IS NULL,
+			COALESCE(o.reconciliation_note,'') LIKE '%superseded VIP checkout%',
+			NOT EXISTS(SELECT 1 FROM reader_conversion_outbox x WHERE x.order_id=o.id AND x.event_name IN ('Purchase','Subscribe'))
+			FROM recharge_orders o WHERE o.external_ref_id=$1`, lateSale.ID).Scan(&dupUnfulfilled, &dupFlagged, &dupNoEvents); err != nil ||
+			!dupUnfulfilled || !dupFlagged || !dupNoEvents {
+			t.Fatalf("duplicate PayPal order state wrong: unfulfilled=%v flagged=%v noEvents=%v err=%v",
+				dupUnfulfilled, dupFlagged, dupNoEvents, err)
+		}
+		svc.reconcilePayPalCancellations(ctx)
+		if pp.subDetailsByID[oldPP.ExternalOrderID].Status != "CANCELLED" {
+			t.Fatalf("expected superseded PayPal agreement to be cancelled remotely, got %s", pp.subDetailsByID[oldPP.ExternalOrderID].Status)
+		}
+	})
+
+	t.Run("live PayPal EXPIRED agreement refreshes and returns fresh approval URL on retry", func(t *testing.T) {
+		intent := prepare(691, 605, uuid.NewString())
+		old := startPayPal(691, intent.ID)
+		// Only change remote provider status to EXPIRED; keep local DB PENDING.
+		pp.subDetailsByID[old.ExternalOrderID].Status = "EXPIRED"
+
+		got := startPayPal(691, intent.ID)
+		if got.Status != "awaiting_approval" || got.ApprovalURL == "" ||
+			got.ApprovalURL == old.ApprovalURL || got.ExternalOrderID == old.ExternalOrderID {
+			t.Fatalf("retry on live-EXPIRED PayPal sub did not issue a fresh approval URL: got=%+v old=%+v", got, old)
+		}
+		if oldSub, err := repo.GetSubscriptionByID(ctx, old.ExternalOrderID); err != nil || oldSub == nil || oldSub.Status != "EXPIRED" {
+			t.Fatalf("old expired PayPal sub not persisted as EXPIRED: sub=%+v err=%v", oldSub, err)
+		}
+	})
+
+	t.Run("#22 VIP plan switch from PayPal (with pending Stripe switch) succeeds in one click and is idempotent", func(t *testing.T) {
+		oldIntent := prepare(692, 605, uuid.NewString())
+		oldPP := startPayPal(692, oldIntent.ID)
+		// Simulate an earlier failed PayPal->Stripe switch leaving switch_to_provider='stripe'.
+		exec(`UPDATE payment_vip_checkout_intents SET switch_to_provider='stripe' WHERE intent_id=$1`, oldIntent.ID)
+
+		reqKey := uuid.NewString()
+		newIntent := prepare(692, 604, reqKey)
+		if newIntent.ID == oldIntent.ID || newIntent.Cycle != "year" || newIntent.Status != "ready" {
+			t.Fatalf("expected fresh Year VIP intent in one click: %+v", newIntent)
+		}
+		if oldRow := read(692, oldIntent.ID); oldRow.status != "Expired" || oldRow.activeProvider != "" || oldRow.switchTo != "" {
+			t.Fatalf("old Month VIP intent not released cleanly: %+v", oldRow)
+		}
+		if pp.subDetailsByID[oldPP.ExternalOrderID].Status != "CANCELLED" {
+			t.Fatalf("old PayPal agreement not cancelled remotely: %s", pp.subDetailsByID[oldPP.ExternalOrderID].Status)
+		}
+		started := startPayPal(692, newIntent.ID)
+		if started.Status != "awaiting_approval" || started.ApprovalURL == "" || started.ExternalOrderID == oldPP.ExternalOrderID {
+			t.Fatalf("could not start replacement Year checkout: %+v", started)
+		}
+		// Replaying same request key and clicking again with a new key both reuse the single Year intent.
+		if replay := prepare(692, 604, reqKey); replay.ID != newIntent.ID {
+			t.Fatalf("replayed key created a different intent: %+v vs %s", replay, newIntent.ID)
+		}
+		if again := prepare(692, 604, uuid.NewString()); again.ID != newIntent.ID {
+			t.Fatalf("duplicate click created a second Year intent: %+v vs %s", again, newIntent.ID)
+		}
+		var pendingCount int
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM payment_vip_checkout_intents WHERE user_id=692 AND status='Pending'`).Scan(&pendingCount); err != nil || pendingCount != 1 {
+			t.Fatalf("expected exactly 1 pending Year VIP intent, got %d err=%v", pendingCount, err)
+		}
+	})
+
+	t.Run("#22 PayPal cancel refusal (approval still open), timeout, and concurrent approval block plan switch with structured error", func(t *testing.T) {
+		// Case A: PayPal rejects /cancel with 404 and old approval link remains APPROVAL_PENDING.
+		oldA := prepare(693, 605, uuid.NewString())
+		oldPPA := startPayPal(693, oldA.ID)
+		pp.cancelFault = func(string) error {
+			return &paypal.APIError{
+				Status: http.StatusNotFound,
+				Name:   "RESOURCE_NOT_FOUND",
+				Issues: []string{"INVALID_RESOURCE_ID"},
+			}
+		}
+		beforePP, beforeSt := len(pp.agreements), stripe.vipSessionSeq
+		_, err := svc.PreparePurchase(ctx, 693, 0, 604, 0, uuid.NewString(), "", checkoutAttribution{})
+		var blocked *VIPPlanSwitchBlockedError
+		if !errors.As(err, &blocked) || blocked.Code != VIPPlanSwitchCodeApprovalOpen ||
+			blocked.CurrentIntentID != oldA.ID || blocked.CurrentSlotID != 605 ||
+			len(pp.agreements) != beforePP || stripe.vipSessionSeq != beforeSt {
+			t.Fatalf("expected approval_open block preserving old intent, got err=%v blocked=%+v", err, blocked)
+		}
+		// Verify HTTP handler exposes distinguishable code + current_intent payload.
+		handler := NewHandler(svc)
+		router := gin.New()
+		router.POST("/purchases", func(c *gin.Context) {
+			c.Set("user_id", int64(693))
+			handler.PreparePurchase(c)
+		})
+		req := httptest.NewRequest(http.MethodPost, "/purchases", strings.NewReader(fmt.Sprintf(`{"slot_id":604,"request_key":%q}`, uuid.NewString())))
+		req.Header.Set("Content-Type", "application/json")
+		resp := httptest.NewRecorder()
+		router.ServeHTTP(resp, req)
+		if resp.Code != http.StatusConflict || !strings.Contains(resp.Body.String(), VIPPlanSwitchCodeApprovalOpen) ||
+			!strings.Contains(resp.Body.String(), oldA.ID) {
+			t.Fatalf("HTTP plan-switch error response: %d %s", resp.Code, resp.Body.String())
+		}
+		if oldRow := read(693, oldA.ID); oldRow.status != "Pending" || oldRow.subscriptionID != oldPPA.ExternalOrderID {
+			t.Fatalf("original intent mutated on blocked switch: %+v", oldRow)
+		}
+		// Once PayPal marks the old agreement EXPIRED, retrying Year succeeds immediately.
+		pp.cancelFault = nil
+		pp.subDetailsByID[oldPPA.ExternalOrderID].Status = "EXPIRED"
+		yearA := prepare(693, 604, uuid.NewString())
+		if yearA.ID == oldA.ID || yearA.Cycle != "year" {
+			t.Fatalf("retry after expiry failed: %+v", yearA)
+		}
+
+		// Case B: PayPal verification/cancel timeout blocks with vip_plan_switch_pending and recovers once cancelled.
+		oldB := prepare(694, 605, uuid.NewString())
+		oldPPB := startPayPal(694, oldB.ID)
+		pp.cancelFault = func(string) error { return context.DeadlineExceeded }
+		beforePP, beforeSt = len(pp.agreements), stripe.vipSessionSeq
+		_, err = svc.PreparePurchase(ctx, 694, 0, 604, 0, uuid.NewString(), "", checkoutAttribution{})
+		blocked = nil
+		if !errors.As(err, &blocked) || blocked.Code != VIPPlanSwitchCodePending ||
+			blocked.CurrentIntentID != oldB.ID || len(pp.agreements) != beforePP || stripe.vipSessionSeq != beforeSt {
+			t.Fatalf("expected timeout block, got err=%v blocked=%+v", err, blocked)
+		}
+		pp.cancelFault = nil
+		pp.subDetailsByID[oldPPB.ExternalOrderID].Status = "CANCELLED"
+		yearB := prepare(694, 604, uuid.NewString())
+		if yearB.ID == oldB.ID || yearB.Cycle != "year" {
+			t.Fatalf("retry after confirmed cancel failed: %+v", yearB)
+		}
+
+		// Case C: Concurrent approval wins -> vip_plan_switch_confirming, zero new creations.
+		oldC := prepare(695, 605, uuid.NewString())
+		oldPPC := startPayPal(695, oldC.ID)
+		exec(`UPDATE payment_vip_checkout_intents SET switch_to_provider='stripe' WHERE intent_id=$1`, oldC.ID)
+		pp.cancelFault = func(id string) error {
+			pp.subDetailsByID[id].Status = "APPROVED"
+			return errors.New("already approved")
+		}
+		defer func() { pp.cancelFault = nil }()
+		beforePP, beforeSt = len(pp.agreements), stripe.vipSessionSeq
+		_, err = svc.PreparePurchase(ctx, 695, 0, 604, 0, uuid.NewString(), "", checkoutAttribution{})
+		blocked = nil
+		if !errors.As(err, &blocked) || blocked.Code != VIPPlanSwitchCodeConfirming ||
+			blocked.CurrentIntentID != oldC.ID || len(pp.agreements) != beforePP || stripe.vipSessionSeq != beforeSt {
+			t.Fatalf("expected confirming block on concurrent approval, got err=%v blocked=%+v", err, blocked)
+		}
+		if oldRow := read(695, oldC.ID); oldRow.status != "Pending" || oldRow.switchTo != "" || oldRow.subscriptionID != oldPPC.ExternalOrderID {
+			t.Fatalf("concurrent approval did not keep original intent and clear switchTo: %+v", oldRow)
+		}
+	})
+
+	t.Run("#22 Stripe symmetric VIP plan switch succeeds, blocks on timeout or concurrent subscription, and recovers", func(t *testing.T) {
+		// Case A: Open Stripe Month session (with switch_to_provider='paypal') closes and switches to Year in one click.
+		oldA := prepare(696, 605, uuid.NewString())
+		_ = startStripe(696, oldA.ID)
+		exec(`UPDATE payment_vip_checkout_intents SET switch_to_provider='paypal' WHERE intent_id=$1`, oldA.ID)
+		yearA := prepare(696, 604, uuid.NewString())
+		if yearA.ID == oldA.ID || yearA.Cycle != "year" {
+			t.Fatalf("Stripe Month -> Year switch failed: %+v", yearA)
+		}
+		if oldRow := read(696, oldA.ID); oldRow.status != "Expired" || oldRow.activeProvider != "" || oldRow.switchTo != "" {
+			t.Fatalf("old Stripe intent not expired cleanly: %+v", oldRow)
+		}
+		if started := startStripe(696, yearA.ID); started.Status != "awaiting_approval" || started.ApprovalURL == "" {
+			t.Fatalf("could not start replacement Year Stripe checkout: %+v", started)
+		}
+
+		// Case B: Stripe close timeout blocks with vip_plan_switch_pending and recovers once Stripe responds.
+		oldB := prepare(697, 605, uuid.NewString())
+		_ = startStripe(697, oldB.ID)
+		beforeSt := stripe.vipSessionSeq
+		stripe.closeVIPErr = context.DeadlineExceeded
+		_, err := svc.PreparePurchase(ctx, 697, 0, 604, 0, uuid.NewString(), "", checkoutAttribution{})
+		stripe.closeVIPErr = nil
+		var blocked *VIPPlanSwitchBlockedError
+		if !errors.As(err, &blocked) || blocked.Code != VIPPlanSwitchCodePending ||
+			blocked.CurrentIntentID != oldB.ID || stripe.vipSessionSeq != beforeSt {
+			t.Fatalf("expected Stripe timeout block, got err=%v blocked=%+v", err, blocked)
+		}
+		yearB := prepare(697, 604, uuid.NewString())
+		if yearB.ID == oldB.ID || yearB.Cycle != "year" {
+			t.Fatalf("Stripe retry after transient timeout failed: %+v", yearB)
+		}
+
+		// Case C: Concurrent Stripe subscription payment wins -> vip_plan_switch_confirming.
+		oldC := prepare(698, 605, uuid.NewString())
+		_ = startStripe(698, oldC.ID)
+		beforeSt = stripe.vipSessionSeq
+		stripe.closeVIPProof = func(proof payment.StripeVIPCheckout) payment.StripeVIPCheckout {
+			proof.SubscriptionID, proof.Expired = "sub_ConcurrentPlanSwitch698", false
+			return proof
+		}
+		defer func() { stripe.closeVIPProof = nil }()
+		_, err = svc.PreparePurchase(ctx, 698, 0, 604, 0, uuid.NewString(), "", checkoutAttribution{})
+		blocked = nil
+		if !errors.As(err, &blocked) || blocked.Code != VIPPlanSwitchCodeConfirming ||
+			blocked.CurrentIntentID != oldC.ID || stripe.vipSessionSeq != beforeSt {
+			t.Fatalf("expected Stripe confirming block, got err=%v blocked=%+v", err, blocked)
+		}
+	})
+
+	t.Run("#18 legacy pre-upgrade superseded PayPal agreement without marker never double-fulfills", func(t *testing.T) {
+		for _, tc := range []struct {
+			name        string
+			userID      int64
+			stripeFirst bool
+		}{
+			{"stripe settles before legacy late PayPal", 699, true},
+			{"legacy late PayPal arrives before stripe", 700, false},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				intent := prepare(tc.userID, 605, uuid.NewString())
+				oldPP := startPayPal(tc.userID, intent.ID)
+				pp.cancelFault = func(string) error {
+					return &paypal.APIError{
+						Status: http.StatusNotFound,
+						Name:   "RESOURCE_NOT_FOUND",
+						Issues: []string{"INVALID_RESOURCE_ID"},
+					}
+				}
+				_ = startStripe(tc.userID, intent.ID)
+				pp.cancelFault = nil
+
+				// Strip superseded_vip_intent_id to reproduce pre-upgrade legacy switched records.
+				exec(`UPDATE user_subscriptions SET attribution = attribution - 'superseded_vip_intent_id', cancel_reason = NULL
+					WHERE subscription_id = $1`, oldPP.ExternalOrderID)
+
+				row := read(tc.userID, intent.ID)
+				v, err := findStripeVIPIntent(ctx, pool, stripe.account, row.stripeIntentID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				now := time.Now().UTC().Truncate(time.Second)
+				periodEnd := now.AddDate(0, 1, 0)
+				settleStripe := func() {
+					t.Helper()
+					inv := payment.StripeVIPInvoice{
+						ID: fmt.Sprintf("in_legacy_dup_%d", tc.userID), BillingReason: "subscription_create",
+						Currency: "USD", Country: "US", Status: "paid",
+						DueMinor: 1499, StartsAt: now, EndsAt: periodEnd,
+						Subscription: payment.StripeVIPSubscription{
+							ID: fmt.Sprintf("sub_LegacyDup%d", tc.userID), CustomerID: fmt.Sprintf("cus_LegacyDup%d", tc.userID),
+							IntentID: v.ID, PriceID: v.Offer.PriceID, Status: "active",
+						},
+						Allocations: []payment.StripeVIPAllocation{{
+							ID: fmt.Sprintf("inpay_legacy_dup_%d", tc.userID), AmountMinor: 1499,
+							Receipt: payment.SingleChargeProof{
+								ID: fmt.Sprintf("ch_legacy_dup_%d", tc.userID), Currency: "USD", AmountMinor: 1499,
+								PaidAt: now, EligibleTerms: true, Evidence: []byte("{}"),
+							},
+						}},
+					}
+					if err := settleStripeVIPInvoice(ctx, v, inv, nil); err != nil {
+						t.Fatalf("settleStripeVIPInvoice failed: %v", err)
+					}
+				}
+				deliverLegacyPayPal := func() string {
+					t.Helper()
+					details := *pp.subDetailsByID[oldPP.ExternalOrderID]
+					details.Status = "ACTIVE"
+					details.LastPaymentTime = &now
+					details.LastPaymentCents = 1499
+					details.LastPaymentCurrency = "USD"
+					details.CurrentPeriodEnd = &periodEnd
+					pp.subDetailsByID[oldPP.ExternalOrderID] = &details
+					if err := svc.applyPayPalEvent(ctx, pp, &payment.WebhookEventResult{
+						EventType:      "subscription_activated",
+						SubscriptionID: oldPP.ExternalOrderID,
+						Account:        pp.account,
+					}); err != nil {
+						t.Fatalf("applyPayPalEvent failed: %v", err)
+					}
+					oldSub, err := repo.GetSubscriptionByID(ctx, oldPP.ExternalOrderID)
+					if err != nil || oldSub == nil {
+						t.Fatalf("old legacy PayPal sub: %+v %v", oldSub, err)
+					}
+					saleID := fmt.Sprintf("SALE-LEGACY-DUP-%d", tc.userID)
+					sale := payment.SubscriptionTransaction{ID: saleID, Status: "COMPLETED", Time: now}
+					sale.Amount.Gross.Currency, sale.Amount.Gross.Value = "USD", "14.99"
+					if err := svc.recordPayPalSubscriptionTransaction(ctx, oldSub, &details, sale); err != nil {
+						t.Fatalf("recordPayPalSubscriptionTransaction failed: %v", err)
+					}
+					return saleID
+				}
+
+				var saleID string
+				if tc.stripeFirst {
+					settleStripe()
+					saleID = deliverLegacyPayPal()
+				} else {
+					saleID = deliverLegacyPayPal()
+					settleStripe()
+				}
+
+				var totalOrders, fulfilledOrders, totalReceipts int
+				if err := pool.QueryRow(ctx, `SELECT count(*), count(*) FILTER (WHERE fulfilled_at IS NOT NULL)
+					FROM recharge_orders WHERE user_id=$1 AND order_type='subscription'`, tc.userID).Scan(&totalOrders, &fulfilledOrders); err != nil {
+					t.Fatal(err)
+				}
+				if err := pool.QueryRow(ctx, `SELECT count(*) FROM third_party_payment_orders tp
+					JOIN recharge_orders o ON o.id=tp.order_id WHERE o.user_id=$1`, tc.userID).Scan(&totalReceipts); err != nil {
+					t.Fatal(err)
+				}
+				if totalOrders != 2 || totalReceipts != 2 || fulfilledOrders != 1 {
+					t.Fatalf("expected 2 ledger orders/receipts and 1 fulfilled VIP order, got orders=%d receipts=%d fulfilled=%d",
+						totalOrders, totalReceipts, fulfilledOrders)
+				}
+				var dupUnfulfilled, dupFlagged bool
+				if err := pool.QueryRow(ctx, `SELECT fulfilled_at IS NULL AND paid_period_end IS NULL,
+					COALESCE(reconciliation_note,'') LIKE '%superseded VIP checkout%'
+					FROM recharge_orders WHERE external_ref_id=$1`, saleID).Scan(&dupUnfulfilled, &dupFlagged); err != nil || !dupUnfulfilled || !dupFlagged {
+					t.Fatalf("legacy duplicate PayPal order not held for review: unfulfilled=%v flagged=%v err=%v", dupUnfulfilled, dupFlagged, err)
+				}
+			})
+		}
+	})
+
+	t.Run("#19 PayPal retry when remote is ACTIVE with payment or APPROVED never returns stale approval URL", func(t *testing.T) {
+		now := time.Now().UTC().Truncate(time.Second)
+		periodEnd := now.AddDate(0, 1, 0)
+
+		// Case A: Remote is ACTIVE with payment, transaction not yet indexed -> enters confirming with empty ApprovalURL and probes ledger.
+		iA := prepare(701, 605, uuid.NewString())
+		oldA := startPayPal(701, iA.ID)
+		dA := *pp.subDetailsByID[oldA.ExternalOrderID]
+		dA.Status, dA.LastPaymentTime, dA.LastPaymentCents, dA.LastPaymentCurrency, dA.CurrentPeriodEnd = "ACTIVE", &now, 1499, "USD", &periodEnd
+		pp.subDetailsByID[oldA.ExternalOrderID] = &dA
+		listBefore := pp.listTxCalls
+		gotA := startPayPal(701, iA.ID)
+		if gotA.Status != "confirming" || gotA.ApprovalURL != "" || pp.listTxCalls <= listBefore {
+			t.Fatalf("ACTIVE sub without indexed tx should return confirming with empty URL and probe tx: got=%+v listCalls=%d/%d",
+				gotA, pp.listTxCalls, listBefore)
+		}
+
+		// Case B: Remote is ACTIVE with payment AND transaction visible in PayPal ledger -> settles immediately to completed with empty ApprovalURL.
+		iB := prepare(702, 605, uuid.NewString())
+		oldB := startPayPal(702, iB.ID)
+		dB := *pp.subDetailsByID[oldB.ExternalOrderID]
+		dB.Status, dB.LastPaymentTime, dB.LastPaymentCents, dB.LastPaymentCurrency, dB.CurrentPeriodEnd = "ACTIVE", &now, 1499, "USD", &periodEnd
+		pp.subDetailsByID[oldB.ExternalOrderID] = &dB
+		saleB := payment.SubscriptionTransaction{ID: "SALE-RETRY-ACTIVE-702", Status: "COMPLETED", Time: now}
+		saleB.Amount.Gross.Currency, saleB.Amount.Gross.Value = "USD", "14.99"
+		if pp.subTxByID == nil {
+			pp.subTxByID = make(map[string][]payment.SubscriptionTransaction)
+		}
+		pp.subTxByID[oldB.ExternalOrderID] = []payment.SubscriptionTransaction{saleB}
+		gotB := startPayPal(702, iB.ID)
+		if gotB.Status != "completed" || gotB.ApprovalURL != "" {
+			t.Fatalf("ACTIVE sub with visible tx should settle to completed with empty URL: got=%+v", gotB)
+		}
+
+		// Case C: Remote is APPROVED while local DB is PENDING -> activates and returns confirming with empty ApprovalURL.
+		iC := prepare(703, 605, uuid.NewString())
+		oldC := startPayPal(703, iC.ID)
+		pp.subDetailsByID[oldC.ExternalOrderID].Status = "APPROVED"
+		gotC := startPayPal(703, iC.ID)
+		if gotC.Status != "confirming" || gotC.ApprovalURL != "" {
+			t.Fatalf("APPROVED sub on retry should return confirming with empty URL: got=%+v", gotC)
+		}
+	})
+
+	t.Run("#18 legitimate pre-cancel first PayPal payment still fulfills after cancel and unpaid reopen", func(t *testing.T) {
+		for _, tc := range []struct {
+			name         string
+			userID       int64
+			reopenStripe bool
+		}{
+			{"cancel then reopen PayPal unpaid", 704, false},
+			{"cancel then reopen Stripe unpaid", 705, true},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				intent := prepare(tc.userID, 605, uuid.NewString())
+				oldPP := startPayPal(tc.userID, intent.ID)
+
+				// Buyer paid first cycle on PayPal before cancelling, but local ledger has not imported it yet.
+				paidAt := time.Now().UTC().Add(-2 * time.Minute).Truncate(time.Second)
+				periodEnd := paidAt.AddDate(0, 1, 0)
+				d := *pp.subDetailsByID[oldPP.ExternalOrderID]
+				d.Status = "ACTIVE"
+				d.CurrentPeriodStart = &paidAt
+				d.LastPaymentTime = &paidAt
+				d.LastPaymentCents = 1499
+				d.LastPaymentCurrency = "USD"
+				d.CurrentPeriodEnd = &periodEnd
+				pp.subDetailsByID[oldPP.ExternalOrderID] = &d
+
+				// User cancels renewal and PayPal confirms cancellation.
+				if err := svc.CancelSubscription(ctx, tc.userID, oldPP.ExternalOrderID, "user cancelled renewal"); err != nil {
+					t.Fatalf("CancelSubscription failed: %v", err)
+				}
+				if err := svc.confirmPayPalCancellation(ctx, oldPP.ExternalOrderID, "user cancelled renewal"); err != nil {
+					t.Fatalf("confirmPayPalCancellation failed: %v", err)
+				}
+				dCancelled := *pp.subDetailsByID[oldPP.ExternalOrderID]
+				dCancelled.Status = "CANCELLED"
+				dCancelled.CurrentPeriodEnd = nil // PayPal clears next_billing_time after cancel; period comes from snapshot/regular cycle.
+				pp.subDetailsByID[oldPP.ExternalOrderID] = &dCancelled
+
+				// User reopens checkout (unpaid new agreement), deleting the old paypal_subscription_intents row.
+				if tc.reopenStripe {
+					reopenIntent := prepare(tc.userID, 604, uuid.NewString())
+					_ = startStripe(tc.userID, reopenIntent.ID)
+				} else {
+					reopenIntent := prepare(tc.userID, 605, uuid.NewString())
+					reopened := startPayPal(tc.userID, reopenIntent.ID)
+					if reopened.ExternalOrderID == oldPP.ExternalOrderID {
+						t.Fatalf("expected fresh unpaid PayPal agreement on reopen: %+v", reopened)
+					}
+				}
+
+				// Now reconciliation imports the sole legitimate pre-cancel first payment.
+				oldSub, err := repo.GetSubscriptionByID(ctx, oldPP.ExternalOrderID)
+				if err != nil || oldSub == nil {
+					t.Fatalf("GetSubscriptionByID: %+v %v", oldSub, err)
+				}
+				saleID := fmt.Sprintf("SALE-LEGIT-FIRST-%d", tc.userID)
+				sale := payment.SubscriptionTransaction{ID: saleID, Status: "COMPLETED", Time: paidAt}
+				sale.Amount.Gross.Currency, sale.Amount.Gross.Value = "USD", "14.99"
+				if err := svc.recordPayPalSubscriptionTransaction(ctx, oldSub, &dCancelled, sale); err != nil {
+					t.Fatalf("recordPayPalSubscriptionTransaction failed: %v", err)
+				}
+
+				var fulfilled bool
+				var note string
+				if err := pool.QueryRow(ctx, `SELECT fulfilled_at IS NOT NULL AND paid_period_end IS NOT NULL,
+					COALESCE(reconciliation_note,'')
+					FROM recharge_orders WHERE external_ref_id=$1`, saleID).Scan(&fulfilled, &note); err != nil || !fulfilled || note != "" {
+					t.Fatalf("legitimate sole first payment was not fulfilled: fulfilled=%v note=%q err=%v", fulfilled, note, err)
+				}
+				hasAccess, err := svc.HasSubscriptionAccess(ctx, tc.userID)
+				if err != nil || !hasAccess {
+					t.Fatalf("user should have VIP access from sole legitimate first payment: access=%v err=%v", hasAccess, err)
+				}
+			})
+		}
+	})
+
+	t.Run("#22 locally cancelled unapproved PayPal agreement still blocks plan switch while remote APPROVAL_PENDING is open", func(t *testing.T) {
+		notFound404 := func(string) error {
+			return &paypal.APIError{
+				Status: http.StatusNotFound,
+				Name:   "RESOURCE_NOT_FOUND",
+				Issues: []string{"INVALID_RESOURCE_ID"},
+			}
+		}
+
+		// Case A: CancelSubscription + confirmPayPalCancellation hits 404 -> local CANCELLED while remote stays APPROVAL_PENDING.
+		oldA := prepare(706, 605, uuid.NewString())
+		ppOldA := startPayPal(706, oldA.ID)
+		if err := svc.CancelSubscription(ctx, 706, ppOldA.ExternalOrderID, "changed mind"); err != nil {
+			t.Fatalf("CancelSubscription failed: %v", err)
+		}
+		pp.cancelFault = notFound404
+		if err := svc.confirmPayPalCancellation(ctx, ppOldA.ExternalOrderID, "changed mind"); err != nil {
+			pp.cancelFault = nil
+			t.Fatalf("confirmPayPalCancellation failed: %v", err)
+		}
+		stripeBefore := stripe.vipSessionSeq
+		_, err := svc.PreparePurchase(ctx, 706, 0, 604, 0, uuid.NewString(), "", checkoutAttribution{})
+		pp.cancelFault = nil
+		var blocked *VIPPlanSwitchBlockedError
+		if !errors.As(err, &blocked) || blocked.Code != VIPPlanSwitchCodeApprovalOpen ||
+			blocked.CurrentIntentID != oldA.ID || stripe.vipSessionSeq != stripeBefore {
+			t.Fatalf("expected approval_open block on locally-cancelled unapproved PayPal sub, got err=%v blocked=%+v stripe=%d/%d",
+				err, blocked, stripe.vipSessionSeq, stripeBefore)
+		}
+		if rowA := read(706, oldA.ID); rowA.status != "Pending" || rowA.subscriptionID != ppOldA.ExternalOrderID {
+			t.Fatalf("original intent should be preserved while remote link is still open: %+v", rowA)
+		}
+
+		// Once PayPal remotely confirms EXPIRED, plan switch succeeds in one click and Stripe opens cleanly.
+		pp.subDetailsByID[ppOldA.ExternalOrderID].Status = "EXPIRED"
+		yearA := prepare(706, 604, uuid.NewString())
+		if yearA.ID == oldA.ID || yearA.Cycle != "year" {
+			t.Fatalf("expected Year intent after remote PayPal EXPIRED: %+v", yearA)
+		}
+		if started := startStripe(706, yearA.ID); started.Status != "awaiting_approval" || started.ApprovalURL == "" {
+			t.Fatalf("expected fresh Stripe approval URL after remote PayPal EXPIRED: %+v", started)
+		}
+
+		// Case B: Locally-cancelled unapproved PayPal agreement with remote verification timeout -> blocks with pending.
+		oldB := prepare(707, 605, uuid.NewString())
+		ppOldB := startPayPal(707, oldB.ID)
+		if err := svc.CancelSubscription(ctx, 707, ppOldB.ExternalOrderID, "changed mind"); err != nil {
+			t.Fatalf("CancelSubscription failed: %v", err)
+		}
+		pp.cancelFault = notFound404
+		if err := svc.confirmPayPalCancellation(ctx, ppOldB.ExternalOrderID, "changed mind"); err != nil {
+			pp.cancelFault = nil
+			t.Fatalf("confirmPayPalCancellation failed: %v", err)
+		}
+		pp.cancelFault = nil
+		pp.getSubFault = func(string) error { return context.DeadlineExceeded }
+		_, err = svc.PreparePurchase(ctx, 707, 0, 604, 0, uuid.NewString(), "", checkoutAttribution{})
+		pp.getSubFault = nil
+		blocked = nil
+		if !errors.As(err, &blocked) || blocked.Code != VIPPlanSwitchCodePending || blocked.CurrentIntentID != oldB.ID {
+			t.Fatalf("expected pending block when remote check times out on local cancel, got err=%v blocked=%+v", err, blocked)
+		}
+		if rowB := read(707, oldB.ID); rowB.status != "Pending" || rowB.subscriptionID != ppOldB.ExternalOrderID {
+			t.Fatalf("original intent should be preserved on remote timeout: %+v", rowB)
+		}
+	})
+
+	t.Run("#18 legacy PayPal -> Stripe -> PayPal without marker never double-fulfills in either arrival order", func(t *testing.T) {
+		notFound404 := func(string) error {
+			return &paypal.APIError{
+				Status: http.StatusNotFound,
+				Name:   "RESOURCE_NOT_FOUND",
+				Issues: []string{"INVALID_RESOURCE_ID"},
+			}
+		}
+		for _, tc := range []struct {
+			name            string
+			userID          int64
+			oldArrivesFirst bool
+		}{
+			{"old PayPal arrives before new PayPal", 708, true},
+			{"new PayPal arrives before old PayPal", 709, false},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				intent := prepare(tc.userID, 605, uuid.NewString())
+				oldPP := startPayPal(tc.userID, intent.ID)
+
+				// Switch PayPal -> Stripe (with 404 cancel rejection on unapproved oldPP), then Stripe -> PayPal (newPP).
+				pp.cancelFault = notFound404
+				_ = startStripe(tc.userID, intent.ID)
+				pp.cancelFault = nil
+				newPP := startPayPal(tc.userID, intent.ID)
+				if newPP.ExternalOrderID == "" || newPP.ExternalOrderID == oldPP.ExternalOrderID {
+					t.Fatalf("expected distinct new PayPal agreement after PayPal->Stripe->PayPal: old=%s new=%+v", oldPP.ExternalOrderID, newPP)
+				}
+
+				// Strip pre-upgrade markers on oldPP so it matches legacy data before superseded_vip_intent_id existed.
+				exec(`UPDATE user_subscriptions SET attribution = attribution - 'superseded_vip_intent_id' - 'termination_source' - 'remote_termination_confirmed',
+					cancel_reason = NULL WHERE subscription_id = $1`, oldPP.ExternalOrderID)
+
+				now := time.Now().UTC().Truncate(time.Second)
+				periodEnd := now.AddDate(0, 1, 0)
+				deliverPayPal := func(subID, saleID string) {
+					t.Helper()
+					details := *pp.subDetailsByID[subID]
+					details.Status = "ACTIVE"
+					details.LastPaymentTime = &now
+					details.LastPaymentCents = 1499
+					details.LastPaymentCurrency = "USD"
+					details.CurrentPeriodEnd = &periodEnd
+					pp.subDetailsByID[subID] = &details
+					sub, err := repo.GetSubscriptionByID(ctx, subID)
+					if err != nil || sub == nil {
+						t.Fatalf("GetSubscriptionByID(%s): %+v %v", subID, sub, err)
+					}
+					sale := payment.SubscriptionTransaction{ID: saleID, Status: "COMPLETED", Time: now}
+					sale.Amount.Gross.Currency, sale.Amount.Gross.Value = "USD", "14.99"
+					if err := svc.recordPayPalSubscriptionTransaction(ctx, sub, &details, sale); err != nil {
+						t.Fatalf("recordPayPalSubscriptionTransaction(%s) failed: %v", subID, err)
+					}
+				}
+
+				oldSale := fmt.Sprintf("SALE-P2S2P-OLD-%d", tc.userID)
+				newSale := fmt.Sprintf("SALE-P2S2P-NEW-%d", tc.userID)
+				if tc.oldArrivesFirst {
+					deliverPayPal(oldPP.ExternalOrderID, oldSale)
+					deliverPayPal(newPP.ExternalOrderID, newSale)
+				} else {
+					deliverPayPal(newPP.ExternalOrderID, newSale)
+					deliverPayPal(oldPP.ExternalOrderID, oldSale)
+				}
+
+				var totalOrders, fulfilledOrders, totalReceipts int
+				if err := pool.QueryRow(ctx, `SELECT count(*), count(*) FILTER (WHERE fulfilled_at IS NOT NULL)
+					FROM recharge_orders WHERE user_id=$1 AND order_type='subscription'`, tc.userID).Scan(&totalOrders, &fulfilledOrders); err != nil {
+					t.Fatal(err)
+				}
+				if err := pool.QueryRow(ctx, `SELECT count(*) FROM third_party_payment_orders tp
+					JOIN recharge_orders o ON o.id=tp.order_id WHERE o.user_id=$1`, tc.userID).Scan(&totalReceipts); err != nil {
+					t.Fatal(err)
+				}
+				if totalOrders != 2 || totalReceipts != 2 || fulfilledOrders != 1 {
+					t.Fatalf("expected 2 real receipts/orders and 1 VIP fulfillment, got orders=%d receipts=%d fulfilled=%d",
+						totalOrders, totalReceipts, fulfilledOrders)
+				}
+				// Verify even when an earlier agreement fulfilled first (no switch evidence on old), the new PayPal agreement's overlapping first payment is held.
+				var heldCount int
+				if err := pool.QueryRow(ctx, `SELECT count(*) FROM recharge_orders
+					WHERE user_id=$1 AND order_type='subscription' AND fulfilled_at IS NULL AND paid_period_end IS NULL
+					  AND COALESCE(reconciliation_note,'') LIKE '%superseded VIP checkout%'`, tc.userID).Scan(&heldCount); err != nil || heldCount != 1 {
+					t.Fatalf("expected 1 duplicate order held for review, got %d err=%v", heldCount, err)
+				}
+			})
+		}
+
+		// Also verify the direct case where an overlapping PayPal subscription already fulfilled first and a new ACTIVE PayPal agreement receives an overlapping first payment.
+		intentC := prepare(711, 605, uuid.NewString())
+		oldC := startPayPal(711, intentC.ID)
+		pp.cancelFault = notFound404
+		_ = startStripe(711, intentC.ID)
+		pp.cancelFault = nil
+		newC := startPayPal(711, intentC.ID)
+		exec(`UPDATE user_subscriptions SET attribution = attribution - 'superseded_vip_intent_id' - 'termination_source' - 'remote_termination_confirmed',
+			cancel_reason = NULL WHERE subscription_id = $1`, oldC.ExternalOrderID)
+		paidBeforeCancel := time.Now().UTC().Add(-2 * time.Minute).Truncate(time.Second)
+		periodEndC := paidBeforeCancel.AddDate(0, 1, 0)
+		// Simulate oldC already legitimately fulfilled first (e.g. paid before cancel with CANCELLED status).
+		dOldC := *pp.subDetailsByID[oldC.ExternalOrderID]
+		dOldC.Status = "CANCELLED"
+		dOldC.CurrentPeriodStart = &paidBeforeCancel
+		dOldC.LastPaymentTime = &paidBeforeCancel
+		dOldC.LastPaymentCents = 1499
+		dOldC.LastPaymentCurrency = "USD"
+		pp.subDetailsByID[oldC.ExternalOrderID] = &dOldC
+		oldSubC, _ := repo.GetSubscriptionByID(ctx, oldC.ExternalOrderID)
+		saleOldC := payment.SubscriptionTransaction{ID: "SALE-P2S2P-DIRECT-OLD-711", Status: "COMPLETED", Time: paidBeforeCancel}
+		saleOldC.Amount.Gross.Currency, saleOldC.Amount.Gross.Value = "USD", "14.99"
+		if err := svc.recordPayPalSubscriptionTransaction(ctx, oldSubC, &dOldC, saleOldC); err != nil {
+			t.Fatalf("oldC settlement failed: %v", err)
+		}
+		// Now newC (status=PENDING/ACTIVE) receives an overlapping first payment -> MUST NOT double-fulfill!
+		nowC := time.Now().UTC().Truncate(time.Second)
+		dNewC := *pp.subDetailsByID[newC.ExternalOrderID]
+		dNewC.Status = "ACTIVE"
+		dNewC.LastPaymentTime = &nowC
+		dNewC.LastPaymentCents = 1499
+		dNewC.LastPaymentCurrency = "USD"
+		endNewC := nowC.AddDate(0, 1, 0)
+		dNewC.CurrentPeriodEnd = &endNewC
+		pp.subDetailsByID[newC.ExternalOrderID] = &dNewC
+		newSubC, _ := repo.GetSubscriptionByID(ctx, newC.ExternalOrderID)
+		saleNewC := payment.SubscriptionTransaction{ID: "SALE-P2S2P-DIRECT-NEW-711", Status: "COMPLETED", Time: nowC}
+		saleNewC.Amount.Gross.Currency, saleNewC.Amount.Gross.Value = "USD", "14.99"
+		if err := svc.recordPayPalSubscriptionTransaction(ctx, newSubC, &dNewC, saleNewC); err != nil {
+			t.Fatalf("newC settlement failed: %v", err)
+		}
+		_ = periodEndC
+		var orders711, fulfilled711 int
+		if err := pool.QueryRow(ctx, `SELECT count(*), count(*) FILTER (WHERE fulfilled_at IS NOT NULL)
+			FROM recharge_orders WHERE user_id=711 AND order_type='subscription'`).Scan(&orders711, &fulfilled711); err != nil || orders711 != 2 || fulfilled711 != 1 {
+			t.Fatalf("new ACTIVE PayPal agreement double-fulfilled overlapping period: orders=%d fulfilled=%d err=%v", orders711, fulfilled711, err)
+		}
+	})
+
+	t.Run("#19 locally cancelled unapproved PayPal sub that later expires remotely issues fresh link on retry", func(t *testing.T) {
+		intent := prepare(710, 605, uuid.NewString())
+		oldPP := startPayPal(710, intent.ID)
+		if err := svc.CancelSubscription(ctx, 710, oldPP.ExternalOrderID, "changed mind"); err != nil {
+			t.Fatalf("CancelSubscription failed: %v", err)
+		}
+		pp.cancelFault = func(string) error {
+			return &paypal.APIError{
+				Status: http.StatusNotFound,
+				Name:   "RESOURCE_NOT_FOUND",
+				Issues: []string{"INVALID_RESOURCE_ID"},
+			}
+		}
+		if err := svc.confirmPayPalCancellation(ctx, oldPP.ExternalOrderID, "changed mind"); err != nil {
+			pp.cancelFault = nil
+			t.Fatalf("confirmPayPalCancellation failed: %v", err)
+		}
+		pp.cancelFault = nil
+
+		// Remote PayPal later confirms EXPIRED with no payment.
+		pp.subDetailsByID[oldPP.ExternalOrderID].Status = "EXPIRED"
+		pp.subDetailsByID[oldPP.ExternalOrderID].LastPaymentTime = nil
+
+		// Clicking PayPal again must confirm EXPIRED, detach old sub, and return a fresh approval URL in the same click.
+		fresh := startPayPal(710, intent.ID)
+		if fresh.Status != "awaiting_approval" || fresh.ApprovalURL == "" || fresh.ExternalOrderID == oldPP.ExternalOrderID {
+			t.Fatalf("expected fresh approval URL after locally-cancelled sub remotely expired, got=%+v old=%s", fresh, oldPP.ExternalOrderID)
+		}
+		var oldStatus string
+		var remoteConfirmed bool
+		if err := pool.QueryRow(ctx, `SELECT status, COALESCE((attribution->>'remote_termination_confirmed')::boolean, false)
+			FROM user_subscriptions WHERE subscription_id=$1`, oldPP.ExternalOrderID).Scan(&oldStatus, &remoteConfirmed); err != nil || oldStatus != "EXPIRED" || !remoteConfirmed {
+			t.Fatalf("expected old sub persisted as provider-confirmed EXPIRED, got status=%s confirmed=%v err=%v", oldStatus, remoteConfirmed, err)
+		}
+	})
+
 	t.Run("in-flight creation blocks switching until confirmed", func(t *testing.T) {
 		intent := prepare(611, 605, uuid.NewString())
 		started, unblock := make(chan struct{}), make(chan struct{})
@@ -561,8 +1316,18 @@ func testUnifiedVIPReview(t *testing.T, svc *service, pool *pgxpool.Pool, pp *si
 			if row.status != "Expired" || row.paypalIntentID != "" {
 				t.Fatalf("superseded year plan started: %+v", row)
 			}
+		case startErr == nil && prepErr == nil:
+			// StartPayPalCheckout completed first, then PreparePurchase safely cancelled
+			// the unapproved Year agreement and replaced it with a single Pending Month checkout.
+			if row.status != "Expired" || row.paypalIntentID != "" {
+				t.Fatalf("replaced year plan kept active reservation: %+v", row)
+			}
 		default:
 			t.Fatalf("replace and start: %v / %v", prepErr, startErr)
+		}
+		var pendingCount int
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM payment_vip_checkout_intents WHERE user_id=626 AND status='Pending'`).Scan(&pendingCount); err != nil || pendingCount != 1 {
+			t.Fatalf("expected exactly one pending VIP checkout after race, got %d err=%v", pendingCount, err)
 		}
 	})
 

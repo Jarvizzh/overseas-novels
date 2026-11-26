@@ -291,7 +291,7 @@ func (s *service) closePayPalVIPForSwitch(ctx context.Context, row vipCheckoutIn
 			// because unapproved agreements cannot be cancelled via API. Re-reading confirms
 			// it is still unapproved with no payment.
 			if unapprovedNotCancellable && details.Status == "APPROVAL_PENDING" && details.LastPaymentTime == nil {
-				return closeUnifiedPayPalChild(ctx, row, subID)
+				return closeUnifiedPayPalChild(ctx, row, subID, false)
 			}
 		}
 		if details.LastPaymentTime != nil || details.Status == "APPROVED" || details.Status == "ACTIVE" || details.Status == "SUSPENDED" {
@@ -305,10 +305,10 @@ func (s *service) closePayPalVIPForSwitch(ctx context.Context, row vipCheckoutIn
 			return ErrCheckoutPending
 		}
 	}
-	return closeUnifiedPayPalChild(ctx, row, subID)
+	return closeUnifiedPayPalChild(ctx, row, subID, true)
 }
 
-func closeUnifiedPayPalChild(ctx context.Context, row vipCheckoutIntentRow, subID string) error {
+func closeUnifiedPayPalChild(ctx context.Context, row vipCheckoutIntentRow, subID string, remoteConfirmed bool) error {
 	tx, err := db.Pool(ctx).Begin(ctx)
 	if err != nil {
 		return err
@@ -325,11 +325,22 @@ func closeUnifiedPayPalChild(ctx context.Context, row vipCheckoutIntentRow, subI
 		return ErrCheckoutPending
 	}
 	if subID != "" {
+		terminationSource := "local_unapproved_switch"
+		if remoteConfirmed {
+			terminationSource = "provider_confirmed"
+		}
 		tag, err = tx.Exec(ctx, `UPDATE user_subscriptions SET status='CANCELLED',
-			cancelled_at=COALESCE(cancelled_at,now()),next_billing_time=NULL,updated_at=now()
+			cancelled_at=COALESCE(cancelled_at,now()),
+			cancel_reason=COALESCE(NULLIF(cancel_reason,''), 'Superseded by VIP checkout switch'),
+			attribution=COALESCE(attribution,'{}'::jsonb) || jsonb_build_object(
+				'superseded_vip_intent_id', $4::text,
+				'termination_source', $5::text,
+				'remote_termination_confirmed', $6::boolean
+			),
+			next_billing_time=NULL,updated_at=now()
 			WHERE subscription_id=$1 AND user_id=$2 AND checkout_intent_id=$3::uuid AND payment_method='paypal'
 			  AND status IN ('PENDING','CANCELLED','EXPIRED') AND last_payment_time IS NULL
-			  AND paypal_activation_requested_at IS NULL`, subID, row.userID, row.paypalIntentID)
+			  AND paypal_activation_requested_at IS NULL`, subID, row.userID, row.paypalIntentID, row.intentID, terminationSource, remoteConfirmed)
 		if err != nil {
 			return err
 		}

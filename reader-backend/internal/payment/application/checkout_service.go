@@ -26,9 +26,13 @@ func (s *service) PreparePurchase(ctx context.Context, userID, productID int64, 
 		return nil, ErrCheckoutUnavailable
 	}
 	returnPath = checkoutReadingPath(returnPath, novelID)
-	return s.repo.preparePurchase(ctx, userID, purchaseRequest{
+	req := purchaseRequest{
 		key: key, productID: productID, slotID: slotID, novelID: novelID, returnPath: returnPath,
-	}, attribution)
+	}
+	if err := s.prepareVIPPlanReplacement(ctx, userID, req); err != nil {
+		return nil, err
+	}
+	return s.repo.preparePurchase(ctx, userID, req, attribution)
 }
 
 func checkoutReadingPath(raw string, novelID int64) string {
