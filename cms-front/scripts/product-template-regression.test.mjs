@@ -97,6 +97,19 @@ test('TC-FE-03: TemplatesTab enforces env/readiness filtering, promo reference d
       .map((t) => t.id),
     [1, 3],
   );
+  assert.deepEqual(
+    tplHelpers
+      .filterPromotionTemplatesByEnv(
+        [
+          { id: 1, environment: 'live' },
+          { id: 2, environment: 'sandbox' },
+          { id: 3 },
+        ],
+        'sandbox',
+      )
+      .map((t) => t.id),
+    [2],
+  );
 
   const singleDefaultList = [
     { id: 1, is_default: true },
@@ -133,6 +146,28 @@ test('TC-FE-05 (CMS) & F-12: Promotion URL never appends template_id and legacy 
   assert.ok(built.finalUrl);
   assert.equal(built.finalUrl.includes('template_id='), false);
   assert.equal(built.payload.recharge_template_id, 77);
+  assert.equal(built.payload.environment, 'live');
+
+  const builtSbx = promoHelpers.validateAndBuildPromotionPayload(
+    {
+      novelId: 42,
+      name: 'Sandbox Campaign',
+      environment: 'sandbox',
+      chapterIndex: '1',
+      utmSource: 'fb',
+      utmCampaign: 'sbx',
+      domainId: '1',
+      fbPixelId: '9',
+      rechargeTemplateId: '88',
+      coinCostPerThousand: '',
+      startPayChapterIndex: '',
+    },
+    [{ id: 1, domain: 'reader.example.test', type: 'main', is_default: true, status: 1 }],
+    [{ id: 9, pixel_id: 'PX-999' }],
+  );
+  assert.equal(builtSbx.error, undefined);
+  assert.equal(builtSbx.payload.environment, 'sandbox');
+  assert.equal(builtSbx.payload.recharge_template_id, 88);
 
   assert.equal(existsSync(new URL('../src/pages/StripeOfferSettings.tsx', import.meta.url)), false);
 });

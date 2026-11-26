@@ -182,7 +182,7 @@ func (r *dbRepository) stripeOfferSlots(ctx context.Context, account payment.Web
 		  AND p.product_type IN ('single','whole_book')
 		  AND (a.environment='sandbox' OR (b.validated_catalog IS NOT NULL AND b.release_evidence IS NOT NULL AND b.market_policy IS NOT NULL
 		   AND COALESCE(payment_last_stripe_billing_country(a.id,$3)=ANY(b.allowed_countries),true)))
-		  AND s.template_id=COALESCE((SELECT recharge_template_id FROM reader_promotion_for_user($3) WHERE recharge_template_id IS NOT NULL),
+		  AND s.template_id=COALESCE((SELECT recharge_template_id FROM reader_promotion_for_user_env($3, $2) WHERE recharge_template_id IS NOT NULL),
 			`+defaultLiveTemplateIDSQL+`)
 		ORDER BY s.id`, account.AccountKey, account.Environment, userID)
 	if err != nil {

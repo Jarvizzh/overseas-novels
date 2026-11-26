@@ -73,7 +73,7 @@ func resolveProductForCheckoutTx(ctx context.Context, q checkoutQueryer, userID 
 		JOIN product_publications pub ON pub.product_id = p.id AND pub.environment = $2 AND pub.status = 'published'
 		WHERE s.id = $1
 		  AND s.template_id = COALESCE(
-		      (SELECT rp.recharge_template_id FROM reader_promotion_for_user($3) rp WHERE rp.recharge_template_id IS NOT NULL),
+		      (SELECT rp.recharge_template_id FROM reader_promotion_for_user_env($3, $2) rp WHERE rp.recharge_template_id IS NOT NULL),
 		      ` + defaultLiveTemplateIDSQL + `
 		  )
 		  AND ($4::bigint = 0 OR p.id = $4)

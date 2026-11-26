@@ -115,7 +115,7 @@ func lockStripeVIPOrder(ctx context.Context, tx pgx.Tx, v stripeVIPIntent, proof
 		   p.id,p.novel_id,v.attribution
 		FROM payment_stripe_subscription_intents v JOIN users u ON u.id=v.user_id
 		LEFT JOIN recharge_templates t ON t.id=v.template_id
-		LEFT JOIN LATERAL reader_promotion_for_user(v.user_id) p ON true WHERE v.id=$1 RETURNING id`,
+		LEFT JOIN LATERAL reader_promotion_for_user_env(v.user_id, CASE WHEN v.checkout_environment IN ('sandbox','test') THEN 'sandbox' ELSE 'live' END) p ON true WHERE v.id=$1 RETURNING id`,
 		v.ID, proof.ID, proof.DueMinor, proof.Subscription.ID).Scan(&orderID)
 	if err != nil {
 		return 0, false, err

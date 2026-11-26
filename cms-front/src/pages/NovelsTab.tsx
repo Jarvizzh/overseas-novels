@@ -271,10 +271,12 @@ export default function NovelsTab() {
     domainId?: string;
     fbPixelId: string;
     rechargeTemplateId: string;
+    environment: 'live' | 'sandbox';
     coinCostPerThousand: string;
     startPayChapterIndex: string;
   }>({
     name: '',
+    environment: 'live',
     novelId: 0,
     title: '',
     chapterIndex: '1',
@@ -1036,6 +1038,7 @@ export default function NovelsTab() {
     }
     setPromotionForm({
       name: '',
+      environment: 'live',
       novelId: novel.id,
       title: novel.title,
       chapterIndex: '1',
@@ -1062,6 +1065,7 @@ export default function NovelsTab() {
       {
         novelId: promotionForm.novelId,
         name: promotionForm.name,
+        environment: promotionForm.environment,
         novelTitle: promotionForm.title,
         chapterIndex: promotionForm.chapterIndex,
         utmSource: promotionForm.utmSource,

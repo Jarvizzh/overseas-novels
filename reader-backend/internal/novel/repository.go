@@ -304,9 +304,9 @@ func ReadChapterPricing(ctx context.Context, q interface {
 	err := q.QueryRow(ctx, `
 		SELECT `+chapterPricingColumns+`
 		FROM novels n CROSS JOIN (SELECT $1::bigint user_id, $3::int promo_id) reader
-		`+chapterPricingJoin+`
+		`+chapterPricingJoinSQL("$5")+`
 		WHERE n.id=$2 AND n.status<>'archived' AND n.publish_status='published'
-		  AND ($4::bigint=0 OR n.content_version=$4)`, userID, novelID, promoID, contentVersion(ctx)).Scan(&start, &cost)
+		  AND ($4::bigint=0 OR n.content_version=$4)`, userID, novelID, promoID, contentVersion(ctx), conversion.PromotionEnvironment()).Scan(&start, &cost)
 	if err == pgx.ErrNoRows && contentVersion(ctx) != 0 {
 		return 0, 0, ErrContentChanged
 	}

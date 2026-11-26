@@ -16,6 +16,22 @@ func Environment() string {
 	return "production"
 }
 
+// PromotionEnvironmentFor maps a conversion environment to promotion/catalog environment ("live" or "sandbox").
+// Fails closed to "live" for empty or unrecognized environments.
+func PromotionEnvironmentFor(env string) string {
+	switch env {
+	case "sandbox", "test":
+		return "sandbox"
+	default:
+		return "live"
+	}
+}
+
+// PromotionEnvironment maps runtime conversion environment to promotion/catalog environment ("live" or "sandbox").
+func PromotionEnvironment() string {
+	return PromotionEnvironmentFor(Environment())
+}
+
 type Attribution struct {
 	FBP       string `json:"fbp,omitempty"`
 	FBC       string `json:"fbc,omitempty"`
@@ -35,7 +51,7 @@ func EnqueueRegistrationTx(ctx context.Context, tx pgx.Tx, userID int64, attribu
 					WHEN p.id IS NOT NULL OR $4 OR COALESCE(u.utm_source,'')<>'' OR COALESCE(u.utm_campaign,'')<>''
 					THEN 'missing_pixel' ELSE 'organic' END)
 		FROM users u
-		LEFT JOIN promotion_links p ON p.id=u.promotion_link_id
+		LEFT JOIN promotion_links p ON p.id=u.promotion_link_id AND (p.environment='live' OR ($2 IN ('sandbox','test') AND p.environment='sandbox'))
 		LEFT JOIN fb_pixels f ON f.id=p.fb_pixel_id
 		WHERE u.id=$1
 		ON CONFLICT (business_key) DO NOTHING`, userID, Environment(), attribution, promotionHint || attribution.FBC != "")

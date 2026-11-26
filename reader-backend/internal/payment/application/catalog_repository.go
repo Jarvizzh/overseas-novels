@@ -177,7 +177,7 @@ func wholeBookProductAvailable(ctx context.Context, q checkoutQueryer, userID in
 	err := q.QueryRow(ctx, `
 		SELECT EXISTS (
 			SELECT 1 FROM users u
-			LEFT JOIN LATERAL (SELECT id, novel_id, recharge_template_id FROM reader_promotion_for_user(u.id)) promo ON TRUE
+			LEFT JOIN LATERAL (SELECT id, novel_id, recharge_template_id FROM reader_promotion_for_user_env(u.id, $6)) promo ON TRUE
 			WHERE u.id = $1
 			  AND EXISTS (SELECT 1 FROM novels WHERE id = $3 AND status <> 'archived' AND publish_status = 'published')
 			  AND ($2 = 0 OR $2 = COALESCE(promo.recharge_template_id, ` + defaultLiveTemplateIDSQL + `))
@@ -187,6 +187,6 @@ func wholeBookProductAvailable(ctx context.Context, q checkoutQueryer, userID in
 			   OR ($4 = 'specific_novels' AND $3 = ANY($5::bigint[]))
 			   OR ($4 = 'promoted_or_default' AND (promo.novel_id = $3 OR (promo.id IS NULL AND EXISTS(SELECT 1 FROM recharge_templates WHERE id = $2 AND is_default AND environment = 'live'))))
 			  )
-		)`, userID, templateID, novelID, scopeType, scopeIDs).Scan(&allowed)
+		)`, userID, templateID, novelID, scopeType, scopeIDs, currentPaymentLedgerEnvironment()).Scan(&allowed)
 	return allowed, err
 }

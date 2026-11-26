@@ -10,6 +10,7 @@ export function normalizeDomainHref(domain: string): string {
 export interface PromotionBuildInput {
   novelId: number;
   name: string;
+  environment?: 'live' | 'sandbox';
   novelTitle?: string;
   chapterIndex: string;
   utmSource: string;
@@ -30,6 +31,7 @@ export interface PromotionBuildResult {
   finalUrl?: string;
   payload?: {
     name: string;
+    environment: 'live' | 'sandbox';
     novel_id: number;
     novel_title?: string;
     chapter_index: number;
@@ -115,6 +117,7 @@ export function validateAndBuildPromotionPayload(
     finalUrl,
     payload: {
       name: input.name,
+      environment: input.environment === 'sandbox' ? 'sandbox' : 'live',
       novel_id: input.novelId,
       ...(input.novelTitle !== undefined ? { novel_title: input.novelTitle } : {}),
       chapter_index: parsedChapter,

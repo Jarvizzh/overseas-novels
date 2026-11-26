@@ -19,12 +19,14 @@ const chapterPricingColumns = `
     COALESCE(pl.coin_cost_per_thousand, n.coin_cost_per_thousand,
         (SELECT value::int FROM system_configs WHERE key='global_coin_cost_per_thousand'),500)`
 
-const chapterPricingJoin = `LEFT JOIN LATERAL (
+func chapterPricingJoinSQL(envParam string) string {
+	return `LEFT JOIN LATERAL (
     SELECT p.start_pay_chapter_index, p.coin_cost_per_thousand
     FROM promotion_links p WHERE p.novel_id=n.id AND p.id=CASE WHEN reader.user_id>0
-    THEN (SELECT id FROM reader_promotion_for_user(reader.user_id))
-    ELSE resolve_reader_promotion(reader.promo_id,'','') END
+    THEN (SELECT id FROM reader_promotion_for_user_env(reader.user_id,` + envParam + `))
+    ELSE resolve_reader_promotion_for_env(reader.promo_id,'','',` + envParam + `) END
 ) pl ON TRUE`
+}
 
 var paidAccessSQL = `(
     EXISTS(SELECT 1 FROM user_subscriptions WHERE user_id=reader.user_id AND payment_subscription_environment(user_subscriptions)=$6 AND ` + PaidSubscriptionPredicate + `)
@@ -75,7 +77,7 @@ func (r *dbRepository) ReadSnapshot(ctx context.Context, userID, novelID int64, 
 		), book(id, content_version, start_pay, cost) AS MATERIALIZED (
 		    SELECT n.id, n.content_version, `+chapterPricingColumns+`
 		    FROM reader JOIN novels n ON n.id=$3 AND n.status<>'archived' AND n.publish_status='published'
-		    `+chapterPricingJoin+`
+		    `+chapterPricingJoinSQL("$7")+`
 		), reading AS MATERIALIZED (
 		    SELECT reader.user_id, reader.account_active, book.id AS novel_id, book.content_version, book.start_pay, book.cost,
 		        CASE WHEN reader.user_id>0 AND book.id IS NOT NULL AND
@@ -98,7 +100,7 @@ func (r *dbRepository) ReadSnapshot(ctx context.Context, userID, novelID int64, 
 		    CASE WHEN id IS NOT NULL AND NOT pass AND NOT unlocked AND $5>=start_pay-1 AND cost>0
 		        THEN COALESCE(content_preview, (SELECT reader_chapter_preview(c.content) FROM chapters c WHERE c.id=access.id), '')
 		        ELSE '' END
-		FROM access`, userID, identity.sessionHash, novelID, promoID, index, conversion.Environment()).Scan(
+		FROM access`, userID, identity.sessionHash, novelID, promoID, index, conversion.Environment(), conversion.PromotionEnvironment()).Scan(
 		&snapshot.userID, &accountActive, &snapshot.version, &snapshot.start, &snapshot.cost, &snapshot.pass,
 		&snapshot.unlocked, &snapshot.review, &id, &chapter.Title, &chapter.WordCount, &created,
 		&chapter.ObjectKey, &chapter.ContentHash, &chapter.BodyRevision, &snapshot.preview)

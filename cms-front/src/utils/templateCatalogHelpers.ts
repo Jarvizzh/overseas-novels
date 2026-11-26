@@ -13,8 +13,15 @@ export function canSetDefaultTemplate(template: Pick<RechargeTemplateDTO, 'envir
   return (template.environment ?? 'live') === 'live' && !template.is_default;
 }
 
+export function filterPromotionTemplatesByEnv<T extends { environment?: string }>(
+  templates: T[],
+  environment: 'live' | 'sandbox' = 'live',
+): T[] {
+  return templates.filter((t) => (t.environment ?? 'live') === environment);
+}
+
 export function filterLivePromotionTemplates<T extends { environment?: string }>(templates: T[]): T[] {
-  return templates.filter((t) => (t.environment ?? 'live') === 'live');
+  return filterPromotionTemplatesByEnv(templates, 'live');
 }
 
 export function shouldLockDefaultTemplate(

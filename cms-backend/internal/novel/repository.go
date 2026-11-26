@@ -3,6 +3,7 @@ package novel
 import (
 	"context"
 	"errors"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -50,12 +51,12 @@ type NovelRepository interface {
 	ListPromotionLinks(ctx context.Context) ([]PromotionLink, error)
 	CreatePromotionLink(ctx context.Context, link *PromotionLink) (int, error)
 	UpdatePromotionLinkURL(ctx context.Context, id int, generatedURL string) error
-	UpdatePromotionLink(ctx context.Context, id int, name string, chapterIndex int, source, campaign, url string, pixelID, templateID, domainID, coinCost, startPayIndex *int, domain string) error
+	UpdatePromotionLink(ctx context.Context, id int, name, environment string, chapterIndex int, source, campaign, url string, pixelID, templateID, domainID, coinCost, startPayIndex *int, domain string) error
 	DeletePromotionLink(ctx context.Context, id int) error
 
 	ListFBPixels(ctx context.Context) ([]FBPixel, error)
 	ListPublishedNovelOptionsForPromo(ctx context.Context) ([]PromotionLinkNovelOption, error)
-	ListLiveTemplateOptionsForPromo(ctx context.Context) ([]PromotionLinkTemplateOption, error)
+	ListTemplateOptionsForPromo(ctx context.Context) ([]PromotionLinkTemplateOption, error)
 	ListActiveDomainOptionsForPromo(ctx context.Context) ([]PromotionLinkDomainOption, error)
 }
 
@@ -420,7 +421,7 @@ func (r *dbNovelRepository) UpdateSettingTx(ctx context.Context, tx pgx.Tx, key,
 
 func (r *dbNovelRepository) ListPromotionLinks(ctx context.Context) ([]PromotionLink, error) {
 	query := `
-		SELECT pl.id, pl.name, pl.novel_id, pl.novel_title, pl.chapter_index, pl.utm_source, pl.utm_campaign, 
+		SELECT pl.id, pl.name, pl.environment, pl.novel_id, pl.novel_title, pl.chapter_index, pl.utm_source, pl.utm_campaign, 
 		       pl.generated_url, pl.fb_pixel_id, pl.recharge_template_id, pl.domain_id, 
 		       COALESCE(sd.domain, pl.domain, '') AS domain, 
 		       pl.coin_cost_per_thousand, pl.start_pay_chapter_index, pl.created_at
@@ -437,7 +438,7 @@ func (r *dbNovelRepository) ListPromotionLinks(ctx context.Context) ([]Promotion
 	for rows.Next() {
 		var link PromotionLink
 		err = rows.Scan(
-			&link.ID, &link.Name, &link.NovelID, &link.NovelTitle, &link.ChapterIndex,
+			&link.ID, &link.Name, &link.Environment, &link.NovelID, &link.NovelTitle, &link.ChapterIndex,
 			&link.UtmSource, &link.UtmCampaign, &link.GeneratedURL, &link.FBPixelID, &link.RechargeTemplateID,
 			&link.DomainID, &link.Domain,
 			&link.CoinCostPerThousand, &link.StartPayChapterIndex, &link.CreatedAt,
@@ -454,30 +455,32 @@ func (r *dbNovelRepository) ListPromotionLinks(ctx context.Context) ([]Promotion
 }
 
 func (r *dbNovelRepository) CreatePromotionLink(ctx context.Context, link *PromotionLink) (int, error) {
+	env := normalizePromotionEnvironment(link.Environment)
+	link.Environment = env
 	query := `
-		INSERT INTO promotion_links (name, novel_id, novel_title, chapter_index, utm_source, utm_campaign, generated_url, fb_pixel_id, recharge_template_id, domain_id, domain, coin_cost_per_thousand, start_pay_chapter_index)
-		SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13
+		INSERT INTO promotion_links (name, environment, novel_id, novel_title, chapter_index, utm_source, utm_campaign, generated_url, fb_pixel_id, recharge_template_id, domain_id, domain, coin_cost_per_thousand, start_pay_chapter_index)
+		SELECT $1, $14, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13
 		WHERE ($8::int IS NULL OR EXISTS (
 			SELECT 1 FROM conversion.destinations x JOIN conversion.integration_destinations b ON b.destination_id=x.id
 			JOIN conversion.integrations i ON i.id=b.integration_id
 			WHERE x.legacy_fb_pixel_id=$8 AND x.enabled AND x.retired_at IS NULL
 			  AND i.source='starnovel' AND i.account_key='reader'))
-		  AND ($9::int IS NULL OR EXISTS (SELECT 1 FROM recharge_templates rt WHERE rt.id = $9 AND rt.environment = 'live'))
+		  AND ($9::int IS NULL OR EXISTS (SELECT 1 FROM recharge_templates rt WHERE rt.id = $9 AND rt.environment = $14))
 		RETURNING id, created_at`
 	var id int
-	err := runPromoLinkMutationTx(ctx, link.RechargeTemplateID, func(tx pgx.Tx) error {
+	err := runPromoLinkMutationTx(ctx, env, link.RechargeTemplateID, func(tx pgx.Tx) error {
 		return tx.QueryRow(
 			ctx, query, link.Name, link.NovelID, link.NovelTitle, link.ChapterIndex,
 			link.UtmSource, link.UtmCampaign, link.GeneratedURL, link.FBPixelID, link.RechargeTemplateID,
-			link.DomainID, link.Domain, link.CoinCostPerThousand, link.StartPayChapterIndex,
+			link.DomainID, link.Domain, link.CoinCostPerThousand, link.StartPayChapterIndex, env,
 		).Scan(&id, &link.CreatedAt)
 	})
 	return id, err
 }
 
 // Acquire FOR KEY SHARE on recharge_templates before mutating promotion_links so
-// concurrent live->sandbox template demotion (FOR UPDATE) serializes cleanly.
-func runPromoLinkMutationTx(ctx context.Context, templateID *int, fn func(pgx.Tx) error) error {
+// concurrent template environment changes (FOR UPDATE) serialize cleanly.
+func runPromoLinkMutationTx(ctx context.Context, targetEnv string, templateID *int, fn func(pgx.Tx) error) error {
 	tx, err := db.DB.Begin(ctx)
 	if err != nil {
 		return err
@@ -486,7 +489,7 @@ func runPromoLinkMutationTx(ctx context.Context, templateID *int, fn func(pgx.Tx
 	if templateID != nil {
 		var env string
 		err := tx.QueryRow(ctx, `SELECT environment FROM recharge_templates WHERE id = $1 FOR KEY SHARE`, *templateID).Scan(&env)
-		if errors.Is(err, pgx.ErrNoRows) || (err == nil && env != "live") {
+		if errors.Is(err, pgx.ErrNoRows) || (err == nil && env != targetEnv) {
 			return ErrInvalidPromoTemplate
 		}
 		if err != nil {
@@ -504,19 +507,41 @@ func (r *dbNovelRepository) UpdatePromotionLinkURL(ctx context.Context, id int, 
 	return err
 }
 
-func (r *dbNovelRepository) UpdatePromotionLink(ctx context.Context, id int, name string, chapterIndex int, source, campaign, url string, pixelID, templateID, domainID, coinCost, startPayIndex *int, domain string) error {
+func (r *dbNovelRepository) UpdatePromotionLink(ctx context.Context, id int, name, environment string, chapterIndex int, source, campaign, url string, pixelID, templateID, domainID, coinCost, startPayIndex *int, domain string) error {
+	trimmedEnv := strings.TrimSpace(environment)
+	keepExistingEnv := trimmedEnv == ""
+	env := trimmedEnv
+	if keepExistingEnv {
+		// Read existing environment without locking promotion_links before recharge_templates
+		// so the global lock order (recharge_templates -> promotion_links) is preserved.
+		if err := db.DB.QueryRow(ctx, `SELECT environment FROM promotion_links WHERE id = $1`, id).Scan(&env); err != nil {
+			return err
+		}
+	} else {
+		env = normalizePromotionEnvironment(trimmedEnv)
+	}
 	query := `
 		UPDATE promotion_links
-		SET name = $1, chapter_index = $2, utm_source = $3, utm_campaign = $4, generated_url = $5, fb_pixel_id = $6, recharge_template_id = $7, domain_id = $8, domain = $9, coin_cost_per_thousand = $10, start_pay_chapter_index = $11
+		SET name = $1,
+		    environment = CASE WHEN $14::bool THEN environment ELSE $13 END,
+		    chapter_index = $2, utm_source = $3, utm_campaign = $4, generated_url = $5, fb_pixel_id = $6, recharge_template_id = $7, domain_id = $8, domain = $9, coin_cost_per_thousand = $10, start_pay_chapter_index = $11
 		WHERE id = $12 AND (fb_pixel_id IS NOT DISTINCT FROM $6 OR $6::int IS NULL OR EXISTS (
 			SELECT 1 FROM conversion.destinations x JOIN conversion.integration_destinations b ON b.destination_id=x.id
 			JOIN conversion.integrations i ON i.id=b.integration_id
 			WHERE x.legacy_fb_pixel_id=$6 AND x.enabled AND x.retired_at IS NULL
 			  AND i.source='starnovel' AND i.account_key='reader'))
-		  AND ($7::int IS NULL OR EXISTS (SELECT 1 FROM recharge_templates rt WHERE rt.id = $7 AND rt.environment = 'live'))`
-	return runPromoLinkMutationTx(ctx, templateID, func(tx pgx.Tx) error {
-		tag, err := tx.Exec(ctx, query, name, chapterIndex, source, campaign, url, pixelID, templateID, domainID, domain, coinCost, startPayIndex, id)
+		  AND ($7::int IS NULL OR EXISTS (
+			SELECT 1 FROM recharge_templates rt
+			WHERE rt.id = $7 AND rt.environment = CASE WHEN $14::bool THEN promotion_links.environment ELSE $13 END))`
+	return runPromoLinkMutationTx(ctx, env, templateID, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, query, name, chapterIndex, source, campaign, url, pixelID, templateID, domainID, domain, coinCost, startPayIndex, id, env, keepExistingEnv)
 		if err == nil && tag.RowsAffected() != 1 {
+			if keepExistingEnv && templateID != nil {
+				var currentEnv string
+				if qErr := tx.QueryRow(ctx, `SELECT environment FROM promotion_links WHERE id = $1`, id).Scan(&currentEnv); qErr == nil && currentEnv != env {
+					return ErrInvalidPromoTemplate
+				}
+			}
 			return pgx.ErrNoRows
 		}
 		return err
@@ -577,12 +602,11 @@ func (r *dbNovelRepository) ListPublishedNovelOptionsForPromo(ctx context.Contex
 	return out, rows.Err()
 }
 
-func (r *dbNovelRepository) ListLiveTemplateOptionsForPromo(ctx context.Context) ([]PromotionLinkTemplateOption, error) {
+func (r *dbNovelRepository) ListTemplateOptionsForPromo(ctx context.Context) ([]PromotionLinkTemplateOption, error) {
 	rows, err := db.DB.Query(ctx, `
-		SELECT id, name, is_default
+		SELECT id, name, environment, is_default
 		FROM recharge_templates
-		WHERE environment = 'live'
-		ORDER BY is_default DESC, id DESC`)
+		ORDER BY environment ASC, is_default DESC, id DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -591,7 +615,7 @@ func (r *dbNovelRepository) ListLiveTemplateOptionsForPromo(ctx context.Context)
 	out := make([]PromotionLinkTemplateOption, 0)
 	for rows.Next() {
 		var opt PromotionLinkTemplateOption
-		if err := rows.Scan(&opt.ID, &opt.Name, &opt.IsDefault); err != nil {
+		if err := rows.Scan(&opt.ID, &opt.Name, &opt.Environment, &opt.IsDefault); err != nil {
 			return nil, err
 		}
 		out = append(out, opt)

@@ -158,7 +158,7 @@ func (r *dbRepository) reservePayPalSubscriptionTx(ctx context.Context, tx pgx.T
 			(user_id,intent_id,product_id,product_snapshot,slot_id,template_id,cycle,price_cents,return_url,cancel_url,attribution,checkout_account_id,checkout_return_path,plan_id,vip_offer_version_id,checkout_environment)
  SELECT $1,$2,NULLIF($15,0),COALESCE($16::jsonb,'{}'::jsonb),$3,$4,$5,$6,$7,$8,$9::jsonb || jsonb_build_object('pixel_id',fp.pixel_id,'promotion_link_id',p.id,'novel_id',p.novel_id,'utm_source',u.utm_source,'utm_campaign',u.utm_campaign)
 	 ,$10,$11,NULLIF($12,''),$13,$14
- FROM users u LEFT JOIN LATERAL reader_promotion_for_user(u.id) p ON true LEFT JOIN fb_pixels fp ON fp.id=p.fb_pixel_id WHERE u.id=$1`, current.userID, current.id, current.slotID, current.templateID,
+ FROM users u LEFT JOIN LATERAL reader_promotion_for_user_env(u.id, CASE WHEN $14 IN ('sandbox','test') THEN 'sandbox' ELSE 'live' END) p ON true LEFT JOIN fb_pixels fp ON fp.id=p.fb_pixel_id WHERE u.id=$1`, current.userID, current.id, current.slotID, current.templateID,
 			current.cycle, current.priceCents, current.returnURL, current.cancelURL, metadata, current.accountID, current.returnPath, current.planID, current.offerVersionID, conversion.Environment(), current.productID, snapArg)
 		if err != nil {
 			return nil, err

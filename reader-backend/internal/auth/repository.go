@@ -8,6 +8,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"reader-backend/internal/conversion"
 	"reader-backend/internal/db"
 	"reader-backend/internal/model"
 )
@@ -39,11 +40,11 @@ func (r *dbUserRepository) BeginTx(ctx context.Context) (pgx.Tx, error) {
 func (r *dbUserRepository) CreateGuestUser(ctx context.Context, tx pgx.Tx, nickname, device, ipAddress, utmSource, utmCampaign string) (*model.User, error) {
 	userQuery := `
 		INSERT INTO users (email, password_hash, nickname, avatar_url, status, device, ip_address, utm_source, utm_campaign, promotion_link_id, promotion_resolved)
-		VALUES (NULL, NULL, $1::text, '/assets/default_avatar.png', 1, $2::text, $3::text, $4::text, $5::text,resolve_reader_promotion($6,$4::text,$5::text),true)
+		VALUES (NULL, NULL, $1::text, '/assets/default_avatar.png', 1, $2::text, $3::text, $4::text, $5::text,resolve_reader_promotion_for_env($6,$4::text,$5::text,$7::text),true)
 		RETURNING id, nickname, avatar_url, status, created_at`
 
 	var user model.User
-	err := tx.QueryRow(ctx, userQuery, nickname, device, ipAddress, utmSource, utmCampaign, promotionID(ctx)).Scan(
+	err := tx.QueryRow(ctx, userQuery, nickname, device, ipAddress, utmSource, utmCampaign, promotionID(ctx), conversion.PromotionEnvironment()).Scan(
 		&user.ID, &user.Nickname, &user.AvatarURL, &user.Status, &user.CreatedAt,
 	)
 	if err != nil {
@@ -59,12 +60,12 @@ func (r *dbUserRepository) CreateGuestUser(ctx context.Context, tx pgx.Tx, nickn
 func (r *dbUserRepository) CreateStandardUser(ctx context.Context, tx pgx.Tx, email, passwordHash, nickname, device, ipAddress, utmSource, utmCampaign string) (*model.User, error) {
 	userQuery := `
 		INSERT INTO users (email, password_hash, nickname, avatar_url, status, device, ip_address, utm_source, utm_campaign, promotion_link_id, promotion_resolved)
-		VALUES ($1::text, $2::text, $3::text, '/assets/default_avatar.png', 1, $4::text, $5::text, $6::text, $7::text,resolve_reader_promotion($8,$6::text,$7::text),true)
+		VALUES ($1::text, $2::text, $3::text, '/assets/default_avatar.png', 1, $4::text, $5::text, $6::text, $7::text,resolve_reader_promotion_for_env($8,$6::text,$7::text,$9::text),true)
 		RETURNING id, email, nickname, avatar_url, status, created_at`
 
 	var user model.User
 	var emailStr string
-	err := tx.QueryRow(ctx, userQuery, email, passwordHash, nickname, device, ipAddress, utmSource, utmCampaign, promotionID(ctx)).Scan(
+	err := tx.QueryRow(ctx, userQuery, email, passwordHash, nickname, device, ipAddress, utmSource, utmCampaign, promotionID(ctx), conversion.PromotionEnvironment()).Scan(
 		&user.ID, &emailStr, &user.Nickname, &user.AvatarURL, &user.Status, &user.CreatedAt,
 	)
 	if err != nil {

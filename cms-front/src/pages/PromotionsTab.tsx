@@ -11,7 +11,7 @@ import {
 } from '../utils/api';
 import { copyTextToClipboard } from '../utils/clipboard';
 import { validateAndBuildPromotionPayload } from '../utils/promotion';
-import { filterLivePromotionTemplates } from '../utils/templateCatalogHelpers';
+import { filterPromotionTemplatesByEnv } from '../utils/templateCatalogHelpers';
 import CustomSelect from '../components/CustomSelect';
 import { CmsDialog } from '../components/ui/CmsDialog';
 import { Pagination } from '../components/ui/Pagination';
@@ -30,6 +30,7 @@ import {
 interface PromotionLink {
   id: number;
   name: string;
+  environment?: 'live' | 'sandbox';
   novel_id: number;
   novel_title: string;
   chapter_index: number;
@@ -48,6 +49,7 @@ interface PromotionLink {
 const EMPTY_CREATE_FORM = {
   novelId: '',
   name: '',
+  environment: 'live' as 'live' | 'sandbox',
   chapterIndex: '1',
   utmSource: 'facebook',
   utmCampaign: '',
@@ -404,6 +406,7 @@ export default function PromotionsTab() {
 
   const [searchQuery, setSearchQuery] = useState('');
   const [sourceFilter, setSourceFilter] = useState('');
+  const [envFilter, setEnvFilter] = useState<'' | 'live' | 'sandbox'>('');
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(15);
   const [density, setDensity] = useState<TableDensity>('comfortable');
@@ -419,6 +422,7 @@ export default function PromotionsTab() {
   const [editSubmitting, setEditSubmitting] = useState(false);
   const [editForm, setEditForm] = useState({
     name: '',
+    environment: 'live' as 'live' | 'sandbox',
     chapterIndex: '1',
     utmSource: 'facebook',
     utmCampaign: '',
@@ -492,6 +496,7 @@ export default function PromotionsTab() {
         novelId: selectedNovel.id,
         novelTitle: selectedNovel.title,
         name: trimmedName,
+        environment: createForm.environment,
         chapterIndex: createForm.chapterIndex,
         utmSource: createForm.utmSource,
         utmCampaign: createForm.utmCampaign,
@@ -528,6 +533,7 @@ export default function PromotionsTab() {
     setEditingLink(link);
     setEditForm({
       name: link.name || '',
+      environment: link.environment === 'sandbox' ? 'sandbox' : 'live',
       chapterIndex: link.chapter_index > 0 ? String(link.chapter_index) : '',
       utmSource: link.utm_source || 'facebook',
       utmCampaign: link.utm_campaign || '',
@@ -554,6 +560,7 @@ export default function PromotionsTab() {
       {
         novelId: editingLink.novel_id,
         name: editForm.name,
+        environment: editForm.environment,
         chapterIndex: editForm.chapterIndex,
         utmSource: editForm.utmSource,
         utmCampaign: editForm.utmCampaign,
@@ -617,9 +624,11 @@ export default function PromotionsTab() {
         link.utm_campaign.toLowerCase().includes(q) ||
         (link.name && link.name.toLowerCase().includes(q));
       const matchesSource = !sourceFilter || link.utm_source.toLowerCase() === sourceFilter.toLowerCase();
-      return matchesSearch && matchesSource;
+      const linkEnv = link.environment === 'sandbox' ? 'sandbox' : 'live';
+      const matchesEnv = !envFilter || linkEnv === envFilter;
+      return matchesSearch && matchesSource && matchesEnv;
     });
-  }, [links, searchQuery, sourceFilter]);
+  }, [links, searchQuery, sourceFilter, envFilter]);
 
   const totalPages = Math.max(1, Math.ceil(filteredLinks.length / pageSize));
   const safePage = Math.min(page, totalPages);
@@ -646,6 +655,7 @@ export default function PromotionsTab() {
   const resetFilters = () => {
     setSearchQuery('');
     setSourceFilter('');
+    setEnvFilter('');
     setPage(1);
   };
 
@@ -671,8 +681,18 @@ export default function PromotionsTab() {
         },
       });
     }
+    if (envFilter) {
+      chips.push({
+        key: 'env',
+        label: `环境: ${envFilter === 'sandbox' ? 'Sandbox 沙箱' : 'Live 正式'}`,
+        onClear: () => {
+          setEnvFilter('');
+          setPage(1);
+        },
+      });
+    }
     return chips;
-  }, [searchQuery, sourceFilter]);
+  }, [searchQuery, sourceFilter, envFilter]);
 
   const columnOptions: ColumnOption[] = [
     { key: 'created_at', label: '创建时间', visible: showCreatedAt },
@@ -711,7 +731,22 @@ export default function PromotionsTab() {
               width="160px"
             />
 
-            {(searchQuery || sourceFilter) && (
+            <CustomSelect
+              aria-label="筛选推广环境"
+              options={[
+                { value: '', label: '全部环境' },
+                { value: 'live', label: 'Live 正式' },
+                { value: 'sandbox', label: 'Sandbox 沙箱' },
+              ]}
+              value={envFilter}
+              onChange={(val) => {
+                setEnvFilter((val === 'live' || val === 'sandbox' ? val : '') as '' | 'live' | 'sandbox');
+                setPage(1);
+              }}
+              width="140px"
+            />
+
+            {(searchQuery || sourceFilter || envFilter) && (
               <button type="button" onClick={resetFilters} className="btn-ghost h-9 text-xs text-[var(--cms-muted-fg)]">
                 重置
               </button>
@@ -796,8 +831,19 @@ export default function PromotionsTab() {
                   <tr key={link.id}>
                     <td className="tabular-nums text-[var(--cms-muted-fg)] whitespace-nowrap">#{link.id}</td>
                     <td>
-                      <div className="text-[var(--cms-fg)] truncate max-w-[180px]" title={link.name}>
-                        {link.name || <span className="text-[var(--cms-muted-fg)]">未命名 #{link.id}</span>}
+                      <div className="flex items-center gap-1.5 max-w-[200px]">
+                        <span className="text-[var(--cms-fg)] truncate" title={link.name}>
+                          {link.name || <span className="text-[var(--cms-muted-fg)]">未命名 #{link.id}</span>}
+                        </span>
+                        <span
+                          className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium ${
+                            link.environment === 'sandbox'
+                              ? 'bg-[var(--cms-warning)]/15 text-[var(--cms-warning)]'
+                              : 'bg-[var(--cms-success)]/15 text-[var(--cms-success)]'
+                          }`}
+                        >
+                          {link.environment === 'sandbox' ? 'Sandbox' : 'Live'}
+                        </span>
                       </div>
                       <div
                         className="text-[var(--cms-muted-fg)] mt-0.5 truncate max-w-[180px]"
@@ -1060,26 +1106,55 @@ export default function PromotionsTab() {
             </label>
           </div>
 
-          <label className="block space-y-1.5">
-            <span className="block font-medium text-[var(--cms-muted-fg)]">绑定充值模板（可选）</span>
-            <CustomSelect
-              aria-label="绑定充值模板"
-              width="100%"
-              value={createForm.rechargeTemplateId}
-              disabled={createSubmitting || Boolean(createdUrl)}
-              onChange={(val) => setCreateForm({ ...createForm, rechargeTemplateId: val })}
-              options={[
-                { value: '', label: '-- 使用默认激活模板 --' },
-                ...filterLivePromotionTemplates(templates).map((t) => ({
-                  value: String(t.id),
-                  label: `${t.name} ${t.is_default ? '(默认)' : ''}`,
-                })),
-              ]}
-            />
-            <span className="block text-[11px] text-[var(--cms-muted-fg)]">
-              该模板绑定仅对通过此推广链接首次注册/首次触达的读者生效；已归因老用户仍按首触推广或默认模板计价。
-            </span>
-          </label>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <label className="space-y-1.5">
+              <span className="block font-medium text-[var(--cms-muted-fg)]">推广环境</span>
+              <CustomSelect
+                aria-label="推广环境"
+                width="100%"
+                value={createForm.environment}
+                disabled={createSubmitting || Boolean(createdUrl)}
+                onChange={(val) => {
+                  const nextEnv: 'live' | 'sandbox' = val === 'sandbox' ? 'sandbox' : 'live';
+                  const matched = filterPromotionTemplatesByEnv(templates, nextEnv).some(
+                    (t) => String(t.id) === createForm.rechargeTemplateId,
+                  );
+                  setCreateForm({
+                    ...createForm,
+                    environment: nextEnv,
+                    rechargeTemplateId: matched ? createForm.rechargeTemplateId : '',
+                  });
+                }}
+                options={[
+                  { value: 'live', label: 'Live 正式（线上投放）' },
+                  { value: 'sandbox', label: 'Sandbox 沙箱（仅联调测试）' },
+                ]}
+              />
+            </label>
+
+            <label className="space-y-1.5">
+              <span className="block font-medium text-[var(--cms-muted-fg)]">绑定充值模板（可选）</span>
+              <CustomSelect
+                aria-label="绑定充值模板"
+                width="100%"
+                value={createForm.rechargeTemplateId}
+                disabled={createSubmitting || Boolean(createdUrl)}
+                onChange={(val) => setCreateForm({ ...createForm, rechargeTemplateId: val })}
+                options={[
+                  { value: '', label: '-- 使用默认激活模板 --' },
+                  ...filterPromotionTemplatesByEnv(templates, createForm.environment).map((t) => ({
+                    value: String(t.id),
+                    label: `${t.name} ${t.is_default ? '(默认)' : ''}`,
+                  })),
+                ]}
+              />
+            </label>
+          </div>
+          <span className="block text-[11px] text-[var(--cms-muted-fg)] -mt-2">
+            {createForm.environment === 'sandbox'
+              ? 'Sandbox 推广链接仅可绑定沙箱模板且仅在沙箱/测试环境生效，不会泄漏到线上 Live 流量。'
+              : '该模板绑定仅对通过此推广链接首次注册/首次触达的读者生效；已归因老用户仍按首触推广或默认模板计价。'}
+          </span>
 
           {createdUrl && (
             <div className="p-3.5 rounded-xl bg-[var(--cms-content)] border border-[var(--cms-border)] space-y-2">
@@ -1235,22 +1310,53 @@ export default function PromotionsTab() {
               </label>
             </div>
 
-            <label className="block space-y-1.5">
-              <span className="block font-medium text-[var(--cms-muted-fg)]">绑定充值模板（可选）</span>
-              <CustomSelect
-                aria-label="绑定充值模板"
-                width="100%"
-                value={editForm.rechargeTemplateId}
-                onChange={(val) => setEditForm({ ...editForm, rechargeTemplateId: val })}
-                options={[
-                  { value: '', label: '-- 使用默认激活模板 --' },
-                  ...filterLivePromotionTemplates(templates).map((t) => ({ value: String(t.id), label: `${t.name} ${t.is_default ? '(默认)' : ''}` })),
-                ]}
-              />
-              <span className="block text-[11px] text-[var(--cms-muted-fg)]">
-                该模板绑定仅对通过此推广链接首次注册/首次触达的读者生效；已归因老用户仍按首触推广或默认模板计价。
-              </span>
-            </label>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <label className="space-y-1.5">
+                <span className="block font-medium text-[var(--cms-muted-fg)]">推广环境</span>
+                <CustomSelect
+                  aria-label="推广环境"
+                  width="100%"
+                  value={editForm.environment}
+                  onChange={(val) => {
+                    const nextEnv: 'live' | 'sandbox' = val === 'sandbox' ? 'sandbox' : 'live';
+                    const matched = filterPromotionTemplatesByEnv(templates, nextEnv).some(
+                      (t) => String(t.id) === editForm.rechargeTemplateId,
+                    );
+                    setEditForm({
+                      ...editForm,
+                      environment: nextEnv,
+                      rechargeTemplateId: matched ? editForm.rechargeTemplateId : '',
+                    });
+                  }}
+                  options={[
+                    { value: 'live', label: 'Live 正式（线上投放）' },
+                    { value: 'sandbox', label: 'Sandbox 沙箱（仅联调测试）' },
+                  ]}
+                />
+              </label>
+
+              <label className="space-y-1.5">
+                <span className="block font-medium text-[var(--cms-muted-fg)]">绑定充值模板（可选）</span>
+                <CustomSelect
+                  aria-label="绑定充值模板"
+                  width="100%"
+                  value={editForm.rechargeTemplateId}
+                  onChange={(val) => setEditForm({ ...editForm, rechargeTemplateId: val })}
+                  options={[
+                    { value: '', label: '-- 使用默认激活模板 --' },
+                    ...filterPromotionTemplatesByEnv(templates, editForm.environment).map((t) => ({
+                      value: String(t.id),
+                      label: `${t.name} ${t.is_default ? '(默认)' : ''}`,
+                    })),
+                  ]}
+                />
+              </label>
+            </div>
+            <span className="block text-[11px] text-[var(--cms-muted-fg)] -mt-2">
+              {editForm.environment === 'sandbox'
+                ? 'Sandbox 推广链接仅可绑定沙箱模板且仅在沙箱/测试环境生效，不会泄漏到线上 Live 流量。'
+                : '该模板绑定仅对通过此推广链接首次注册/首次触达的读者生效；已归因老用户仍按首触推广或默认模板计价。'}
+            </span>
           </form>
         )}
       </CmsDialog>

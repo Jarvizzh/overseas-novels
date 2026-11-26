@@ -233,7 +233,7 @@ func validateVIPQuoteTx(ctx context.Context, tx pgx.Tx, userID, productID int64,
 		WHERE s.id=$2 AND s.template_id=$3 AND s.product_id=$4
 		  AND p.product_type='vip' AND p.currency='USD' AND p.price_cents=$5 AND p.vip_cycle=$6
 		  AND s.template_id=COALESCE(
-		    (SELECT recharge_template_id FROM reader_promotion_for_user($1) WHERE recharge_template_id IS NOT NULL),
+		    (SELECT recharge_template_id FROM reader_promotion_for_user_env($1, $7) WHERE recharge_template_id IS NOT NULL),
 		    `+defaultLiveTemplateIDSQL+`)
 		FOR SHARE OF s,p,pub`, userID, slotID, templateID, productID, price, cycle, currentPaymentLedgerEnvironment()).Scan(&slot)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -400,7 +400,7 @@ func reserveVIPCheckoutIntentTx(
 		           'utm_source', u.utm_source, 'utm_campaign', u.utm_campaign
 		       )
 		FROM users u
-		LEFT JOIN LATERAL reader_promotion_for_user(u.id) p ON true
+		LEFT JOIN LATERAL reader_promotion_for_user_env(u.id, CASE WHEN $7 IN ('sandbox','test') THEN 'sandbox' ELSE 'live' END) p ON true
 		LEFT JOIN fb_pixels fp ON fp.id = p.fb_pixel_id
 		WHERE u.id = $12`,
 		intentID, prod.ID, prod.SlotID, prod.TemplateID, prod.PriceCents, prod.VipCycle,

@@ -36,7 +36,7 @@ var (
 	ErrInvalidSettingValue     = errors.New("无效的全局配置参数")
 	ErrInvalidNovelPricing     = errors.New("小说千字单价必须为 0 到 2147483647 的整数")
 	ErrInvalidPromoPricing     = errors.New("无效的推广链接计费参数")
-	ErrInvalidPromoTemplate    = errors.New("推广链接仅支持绑定 Live 环境的充值模板")
+	ErrInvalidPromoTemplate    = errors.New("推广链接仅支持绑定同环境（Live / Sandbox）的充值模板")
 	ErrInvalidGenres           = errors.New("分类标签总长度不能超过 2048 个字符")
 	ErrInvalidFilterParam      = errors.New("无效的查询筛选参数")
 	ErrInvalidBatchNovelIDs    = errors.New("请至少选择一本有效书籍")
@@ -139,7 +139,7 @@ type NovelService interface {
 	ListPromotionLinks(ctx context.Context) ([]PromotionLink, error)
 	GetPromotionLinkOptions(ctx context.Context) (*PromotionLinkOptions, error)
 	CreatePromotionLink(ctx context.Context, link *PromotionLink) (*PromotionLink, error)
-	UpdatePromotionLink(ctx context.Context, id int, name string, chapterIndex int, source, campaign, url string, pixelID, templateID, domainID, coinCost, startPayIndex *int, domain string) error
+	UpdatePromotionLink(ctx context.Context, id int, name, environment string, chapterIndex int, source, campaign, url string, pixelID, templateID, domainID, coinCost, startPayIndex *int, domain string) error
 	DeletePromotionLink(ctx context.Context, id int) error
 
 	ListFBPixels(ctx context.Context) ([]FBPixel, error)
@@ -1475,7 +1475,7 @@ func (s *novelService) GetPromotionLinkOptions(ctx context.Context) (*PromotionL
 			PixelID: p.PixelID,
 		})
 	}
-	templates, err := s.repo.ListLiveTemplateOptionsForPromo(ctx)
+	templates, err := s.repo.ListTemplateOptionsForPromo(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -1547,11 +1547,18 @@ func (s *novelService) CreatePromotionLink(ctx context.Context, link *PromotionL
 	return link, nil
 }
 
-func (s *novelService) UpdatePromotionLink(ctx context.Context, id int, name string, chapterIndex int, source, campaign, url string, pixelID, templateID, domainID, coinCost, startPayIndex *int, domain string) error {
+func (s *novelService) UpdatePromotionLink(ctx context.Context, id int, name, environment string, chapterIndex int, source, campaign, url string, pixelID, templateID, domainID, coinCost, startPayIndex *int, domain string) error {
 	if err := validatePromoPricing(coinCost, startPayIndex); err != nil {
 		return err
 	}
-	return s.repo.UpdatePromotionLink(ctx, id, name, chapterIndex, source, campaign, url, pixelID, templateID, domainID, coinCost, startPayIndex, domain)
+	return s.repo.UpdatePromotionLink(ctx, id, name, strings.TrimSpace(environment), chapterIndex, source, campaign, url, pixelID, templateID, domainID, coinCost, startPayIndex, domain)
+}
+
+func normalizePromotionEnvironment(env string) string {
+	if strings.TrimSpace(env) == "sandbox" {
+		return "sandbox"
+	}
+	return "live"
 }
 
 func (s *novelService) DeletePromotionLink(ctx context.Context, id int) error {

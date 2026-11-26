@@ -383,3 +383,97 @@ func TestReaderDefaultTemplateIgnoresSandboxDefaultRow(t *testing.T) {
 		t.Fatalf("whole_book_offer_available live=%v sbx=%v err=%v", okLive, okSbx, err)
 	}
 }
+
+// Sandbox promotion links work with sandbox templates in sandbox mode and never leak into live production mode.
+func TestSandboxPromotionLinkIsolatedFromLiveAndActiveInSandbox(t *testing.T) {
+	pool, svc, _ := setupRegressionReaderFixture(t)
+	ctx := t.Context()
+
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO payment_channel_accounts(provider, account_key, environment, credentials_ref, webhook_ref, display_name, status, is_primary, new_orders_enabled, new_subscriptions_enabled)
+		VALUES
+		('paypal', 'reg-paypal-live-iso', 'live', 'env:pp', 'env:pp', 'Reg PayPal Live', 'published', true, true, true),
+		('stripe', 'acct_RegLiveIso1', 'live', 'db:encrypted', 'test', 'Reg Stripe Live', 'published', true, true, true);
+	`); err != nil {
+		t.Fatal(err)
+	}
+
+	_ = seedTestProductAndSlot(t, pool, testCatalogSpec{
+		SlotID: 7501, TemplateID: 750, TemplateName: "Live Default Promo Iso", IsDefault: true, SlotIndex: 1,
+		Code: "RDR_LIVE_PROMO_ISO", ProductType: "single", PriceCents: 499, Coins: 500,
+		Environment: "live", PayPalAccountKey: "reg-paypal-live-iso", StripeAccountKey: "acct_RegLiveIso1",
+	})
+	pSbx := seedTestProductAndSlot(t, pool, testCatalogSpec{
+		SlotID: 7511, TemplateID: 751, TemplateName: "Sandbox Promo Template", IsDefault: false, SlotIndex: 1,
+		Code: "RDR_SBX_PROMO_ISO", ProductType: "single", PriceCents: 199, Coins: 200,
+		Environment: "sandbox", PayPalAccountKey: "reg-paypal", StripeAccountKey: "acct_RegPrimary1",
+	})
+	if _, err := pool.Exec(ctx, `
+		UPDATE recharge_templates SET environment='sandbox' WHERE id=751;
+		INSERT INTO promotion_links(id, name, environment, novel_id, novel_title, utm_source, utm_campaign, generated_url, recharge_template_id)
+		VALUES (7510, 'Sandbox Test Promo', 'sandbox', 701, 'Reg Novel', 'fb', 'sbx_camp', 'https://example.test/detail?novel_id=701', 751);
+		INSERT INTO users(id, email, promotion_link_id, promotion_resolved)
+		VALUES (751, 'sbx-promo-user@example.invalid', 7510, true);
+	`); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. In sandbox mode: resolves sandbox promotion link & sandbox template 751 and allows checkout.
+	t.Setenv("CONVERSION_ENVIRONMENT", "sandbox")
+	var resolvedSbx *int
+	if err := pool.QueryRow(ctx, `SELECT resolve_reader_promotion_for_env(7510, '', '', 'sandbox')`).Scan(&resolvedSbx); err != nil || resolvedSbx == nil || *resolvedSbx != 7510 {
+		t.Fatalf("expected sandbox promotion 7510 to resolve in sandbox, got %v err=%v", resolvedSbx, err)
+	}
+	sbxTpl, err := svc.GetRechargeTemplates(ctx, 751, 701)
+	if err != nil || sbxTpl.ID != 751 || len(sbxTpl.Slots) != 1 || sbxTpl.Slots[0].ID != 7511 {
+		t.Fatalf("expected sandbox template 751 with slot 7511 in sandbox mode, got %+v err=%v", sbxTpl, err)
+	}
+	if intent, err := svc.PreparePurchase(ctx, 751, pSbx, 7511, 0, uuid.NewString(), "", checkoutAttribution{}); err != nil || intent.SlotID != 7511 {
+		t.Fatalf("expected sandbox PreparePurchase on slot 7511 to succeed, intent=%+v err=%v", intent, err)
+	}
+
+	// 2. In live (production) mode: sandbox promotion 7510 is ignored and reader falls back to live default template 750.
+	t.Setenv("CONVERSION_ENVIRONMENT", "production")
+	var resolvedLive *int
+	if err := pool.QueryRow(ctx, `SELECT resolve_reader_promotion_for_env(7510, '', '', 'live')`).Scan(&resolvedLive); err != nil || resolvedLive != nil {
+		t.Fatalf("expected sandbox promotion 7510 NOT to resolve in live, got %v err=%v", resolvedLive, err)
+	}
+	liveTpl, err := svc.GetRechargeTemplates(ctx, 751, 701)
+	if err != nil || liveTpl.ID != 750 || len(liveTpl.Slots) != 1 || liveTpl.Slots[0].ID != 7501 {
+		t.Fatalf("expected live fallback template 750 with slot 7501 in production mode, got %+v err=%v", liveTpl, err)
+	}
+	if _, err := svc.PreparePurchase(ctx, 751, pSbx, 7511, 0, uuid.NewString(), "", checkoutAttribution{}); !errors.Is(err, ErrCheckoutUnavailable) {
+		t.Fatalf("expected sandbox slot 7511 blocked in live mode, got %v", err)
+	}
+
+	// 3. Fail-closed behavior: empty, NULL, or unknown env must NOT resolve sandbox promotion links.
+	for _, envExpr := range []string{`''`, `NULL::text`, `'staging'`} {
+		var resolved *int
+		if err := pool.QueryRow(ctx, `SELECT resolve_reader_promotion_for_env(7510, '', '', `+envExpr+`)`).Scan(&resolved); err != nil || resolved != nil {
+			t.Fatalf("expected sandbox promotion 7510 fail-closed for env=%s, got %v err=%v", envExpr, resolved, err)
+		}
+		var userPromoCount int
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM reader_promotion_for_user_env(751, `+envExpr+`)`).Scan(&userPromoCount); err != nil || userPromoCount != 0 {
+			t.Fatalf("expected reader_promotion_for_user_env fail-closed for env=%s, got %d err=%v", envExpr, userPromoCount, err)
+		}
+	}
+
+	// 4. UTM fallback in sandbox prefers unique sandbox match over a live link sharing the same UTM.
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO promotion_links(id, name, environment, novel_id, novel_title, chapter_index, utm_source, utm_campaign, generated_url)
+		VALUES (7520, 'Shared UTM Live', 'live', 701, 'Book 701', 1, 'fb', 'shared_campaign', 'https://example.test/live'),
+		       (7521, 'Shared UTM Sandbox', 'sandbox', 701, 'Book 701', 1, 'fb', 'shared_campaign', 'https://example.test/sbx')
+	`); err != nil {
+		t.Fatal(err)
+	}
+	var utmSbx, utmLive, utmEmpty *int
+	if err := pool.QueryRow(ctx, `SELECT
+		resolve_reader_promotion_for_env(0, 'fb', 'shared_campaign', 'sandbox'),
+		resolve_reader_promotion_for_env(0, 'fb', 'shared_campaign', 'live'),
+		resolve_reader_promotion_for_env(0, 'fb', 'shared_campaign', '')`).Scan(&utmSbx, &utmLive, &utmEmpty); err != nil {
+		t.Fatal(err)
+	}
+	if utmSbx == nil || *utmSbx != 7521 || utmLive == nil || *utmLive != 7520 || utmEmpty == nil || *utmEmpty != 7520 {
+		t.Fatalf("unexpected UTM fallback resolution: sandbox=%v live=%v empty=%v", utmSbx, utmLive, utmEmpty)
+	}
+}

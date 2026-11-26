@@ -171,7 +171,7 @@ func (r *dbRepository) RecordSubscriptionRenewalOrderTx(
  WHEN $10::timestamptz IS NULL AND $3::int < $14::int THEN 'PayPal settled amount is below the agreement price; billing period needs review'
  WHEN $10::timestamptz IS NULL THEN 'PayPal settled amount verified; billing period needs review' END,$11,(SELECT attribution FROM user_subscriptions WHERE subscription_id=$7::text) || jsonb_build_object('payer_email',$12::text),NULLIF($13,'')
 		FROM users u LEFT JOIN LATERAL (
-			SELECT id,novel_id FROM reader_promotion_for_user(u.id)
+			SELECT id,novel_id FROM reader_promotion_for_user_env(u.id, CASE WHEN $13 IN ('sandbox','test') THEN 'sandbox' ELSE 'live' END)
 		) p ON TRUE WHERE u.id=$1
 		ON CONFLICT(external_ref_id) DO UPDATE SET
 			paid_period_end=COALESCE(EXCLUDED.paid_period_end,recharge_orders.paid_period_end),

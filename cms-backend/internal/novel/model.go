@@ -41,6 +41,7 @@ type Chapter struct {
 type PromotionLink struct {
 	ID                   int       `json:"id"`
 	Name                 string    `json:"name"`
+	Environment          string    `json:"environment"`
 	NovelID              int64     `json:"novel_id"`
 	NovelTitle           string    `json:"novel_title"`
 	ChapterIndex         int       `json:"chapter_index"`
@@ -83,9 +84,10 @@ type PromotionLinkPixelOption struct {
 }
 
 type PromotionLinkTemplateOption struct {
-	ID        int    `json:"id"`
-	Name      string `json:"name"`
-	IsDefault bool   `json:"is_default"`
+	ID          int    `json:"id"`
+	Name        string `json:"name"`
+	Environment string `json:"environment"`
+	IsDefault   bool   `json:"is_default"`
 }
 
 type PromotionLinkDomainOption struct {

@@ -7,7 +7,7 @@ import type {
   PromotionLinkTemplateOption,
   SystemDomain,
 } from '../../utils/api';
-import { filterLivePromotionTemplates } from '../../utils/templateCatalogHelpers';
+import { filterPromotionTemplatesByEnv } from '../../utils/templateCatalogHelpers';
 
 export interface FBPixel {
   id: number;
@@ -25,6 +25,7 @@ export interface RechargeTemplate {
 
 export interface PromotionFormData {
   name: string;
+  environment: 'live' | 'sandbox';
   novelId: number;
   title: string;
   chapterIndex: string;
@@ -240,21 +241,51 @@ export const PromotionLinkModal: React.FC<PromotionLinkModalProps> = ({
           </label>
         </div>
 
-        <label className="block space-y-1.5">
-          <span className="block font-medium text-[var(--cms-muted-fg)]">绑定充值模板（可选）</span>
-          <CustomSelect
-            width="100%"
-            value={promotionForm.rechargeTemplateId}
-            onChange={(val) => setPromotionForm({ ...promotionForm, rechargeTemplateId: val })}
-            options={[
-              { value: '', label: '-- 使用默认激活模板 --' },
-              ...filterLivePromotionTemplates(templates).map((t) => ({ value: String(t.id), label: `${t.name} ${t.is_default ? '(默认)' : ''}` })),
-            ]}
-          />
-          <span className="block text-[11px] text-[var(--cms-muted-fg)]">
-            该模板绑定仅对通过此推广链接首次注册/首次触达的读者生效；已归因老用户仍按首触推广或默认模板计价。
-          </span>
-        </label>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <label className="space-y-1.5">
+            <span className="block font-medium text-[var(--cms-muted-fg)]">推广环境</span>
+            <CustomSelect
+              width="100%"
+              value={promotionForm.environment ?? 'live'}
+              onChange={(val) => {
+                const nextEnv: 'live' | 'sandbox' = val === 'sandbox' ? 'sandbox' : 'live';
+                const matched = filterPromotionTemplatesByEnv(templates, nextEnv).some(
+                  (t) => String(t.id) === promotionForm.rechargeTemplateId,
+                );
+                setPromotionForm({
+                  ...promotionForm,
+                  environment: nextEnv,
+                  rechargeTemplateId: matched ? promotionForm.rechargeTemplateId : '',
+                });
+              }}
+              options={[
+                { value: 'live', label: 'Live 正式（线上投放）' },
+                { value: 'sandbox', label: 'Sandbox 沙箱（仅联调测试）' },
+              ]}
+            />
+          </label>
+
+          <label className="space-y-1.5">
+            <span className="block font-medium text-[var(--cms-muted-fg)]">绑定充值模板（可选）</span>
+            <CustomSelect
+              width="100%"
+              value={promotionForm.rechargeTemplateId}
+              onChange={(val) => setPromotionForm({ ...promotionForm, rechargeTemplateId: val })}
+              options={[
+                { value: '', label: '-- 使用默认激活模板 --' },
+                ...filterPromotionTemplatesByEnv(templates, promotionForm.environment ?? 'live').map((t) => ({
+                  value: String(t.id),
+                  label: `${t.name} ${t.is_default ? '(默认)' : ''}`,
+                })),
+              ]}
+            />
+          </label>
+        </div>
+        <span className="block text-[11px] text-[var(--cms-muted-fg)] -mt-2">
+          {(promotionForm.environment ?? 'live') === 'sandbox'
+            ? 'Sandbox 推广链接仅可绑定沙箱模板且仅在沙箱/测试环境生效，不会泄漏到线上 Live 流量。'
+            : '该模板绑定仅对通过此推广链接首次注册/首次触达的读者生效；已归因老用户仍按首触推广或默认模板计价。'}
+        </span>
 
         {generatedLink && (
           <div className="p-3.5 rounded-xl bg-[var(--cms-content)] border border-[var(--cms-border)] space-y-2">

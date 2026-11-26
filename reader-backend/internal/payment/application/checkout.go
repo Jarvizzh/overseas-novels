@@ -53,8 +53,8 @@ func (r *dbRepository) GetCheckoutTemplate(ctx context.Context, userID int64) (i
 	var id int
 	err := db.Pool(ctx).QueryRow(ctx, `
 		SELECT COALESCE(
-			(SELECT p.recharge_template_id FROM reader_promotion_for_user($1) p WHERE p.recharge_template_id IS NOT NULL),
-			`+defaultLiveTemplateIDSQL+`, 0)`, userID).Scan(&id)
+			(SELECT p.recharge_template_id FROM reader_promotion_for_user_env($1, $2) p WHERE p.recharge_template_id IS NOT NULL),
+			`+defaultLiveTemplateIDSQL+`, 0)`, userID, currentPaymentLedgerEnvironment()).Scan(&id)
 	return id, err
 }
 
@@ -112,7 +112,7 @@ func insertCheckout(ctx context.Context, q checkoutQueryer, key string, userID i
 			u.utm_source, u.utm_campaign, p.id, $12::jsonb || jsonb_build_object('pixel_id',(SELECT fp.pixel_id FROM promotion_links l JOIN fb_pixels fp ON fp.id=l.fb_pixel_id WHERE l.id=p.id)),
 			$13, $14
 		FROM users u
-		LEFT JOIN LATERAL (SELECT id,novel_id,recharge_template_id FROM reader_promotion_for_user(u.id)) p ON TRUE
+		LEFT JOIN LATERAL (SELECT id,novel_id,recharge_template_id FROM reader_promotion_for_user_env(u.id, $15)) p ON TRUE
 		WHERE u.id = $11
 		  AND $6 > 0
 		  AND $7 = COALESCE(p.recharge_template_id,`+defaultLiveTemplateIDSQL+`)

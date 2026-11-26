@@ -949,6 +949,7 @@ func (h *Handler) GetPromotionLinkOptions(c *gin.Context) {
 
 type CreatePromotionLinkReq struct {
 	Name                 string `json:"name"`
+	Environment          string `json:"environment" binding:"omitempty,oneof=sandbox live"`
 	NovelID              int64  `json:"novel_id" binding:"required"`
 	NovelTitle           string `json:"novel_title" binding:"required"`
 	ChapterIndex         int    `json:"chapter_index"`
@@ -978,6 +979,7 @@ func (h *Handler) CreatePromotionLink(c *gin.Context) {
 	ctx := c.Request.Context()
 	link := &PromotionLink{
 		Name:                 req.Name,
+		Environment:          normalizePromotionEnvironment(req.Environment),
 		NovelID:              req.NovelID,
 		NovelTitle:           req.NovelTitle,
 		ChapterIndex:         req.ChapterIndex,
@@ -1015,6 +1017,7 @@ func (h *Handler) CreatePromotionLink(c *gin.Context) {
 
 type UpdatePromotionLinkReq struct {
 	Name                 string `json:"name"`
+	Environment          string `json:"environment" binding:"omitempty,oneof=sandbox live"`
 	ChapterIndex         int    `json:"chapter_index"`
 	UtmSource            string `json:"utm_source"`
 	UtmCampaign          string `json:"utm_campaign"`
@@ -1047,7 +1050,7 @@ func (h *Handler) UpdatePromotionLink(c *gin.Context) {
 	}
 
 	ctx := c.Request.Context()
-	err = h.service.UpdatePromotionLink(ctx, id, req.Name, req.ChapterIndex, req.UtmSource, req.UtmCampaign, req.GeneratedURL, req.FBPixelID, req.RechargeTemplateID, req.DomainID, req.CoinCostPerThousand, req.StartPayChapterIndex, req.Domain)
+	err = h.service.UpdatePromotionLink(ctx, id, req.Name, req.Environment, req.ChapterIndex, req.UtmSource, req.UtmCampaign, req.GeneratedURL, req.FBPixelID, req.RechargeTemplateID, req.DomainID, req.CoinCostPerThousand, req.StartPayChapterIndex, req.Domain)
 	if err != nil {
 		if errors.Is(err, ErrInvalidPromoPricing) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})

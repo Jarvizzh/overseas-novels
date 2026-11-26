@@ -140,12 +140,12 @@ func reserveStripeVIPTx(ctx context.Context, tx pgx.Tx, e *checkoutEvaluation, r
 		JOIN product_channel_bindings b ON b.product_id=prod.id AND b.account_id=$3 AND b.provider='stripe' AND b.environment=$10
 		JOIN users u ON u.id=$2
 		CROSS JOIN LATERAL (SELECT payment_last_stripe_billing_country($3,$2) AS country) expected
-		LEFT JOIN LATERAL reader_promotion_for_user(u.id) p ON true LEFT JOIN fb_pixels fp ON fp.id=p.fb_pixel_id
+		LEFT JOIN LATERAL reader_promotion_for_user_env(u.id, $10) p ON true LEFT JOIN fb_pixels fp ON fp.id=p.fb_pixel_id
 		WHERE s.id=$5 AND prod.product_type='vip'
 		  AND b.enabled=true AND b.validation_status='verified' AND b.external_product_ref<>'' AND b.external_price_ref<>''
 		  AND ($10='sandbox' OR (b.validated_catalog IS NOT NULL AND b.release_evidence IS NOT NULL AND b.market_policy IS NOT NULL
 		   AND (expected.country IS NULL OR expected.country=ANY(b.allowed_countries))))
-		  AND s.template_id=COALESCE((SELECT recharge_template_id FROM reader_promotion_for_user($2) WHERE recharge_template_id IS NOT NULL),
+		  AND s.template_id=COALESCE((SELECT recharge_template_id FROM reader_promotion_for_user_env($2, $10) WHERE recharge_template_id IS NOT NULL),
 			`+defaultLiveTemplateIDSQL+`)`, id, req.userID, e.accountID,
 		conversion.Environment(), req.slotID, returnURL, cancelURL, req.returnPath, metadata, req.account.Environment)
 	if err != nil {
@@ -169,7 +169,7 @@ func stripeVIPSlots(ctx context.Context, account payment.WebhookAccount, user in
 		 AND p.product_type='vip' AND b.enabled=true AND b.validation_status='verified' AND b.external_product_ref<>'' AND b.external_price_ref<>''
 		 AND (a.environment='sandbox' OR (b.validated_catalog IS NOT NULL AND b.release_evidence IS NOT NULL AND b.market_policy IS NOT NULL
 		  AND COALESCE(payment_last_stripe_billing_country(a.id,$3)=ANY(b.allowed_countries),true)))
-		 AND s.template_id=COALESCE((SELECT recharge_template_id FROM reader_promotion_for_user($3) WHERE recharge_template_id IS NOT NULL),
+		 AND s.template_id=COALESCE((SELECT recharge_template_id FROM reader_promotion_for_user_env($3, $2) WHERE recharge_template_id IS NOT NULL),
 			`+defaultLiveTemplateIDSQL+`)
 		ORDER BY s.id`, account.AccountKey, account.Environment, user)
 	if err != nil {
@@ -208,7 +208,7 @@ func claimStripeVIP(ctx context.Context, account payment.WebhookAccount, id stri
 		                    WHERE s.id=u.slot_id AND s.template_id=u.template_id AND p.id=u.product_id
 		                      AND p.product_type='vip' AND p.currency=u.currency AND p.price_cents=u.price_cents AND p.vip_cycle=u.cycle
 		                      AND s.template_id=COALESCE(
-		                          (SELECT recharge_template_id FROM reader_promotion_for_user(u.user_id) WHERE recharge_template_id IS NOT NULL),
+		                          (SELECT recharge_template_id FROM reader_promotion_for_user_env(u.user_id, a.environment) WHERE recharge_template_id IS NOT NULL),
 		                          `+defaultLiveTemplateIDSQL+`)
 		                    FOR SHARE OF s,p,pub
 		                ))))

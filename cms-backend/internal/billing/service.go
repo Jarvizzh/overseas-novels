@@ -378,13 +378,16 @@ func (s *billingService) UpdateRechargeTemplate(ctx context.Context, adminID str
 	if isDefault && env != "live" {
 		return fmt.Errorf("%w: sandbox templates cannot be set as the site default", ErrTemplateEnvPolicy)
 	}
-	if env != "live" {
+	if env != "live" && wasDefault {
+		return fmt.Errorf("%w: default templates must remain in live environment", ErrTemplateEnvPolicy)
+	}
+	if env != existingEnv {
 		var hasPromoRef bool
 		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM promotion_links WHERE recharge_template_id = $1 FOR SHARE)`, id).Scan(&hasPromoRef); err != nil {
 			return err
 		}
-		if wasDefault || hasPromoRef {
-			return fmt.Errorf("%w: default or promotion-linked templates must remain in live environment", ErrTemplateEnvPolicy)
+		if hasPromoRef {
+			return fmt.Errorf("%w: promotion-linked templates cannot change environment while referenced", ErrTemplateEnvPolicy)
 		}
 	}
 

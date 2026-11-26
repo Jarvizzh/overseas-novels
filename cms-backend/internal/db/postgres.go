@@ -96,7 +96,8 @@ const (
 	conversionBatchVersion            int64 = 2026111932
 	conversionRereviewVersion         int64 = 2026111933
 	conversionCredentialHealthVersion int64 = 2026111934
-	RequiredSchemaVersion             int64 = 2026111935
+	rbacPermissionsVersion            int64 = 2026111935
+	RequiredSchemaVersion             int64 = 2026111936
 )
 
 // BootstrapAdminConfig holds environment-injected credentials for initializing
@@ -356,7 +357,12 @@ func autoMigrateInternal(ctx context.Context, pool *pgxpool.Pool, bootstrap *Boo
 			return fmt.Errorf("schema migration %d: %w", conversionCredentialHealthVersion, err)
 		}
 	}
-	if _, err := tx.Exec(ctx, dbassets.RBACPermissionsSQL); err != nil {
+	if version < rbacPermissionsVersion {
+		if _, err := tx.Exec(ctx, dbassets.RBACPermissionsSQL); err != nil {
+			return fmt.Errorf("schema migration %d: %w", rbacPermissionsVersion, err)
+		}
+	}
+	if _, err := tx.Exec(ctx, dbassets.PromotionEnvironmentSQL); err != nil {
 		return fmt.Errorf("schema migration %d: %w", RequiredSchemaVersion, err)
 	}
 	if bootstrap != nil {

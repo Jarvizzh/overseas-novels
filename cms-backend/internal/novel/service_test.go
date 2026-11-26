@@ -390,7 +390,7 @@ func (r *fakeNovelRepo) UpdatePromotionLinkURL(_ context.Context, id int, genera
 	}
 	return nil
 }
-func (r *fakeNovelRepo) UpdatePromotionLink(context.Context, int, string, int, string, string, string, *int, *int, *int, *int, *int, string) error {
+func (r *fakeNovelRepo) UpdatePromotionLink(context.Context, int, string, string, int, string, string, string, *int, *int, *int, *int, *int, string) error {
 	return nil
 }
 func (r *fakeNovelRepo) DeletePromotionLink(context.Context, int) error  { return nil }
@@ -410,7 +410,7 @@ func (r *fakeNovelRepo) ListPublishedNovelOptionsForPromo(context.Context) ([]Pr
 	}
 	return out, nil
 }
-func (r *fakeNovelRepo) ListLiveTemplateOptionsForPromo(context.Context) ([]PromotionLinkTemplateOption, error) {
+func (r *fakeNovelRepo) ListTemplateOptionsForPromo(context.Context) ([]PromotionLinkTemplateOption, error) {
 	return []PromotionLinkTemplateOption{}, nil
 }
 func (r *fakeNovelRepo) ListActiveDomainOptionsForPromo(context.Context) ([]PromotionLinkDomainOption, error) {

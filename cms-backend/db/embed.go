@@ -189,3 +189,8 @@ var ConversionCredentialHealthSQL string
 //
 //go:embed migrations/2026111935.sql
 var RBACPermissionsSQL string
+
+// PromotionEnvironmentSQL scopes promotion_links by environment (live/sandbox) and adds env-aware reader promotion functions.
+//
+//go:embed migrations/2026111936.sql
+var PromotionEnvironmentSQL string
