@@ -211,6 +211,7 @@ func (p *Client) CreateOrder(ctx context.Context, account payment.WebhookAccount
 
 // CaptureOrder captures a PayPal single transaction
 var (
+	ErrOrderCreated  = errors.New("PayPal order is awaiting buyer approval")
 	ErrOrderApproved = errors.New("PayPal order approved and awaiting capture")
 	ErrOrderClosed   = errors.New("PayPal order is voided")
 )
@@ -275,6 +276,9 @@ func (p *Client) readCapture(ctx context.Context, orderID string, expectedAccoun
 		if captureResp.Status == "APPROVED" {
 			return result, ErrOrderApproved
 		}
+	}
+	if !captureOrder && captureResp.Status == "CREATED" {
+		return nil, ErrOrderCreated
 	}
 	if captureResp.Status == "PAYER_ACTION_REQUIRED" {
 		return nil, payment.ErrCheckoutVerificationRequired

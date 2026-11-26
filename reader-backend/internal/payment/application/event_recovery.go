@@ -146,7 +146,11 @@ func (s *service) enqueueRecoveredPayPal(ctx context.Context, event paypal.Event
 	}
 	fact.LookupOnly = true
 	_, registered := payment.AccountCapability[payment.WebhookProvider](s.adapters, payment.ProviderPayPal, event.Account)
-	return nil, s.repo.enqueuePayPalEvent(ctx, fact, registered)
+	if err := s.repo.enqueuePayPalEvent(ctx, fact, registered); err != nil {
+		return nil, err
+	}
+	notifyWorker(s.paypalEventsWake)
+	return nil, nil
 }
 
 func (s *service) recoverStripeEventWindow(ctx context.Context) {
@@ -167,7 +171,11 @@ func (s *service) recoverStripeEventWindow(ctx context.Context) {
 		if err != nil {
 			return err, nil
 		}
-		return nil, queueStripeNotice(ctx, notice, raw)
+		if err := queueStripeNotice(ctx, notice, raw); err != nil {
+			return nil, err
+		}
+		notifyWorker(s.stripeEventsWake)
+		return nil, nil
 	})
 	s.recoverPaymentEventWindow(ctx, payment.ProviderStripe, adapter.AccountScope(), func(ctx context.Context, w paymentEventWindowLease) (string, error) {
 		if time.Since(w.start) >= 30*24*time.Hour {
@@ -193,6 +201,7 @@ func (s *service) recoverStripeEventWindow(ctx context.Context) {
 			if err := queueStripeNotice(ctx, notice, body); err != nil {
 				return "", err
 			}
+			notifyWorker(s.stripeEventsWake)
 		}
 		if !page.HasMore {
 			return "", nil

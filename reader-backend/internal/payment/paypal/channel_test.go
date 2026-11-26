@@ -276,6 +276,18 @@ func TestCheckoutRejectsMismatchedMerchantAndPreservesEvidence(t *testing.T) {
 	}
 }
 
+func TestGetCaptureDistinguishesCreatedOrder(t *testing.T) {
+	client := channelFixture(t, func(req *http.Request) (*http.Response, error) {
+		if req.Method != http.MethodGet || req.URL.Path != "/v2/checkout/orders/PAYPAL-CREATED" {
+			t.Fatalf("unexpected request: %s %s", req.Method, req.URL)
+		}
+		return response(200, `{"id":"PAYPAL-CREATED","status":"CREATED","purchase_units":[{"payee":{"merchant_id":"merchant-fixture"},"amount":{"currency_code":"USD","value":"9.99"},"custom_id":"attempt-created"}]}`)
+	})
+	if _, err := client.GetCapture(t.Context(), "PAYPAL-CREATED"); !errors.Is(err, ErrOrderCreated) {
+		t.Fatalf("expected ErrOrderCreated, got %v", err)
+	}
+}
+
 func TestPayPalRefundAmountsUseCurrencyScale(t *testing.T) {
 	if got := formatAmount(999, "JPY"); got != "999" {
 		t.Fatalf("unexpected JPY request amount: %s", got)

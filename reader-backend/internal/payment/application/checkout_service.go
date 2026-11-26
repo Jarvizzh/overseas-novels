@@ -54,7 +54,7 @@ func (s *service) GetPurchase(ctx context.Context, userID int64, intentID, paypa
 	return s.getPurchase(ctx, userID, intentID, paypalOrderID, true)
 }
 
-func (s *service) getPurchase(ctx context.Context, userID int64, intentID, paypalOrderID string, refreshVIP bool) (*PurchaseIntent, error) {
+func (s *service) getPurchase(ctx context.Context, userID int64, intentID, paypalOrderID string, refresh bool) (*PurchaseIntent, error) {
 	if intentID != "" {
 		id, err := uuid.Parse(intentID)
 		if err != nil || id == uuid.Nil {
@@ -64,10 +64,32 @@ func (s *service) getPurchase(ctx context.Context, userID int64, intentID, paypa
 	} else if paypalOrderID == "" {
 		return nil, ErrCheckoutUnavailable
 	}
-	if vipIntent, found, err := s.tryGetVIPPurchaseIntent(ctx, userID, intentID, paypalOrderID, refreshVIP); found {
+	if vipIntent, found, err := s.tryGetVIPPurchaseIntent(ctx, userID, intentID, paypalOrderID, refresh); found {
 		return vipIntent, err
 	}
-	return s.repo.purchaseByReference(ctx, userID, intentID, paypalOrderID)
+	intent, err := s.repo.purchaseByReference(ctx, userID, intentID, paypalOrderID)
+	if err != nil {
+		return nil, err
+	}
+	if refresh && paypalOrderID != "" && intent.Provider == payment.ProviderPayPal &&
+		(intent.Status == "awaiting_approval" || intent.Status == "confirming") &&
+		intent.ConfirmationCode == "" &&
+		intent.ExternalOrderID == paypalOrderID &&
+		s.claimReturnProbe(paypalOrderID, 4*time.Second) {
+		// Buyer returned from PayPal approval; attempt idempotent capture immediately
+		// using a bounded detached context so a client tab switch/disconnect cannot
+		// abort an in-flight capture or drop a committed receipt.
+		capCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 12*time.Second)
+		_, capErr := s.completePayPalOrder(capCtx, userID, paypalOrderID, true)
+		cancel()
+		if capErr != nil && !errors.Is(capErr, paypal.ErrOrderCreated) && !errors.Is(capErr, ErrCheckoutPending) {
+			log.Printf("task=purchase_return order=%s intent=%s error=%v", paypalOrderID, intent.ID, capErr)
+		}
+		if refreshed, refreshErr := s.repo.purchaseByReference(ctx, userID, intent.ID, paypalOrderID); refreshErr == nil {
+			return refreshed, nil
+		}
+	}
+	return intent, nil
 }
 
 func (s *service) ListRecentPurchases(ctx context.Context, userID int64) ([]PurchaseIntent, error) {
@@ -481,7 +503,7 @@ func (s *service) completePayPalOrder(ctx context.Context, userID int64, orderID
 		}
 	}
 	if err != nil {
-		if order.managedAttempt {
+		if order.managedAttempt && !errors.Is(err, paypal.ErrOrderCreated) {
 			if saveErr := s.repo.recordCaptureOutcome(ctx, order.id, orderID, captureOutcomeFor(err)); saveErr != nil {
 				return nil, errors.Join(err, saveErr)
 			}
@@ -493,9 +515,13 @@ func (s *service) completePayPalOrder(ctx context.Context, userID int64, orderID
 		}
 		return nil, err
 	}
-	result, err := s.repo.settleCheckout(ctx, orderID, capture)
+	// Once PayPal has returned a verified capture receipt, detach caller cancellation
+	// so client disconnects cannot drop settlement or review flagging.
+	settleCtx, settleCancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+	defer settleCancel()
+	result, err := s.repo.settleCheckout(settleCtx, orderID, capture)
 	if errors.Is(err, ErrCheckoutUnavailable) || errors.Is(err, errRefundUnmatched) {
-		if markErr := s.repo.flagCheckoutForReview(ctx, order.id, "PayPal payment or refund requires verification"); markErr != nil {
+		if markErr := s.repo.flagCheckoutForReview(settleCtx, order.id, "PayPal payment or refund requires verification"); markErr != nil {
 			return nil, markErr
 		}
 	}

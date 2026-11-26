@@ -24,22 +24,25 @@ func (s *service) RunReconciliation(ctx context.Context) {
 	type scheduledWorker struct {
 		run      func(context.Context)
 		interval time.Duration
+		wake     <-chan struct{}
 	}
 	scheduled := []scheduledWorker{
-		{func(ctx context.Context) { s.eachPayPalAccount(ctx, (*service).reconcilePayPalEvents) }, 15 * time.Second}, {s.reconcilePayPalOrders, 15 * time.Second},
-		{s.reconcilePayPalCancellations, 15 * time.Second}, {s.reconcilePayPalSubscriptions, 15 * time.Second},
-		{func(ctx context.Context) { s.eachPayPalAccount(ctx, (*service).reconcileRefundCommands) }, 15 * time.Second},
-		{s.reconcileAftercare, aftercareInterval},
-		{func(ctx context.Context) { s.eachStripeAccount(ctx, (*service).reconcileStripeCheckouts) }, stripeCheckoutInterval},
-		{func(ctx context.Context) { s.eachPayPalAccount(ctx, (*service).recoverPayPalEventWindow) }, paymentEventRecoveryInterval},
-		{func(ctx context.Context) { s.eachStripeAccount(ctx, (*service).recoverStripeEventWindow) }, paymentEventRecoveryInterval},
-		{func(ctx context.Context) { s.eachStripeAccount(ctx, (*service).reconcileStripeVIP) }, stripeCheckoutInterval},
-		{func(ctx context.Context) { s.eachStripeAccount(ctx, (*service).reconcileStripeRefunds) }, stripeCheckoutInterval},
-		{s.reconcileSettlementCommands, stripeCheckoutInterval},
-		{s.reconcileAutomaticLedger, paymentEventRecoveryInterval},
+		{func(ctx context.Context) { s.eachPayPalAccount(ctx, (*service).reconcilePayPalEvents) }, 15 * time.Second, s.paypalEventsWake},
+		{s.reconcilePayPalOrders, 15 * time.Second, nil},
+		{s.reconcilePayPalCancellations, 15 * time.Second, nil},
+		{s.reconcilePayPalSubscriptions, 15 * time.Second, nil},
+		{func(ctx context.Context) { s.eachPayPalAccount(ctx, (*service).reconcileRefundCommands) }, 15 * time.Second, nil},
+		{s.reconcileAftercare, aftercareInterval, nil},
+		{func(ctx context.Context) { s.eachStripeAccount(ctx, (*service).reconcileStripeCheckouts) }, stripeCheckoutInterval, s.stripeEventsWake},
+		{func(ctx context.Context) { s.eachPayPalAccount(ctx, (*service).recoverPayPalEventWindow) }, paymentEventRecoveryInterval, nil},
+		{func(ctx context.Context) { s.eachStripeAccount(ctx, (*service).recoverStripeEventWindow) }, paymentEventRecoveryInterval, nil},
+		{func(ctx context.Context) { s.eachStripeAccount(ctx, (*service).reconcileStripeVIP) }, stripeCheckoutInterval, nil},
+		{func(ctx context.Context) { s.eachStripeAccount(ctx, (*service).reconcileStripeRefunds) }, stripeCheckoutInterval, nil},
+		{s.reconcileSettlementCommands, stripeCheckoutInterval, nil},
+		{s.reconcileAutomaticLedger, paymentEventRecoveryInterval, nil},
 	}
 	if config.AppConfig.PaymentTaskMetrics {
-		scheduled = append(scheduled, scheduledWorker{s.observePaymentTasks, 30 * time.Second})
+		scheduled = append(scheduled, scheduledWorker{s.observePaymentTasks, 30 * time.Second, nil})
 	}
 	for _, worker := range scheduled {
 		workers.Go(func() {
@@ -50,10 +53,14 @@ func (s *service) RunReconciliation(ctx context.Context) {
 				case <-ctx.Done():
 					return
 				case <-ticker.C:
-					cycle, cancel := context.WithTimeout(ctx, 8*time.Minute)
-					worker.run(cycle)
-					cancel()
+				case <-worker.wake:
 				}
+				if ctx.Err() != nil {
+					return
+				}
+				cycle, cancel := context.WithTimeout(ctx, 8*time.Minute)
+				worker.run(cycle)
+				cancel()
 			}
 		})
 	}

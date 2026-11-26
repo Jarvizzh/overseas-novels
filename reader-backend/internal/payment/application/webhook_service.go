@@ -27,7 +27,11 @@ func (s *service) ProcessSubscriptionWebhook(ctx context.Context, providerName s
 			}
 			notice, err := checkout.VerifySingleCheckoutEvent(payload, providerHeader(headers, "Stripe-Signature"))
 			if err == nil && (notice == nil || notice.Account == checkout.AccountScope()) {
-				return queueStripeNotice(ctx, notice, payload)
+				if err := queueStripeNotice(ctx, notice, payload); err != nil {
+					return err
+				}
+				notifyWorker(s.stripeEventsWake)
+				return nil
 			}
 		}
 		return errors.New("Stripe event could not be verified for a configured account")
@@ -49,7 +53,11 @@ func (s *service) ProcessSubscriptionWebhook(ctx context.Context, providerName s
 		event, err := provider.ParseWebhook(ctx, payload, headers)
 		if err == nil && event != nil && event.EventID != "" && event.Account == account {
 			_, registered := payment.AccountCapability[payment.WebhookProvider](s.adapters, providerName, event.Account)
-			return s.repo.enqueuePayPalEvent(ctx, event, registered)
+			if err := s.repo.enqueuePayPalEvent(ctx, event, registered); err != nil {
+				return err
+			}
+			notifyWorker(s.paypalEventsWake)
+			return nil
 		}
 	}
 	return errors.New("PayPal event could not be verified for a configured account")
@@ -81,7 +89,11 @@ func (s *service) ProcessChannelWebhook(ctx context.Context, token string, paylo
 		if notice != nil && notice.Account != scope {
 			return errors.New("Stripe channel webhook account mismatch")
 		}
-		return queueStripeNotice(ctx, notice, payload)
+		if err := queueStripeNotice(ctx, notice, payload); err != nil {
+			return err
+		}
+		notifyWorker(s.stripeEventsWake)
+		return nil
 	case payment.ProviderPayPal:
 		whProvider, ok := adapter.(payment.WebhookProvider)
 		if !ok {
@@ -94,7 +106,11 @@ func (s *service) ProcessChannelWebhook(ctx context.Context, token string, paylo
 			}
 			return errors.New("PayPal channel webhook verification failed")
 		}
-		return s.repo.enqueuePayPalEvent(ctx, event, true)
+		if err := s.repo.enqueuePayPalEvent(ctx, event, true); err != nil {
+			return err
+		}
+		notifyWorker(s.paypalEventsWake)
+		return nil
 	default:
 		return ErrCheckoutUnavailable
 	}

@@ -2097,6 +2097,108 @@
   }
 }
 
+/* Recharge Sticky Checkout Bar */
+.scroll-container.recharge-scroll-container {
+  padding-bottom: 20px;
+}
+
+.recharge-checkout-bar {
+  flex-shrink: 0;
+  border-top: 1px solid var(--border-color);
+  padding: 10px 16px calc(12px + env(safe-area-inset-bottom));
+  z-index: 40;
+}
+
+.recharge-checkout-inner {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.recharge-checkout-summary {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding-inline: 2px;
+}
+
+.recharge-checkout-summary-title {
+  font-size: 0.8125rem;
+  font-weight: 500;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.recharge-checkout-summary-price {
+  font-size: 0.9375rem;
+  font-weight: 700;
+  color: var(--text-primary);
+  flex-shrink: 0;
+}
+
+.recharge-checkout-actions {
+  display: grid;
+  gap: 10px;
+}
+
+.recharge-paypal-btn,
+.btn-cta-primary.recharge-card-btn {
+  width: 100%;
+  min-width: 0;
+  min-block-size: 48px;
+  padding: 10px 14px;
+  border-radius: 999px;
+  font-size: 0.9375rem;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  white-space: nowrap;
+  overflow: hidden;
+  transition: var(--transition-fast);
+}
+
+.recharge-btn-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.recharge-paypal-btn {
+  background-color: #F5C344;
+  color: #0F265C;
+  border: none;
+  cursor: pointer;
+}
+
+.recharge-paypal-btn:hover:not(:disabled) {
+  filter: brightness(0.96);
+}
+
+.recharge-paypal-btn:active:not(:disabled) {
+  transform: scale(0.985);
+}
+
+.recharge-paypal-btn:disabled,
+.btn-cta-primary.recharge-card-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+@media (max-width: 360px) {
+  .recharge-paypal-btn,
+  .btn-cta-primary.recharge-card-btn {
+    padding: 10px 10px;
+    font-size: 0.875rem;
+    gap: 5px;
+  }
+}
+
 /* Form Input Standard (>= 16px on mobile to prevent Safari auto-zoom) */
 .sn-input {
   width: 100%;

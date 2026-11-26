@@ -3,6 +3,7 @@ package application
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	"reader-backend/internal/model"
@@ -41,12 +42,20 @@ type SubscriptionAccess interface {
 	HasActiveSubscription(context.Context, int64) (bool, error)
 }
 
+type returnProbeLimiter struct {
+	mu    sync.Mutex
+	until map[string]time.Time
+}
+
 type service struct {
 	repo             Repository
 	readingAccess    SubscriptionAccess
 	paypalClient     paypalCheckout
 	adapters         payment.Adapters
 	historicalStripe bool
+	paypalEventsWake chan struct{}
+	stripeEventsWake chan struct{}
+	returnProbe      *returnProbeLimiter
 }
 
 // paypalCheckout is the set of capabilities used by the existing PayPal purchase flow.
@@ -67,11 +76,47 @@ type subscriptionCheckout interface {
 func NewService(repo Repository, readingAccess SubscriptionAccess, adapters payment.Adapters) Service {
 	paypalClient, _ := payment.Capability[paypalCheckout](adapters, payment.ProviderPayPal)
 	return &service{
-		repo:          repo,
-		readingAccess: readingAccess,
-		paypalClient:  paypalClient,
-		adapters:      adapters,
+		repo:             repo,
+		readingAccess:    readingAccess,
+		paypalClient:     paypalClient,
+		adapters:         adapters,
+		paypalEventsWake: make(chan struct{}, 1),
+		stripeEventsWake: make(chan struct{}, 1),
+		returnProbe:      &returnProbeLimiter{},
 	}
+}
+
+func notifyWorker(ch chan struct{}) {
+	if ch == nil {
+		return
+	}
+	select {
+	case ch <- struct{}{}:
+	default:
+	}
+}
+
+func (s *service) claimReturnProbe(orderID string, cooldown time.Duration) bool {
+	if orderID == "" || cooldown <= 0 || s.returnProbe == nil {
+		return true
+	}
+	now := time.Now()
+	s.returnProbe.mu.Lock()
+	defer s.returnProbe.mu.Unlock()
+	if s.returnProbe.until == nil {
+		s.returnProbe.until = make(map[string]time.Time)
+	} else if len(s.returnProbe.until) > 1000 {
+		for id, until := range s.returnProbe.until {
+			if !now.Before(until) {
+				delete(s.returnProbe.until, id)
+			}
+		}
+	}
+	if until, ok := s.returnProbe.until[orderID]; ok && now.Before(until) {
+		return false
+	}
+	s.returnProbe.until[orderID] = now.Add(cooldown)
+	return true
 }
 
 func (s *service) primaryPayPalClient() paypalCheckout {
