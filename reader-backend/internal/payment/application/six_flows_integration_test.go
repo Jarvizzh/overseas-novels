@@ -33,6 +33,8 @@ type sixFlowPayPalAdapter struct {
 	createFault    string
 	cancelFault    func(string) error
 	beforeCreate   func()
+	listTxCalls    int
+	activateCalls  int
 }
 
 func (a *sixFlowPayPalAdapter) CreateOrder(_ context.Context, _ payment.WebhookAccount, _ int64, customID, _, _, _, _ string) (string, string, error) {
@@ -103,7 +105,10 @@ func (a *sixFlowPayPalAdapter) GetSubscription(_ context.Context, id string) (*p
 	return &payment.SubscriptionDetails{SubscriptionID: id, Status: "APPROVAL_PENDING"}, nil
 }
 
-func (a *sixFlowPayPalAdapter) ActivateSubscription(context.Context, string) error { return nil }
+func (a *sixFlowPayPalAdapter) ActivateSubscription(context.Context, string) error {
+	a.activateCalls++
+	return nil
+}
 
 func (a *sixFlowPayPalAdapter) CancelSubscription(_ context.Context, id, _ string) error {
 	a.cancelledSubs = append(a.cancelledSubs, id)
@@ -115,6 +120,7 @@ func (a *sixFlowPayPalAdapter) CancelSubscription(_ context.Context, id, _ strin
 }
 
 func (a *sixFlowPayPalAdapter) ListSubscriptionTransactions(context.Context, string, time.Time, time.Time) ([]payment.SubscriptionTransaction, error) {
+	a.listTxCalls++
 	return nil, nil
 }
 

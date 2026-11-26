@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"time"
 
 	"reader-backend/internal/conversion"
@@ -139,6 +140,17 @@ func (s *service) ActivateSubscription(
 	}
 	if details.PlanID != sub.PlanID || details.SubscriptionID != subscriptionID {
 		return ErrCheckoutUnavailable
+	}
+	if providerName == payment.ProviderPayPal && sub.Status == "CANCELLED" &&
+		(details.Status == "APPROVED" || details.Status == "ACTIVE" || details.Status == "SUSPENDED") {
+		log.Printf("task=paypal_subscription action=requeue_late_cancel sub=%s live_status=%s source=activate",
+			sub.SubscriptionID, details.Status)
+		if err := requeueLateApprovedPayPalCancellation(ctx, sub.SubscriptionID, "Superseded PayPal subscription approved after cancellation"); err != nil {
+			return err
+		}
+		if details.Status != "ACTIVE" {
+			return nil
+		}
 	}
 	switch details.Status {
 	case "APPROVED":

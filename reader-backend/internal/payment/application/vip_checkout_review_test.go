@@ -59,7 +59,7 @@ func testUnifiedVIPReview(t *testing.T, svc *service, pool *pgxpool.Pool, pp *si
 		return result
 	}
 	exec(`INSERT INTO users(id) SELECT generate_series(610,629)`)
-	exec(`INSERT INTO users(id) SELECT generate_series(680,684)`)
+	exec(`INSERT INTO users(id) SELECT generate_series(680,689)`)
 
 	t.Run("PayPal cancellation uncertainty keeps original checkout", func(t *testing.T) {
 		intent := prepare(610, 605, uuid.NewString())
@@ -233,6 +233,105 @@ func testUnifiedVIPReview(t *testing.T, svc *service, pool *pgxpool.Pool, pp *si
 		if got.Status != "awaiting_approval" || got.ApprovalURL == "" || got.ApprovalURL == old.ApprovalURL || stripe.vipSessionSeq != before+1 {
 			t.Fatalf("same-channel retry after Stripe session expiry did not create fresh checkout: got=%+v old=%+v seq=%d/%d",
 				got, old, stripe.vipSessionSeq, before+1)
+		}
+	})
+
+	t.Run("late PayPal approval on ActivateSubscription, payment_failed webhook, and APPROVED reconcile requeues cancel", func(t *testing.T) {
+		notFound404 := func(string) error {
+			return &paypal.APIError{
+				Status: http.StatusNotFound,
+				Name:   "RESOURCE_NOT_FOUND",
+				Issues: []string{"INVALID_RESOURCE_ID"},
+			}
+		}
+
+		// 1. ActivateSubscription on locally-CANCELLED sub with live APPROVED must requeue CANCEL_PENDING without activating.
+		i1 := prepare(685, 605, uuid.NewString())
+		old1 := startPayPal(685, i1.ID)
+		pp.cancelFault = notFound404
+		_ = startStripe(685, i1.ID)
+		pp.cancelFault = nil
+		pp.subDetailsByID[old1.ExternalOrderID].Status = "APPROVED"
+		activatesBefore := pp.activateCalls
+		if err := svc.ActivateSubscription(ctx, 685, payment.ProviderPayPal, old1.ExternalOrderID, "", "", "", "", "", "", ""); err != nil {
+			t.Fatalf("ActivateSubscription failed: %v", err)
+		}
+		if pp.activateCalls != activatesBefore {
+			t.Fatalf("ActivateSubscription must not activate a locally CANCELLED sub, calls=%d/%d", pp.activateCalls, activatesBefore)
+		}
+		if sub, err := repo.GetSubscriptionByID(ctx, old1.ExternalOrderID); err != nil || sub == nil || sub.Status != "CANCEL_PENDING" {
+			t.Fatalf("expected ActivateSubscription to requeue CANCEL_PENDING: sub=%+v err=%v", sub, err)
+		}
+
+		// 2. subscription_payment_failed webhook on locally-CANCELLED sub with live SUSPENDED must requeue CANCEL_PENDING.
+		i2 := prepare(686, 605, uuid.NewString())
+		old2 := startPayPal(686, i2.ID)
+		pp.cancelFault = notFound404
+		_ = startStripe(686, i2.ID)
+		pp.cancelFault = nil
+		pp.subDetailsByID[old2.ExternalOrderID].Status = "SUSPENDED"
+		if err := svc.applyPayPalEvent(ctx, pp, &payment.WebhookEventResult{
+			EventType:      "subscription_payment_failed",
+			SubscriptionID: old2.ExternalOrderID,
+			PaidAt:         time.Now().UTC(),
+			Account:        pp.account,
+		}); err != nil {
+			t.Fatalf("applyPayPalEvent(subscription_payment_failed) failed: %v", err)
+		}
+		if sub, err := repo.GetSubscriptionByID(ctx, old2.ExternalOrderID); err != nil || sub == nil || sub.Status != "CANCEL_PENDING" {
+			t.Fatalf("expected payment_failed webhook to requeue CANCEL_PENDING: sub=%+v err=%v", sub, err)
+		}
+
+		// 3. reconcileSubscriptionWindow on locally-CANCELLED sub with live APPROVED must requeue without listing transactions.
+		i3 := prepare(687, 605, uuid.NewString())
+		old3 := startPayPal(687, i3.ID)
+		pp.cancelFault = notFound404
+		_ = startStripe(687, i3.ID)
+		pp.cancelFault = nil
+		pp.subDetailsByID[old3.ExternalOrderID].Status = "APPROVED"
+		listTxBefore := pp.listTxCalls
+		now := time.Now().UTC()
+		if err := svc.reconcileSubscriptionWindow(ctx, old3.ExternalOrderID, now.Add(-time.Hour), now); err != nil {
+			t.Fatalf("reconcileSubscriptionWindow failed: %v", err)
+		}
+		if pp.listTxCalls != listTxBefore {
+			t.Fatalf("reconcileSubscriptionWindow must not list transactions for unactivated APPROVED sub, calls=%d/%d", pp.listTxCalls, listTxBefore)
+		}
+		if sub, err := repo.GetSubscriptionByID(ctx, old3.ExternalOrderID); err != nil || sub == nil || sub.Status != "CANCEL_PENDING" {
+			t.Fatalf("expected reconcileSubscriptionWindow(APPROVED) to requeue CANCEL_PENDING: sub=%+v err=%v", sub, err)
+		}
+	})
+
+	t.Run("VIP plan replacement succeeds after previous PayPal or Stripe child closed", func(t *testing.T) {
+		// PayPal expired child on Month (605) -> buyer switches to Year (604).
+		mPP := prepare(688, 605, uuid.NewString())
+		oldPP := startPayPal(688, mPP.ID)
+		exec(`UPDATE user_subscriptions SET status='EXPIRED' WHERE subscription_id=$1`, oldPP.ExternalOrderID)
+		yPP := prepare(688, 604, uuid.NewString())
+		if yPP.ID == mPP.ID || yPP.Cycle != "year" || yPP.Status != "ready" {
+			t.Fatalf("expected new Year intent after expired PayPal Month child: %+v", yPP)
+		}
+		if oldRow := read(688, mPP.ID); oldRow.status != "Expired" || oldRow.activeProvider != "" {
+			t.Fatalf("old Month intent not expired cleanly: %+v", oldRow)
+		}
+		if started := startPayPal(688, yPP.ID); started.Status != "awaiting_approval" || started.ApprovalURL == "" {
+			t.Fatalf("could not start replacement Year PayPal checkout: %+v", started)
+		}
+
+		// Stripe closed child on Month (605) -> buyer switches to Year (604).
+		mSt := prepare(689, 605, uuid.NewString())
+		_ = startStripe(689, mSt.ID)
+		mStRow := read(689, mSt.ID)
+		exec(`UPDATE payment_stripe_subscription_intents SET status='closed', approval_url=NULL WHERE id=$1`, mStRow.stripeIntentID)
+		ySt := prepare(689, 604, uuid.NewString())
+		if ySt.ID == mSt.ID || ySt.Cycle != "year" || ySt.Status != "ready" {
+			t.Fatalf("expected new Year intent after closed Stripe Month child: %+v", ySt)
+		}
+		if oldRow := read(689, mSt.ID); oldRow.status != "Expired" || oldRow.activeProvider != "" {
+			t.Fatalf("old Month Stripe intent not expired cleanly: %+v", oldRow)
+		}
+		if started := startStripe(689, ySt.ID); started.Status != "awaiting_approval" || started.ApprovalURL == "" {
+			t.Fatalf("could not start replacement Year Stripe checkout: %+v", started)
 		}
 	})
 

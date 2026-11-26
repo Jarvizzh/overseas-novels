@@ -227,6 +227,17 @@ func (s *service) applyPayPalEvent(ctx context.Context, provider payment.Subscri
 		return ErrCheckoutUnavailable
 	}
 
+	if sub.Status == "CANCELLED" && (details.Status == "APPROVED" || details.Status == "ACTIVE" || details.Status == "SUSPENDED") {
+		log.Printf("task=paypal_subscription action=requeue_late_cancel sub=%s live_status=%s event=%s",
+			sub.SubscriptionID, details.Status, event.EventType)
+		if err := requeueLateApprovedPayPalCancellation(ctx, sub.SubscriptionID, "Superseded PayPal subscription approved after cancellation"); err != nil {
+			return err
+		}
+		if event.EventType != "payment_succeeded" {
+			return nil
+		}
+	}
+
 	if event.EventType == "subscription_payment_failed" {
 		if event.PaidAt.IsZero() {
 			return errors.New("PayPal renewal failure has no event timestamp")
@@ -238,17 +249,6 @@ func (s *service) applyPayPalEvent(ctx context.Context, provider payment.Subscri
 			return s.repo.UpdateUserSubscriptionStatus(ctx, sub.SubscriptionID, details.Status)
 		}
 		return recordPayPalRenewalFailure(ctx, sub.SubscriptionID, event.PaidAt, details.Status)
-	}
-
-	if sub.Status == "CANCELLED" && (details.Status == "APPROVED" || details.Status == "ACTIVE" || details.Status == "SUSPENDED") {
-		log.Printf("task=paypal_subscription action=requeue_late_cancel sub=%s live_status=%s event=%s",
-			sub.SubscriptionID, details.Status, event.EventType)
-		if err := requeueLateApprovedPayPalCancellation(ctx, sub.SubscriptionID, "Superseded PayPal subscription approved after cancellation"); err != nil {
-			return err
-		}
-		if event.EventType != "payment_succeeded" {
-			return nil
-		}
 	}
 
 	if event.EventType != "payment_succeeded" {

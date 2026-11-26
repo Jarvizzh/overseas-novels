@@ -247,6 +247,9 @@ func (s *service) reconcileSubscriptionWindow(ctx context.Context, id string, fr
 		if err := requeueLateApprovedPayPalCancellation(ctx, sub.SubscriptionID, "Superseded PayPal subscription approved after cancellation"); err != nil {
 			return err
 		}
+		if details.Status == "APPROVED" {
+			return nil
+		}
 	} else {
 		switch details.Status {
 		case "APPROVED":
