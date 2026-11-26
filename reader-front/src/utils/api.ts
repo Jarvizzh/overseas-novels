@@ -411,8 +411,8 @@ export const api = {
     ),
 
   // === WALLET ===
-  getWalletBalance: () =>
-    request<Wallet>('/wallet/balance'),
+  getWalletBalance: (signal?: AbortSignal) =>
+    request<Wallet>('/wallet/balance', { signal }),
 
   getTransactionHistory: (limit: number, cursor?: string, signal?: AbortSignal) => {
     const params = new URLSearchParams({ limit: String(limit) });

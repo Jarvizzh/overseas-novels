@@ -54,6 +54,10 @@ func (s *service) GetPurchase(ctx context.Context, userID int64, intentID, paypa
 	return s.getPurchase(ctx, userID, intentID, paypalOrderID, true)
 }
 
+func canProbePayPalReturn(code captureOutcome) bool {
+	return code == "" || code == captureUnavailable || code == captureUnconfirmed
+}
+
 func (s *service) getPurchase(ctx context.Context, userID int64, intentID, paypalOrderID string, refresh bool) (*PurchaseIntent, error) {
 	if intentID != "" {
 		id, err := uuid.Parse(intentID)
@@ -73,7 +77,7 @@ func (s *service) getPurchase(ctx context.Context, userID int64, intentID, paypa
 	}
 	if refresh && paypalOrderID != "" && intent.Provider == payment.ProviderPayPal &&
 		(intent.Status == "awaiting_approval" || intent.Status == "confirming") &&
-		intent.ConfirmationCode == "" &&
+		canProbePayPalReturn(intent.ConfirmationCode) &&
 		intent.ExternalOrderID == paypalOrderID &&
 		s.claimReturnProbe(paypalOrderID, 4*time.Second) {
 		// Buyer returned from PayPal approval; attempt idempotent capture immediately

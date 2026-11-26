@@ -2097,19 +2097,8 @@
   }
 }
 
-/* Recharge Sticky Checkout Bar */
-.scroll-container.recharge-scroll-container {
-  padding-bottom: 20px;
-}
-
-.recharge-checkout-bar {
-  flex-shrink: 0;
-  border-top: 1px solid var(--border-color);
-  padding: 10px 16px calc(12px + env(safe-area-inset-bottom));
-  z-index: 40;
-}
-
-.recharge-checkout-inner {
+/* Recharge Inline Checkout Actions */
+.recharge-checkout-section {
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -2145,13 +2134,12 @@
   gap: 10px;
 }
 
-.recharge-paypal-btn,
-.btn-cta-primary.recharge-card-btn {
+.recharge-pay-btn {
   width: 100%;
   min-width: 0;
   min-block-size: 48px;
   padding: 10px 14px;
-  border-radius: 999px;
+  border-radius: 14px;
   font-size: 0.9375rem;
   font-weight: 700;
   display: inline-flex;
@@ -2160,6 +2148,11 @@
   gap: 7px;
   white-space: nowrap;
   overflow: hidden;
+  background-color: #FFFFFF;
+  color: var(--text-primary);
+  border: 1px solid rgba(154, 113, 50, 0.36);
+  box-shadow: 0 1px 2px rgba(24, 24, 27, 0.05);
+  cursor: pointer;
   transition: var(--transition-fast);
 }
 
@@ -2169,30 +2162,65 @@
   min-width: 0;
 }
 
-.recharge-paypal-btn {
-  background-color: #F5C344;
-  color: #0F265C;
-  border: none;
-  cursor: pointer;
+.recharge-pay-btn:hover:not(:disabled) {
+  background-color: var(--bg-tertiary);
 }
 
-.recharge-paypal-btn:hover:not(:disabled) {
-  filter: brightness(0.96);
-}
-
-.recharge-paypal-btn:active:not(:disabled) {
+.recharge-pay-btn:active:not(:disabled) {
   transform: scale(0.985);
 }
 
-.recharge-paypal-btn:disabled,
-.btn-cta-primary.recharge-card-btn:disabled {
+.recharge-pay-btn:disabled {
   opacity: 0.55;
   cursor: not-allowed;
 }
 
+.recharge-paypal-back {
+  fill: #003087;
+}
+
+.recharge-paypal-front {
+  fill: #0079C1;
+}
+
+.recharge-paypal-overlap {
+  fill: #001C64;
+}
+
+@supports (color: light-dark(white, black)) {
+  .recharge-pay-btn {
+    background-color: light-dark(#FFFFFF, #22201D);
+    border-color: light-dark(rgba(154, 113, 50, 0.36), rgba(212, 174, 104, 0.36));
+  }
+  .recharge-paypal-back {
+    fill: light-dark(#003087, #60A5FA);
+  }
+  .recharge-paypal-front {
+    fill: light-dark(#0079C1, #38BDF8);
+  }
+  .recharge-paypal-overlap {
+    fill: light-dark(#001C64, #2563EB);
+  }
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-user-theme="light"]) .recharge-pay-btn {
+    background-color: #22201D;
+    border-color: rgba(212, 174, 104, 0.36);
+  }
+  :root:not([data-user-theme="light"]) .recharge-paypal-back {
+    fill: #60A5FA;
+  }
+  :root:not([data-user-theme="light"]) .recharge-paypal-front {
+    fill: #38BDF8;
+  }
+  :root:not([data-user-theme="light"]) .recharge-paypal-overlap {
+    fill: #2563EB;
+  }
+}
+
 @media (max-width: 360px) {
-  .recharge-paypal-btn,
-  .btn-cta-primary.recharge-card-btn {
+  .recharge-pay-btn {
     padding: 10px 10px;
     font-size: 0.875rem;
     gap: 5px;

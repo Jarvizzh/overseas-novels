@@ -225,7 +225,7 @@ func TestGetPurchaseSkipsProbeWhenConfirmationCodePresent(t *testing.T) {
 	const paypalOrderID = "PAYPAL-ORDER-DECLINED"
 	account := payment.WebhookAccount{AccountKey: "client-sbx", Environment: "sandbox"}
 
-	for _, code := range []captureOutcome{captureDeclined, captureBlocked, captureBuyerAction, "payment_switch_pending"} {
+	for _, code := range []captureOutcome{captureDeclined, captureBlocked, captureBuyerAction, captureLegacyBookReview, "payment_switch_pending"} {
 		repo := &stubReturnRepo{
 			intent: PurchaseIntent{
 				ID:               intentID,
@@ -247,6 +247,73 @@ func TestGetPurchaseSkipsProbeWhenConfirmationCodePresent(t *testing.T) {
 		}
 		if pp.getCalls != 0 || pp.captureCalls != 0 {
 			t.Fatalf("code=%s should not probe PayPal, got get=%d cap=%d", code, pp.getCalls, pp.captureCalls)
+		}
+	}
+}
+
+func TestGetPurchaseReprobesRecoverableConfirmationCodes(t *testing.T) {
+	t.Setenv("CONVERSION_ENVIRONMENT", "sandbox")
+	const intentID = "34343434-3434-4343-8343-343434343434"
+	const paypalOrderID = "PAYPAL-ORDER-RECOVERABLE"
+	account := payment.WebhookAccount{AccountKey: "client-sbx", Environment: "sandbox"}
+
+	for _, code := range []captureOutcome{captureUnavailable, captureUnconfirmed} {
+		repo := &stubReturnRepo{
+			intent: PurchaseIntent{
+				ID:               intentID,
+				SlotID:           1,
+				OrderType:        "single",
+				AmountMinor:      999,
+				Currency:         "USD",
+				Coins:            999,
+				Status:           "awaiting_approval",
+				Provider:         payment.ProviderPayPal,
+				ExternalOrderID:  paypalOrderID,
+				ConfirmationCode: code,
+			},
+			order: checkoutOrder{
+				id:             45,
+				userID:         7,
+				checkoutID:     intentID,
+				status:         "Pending",
+				orderType:      "single",
+				amount:         999,
+				currency:       "USD",
+				coins:          999,
+				managedAttempt: true,
+				paymentMethod:  payment.ProviderPayPal,
+			},
+		}
+		pp := &stubReturnPayPal{
+			account: account,
+			getErr:  paypal.ErrOrderApproved,
+			getCapture: &payment.OrderCapture{
+				Account:      account,
+				OrderID:      paypalOrderID,
+				CustomID:     intentID,
+				GrossAmount:  "9.99",
+				CurrencyCode: "USD",
+			},
+			captured: &payment.OrderCapture{
+				Account:      account,
+				OrderID:      paypalOrderID,
+				CaptureID:    "CAP-RECOVER-1",
+				CustomID:     intentID,
+				GrossAmount:  "9.99",
+				CurrencyCode: "USD",
+				Status:       "COMPLETED",
+				OccurredAt:   time.Now().UTC(),
+			},
+		}
+		svc := &service{repo: repo, paypalClient: pp, returnProbe: &returnProbeLimiter{}}
+
+		got, err := svc.GetPurchase(t.Context(), 7, intentID, paypalOrderID)
+		if err != nil {
+			t.Fatalf("code=%s GetPurchase failed: %v", code, err)
+		}
+		if got.Status != "completed" || pp.getCalls != 1 || pp.captureCalls != 1 || !repo.settled {
+			t.Fatalf("code=%s expected recoverable re-probe and capture, got status=%s get=%d cap=%d settled=%v",
+				code, got.Status, pp.getCalls, pp.captureCalls, repo.settled)
 		}
 	}
 }

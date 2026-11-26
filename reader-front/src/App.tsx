@@ -190,26 +190,39 @@ function AppContent() {
     transactionRequest.current = controller;
     setLoadingMoreTransactions(false);
     try {
-      const [balance, txs, subStatus] = await Promise.all([
-        api.getWalletBalance(),
-        api.getTransactionHistory(TX_PAGE_SIZE, undefined, controller.signal),
-        api.getSubscriptionStatus().catch(() => null),
-      ]);
-      if (controller.signal.aborted) return;
+      const balanceTask = api
+        .getWalletBalance(controller.signal)
+        .then((balance) => {
+          if (controller.signal.aborted) return;
+          setChargedCoins(balance.charged_coins);
+          setBonusCoins(balance.bonus_coins);
+          setUserCoins(balance.charged_coins + balance.bonus_coins);
+        })
+        .catch((err) => {
+          if (!controller.signal.aborted) console.error('Failed to load wallet balance:', err);
+        });
 
-      setChargedCoins(balance.charged_coins);
-      setBonusCoins(balance.bonus_coins);
-      setUserCoins(balance.charged_coins + balance.bonus_coins);
+      const historyTask = api
+        .getTransactionHistory(TX_PAGE_SIZE, undefined, controller.signal)
+        .then((txs) => {
+          if (controller.signal.aborted) return;
+          setTransactionHistory(txs.items);
+          setNextTransactionCursor(txs.next_cursor);
+        })
+        .catch((err) => {
+          if (!controller.signal.aborted) console.error('Failed to load transaction history:', err);
+        });
 
-      setTransactionHistory(txs.items);
-      setNextTransactionCursor(txs.next_cursor);
+      const subTask = api
+        .getSubscriptionStatus(controller.signal)
+        .then((subStatus) => {
+          if (controller.signal.aborted || !subStatus) return;
+          setIsVip(Boolean(subStatus.is_vip));
+          setSubscription(subStatus.subscription);
+        })
+        .catch(() => null);
 
-      if (subStatus) {
-        setIsVip(Boolean(subStatus.is_vip));
-        setSubscription(subStatus.subscription);
-      }
-    } catch (err) {
-      if (!controller.signal.aborted) console.error('Failed to load wallet info:', err);
+      await Promise.all([balanceTask, historyTask, subTask]);
     } finally {
       if (transactionRequest.current === controller) {
         transactionRequest.current = null;
@@ -335,7 +348,7 @@ function AppContent() {
           const u = await api.getProfile();
           if (!disposed && readerStorage.getItem('auth-token') === tokenBefore) {
             setSession({ user: u, token: tokenBefore });
-            await reloadWallet();
+            void reloadWallet();
           }
         } catch (err) {
           console.error('Could not restore the current session:', err);
@@ -915,7 +928,7 @@ function AppContent() {
                   setNextTransactionCursor(undefined);
                   readerStorage.setItem('auth-token', token);
                   setSession({ user: u, token });
-                  await reloadWallet();
+                  void reloadWallet();
                   navigateTo('profile');
                 }}
                 onProfileUpdated={(updatedUser, nextToken) => {
