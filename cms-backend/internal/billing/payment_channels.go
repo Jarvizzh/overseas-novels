@@ -43,15 +43,18 @@ const (
 )
 
 var (
-	webhookSecretPattern  = regexp.MustCompile(`^whsec_[A-Za-z0-9_]+$`)
-	paypalAPIBaseSandbox  = "https://api-m.sandbox.paypal.com"
-	paypalAPIBaseLive     = "https://api-m.paypal.com"
-	stripeAPIBaseURL      = "https://api.stripe.com"
-	channelHTTPClient     = &http.Client{Timeout: channelCheckTimeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	errChannelConflict    = errors.New("channel account state conflict")
-	errChannelNotFound    = errors.New("payment channel account not found")
-	errChannelUnverified  = errors.New("channel credentials must pass verification before publishing")
-	errKeyringUnavailable = errors.New("PAYMENT_CREDENTIAL_KEYS must be configured to store or decrypt channel credentials")
+	webhookSecretPattern   = regexp.MustCompile(`^whsec_[A-Za-z0-9_]+$`)
+	paypalAPIBaseSandbox   = "https://api-m.sandbox.paypal.com"
+	paypalAPIBaseLive      = "https://api-m.paypal.com"
+	stripeAPIBaseURL       = "https://api.stripe.com"
+	channelHTTPClient      = &http.Client{Timeout: channelCheckTimeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	errChannelConflict     = errors.New("channel account state conflict")
+	errChannelNotFound     = errors.New("payment channel account not found")
+	errChannelUnverified   = errors.New("channel credentials must pass verification before publishing")
+	errChannelNotDeletable = errors.New("only draft or disabled channel accounts can be deleted")
+	errChannelReferenced   = errors.New("channel account has historical payment, order, or reconciliation records and cannot be deleted")
+	errChannelHasBindings  = errors.New("channel account has product bindings and cannot be deleted")
+	errKeyringUnavailable  = errors.New("PAYMENT_CREDENTIAL_KEYS must be configured to store or decrypt channel credentials")
 )
 
 type channelValidationResult struct {
@@ -754,14 +757,19 @@ func (h *Handler) ValidatePaymentChannel(c *gin.Context) {
 		writeChannelError(c, err)
 		return
 	}
-	if _, err := tx.Exec(ctx, `
+	ct, err := tx.Exec(ctx, `
 		UPDATE payment_channel_accounts
 		SET status = CASE WHEN $2 = 'verified' AND status = 'draft' THEN 'verified' ELSE status END,
 		    last_validated_at = now(),
 		    validation_summary = $3::jsonb,
 		    updated_at = now()
-		WHERE id = $1`, id, validationState, string(summaryJSON)); err != nil {
+		WHERE id = $1`, id, validationState, string(summaryJSON))
+	if err != nil {
 		writeChannelError(c, err)
+		return
+	}
+	if ct.RowsAffected() == 0 {
+		writeChannelError(c, errChannelNotFound)
 		return
 	}
 	if err := billingAuditLogTx(ctx, tx, actor, "validate_payment_channel", strconv.FormatInt(id, 10), "", string(summaryJSON)); err != nil {
@@ -1036,6 +1044,99 @@ func (h *Handler) DeactivatePaymentChannel(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"deactivated": true})
 }
 
+func canDeleteChannelStatus(status string) bool {
+	return status == channelStatusDraft || status == channelStatusDisabled
+}
+
+func (h *Handler) DeletePaymentChannel(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || id <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid channel account ID"})
+		return
+	}
+	ctx := c.Request.Context()
+	actor := c.GetString("admin_id")
+	tx, err := db.DB.Begin(ctx)
+	if err != nil {
+		writeChannelError(c, err)
+		return
+	}
+	defer tx.Rollback(context.WithoutCancel(ctx))
+	if err := requireChannelWriteTx(ctx, tx, actor); err != nil {
+		writeChannelError(c, err)
+		return
+	}
+
+	var provider, environment, accountKey, displayName, merchantID, status string
+	var isPrimary, newOrders, newSubs bool
+	var activeVer, pendingVer int
+	err = tx.QueryRow(ctx, `
+		SELECT provider, environment, account_key, display_name, merchant_id, status,
+		       is_primary, new_orders_enabled, new_subscriptions_enabled, active_version, pending_version
+		FROM payment_channel_accounts
+		WHERE id = $1 FOR UPDATE`, id).
+		Scan(&provider, &environment, &accountKey, &displayName, &merchantID, &status,
+			&isPrimary, &newOrders, &newSubs, &activeVer, &pendingVer)
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeChannelError(c, errChannelNotFound)
+		return
+	}
+	if err != nil {
+		writeChannelError(c, err)
+		return
+	}
+	if !canDeleteChannelStatus(status) || isPrimary || newOrders || newSubs {
+		writeChannelError(c, errChannelNotDeletable)
+		return
+	}
+
+	// Clean up 1-to-1 per-account configuration rows before deleting the account.
+	// If the account is still referenced by product bindings or historical payment/order/reconciliation
+	// records, DELETE below raises SQLSTATE 23503 and the transaction rolls back completely.
+	if _, err := tx.Exec(ctx, `DELETE FROM payment_aftercare_policies WHERE account_id = $1`, id); err != nil {
+		writeChannelError(c, err)
+		return
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM payment_ledger_sync_settings WHERE account_id = $1`, id); err != nil {
+		writeChannelError(c, err)
+		return
+	}
+
+	if _, err := tx.Exec(ctx, `DELETE FROM payment_channel_accounts WHERE id = $1`, id); err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23503" {
+			if pgErr.TableName == "product_channel_bindings" {
+				writeChannelError(c, errChannelHasBindings)
+				return
+			}
+			writeChannelError(c, errChannelReferenced)
+			return
+		}
+		writeChannelError(c, err)
+		return
+	}
+
+	beforeJSON, _ := json.Marshal(map[string]any{
+		"provider":        provider,
+		"environment":     environment,
+		"display_name":    displayName,
+		"merchant_id":     merchantID,
+		"account_key":     maskAccountKey(provider, accountKey),
+		"status":          status,
+		"active_version":  activeVer,
+		"pending_version": pendingVer,
+	})
+	if err := billingAuditLogTx(ctx, tx, actor, "delete_payment_channel", strconv.FormatInt(id, 10), string(beforeJSON), ""); err != nil {
+		writeChannelError(c, err)
+		return
+	}
+	if err := tx.Commit(ctx); err != nil {
+		writeChannelError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"deleted": true})
+}
+
 func validateStripeSecretFormat(environment, apiKey, webhookSecret string) error {
 	if apiKey != "" {
 		wantPrefix := "test_"
@@ -1185,7 +1286,8 @@ func writeChannelError(c *gin.Context, err error) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "Payment channel permission required"})
 	case errors.Is(err, errChannelNotFound):
 		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
-	case errors.Is(err, errChannelConflict), errors.Is(err, errChannelUnverified):
+	case errors.Is(err, errChannelConflict), errors.Is(err, errChannelUnverified),
+		errors.Is(err, errChannelNotDeletable), errors.Is(err, errChannelReferenced), errors.Is(err, errChannelHasBindings):
 		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
 	case errors.Is(err, errKeyringUnavailable):
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": err.Error()})

@@ -297,6 +297,96 @@ func TestChannelLifecycleEncryptionValidationAndPrimarySwitch(t *testing.T) {
 	if status != "disabled" || isPrimary || ordersOK {
 		t.Fatalf("unexpected deactivated state: status=%s primary=%v orders=%v", status, isPrimary, ordersOK)
 	}
+
+	// Delete rules:
+	// 1. Finance role without payments.channels:write cannot delete
+	if rec := doJSON(t, r, http.MethodDelete, fmt.Sprintf("/cms/payments/channels/%d", st2Created.ID), "cfg-finance", nil); rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for finance channel delete, got %d: %s", rec.Code, rec.Body.String())
+	}
+	// 2. Published account cannot be deleted
+	if rec := doJSON(t, r, http.MethodDelete, fmt.Sprintf("/cms/payments/channels/%d", ppCreated.ID), "cfg-super", nil); rec.Code != http.StatusConflict {
+		t.Fatalf("expected 409 when deleting published channel, got %d: %s", rec.Code, rec.Body.String())
+	}
+	// 3. Verified (not yet published) account cannot be deleted
+	verifiedRec := doJSON(t, r, http.MethodPost, "/cms/payments/channels", "cfg-super", map[string]any{
+		"provider": "paypal", "environment": "sandbox", "display_name": "PayPal Verified Temp",
+		"account_key": "paypal_client_verified_tmp", "client_secret": "pp_secret_tmp", "webhook_id": "WH_SBX_01",
+	})
+	if verifiedRec.Code != http.StatusCreated {
+		t.Fatalf("create verified temp failed (%d): %s", verifiedRec.Code, verifiedRec.Body.String())
+	}
+	var verifiedCreated struct {
+		ID int64 `json:"id"`
+	}
+	_ = json.Unmarshal(verifiedRec.Body.Bytes(), &verifiedCreated)
+	if rec := doJSON(t, r, http.MethodPost, fmt.Sprintf("/cms/payments/channels/%d/validate", verifiedCreated.ID), "cfg-super", nil); rec.Code != http.StatusOK {
+		t.Fatalf("validate temp failed (%d): %s", rec.Code, rec.Body.String())
+	}
+	if rec := doJSON(t, r, http.MethodDelete, fmt.Sprintf("/cms/payments/channels/%d", verifiedCreated.ID), "cfg-super", nil); rec.Code != http.StatusConflict {
+		t.Fatalf("expected 409 when deleting verified channel, got %d: %s", rec.Code, rec.Body.String())
+	}
+	// 4. Draft account can be deleted
+	draftRec := doJSON(t, r, http.MethodPost, "/cms/payments/channels", "cfg-super", map[string]any{
+		"provider": "paypal", "environment": "sandbox", "display_name": "PayPal Draft Temp",
+		"account_key": "paypal_client_draft_tmp", "client_secret": "pp_secret_draft_never_leak", "webhook_id": "WH_SBX_01",
+	})
+	if draftRec.Code != http.StatusCreated {
+		t.Fatalf("create draft temp failed (%d): %s", draftRec.Code, draftRec.Body.String())
+	}
+	var draftCreated struct {
+		ID int64 `json:"id"`
+	}
+	_ = json.Unmarshal(draftRec.Body.Bytes(), &draftCreated)
+	if rec := doJSON(t, r, http.MethodDelete, fmt.Sprintf("/cms/payments/channels/%d", draftCreated.ID), "cfg-super", nil); rec.Code != http.StatusOK {
+		t.Fatalf("delete draft channel failed (%d): %s", rec.Code, rec.Body.String())
+	}
+	// 5. Disabled account with 1-to-1 aftercare policy & ledger sync setting (and no historical records) can be deleted
+	if _, err := db.DB.Exec(ctx, `INSERT INTO payment_aftercare_policies(account_id, dispute_lookup, hold_fulfillment) VALUES ($1, true, false)`, st2Created.ID); err != nil {
+		t.Fatalf("seed aftercare policy failed: %v", err)
+	}
+	if _, err := db.DB.Exec(ctx, `INSERT INTO payment_ledger_sync_settings(account_id, enabled, actor_id, reason, window_start, window_end) VALUES ($1, false, 'cfg-super', 'test', now() - interval '1 hour', now())`, st2Created.ID); err != nil {
+		t.Fatalf("seed ledger sync setting failed: %v", err)
+	}
+	if rec := doJSON(t, r, http.MethodDelete, fmt.Sprintf("/cms/payments/channels/%d", st2Created.ID), "cfg-super", nil); rec.Code != http.StatusOK {
+		t.Fatalf("delete disabled channel failed (%d): %s", rec.Code, rec.Body.String())
+	}
+	// 6. Deleting again returns 404
+	if rec := doJSON(t, r, http.MethodDelete, fmt.Sprintf("/cms/payments/channels/%d", st2Created.ID), "cfg-super", nil); rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 when deleting already-deleted channel, got %d: %s", rec.Code, rec.Body.String())
+	}
+	// 7. Disabled account referenced by historical payment_event_inbox returns 409 and preserves its aftercare policy (tx rollback)
+	if rec := doJSON(t, r, http.MethodPost, fmt.Sprintf("/cms/payments/channels/%d/deactivate", verifiedCreated.ID), "cfg-super", nil); rec.Code != http.StatusOK {
+		t.Fatalf("deactivate verified temp failed (%d): %s", rec.Code, rec.Body.String())
+	}
+	if _, err := db.DB.Exec(ctx, `INSERT INTO payment_aftercare_policies(account_id, dispute_lookup, hold_fulfillment) VALUES ($1, true, false)`, verifiedCreated.ID); err != nil {
+		t.Fatalf("seed referenced aftercare policy failed: %v", err)
+	}
+	if _, err := db.DB.Exec(ctx, `INSERT INTO payment_event_inbox(provider, account_id, event_id, event_type, amount_cents, currency, event) VALUES ('paypal', $1, 'EVT-REF-TEST-01', 'PAYMENT.CAPTURE.COMPLETED', 999, 'USD', '{}'::jsonb)`, verifiedCreated.ID); err != nil {
+		t.Fatalf("seed referenced payment event failed: %v", err)
+	}
+	if rec := doJSON(t, r, http.MethodDelete, fmt.Sprintf("/cms/payments/channels/%d", verifiedCreated.ID), "cfg-super", nil); rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), errChannelReferenced.Error()) {
+		t.Fatalf("expected 409 referenced error, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var policyStillExists bool
+	if err := db.DB.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM payment_aftercare_policies WHERE account_id=$1)`, verifiedCreated.ID).Scan(&policyStillExists); err != nil || !policyStillExists {
+		t.Fatalf("expected aftercare policy preserved after FK rollback, exists=%v err=%v", policyStillExists, err)
+	}
+	// 8. Disabled account referenced by product_channel_bindings returns 409 errChannelHasBindings
+	if _, err := db.DB.Exec(ctx, `DELETE FROM payment_event_inbox WHERE account_id = $1`, verifiedCreated.ID); err != nil {
+		t.Fatalf("cleanup payment_event_inbox failed: %v", err)
+	}
+	if _, err := db.DB.Exec(ctx, `INSERT INTO product_channel_bindings(product_id, account_id, provider, environment, external_product_ref, external_price_ref) SELECT id, $1, 'paypal', 'sandbox', 'PROD-1', 'P-1' FROM products LIMIT 1`, verifiedCreated.ID); err != nil {
+		t.Fatalf("seed binding fixture failed: %v", err)
+	}
+	if rec := doJSON(t, r, http.MethodDelete, fmt.Sprintf("/cms/payments/channels/%d", verifiedCreated.ID), "cfg-super", nil); rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), errChannelHasBindings.Error()) {
+		t.Fatalf("expected 409 binding error, got %d: %s", rec.Code, rec.Body.String())
+	}
+	// Verify audit log recorded delete without leaking secrets
+	var delAuditCount int
+	if err := db.DB.QueryRow(ctx, `SELECT count(*) FROM admin_audit_logs WHERE action='delete_payment_channel' AND target_id IN ($1,$2)`,
+		fmt.Sprintf("%d", draftCreated.ID), fmt.Sprintf("%d", st2Created.ID)).Scan(&delAuditCount); err != nil || delAuditCount != 2 {
+		t.Fatalf("expected 2 delete_payment_channel audit logs, got %d err=%v", delAuditCount, err)
+	}
 }
 
 func TestProductCatalogDualChannelGateAndTemplateDecoupling(t *testing.T) {

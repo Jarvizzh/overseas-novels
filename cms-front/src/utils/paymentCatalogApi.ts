@@ -274,6 +274,8 @@ export const channelsApi = {
     apiRequest('POST', `/payments/channels/${id}/publish`, payload),
   deactivate: (id: number): Promise<{ disabled: boolean }> =>
     apiRequest('POST', `/payments/channels/${id}/deactivate`, {}),
+  delete: (id: number): Promise<{ deleted: boolean }> =>
+    apiRequest('DELETE', `/payments/channels/${id}`),
 };
 
 export const productsApi = {

@@ -183,6 +183,32 @@ func TestBillingRoutesEnforceRBACPermissions(t *testing.T) {
 	if w := call("recon-read", http.MethodPut, "/payments/reconciliation/accounts/1/automatic", `{"enabled":true,"reason":"x"}`); w.Code != http.StatusForbidden {
 		t.Fatalf("recon-read PUT automatic = %d, want 403", w.Code)
 	}
+
+	// Channel delete requires payments.channels:write
+	if w := call("prod-write", http.MethodDelete, "/payments/channels/1", ""); w.Code != http.StatusForbidden {
+		t.Fatalf("prod-write DELETE /payments/channels/1 = %d, want 403", w.Code)
+	}
+	if w := call("prod-ch-write", http.MethodDelete, "/payments/channels/not-a-number", ""); w.Code != http.StatusBadRequest {
+		t.Fatalf("prod-ch-write DELETE /payments/channels/not-a-number = %d, want 400 (past authz)", w.Code)
+	}
+}
+
+func TestCanDeleteChannelStatus(t *testing.T) {
+	cases := []struct {
+		status string
+		want   bool
+	}{
+		{channelStatusDraft, true},
+		{channelStatusDisabled, true},
+		{channelStatusVerified, false},
+		{channelStatusPublished, false},
+		{"", false},
+	}
+	for _, tc := range cases {
+		if got := canDeleteChannelStatus(tc.status); got != tc.want {
+			t.Fatalf("canDeleteChannelStatus(%q) = %v, want %v", tc.status, got, tc.want)
+		}
+	}
 }
 
 func TestProductForPrincipalMasksBindingsWithoutChannelsRead(t *testing.T) {

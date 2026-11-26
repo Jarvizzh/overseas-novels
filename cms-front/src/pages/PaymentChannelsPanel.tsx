@@ -106,6 +106,7 @@ export function PaymentChannelsPanel() {
   const [unreadyProducts, setUnreadyProducts] = useState<Array<{ id: number; code: string; name: string }>>([]);
 
   const [deactivateTarget, setDeactivateTarget] = useState<ChannelAccount | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<ChannelAccount | null>(null);
   const [validationNote, setValidationNote] = useState<{ account: ChannelAccount; ok: boolean; summary?: ChannelValidationSummary; message?: string } | null>(null);
 
   const [submitting, setSubmitting] = useState(false);
@@ -401,6 +402,26 @@ export function PaymentChannelsPanel() {
     }
   };
 
+  const submitDelete = async () => {
+    if (!canWriteChannels || !deleteTarget || submitting) return;
+    setSubmitting(true);
+    setDialogError('');
+    try {
+      const deletedId = deleteTarget.id;
+      await channelsApi.delete(deletedId);
+      showToast('已删除该商户账户', 'success');
+      setDeleteTarget(null);
+      if (validationNote?.account.id === deletedId) {
+        setValidationNote(null);
+      }
+      await loadChannels();
+    } catch (err) {
+      setDialogError(errMsg(err, '删除商户失败'));
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
   return (
     <div className="space-y-4 animate-fade-in">
       {/* Scope & Primary Actions Strip */}
@@ -620,6 +641,7 @@ export function PaymentChannelsPanel() {
                         { label: '风控策略', onClick: () => setPolicyTarget(ch) },
                       ]
                     : [];
+                  const canDeleteChannel = ch.status === 'draft' || ch.status === 'disabled';
                   if (canWriteChannels && ch.status !== 'disabled') {
                     menuItems.push({
                       label: '停用账户',
@@ -628,6 +650,17 @@ export function PaymentChannelsPanel() {
                       onClick: () => {
                         setDialogError('');
                         setDeactivateTarget(ch);
+                      },
+                    });
+                  }
+                  if (canWriteChannels && canDeleteChannel) {
+                    menuItems.push({
+                      label: '删除商户',
+                      tone: 'danger',
+                      dividerBefore: ch.status === 'disabled',
+                      onClick: () => {
+                        setDialogError('');
+                        setDeleteTarget(ch);
                       },
                     });
                   }
@@ -1107,6 +1140,31 @@ export function PaymentChannelsPanel() {
       >
         <div className="space-y-2 text-sm text-[var(--cms-muted-fg)]">
           <p>停用后，该账户的新单与新订阅入口将立即关闭，同时不再担任主账户；历史未完成订单的退款、Webhook 回调与对账验证仍会保留以保障售后链路。</p>
+          {dialogError && <p role="alert" className="text-xs text-[var(--cms-error)]">{dialogError}</p>}
+        </div>
+      </CmsDialog>
+
+      {/* 删除商户确认 */}
+      <CmsDialog
+        open={deleteTarget !== null}
+        onClose={() => { if (!submitting) setDeleteTarget(null); }}
+        title="删除商户账户"
+        subtitle={deleteTarget ? `${deleteTarget.display_name || deleteTarget.account_label} · ${deleteTarget.environment}` : undefined}
+        size="sm"
+        closedBy="closerequest"
+        closeDisabled={submitting}
+        footer={
+          <>
+            <button type="button" data-dialog-initial-focus className="btn-secondary" disabled={submitting} onClick={() => setDeleteTarget(null)}>取消</button>
+            <button type="button" className="btn-primary bg-[var(--cms-error)] border-[var(--cms-error)]" disabled={submitting} onClick={() => void submitDelete()}>
+              {submitting ? '删除中…' : '确认删除'}
+            </button>
+          </>
+        }
+      >
+        <div className="space-y-2 text-sm text-[var(--cms-muted-fg)]">
+          <p>确认永久删除该商户账户吗？仅「草稿」与「已停用」状态的商户允许删除，删除后其配置版本与加密凭据将被一并清除且无法恢复。</p>
+          <p className="text-xs">若该商户存在商品绑定或历史订单、订阅、对账等关联记录，系统将阻止删除以保障财务与售后链路完整。</p>
           {dialogError && <p role="alert" className="text-xs text-[var(--cms-error)]">{dialogError}</p>}
         </div>
       </CmsDialog>

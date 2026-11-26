@@ -69,6 +69,7 @@ func (h *Handler) RegisterRoutes(rg *gin.RouterGroup) {
 		payments.POST("/channels/:id/validate", channelsWrite, h.ValidatePaymentChannel)
 		payments.POST("/channels/:id/publish", channelsWrite, h.PublishPaymentChannel)
 		payments.POST("/channels/:id/deactivate", channelsWrite, h.DeactivatePaymentChannel)
+		payments.DELETE("/channels/:id", channelsWrite, h.DeletePaymentChannel)
 		payments.PUT("/channels/:id", channelsWrite, h.UpdatePaymentChannel)
 		payments.GET("/channels/:id/aftercare-policy", channelsRead, h.getAftercarePolicy)
 		payments.PUT("/channels/:id/aftercare-policy", channelsWrite, h.updateAftercarePolicy)
