@@ -334,3 +334,68 @@ func TestStripeReportScheduleMissingPermissionsAndManualImportCompatibility(t *t
 	}
 	_ = account
 }
+
+func TestReviewReportScheduleCatchesUpMissingDays(t *testing.T) {
+	pool := testdb.Open(t)
+	ctx := t.Context()
+	accID, _ := seedEncryptedStripeAccount(t, pool, "acct_ReportCatchUp", "rk_test_catchup_secret")
+	repo := settlement.NewRepository(pool)
+
+	cfg := settlement.ReportScheduleConfig{}
+
+	// 1. Run on Nov 24 -> schedules Nov 23 (2 report types).
+	nov24 := time.Date(2026, 11, 24, 3, 0, 0, 0, time.UTC)
+	created1, err := repo.ScheduleDueStripeReportRuns(ctx, "sandbox", cfg, nov24)
+	if err != nil || created1 != 2 {
+		t.Fatalf("Nov 24 schedule: created=%d err=%v (want 2)", created1, err)
+	}
+
+	// 2. Simulate 2-day outage; next run is Nov 27 -> must catch up Nov 24, Nov 25, Nov 26 (all 4 days total: Nov 23..26).
+	nov27 := time.Date(2026, 11, 27, 4, 0, 0, 0, time.UTC)
+	created2, err := repo.ScheduleDueStripeReportRuns(ctx, "sandbox", cfg, nov27)
+	if err != nil || created2 != 6 {
+		t.Fatalf("Nov 27 catch-up: created=%d err=%v (want 6 for 3 missed days x 2 report types)", created2, err)
+	}
+
+	var distinctDays int
+	if err := pool.QueryRow(ctx, `SELECT count(DISTINCT (parameters->>'interval_start')::bigint)
+		FROM payment_stripe_report_runs WHERE account_id=$1`, accID).Scan(&distinctDays); err != nil {
+		t.Fatal(err)
+	}
+	if distinctDays != 4 {
+		t.Fatalf("scheduled day windows=%d, want 4 (Nov 23,24,25,26)", distinctDays)
+	}
+
+	// 3. Re-running on Nov 27 is completely idempotent (0 new rows).
+	created3, err := repo.ScheduleDueStripeReportRuns(ctx, "sandbox", cfg, nov27)
+	if err != nil || created3 != 0 {
+		t.Fatalf("repeat schedule on Nov 27: created=%d err=%v (want 0)", created3, err)
+	}
+
+	// 4. Bounded catch-up cap: jump 5 days ahead (Dec 2) with MaxCatchUpDaysPerTick=2 -> advances 2 days per tick until caught up.
+	dec02 := time.Date(2026, 12, 2, 2, 0, 0, 0, time.UTC)
+	cappedCfg := settlement.ReportScheduleConfig{MaxCatchUpDaysPerTick: 2}
+	tick1, err := repo.ScheduleDueStripeReportRuns(ctx, "sandbox", cappedCfg, dec02)
+	if err != nil || tick1 != 4 {
+		t.Fatalf("capped tick 1: created=%d err=%v (want 4 = 2 days x 2 types)", tick1, err)
+	}
+	tick2, err := repo.ScheduleDueStripeReportRuns(ctx, "sandbox", cappedCfg, dec02)
+	if err != nil || tick2 != 4 {
+		t.Fatalf("capped tick 2: created=%d err=%v (want 4 = 2 days x 2 types)", tick2, err)
+	}
+	tick3, err := repo.ScheduleDueStripeReportRuns(ctx, "sandbox", cappedCfg, dec02)
+	if err != nil || tick3 != 2 {
+		t.Fatalf("capped tick 3: created=%d err=%v (want 2 = final 1 day x 2 types)", tick3, err)
+	}
+	tick4, err := repo.ScheduleDueStripeReportRuns(ctx, "sandbox", cappedCfg, dec02)
+	if err != nil || tick4 != 0 {
+		t.Fatalf("capped tick 4: created=%d err=%v (want 0)", tick4, err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(DISTINCT (parameters->>'interval_start')::bigint)
+		FROM payment_stripe_report_runs WHERE account_id=$1`, accID).Scan(&distinctDays); err != nil {
+		t.Fatal(err)
+	}
+	if distinctDays != 9 {
+		t.Fatalf("total scheduled day windows=%d, want 9 (Nov 23..Dec 1)", distinctDays)
+	}
+}

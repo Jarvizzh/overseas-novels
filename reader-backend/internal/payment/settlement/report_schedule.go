@@ -25,10 +25,13 @@ const (
 	ReportRunStatusEnqueued  = "enqueued"
 	ReportRunStatusFailed    = "failed"
 
-	reportRunLeaseMinutes = 10
-	reportRunPollSeconds  = 60
-	reportRunRetryMinutes = 15
-	reportRunMaxErrLen    = 1000
+	reportRunLeaseMinutes              = 10
+	reportRunPollSeconds               = 60
+	reportRunRetryMinutes              = 15
+	reportRunMaxErrLen                 = 1000
+	reportScheduleDayDuration          = 24 * time.Hour
+	reportScheduleDaySeconds           = int64(reportScheduleDayDuration / time.Second)
+	defaultReportCatchUpMaxDaysPerTick = 7
 )
 
 // ReportScheduleConfig controls which versioned itemized Stripe reports are
@@ -37,6 +40,11 @@ type ReportScheduleConfig struct {
 	BalanceChangeReportType        string
 	PayoutReconciliationReportType string
 	IncludeMoRColumns              bool
+	// StartDate optionally pins the earliest completed UTC day to schedule/catch up.
+	StartDate time.Time
+	// MaxCatchUpDaysPerTick caps how many missed UTC days are created per account
+	// and report type in a single scheduler pass (defaults to defaultReportCatchUpMaxDaysPerTick).
+	MaxCatchUpDaysPerTick int
 }
 
 func (c ReportScheduleConfig) resolvedTypes() ([]string, error) {
@@ -204,22 +212,28 @@ func (r *Repository) EnsureReportRunSchedule(ctx context.Context, req ReportSche
 	return rec, created, nil
 }
 
-// ScheduleDueStripeReportRuns ensures the previous completed UTC day's itemized
-// Stripe Report Runs are scheduled for all enabled Stripe reconciliation accounts.
+// ScheduleDueStripeReportRuns ensures completed UTC day itemized Stripe Report
+// Runs are scheduled for all enabled Stripe reconciliation accounts, catching up
+// any missed days chronologically up to a bounded per-tick cap.
 func (r *Repository) ScheduleDueStripeReportRuns(ctx context.Context, environment string, cfg ReportScheduleConfig, now time.Time) (int, error) {
 	reportTypes, err := cfg.resolvedTypes()
 	if err != nil {
 		return 0, err
 	}
-	windowEnd := now.UTC().Truncate(24 * time.Hour)
-	windowStart := windowEnd.Add(-24 * time.Hour)
+	latestEnd := now.UTC().Truncate(reportScheduleDayDuration)
+	latestStart := latestEnd.Add(-reportScheduleDayDuration)
+	maxDaysPerTick := cfg.MaxCatchUpDaysPerTick
+	if maxDaysPerTick <= 0 {
+		maxDaysPerTick = defaultReportCatchUpMaxDaysPerTick
+	}
 
 	type enabledAccount struct {
-		account payment.WebhookAccount
-		actorID string
-		reason  string
+		accountID int64
+		account   payment.WebhookAccount
+		actorID   string
+		reason    string
 	}
-	rows, err := r.pool.Query(ctx, `SELECT a.account_key, a.environment, s.actor_id, s.reason
+	rows, err := r.pool.Query(ctx, `SELECT a.id, a.account_key, a.environment, s.actor_id, s.reason
 		FROM payment_ledger_sync_settings s
 		JOIN payment_channel_accounts a ON a.id = s.account_id
 		JOIN admins u ON u.id = s.actor_id AND public.admin_has_permission(u.id, 'payments.reconciliation:write')
@@ -231,7 +245,7 @@ func (r *Repository) ScheduleDueStripeReportRuns(ctx context.Context, environmen
 	var accounts []enabledAccount
 	for rows.Next() {
 		var item enabledAccount
-		if err := rows.Scan(&item.account.AccountKey, &item.account.Environment, &item.actorID, &item.reason); err != nil {
+		if err := rows.Scan(&item.accountID, &item.account.AccountKey, &item.account.Environment, &item.actorID, &item.reason); err != nil {
 			rows.Close()
 			return 0, err
 		}
@@ -243,26 +257,83 @@ func (r *Repository) ScheduleDueStripeReportRuns(ctx context.Context, environmen
 	}
 
 	createdCount := 0
+	var errs []error
 	for _, item := range accounts {
 		for _, reportType := range reportTypes {
-			_, created, err := r.EnsureReportRunSchedule(ctx, ReportScheduleRequest{
-				Account:           item.account,
-				ReportType:        reportType,
-				IntervalStart:     windowStart,
-				IntervalEnd:       windowEnd,
-				IncludeMoRColumns: cfg.IncludeMoRColumns,
-				ActorID:           item.actorID,
-				Reason:            item.reason,
-			})
+			existingStarts, earliestStart, err := r.loadScheduledDailyReportStarts(ctx, item.accountID, item.account.Environment, reportType)
 			if err != nil {
-				return createdCount, err
+				errs = append(errs, err)
+				continue
 			}
-			if created {
-				createdCount++
+			firstStart := latestStart
+			if !cfg.StartDate.IsZero() {
+				firstStart = cfg.StartDate.UTC().Truncate(reportScheduleDayDuration)
+			} else if !earliestStart.IsZero() && earliestStart.Before(firstStart) {
+				firstStart = earliestStart
+			}
+			if firstStart.After(latestStart) {
+				continue
+			}
+
+			scheduledThisPair := 0
+			for dayStart := firstStart; !dayStart.After(latestStart) && scheduledThisPair < maxDaysPerTick; dayStart = dayStart.Add(reportScheduleDayDuration) {
+				if existingStarts[dayStart.Unix()] {
+					continue
+				}
+				_, created, err := r.EnsureReportRunSchedule(ctx, ReportScheduleRequest{
+					Account:           item.account,
+					ReportType:        reportType,
+					IntervalStart:     dayStart,
+					IntervalEnd:       dayStart.Add(reportScheduleDayDuration),
+					IncludeMoRColumns: cfg.IncludeMoRColumns,
+					ActorID:           item.actorID,
+					Reason:            item.reason,
+				})
+				if err != nil {
+					errs = append(errs, err)
+					break
+				}
+				existingStarts[dayStart.Unix()] = true
+				if created {
+					createdCount++
+					scheduledThisPair++
+				}
 			}
 		}
 	}
-	return createdCount, nil
+	return createdCount, errors.Join(errs...)
+}
+
+func (r *Repository) loadScheduledDailyReportStarts(ctx context.Context, accountID int64, environment, reportType string) (map[int64]bool, time.Time, error) {
+	rows, err := r.pool.Query(ctx, `SELECT (parameters->>'interval_start')::bigint
+		FROM payment_stripe_report_runs
+		WHERE account_id = $1
+		  AND environment = $2
+		  AND report_type = $3
+		  AND parameters ? 'interval_start'
+		  AND parameters ? 'interval_end'
+		  AND ((parameters->>'interval_end')::bigint - (parameters->>'interval_start')::bigint) = $4
+		ORDER BY (parameters->>'interval_start')::bigint ASC`,
+		accountID, environment, reportType, reportScheduleDaySeconds)
+	if err != nil {
+		return nil, time.Time{}, err
+	}
+	defer rows.Close()
+
+	starts := make(map[int64]bool)
+	var earliest time.Time
+	for rows.Next() {
+		var ts int64
+		if err := rows.Scan(&ts); err != nil {
+			return nil, time.Time{}, err
+		}
+		day := time.Unix(ts, 0).UTC().Truncate(reportScheduleDayDuration)
+		starts[day.Unix()] = true
+		if earliest.IsZero() || day.Before(earliest) {
+			earliest = day
+		}
+	}
+	return starts, earliest, rows.Err()
 }
 
 type reportRunJob struct {

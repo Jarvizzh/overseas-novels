@@ -273,3 +273,258 @@ func TestStripeEFWAndDisputeAutoMitigation(t *testing.T) {
 		t.Fatalf("lost dispute after refund double-debited wallet: got %d, want 500", chargedCoins)
 	}
 }
+
+func TestReviewStaleOpenObservationDoesNotRefreezeWonDispute(t *testing.T) {
+	ctx := t.Context()
+	pool := testdb.Open(t)
+	exec := func(query string, args ...any) {
+		t.Helper()
+		if _, err := pool.Exec(ctx, query, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	exec(`
+		INSERT INTO admins(id,username,password_hash,role,role_id) VALUES
+			('fin-r1','fin-r1','test','FinanceManager',(SELECT id FROM roles WHERE code='FinanceManager'));
+		INSERT INTO payment_channel_accounts(id,provider,account_key,environment,status,credentials_ref,webhook_ref)
+			OVERRIDING SYSTEM VALUE VALUES(9601,'stripe','acct_r1_stale','sandbox','published','env:test','wh_r1_9601');
+		INSERT INTO payment_aftercare_policies(account_id,finance_id,auto_refund,auto_cancel_subscription,dispute_freeze)
+			VALUES(9601,'fin-r1',true,true,true);
+		INSERT INTO users(id) VALUES(9601),(9602),(9603);
+		INSERT INTO wallets(user_id,charged_coins,bonus_coins) VALUES(9601,100,20),(9602,100,20),(9603,100,20);
+		INSERT INTO recharge_orders(id,user_id,amount_cents,currency,payment_method,status,order_type,coins,bonus_coins_credited,fulfilled_at,checkout_environment)
+			VALUES
+			(9611,9601,1000,'USD','stripe','Success','single',100,20,now(),'sandbox'),
+			(9612,9602,1000,'USD','stripe','Success','single',100,20,now(),'sandbox'),
+			(9613,9603,1000,'USD','stripe','Success','single',100,20,now(),'sandbox');
+		INSERT INTO third_party_payment_orders(id,order_id,payment_provider,external_order_id,capture_id,gross_amount,status,account_id,object_type,currency)
+			VALUES
+			(9621,9611,'stripe','cs_9611','ch_r1_won',10.00,'VERIFIED',9601,'charge','USD'),
+			(9622,9612,'stripe','cs_9612','ch_r1_lost',10.00,'VERIFIED',9601,'charge','USD'),
+			(9623,9613,'stripe','cs_9613','ch_r1_same_ts',10.00,'VERIFIED',9601,'charge','USD');
+	`)
+
+	repo := NewRepository(pool)
+	account := payment.WebhookAccount{AccountKey: "acct_r1_stale", Environment: "sandbox"}
+	t1 := time.Now().UTC().Truncate(time.Second)
+	t2 := t1.Add(10 * time.Second)
+
+	obs := func(extID, chargeID, status string, open bool, ts time.Time, srcRef string) *payment.CaseObservation {
+		return &payment.CaseObservation{
+			Fact: payment.CaseFact{
+				Provider:    payment.ProviderStripe,
+				Account:     account,
+				Kind:        payment.CaseDispute,
+				ExternalID:  extID,
+				Stage:       status,
+				Status:      status,
+				Outcome:     status,
+				Open:        open,
+				ReceiptRefs: []string{chargeID},
+				ObservedAt:  ts,
+				Source:      "webhook",
+				SourceRef:   srcRef,
+				Evidence:    json.RawMessage(`{"ChargeRefundable":false}`),
+			},
+		}
+	}
+
+	// 1. open@T1 -> won@T2 -> stale open@T1 (different source_ref): must stay won and unfrozen.
+	if err := repo.RecordObservation(ctx, obs("du_r1_won", "ch_r1_won", "needs_response", true, t1, "evt_r1_open_1")); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.RecordObservation(ctx, obs("du_r1_won", "ch_r1_won", "won", false, t2, "evt_r1_won_2")); err != nil {
+		t.Fatal(err)
+	}
+	var txBefore int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM transactions WHERE user_id=9601`).Scan(&txBefore); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.RecordObservation(ctx, obs("du_r1_won", "ch_r1_won", "needs_response", true, t1, "evt_r1_stale_open_3")); err != nil {
+		t.Fatal(err)
+	}
+	var caseStatus, freezeStatus string
+	var blocked bool
+	var charged, bonus, txAfter int
+	if err := pool.QueryRow(ctx, `SELECT c.provider_status, adj.blocked, adj.freeze_status, w.charged_coins, w.bonus_coins,
+		(SELECT count(*) FROM transactions WHERE user_id=9601)
+		FROM payment_cases c
+		JOIN payment_entitlement_adjustments adj ON adj.order_id=9611
+		JOIN wallets w ON w.user_id=9601
+		WHERE c.external_id='du_r1_won'`).Scan(&caseStatus, &blocked, &freezeStatus, &charged, &bonus, &txAfter); err != nil {
+		t.Fatal(err)
+	}
+	if caseStatus != "won" || blocked || freezeStatus != FreezeStatusNone || charged != 100 || bonus != 20 || txAfter != txBefore {
+		t.Fatalf("stale open re-froze won dispute: status=%q blocked=%v freeze=%q charged=%d bonus=%d tx=%d->%d",
+			caseStatus, blocked, freezeStatus, charged, bonus, txBefore, txAfter)
+	}
+
+	// 2. open@T1 -> lost@T2 -> stale won@T1: must stay lost and written_off (never unfrozen).
+	if err := repo.RecordObservation(ctx, obs("du_r1_lost", "ch_r1_lost", "needs_response", true, t1, "evt_r1_lost_open")); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.RecordObservation(ctx, obs("du_r1_lost", "ch_r1_lost", "lost", false, t2, "evt_r1_lost_final")); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.RecordObservation(ctx, obs("du_r1_lost", "ch_r1_lost", "won", false, t1, "evt_r1_stale_won")); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT c.provider_status, adj.blocked, adj.freeze_status, w.charged_coins, w.bonus_coins
+		FROM payment_cases c
+		JOIN payment_entitlement_adjustments adj ON adj.order_id=9612
+		JOIN wallets w ON w.user_id=9602
+		WHERE c.external_id='du_r1_lost'`).Scan(&caseStatus, &blocked, &freezeStatus, &charged, &bonus); err != nil {
+		t.Fatal(err)
+	}
+	if caseStatus != "lost" || !blocked || freezeStatus != FreezeStatusWrittenOff || charged != 0 || bonus != 0 {
+		t.Fatalf("stale won mutated lost dispute: status=%q blocked=%v freeze=%q charged=%d bonus=%d",
+			caseStatus, blocked, freezeStatus, charged, bonus)
+	}
+
+	// 3. Equal-timestamp terminal precedence: won@T1 then open@T1 must keep won and unfrozen.
+	if err := repo.RecordObservation(ctx, obs("du_r1_same", "ch_r1_same_ts", "needs_response", true, t1.Add(-time.Second), "evt_r1_same_open0")); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.RecordObservation(ctx, obs("du_r1_same", "ch_r1_same_ts", "won", false, t1, "evt_r1_same_won")); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.RecordObservation(ctx, obs("du_r1_same", "ch_r1_same_ts", "needs_response", true, t1, "evt_r1_same_open1")); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT c.provider_status, adj.blocked, adj.freeze_status, w.charged_coins, w.bonus_coins
+		FROM payment_cases c
+		JOIN payment_entitlement_adjustments adj ON adj.order_id=9613
+		JOIN wallets w ON w.user_id=9603
+		WHERE c.external_id='du_r1_same'`).Scan(&caseStatus, &blocked, &freezeStatus, &charged, &bonus); err != nil {
+		t.Fatal(err)
+	}
+	if caseStatus != "won" || blocked || freezeStatus != FreezeStatusNone || charged != 100 || bonus != 20 {
+		t.Fatalf("equal-timestamp open regressed terminal won: status=%q blocked=%v freeze=%q charged=%d bonus=%d",
+			caseStatus, blocked, freezeStatus, charged, bonus)
+	}
+}
+
+func TestReviewDisablingPolicyStillReleasesExistingFreeze(t *testing.T) {
+	ctx := t.Context()
+	pool := testdb.Open(t)
+	exec := func(query string, args ...any) {
+		t.Helper()
+		if _, err := pool.Exec(ctx, query, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	exec(`
+		INSERT INTO admins(id,username,password_hash,role,role_id) VALUES
+			('fin-r2','fin-r2','test','FinanceManager',(SELECT id FROM roles WHERE code='FinanceManager'));
+		INSERT INTO payment_channel_accounts(id,provider,account_key,environment,status,credentials_ref,webhook_ref)
+			OVERRIDING SYSTEM VALUE VALUES(9701,'stripe','acct_r2_policy','sandbox','published','env:test','wh_r2_9701');
+		INSERT INTO payment_aftercare_policies(account_id,finance_id,auto_refund,auto_cancel_subscription,dispute_freeze)
+			VALUES(9701,'fin-r2',true,true,true);
+		INSERT INTO users(id) VALUES(9701),(9702),(9703);
+		INSERT INTO wallets(user_id,charged_coins,bonus_coins) VALUES(9701,100,20),(9702,100,20),(9703,100,20);
+		INSERT INTO recharge_orders(id,user_id,amount_cents,currency,payment_method,status,order_type,coins,bonus_coins_credited,fulfilled_at,checkout_environment)
+			VALUES
+			(9711,9701,1000,'USD','stripe','Success','single',100,20,now(),'sandbox'),
+			(9712,9702,1000,'USD','stripe','Success','single',100,20,now(),'sandbox'),
+			(9713,9703,1000,'USD','stripe','Success','single',100,20,now(),'sandbox');
+		INSERT INTO third_party_payment_orders(id,order_id,payment_provider,external_order_id,capture_id,gross_amount,status,account_id,object_type,currency)
+			VALUES
+			(9721,9711,'stripe','cs_9711','ch_r2_won',10.00,'VERIFIED',9701,'charge','USD'),
+			(9722,9712,'stripe','cs_9712','ch_r2_lost',10.00,'VERIFIED',9701,'charge','USD'),
+			(9723,9713,'stripe','cs_9713','ch_r2_refunded',10.00,'VERIFIED',9701,'charge','USD');
+	`)
+
+	repo := NewRepository(pool)
+	account := payment.WebhookAccount{AccountKey: "acct_r2_policy", Environment: "sandbox"}
+	now := time.Now().UTC().Truncate(time.Second)
+
+	obs := func(extID, chargeID, status string, open bool, ts time.Time, srcRef string) *payment.CaseObservation {
+		return &payment.CaseObservation{
+			Fact: payment.CaseFact{
+				Provider:    payment.ProviderStripe,
+				Account:     account,
+				Kind:        payment.CaseDispute,
+				ExternalID:  extID,
+				Stage:       status,
+				Status:      status,
+				Outcome:     status,
+				Open:        open,
+				ReceiptRefs: []string{chargeID},
+				ObservedAt:  ts,
+				Source:      "webhook",
+				SourceRef:   srcRef,
+				Evidence:    json.RawMessage(`{"ChargeRefundable":false}`),
+			},
+		}
+	}
+
+	// Freeze all three orders while dispute_freeze=true.
+	if err := repo.RecordObservation(ctx, obs("du_r2_won", "ch_r2_won", "needs_response", true, now, "evt_r2_open_1")); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.RecordObservation(ctx, obs("du_r2_lost", "ch_r2_lost", "needs_response", true, now, "evt_r2_open_2")); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.RecordObservation(ctx, obs("du_r2_ref", "ch_r2_refunded", "needs_response", true, now, "evt_r2_open_3")); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. Disable ONLY dispute_freeze (keep other two enabled) -> won still releases freeze exactly once (incl. replay).
+	exec(`UPDATE payment_aftercare_policies SET dispute_freeze=false WHERE account_id=9701`)
+	if err := repo.RecordObservation(ctx, obs("du_r2_won", "ch_r2_won", "won", false, now.Add(time.Second), "evt_r2_won_1")); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.RecordObservation(ctx, obs("du_r2_won", "ch_r2_won", "won", false, now.Add(2*time.Second), "evt_r2_won_replay")); err != nil {
+		t.Fatal(err)
+	}
+	var blocked bool
+	var freezeStatus string
+	var charged, bonus int
+	if err := pool.QueryRow(ctx, `SELECT adj.blocked, adj.freeze_status, w.charged_coins, w.bonus_coins
+		FROM payment_entitlement_adjustments adj JOIN wallets w ON w.user_id=9701 WHERE adj.order_id=9711`).
+		Scan(&blocked, &freezeStatus, &charged, &bonus); err != nil {
+		t.Fatal(err)
+	}
+	if blocked || freezeStatus != FreezeStatusNone || charged != 100 || bonus != 20 {
+		t.Fatalf("disabling dispute_freeze blocked won release: blocked=%v freeze=%q charged=%d bonus=%d", blocked, freezeStatus, charged, bonus)
+	}
+
+	// 2. Disable ALL THREE toggles -> lost still writes off existing freeze without double-debit.
+	exec(`UPDATE payment_aftercare_policies SET auto_refund=false, auto_cancel_subscription=false, dispute_freeze=false WHERE account_id=9701`)
+	if err := repo.RecordObservation(ctx, obs("du_r2_lost", "ch_r2_lost", "lost", false, now.Add(time.Second), "evt_r2_lost_1")); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT adj.blocked, adj.freeze_status, w.charged_coins, w.bonus_coins
+		FROM payment_entitlement_adjustments adj JOIN wallets w ON w.user_id=9702 WHERE adj.order_id=9712`).
+		Scan(&blocked, &freezeStatus, &charged, &bonus); err != nil {
+		t.Fatal(err)
+	}
+	if !blocked || freezeStatus != FreezeStatusWrittenOff || charged != 0 || bonus != 0 {
+		t.Fatalf("all-toggles-off blocked lost write-off: blocked=%v freeze=%q charged=%d bonus=%d", blocked, freezeStatus, charged, bonus)
+	}
+
+	// 3. Full refund finalized while all toggles off, then won arrives -> must NOT restore already-refunded balance.
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := FinalizeStripeRefund(ctx, tx, 9713, "re_r2_full_refund"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.RecordObservation(ctx, obs("du_r2_ref", "ch_r2_refunded", "won", false, now.Add(time.Second), "evt_r2_ref_won")); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT adj.blocked, adj.freeze_status, w.charged_coins, w.bonus_coins
+		FROM payment_entitlement_adjustments adj JOIN wallets w ON w.user_id=9703 WHERE adj.order_id=9713`).
+		Scan(&blocked, &freezeStatus, &charged, &bonus); err != nil {
+		t.Fatal(err)
+	}
+	if !blocked || freezeStatus != FreezeStatusNone || charged != 0 || bonus != 0 {
+		t.Fatalf("won after full refund wrongly restored balance: blocked=%v freeze=%q charged=%d bonus=%d", blocked, freezeStatus, charged, bonus)
+	}
+}

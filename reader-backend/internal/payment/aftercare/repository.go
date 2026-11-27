@@ -61,8 +61,8 @@ func RecordTx(ctx context.Context, tx pgx.Tx, f payment.CaseFact) error {
 			order_ref=COALESCE(EXCLUDED.order_ref,payment_cases.order_ref),observed_at=EXCLUDED.observed_at,updated_at=clock_timestamp()
 		WHERE payment_cases.provider_status<>'ledger_confirmed' AND (EXCLUDED.observed_at>payment_cases.observed_at OR
 		    (EXCLUDED.observed_at=payment_cases.observed_at AND NOT EXCLUDED.is_open AND payment_cases.is_open) OR
-            (EXCLUDED.observed_at=payment_cases.observed_at AND cardinality(payment_cases.receipt_refs)=0
-                AND cardinality(EXCLUDED.receipt_refs)>0))
+		    (EXCLUDED.observed_at=payment_cases.observed_at AND (payment_cases.is_open OR NOT EXCLUDED.is_open)
+		        AND cardinality(payment_cases.receipt_refs)=0 AND cardinality(EXCLUDED.receipt_refs)>0))
 		RETURNING id`, accountID, f.Kind, f.ExternalID, f.ReceiptRefs, f.Status, f.Stage, f.Reason, f.Outcome, f.Open, f.DueAt, f.AmountMinor, strings.ToUpper(strings.TrimSpace(f.OriginalCurrency)), f.OriginalAmountMinor, f.ObservedAt, f.OrderRef).Scan(&caseID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		err = tx.QueryRow(ctx, `SELECT id FROM payment_cases WHERE account_id=$1 AND kind=$2 AND external_id=$3`, accountID, f.Kind, f.ExternalID).Scan(&caseID)

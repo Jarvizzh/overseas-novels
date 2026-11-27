@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -22,6 +23,10 @@ const (
 type stripeMitigationPolicy struct {
 	accountID              int64
 	caseID                 int64
+	acceptedStatus         string
+	acceptedStage          string
+	acceptedOpen           bool
+	acceptedObservedAt     time.Time
 	autoRefund             bool
 	autoCancelSubscription bool
 	disputeFreeze          bool
@@ -62,37 +67,60 @@ func ApplyStripeMitigationTx(ctx context.Context, tx pgx.Tx, f payment.CaseFact)
 	}
 
 	var policy stripeMitigationPolicy
-	err := tx.QueryRow(ctx, `SELECT c.account_id,c.id,
+	err := tx.QueryRow(ctx, `SELECT c.account_id,c.id,c.provider_status,c.stage,c.is_open,c.observed_at,
 		COALESCE(p.auto_refund,false),COALESCE(p.auto_cancel_subscription,false),COALESCE(p.dispute_freeze,false)
 		FROM payment_cases c
 		JOIN payment_channel_accounts a ON a.id=c.account_id
 		LEFT JOIN payment_aftercare_policies p ON p.account_id=c.account_id
 		WHERE a.provider='stripe' AND a.account_key=$1 AND a.environment=$2
-		  AND c.kind=$3 AND c.external_id=$4`,
+		  AND c.kind=$3 AND c.external_id=$4
+		FOR UPDATE OF c`,
 		f.Account.AccountKey, f.Account.Environment, f.Kind, f.ExternalID).
-		Scan(&policy.accountID, &policy.caseID, &policy.autoRefund, &policy.autoCancelSubscription, &policy.disputeFreeze)
+		Scan(&policy.accountID, &policy.caseID, &policy.acceptedStatus, &policy.acceptedStage,
+			&policy.acceptedOpen, &policy.acceptedObservedAt,
+			&policy.autoRefund, &policy.autoCancelSubscription, &policy.disputeFreeze)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil
 	}
 	if err != nil {
 		return err
 	}
-	if !policy.autoRefund && !policy.autoCancelSubscription && !policy.disputeFreeze {
-		return nil
-	}
 
-	receipts, err := loadStripeMitigationReceiptsTx(ctx, tx, policy.caseID, policy.accountID)
-	if err != nil || len(receipts) == 0 {
-		return err
+	// Drive mitigation strictly from the persisted accepted case state and its
+	// corresponding evidence so stale/rejected observations archived for audit
+	// can never re-trigger open actions or revert terminal outcomes.
+	acceptedEvidence := f.Evidence
+	isStaleObservation := f.ObservedAt.Before(policy.acceptedObservedAt) ||
+		(f.ObservedAt.Equal(policy.acceptedObservedAt) && f.Status != policy.acceptedStatus)
+	if isStaleObservation {
+		var latestRaw []byte
+		evErr := tx.QueryRow(ctx, `SELECT evidence FROM payment_case_evidence
+			WHERE case_id=$1 AND observed_at=$2 ORDER BY observed_at DESC, source_ref DESC LIMIT 1`,
+			policy.caseID, policy.acceptedObservedAt).Scan(&latestRaw)
+		if evErr == nil && len(latestRaw) > 0 {
+			acceptedEvidence = latestRaw
+		} else if evErr != nil && !errors.Is(evErr, pgx.ErrNoRows) {
+			return evErr
+		}
 	}
 
 	if isEFW {
+		if !policy.autoRefund && !policy.autoCancelSubscription {
+			return nil
+		}
+		if isStaleObservation {
+			return nil
+		}
 		var ev efwEvidence
-		if len(f.Evidence) > 0 {
-			_ = json.Unmarshal(f.Evidence, &ev)
+		if len(acceptedEvidence) > 0 {
+			_ = json.Unmarshal(acceptedEvidence, &ev)
 		}
 		if !ev.Actionable {
 			return nil
+		}
+		receipts, err := loadStripeMitigationReceiptsTx(ctx, tx, policy.caseID, policy.accountID)
+		if err != nil || len(receipts) == 0 {
+			return err
 		}
 		for _, receipt := range receipts {
 			if policy.autoRefund {
@@ -109,16 +137,27 @@ func ApplyStripeMitigationTx(ctx context.Context, tx pgx.Tx, f payment.CaseFact)
 		return nil
 	}
 
-	// Dispute handling.
+	// Dispute handling: always evaluate based on the accepted persisted status.
 	var ev disputeEvidence
-	if len(f.Evidence) > 0 {
-		_ = json.Unmarshal(f.Evidence, &ev)
+	if len(acceptedEvidence) > 0 {
+		_ = json.Unmarshal(acceptedEvidence, &ev)
 	}
-	status := f.Status
+	status := policy.acceptedStatus
 	isInquiryOpen := status == "warning_needs_response" || status == "warning_under_review"
 	isFormalOpen := status == "needs_response" || status == "under_review"
 	isWonOrClosedNoLoss := status == "won" || status == "warning_closed" || status == "prevented"
 	isLost := status == "lost"
+
+	// Terminal disputes must still converge any pre-existing freezes even when
+	// all auto-mitigation policy toggles are currently disabled.
+	if !policy.autoRefund && !policy.autoCancelSubscription && !policy.disputeFreeze && !isWonOrClosedNoLoss && !isLost {
+		return nil
+	}
+
+	receipts, err := loadStripeMitigationReceiptsTx(ctx, tx, policy.caseID, policy.accountID)
+	if err != nil || len(receipts) == 0 {
+		return err
+	}
 
 	for _, receipt := range receipts {
 		if policy.autoRefund && isInquiryOpen && ev.ChargeRefundable {
@@ -131,49 +170,47 @@ func ApplyStripeMitigationTx(ctx context.Context, tx pgx.Tx, f payment.CaseFact)
 				return err
 			}
 		}
-		if policy.disputeFreeze {
-			switch {
-			case isFormalOpen:
-				frozen, err := ApplyDisputeFreezeTx(ctx, tx, policy.caseID, receipt.orderID, f.ExternalID)
-				if err != nil {
+		switch {
+		case isFormalOpen && policy.disputeFreeze:
+			frozen, err := ApplyDisputeFreezeTx(ctx, tx, policy.caseID, receipt.orderID, f.ExternalID)
+			if err != nil {
+				return err
+			}
+			if frozen {
+				if err := recordMitigationAuditTx(ctx, tx, policy.caseID,
+					"dispute-freeze:"+f.ExternalID+":"+receipt.captureID,
+					"dispute_entitlement_frozen",
+					"Dispute-period freeze policy froze entitlement during open formal dispute",
+					map[string]any{"order_id": receipt.orderID, "charge_id": receipt.captureID}); err != nil {
 					return err
 				}
-				if frozen {
-					if err := recordMitigationAuditTx(ctx, tx, policy.caseID,
-						"dispute-freeze:"+f.ExternalID+":"+receipt.captureID,
-						"dispute_entitlement_frozen",
-						"Dispute-period freeze policy froze entitlement during open formal dispute",
-						map[string]any{"order_id": receipt.orderID, "charge_id": receipt.captureID}); err != nil {
-						return err
-					}
-				}
-			case isWonOrClosedNoLoss:
-				unfrozen, err := ReleaseDisputeFreezeTx(ctx, tx, policy.caseID, receipt.orderID, f.ExternalID)
-				if err != nil {
+			}
+		case isWonOrClosedNoLoss:
+			unfrozen, err := ReleaseDisputeFreezeTx(ctx, tx, policy.caseID, receipt.orderID, f.ExternalID)
+			if err != nil {
+				return err
+			}
+			if unfrozen {
+				if err := recordMitigationAuditTx(ctx, tx, policy.caseID,
+					"dispute-unfreeze:"+f.ExternalID+":"+receipt.captureID,
+					"dispute_entitlement_unfrozen",
+					"Dispute closed without loss; unfroze previously frozen entitlement",
+					map[string]any{"order_id": receipt.orderID, "charge_id": receipt.captureID, "outcome": status}); err != nil {
 					return err
 				}
-				if unfrozen {
-					if err := recordMitigationAuditTx(ctx, tx, policy.caseID,
-						"dispute-unfreeze:"+f.ExternalID+":"+receipt.captureID,
-						"dispute_entitlement_unfrozen",
-						"Dispute closed without loss; unfroze previously frozen entitlement",
-						map[string]any{"order_id": receipt.orderID, "charge_id": receipt.captureID, "outcome": status}); err != nil {
-						return err
-					}
-				}
-			case isLost:
-				writtenOff, err := WriteOffDisputeFreezeTx(ctx, tx, policy.caseID, receipt.orderID, f.ExternalID)
-				if err != nil {
+			}
+		case isLost:
+			writtenOff, err := WriteOffDisputeFreezeTx(ctx, tx, policy.caseID, receipt.orderID, f.ExternalID)
+			if err != nil {
+				return err
+			}
+			if writtenOff {
+				if err := recordMitigationAuditTx(ctx, tx, policy.caseID,
+					"dispute-writeoff:"+f.ExternalID+":"+receipt.captureID,
+					"dispute_entitlement_written_off",
+					"Dispute lost; wrote off previously frozen entitlement without duplicate debit",
+					map[string]any{"order_id": receipt.orderID, "charge_id": receipt.captureID}); err != nil {
 					return err
-				}
-				if writtenOff {
-					if err := recordMitigationAuditTx(ctx, tx, policy.caseID,
-						"dispute-writeoff:"+f.ExternalID+":"+receipt.captureID,
-						"dispute_entitlement_written_off",
-						"Dispute lost; wrote off previously frozen entitlement without duplicate debit",
-						map[string]any{"order_id": receipt.orderID, "charge_id": receipt.captureID}); err != nil {
-						return err
-					}
 				}
 			}
 		}

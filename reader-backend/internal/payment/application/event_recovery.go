@@ -20,6 +20,7 @@ const (
 	paymentEventWindow           = time.Hour
 	paymentEventOverlap          = 2 * time.Minute
 	paymentEventInitialLookback  = 15 * time.Minute
+	stripeEventRetention         = 30 * 24 * time.Hour
 	paymentEventPageSize         = 100
 )
 
@@ -39,7 +40,7 @@ func SchedulePaymentEventRecovery(ctx context.Context, provider string, account 
 		(provider != payment.ProviderStripe && provider != payment.ProviderPayPal) || from.IsZero() || !from.Before(now) {
 		return errors.New("event recovery requires a channel, account, environment and past start time")
 	}
-	if provider == payment.ProviderStripe && now.Sub(from) >= 30*24*time.Hour {
+	if provider == payment.ProviderStripe && now.Sub(from) >= stripeEventRetention {
 		return errors.New("Stripe event window exceeds retention; recover from transaction resources")
 	}
 	end := from.Add(paymentEventWindow)
@@ -184,11 +185,40 @@ func claimStripeEventRecoveryGroup(ctx context.Context, account payment.WebhookA
 	window.token = uuid.New()
 	window.groupKey = groupKey
 	pool := db.Pool(ctx)
-	_, err := pool.Exec(ctx, `INSERT INTO payment_event_recovery_groups(account_id,group_key,window_start,window_end)
-		SELECT id,$4,now()-make_interval(secs=>$5::int),now() FROM payment_channel_accounts
-		WHERE provider=$1 AND account_key=$2 AND environment=$3 ON CONFLICT DO NOTHING`,
+	// When initializing a group for the first time, inherit the earliest
+	// unfinished legacy payment_event_recovery window (with safe overlap and an
+	// empty page_cursor so each group paginates from the window start). Existing
+	// group rows are never reset by ON CONFLICT DO NOTHING.
+	_, err := pool.Exec(ctx, `WITH target AS (
+		SELECT a.id AS account_id,
+			CASE
+				WHEN legacy.account_id IS NOT NULL THEN
+					LEAST(
+						legacy.window_start,
+						COALESCE(legacy.last_complete_at - make_interval(secs => $6::int), legacy.window_start)
+					)
+				ELSE now() - make_interval(secs => $5::int)
+			END AS init_start,
+			legacy.account_id IS NOT NULL AS has_legacy
+		FROM payment_channel_accounts a
+		LEFT JOIN payment_event_recovery legacy ON legacy.account_id = a.id
+		WHERE a.provider = $1 AND a.account_key = $2 AND a.environment = $3
+	)
+	INSERT INTO payment_event_recovery_groups(account_id,group_key,window_start,window_end,page_cursor)
+	SELECT account_id,
+		$4,
+		init_start,
+		CASE
+			WHEN has_legacy THEN LEAST(now(), init_start + make_interval(secs => $7::int))
+			ELSE now()
+		END,
+		''
+	FROM target
+	ON CONFLICT (account_id, group_key) DO NOTHING`,
 		payment.ProviderStripe, account.AccountKey, account.Environment, groupKey,
-		int(paymentEventInitialLookback/time.Second))
+		int(paymentEventInitialLookback/time.Second),
+		int(paymentEventOverlap/time.Second),
+		int(paymentEventWindow/time.Second))
 	if err != nil {
 		return window, err
 	}
@@ -283,7 +313,9 @@ func (s *service) recoverStripeEventGroups(ctx context.Context, groups []stripe.
 		}
 		request, cancel := context.WithTimeout(ctx, 45*time.Second)
 		next, result := func(ctx context.Context, w paymentEventWindowLease) (string, error) {
-			if time.Since(w.start) >= 30*24*time.Hour {
+			if time.Since(w.start) >= stripeEventRetention {
+				log.Printf("task=payment_event_recovery provider=stripe account=%s env=%s group=%s window_start=%s action=retention_exceeded",
+					account.AccountKey, account.Environment, group.Key, w.start.UTC().Format(time.RFC3339))
 				return "", errors.New("Stripe event window exceeds retention; recover from transaction resources")
 			}
 			page, err := adapter.ListEvents(ctx, stripe.EventQuery{

@@ -296,3 +296,104 @@ func TestStripeGroupedEventRecoveryPaginatesIndependentlyWithoutMissingPages(t *
 		t.Fatalf("recovered events=%d want 4, err=%v", count, err)
 	}
 }
+
+func TestReviewStripeRecoveryKeepsLegacyBacklog(t *testing.T) {
+	t.Setenv("CONVERSION_ENVIRONMENT", "sandbox")
+	pool := testdb.Open(t)
+	ctx := t.Context()
+
+	var legacyAccID, freshAccID, expiredAccID int64
+	if err := pool.QueryRow(ctx, `INSERT INTO payment_channel_accounts(provider,account_key,environment,credentials_ref,webhook_ref)
+		VALUES('stripe','acct_LegacyBacklog','sandbox','test','test') RETURNING id`).Scan(&legacyAccID); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `INSERT INTO payment_channel_accounts(provider,account_key,environment,credentials_ref,webhook_ref)
+		VALUES('stripe','acct_FreshNoLegacy','sandbox','test','test') RETURNING id`).Scan(&freshAccID); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `INSERT INTO payment_channel_accounts(provider,account_key,environment,credentials_ref,webhook_ref)
+		VALUES('stripe','acct_ExpiredLegacy','sandbox','test','test') RETURNING id`).Scan(&expiredAccID); err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Now().UTC().Truncate(time.Second)
+	legacyStart := now.Add(-48 * time.Hour)
+	legacyEnd := now.Add(-47 * time.Hour)
+	if _, err := pool.Exec(ctx, `INSERT INTO payment_event_recovery(account_id,window_start,window_end,page_cursor)
+		VALUES($1,$2,$3,'evt_old_cursor')`, legacyAccID, legacyStart, legacyEnd); err != nil {
+		t.Fatal(err)
+	}
+
+	legacyAccount := payment.WebhookAccount{AccountKey: "acct_LegacyBacklog", Environment: "sandbox"}
+	groups := stripe.RecoveryEventGroups()
+	if len(groups) < 2 {
+		t.Fatalf("expected >=2 groups, got %d", len(groups))
+	}
+
+	// 1. First claim of each group must inherit the 48h legacy backlog start with empty page_cursor.
+	var firstLeases []paymentEventWindowLease
+	for _, g := range groups {
+		lease, err := claimStripeEventRecoveryGroup(ctx, legacyAccount, g.Key)
+		if err != nil {
+			t.Fatalf("claim group %s: %v", g.Key, err)
+		}
+		if lease.cursor != "" {
+			t.Fatalf("group %s copied legacy page_cursor %q; must start from empty cursor", g.Key, lease.cursor)
+		}
+		if delta := lease.start.Sub(legacyStart).Abs(); delta > 2*time.Second {
+			t.Fatalf("group %s start=%s did not inherit legacy backlog start=%s", g.Key, lease.start, legacyStart)
+		}
+		if delta := lease.end.Sub(legacyEnd).Abs(); delta > 2*time.Second {
+			t.Fatalf("group %s end=%s expected %s", g.Key, lease.end, legacyEnd)
+		}
+		firstLeases = append(firstLeases, lease)
+	}
+
+	// 2. Completing group_0 advances it; re-claiming must NOT reset it back to legacy start.
+	if err := finishStripeEventRecoveryGroup(ctx, firstLeases[0], "", nil); err != nil {
+		t.Fatal(err)
+	}
+	advanced, err := claimStripeEventRecoveryGroup(ctx, legacyAccount, groups[0].Key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantNextStart := legacyEnd.Add(-paymentEventOverlap)
+	if delta := advanced.start.Sub(wantNextStart).Abs(); delta > 2*time.Second {
+		t.Fatalf("re-claim reset group_0 window: got %s want %s", advanced.start, wantNextStart)
+	}
+
+	// 3. Fresh account with no legacy row uses normal 15m initial lookback.
+	freshAccount := payment.WebhookAccount{AccountKey: "acct_FreshNoLegacy", Environment: "sandbox"}
+	freshLease, err := claimStripeEventRecoveryGroup(ctx, freshAccount, groups[0].Key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if age := time.Since(freshLease.start); age < 14*time.Minute || age > 17*time.Minute {
+		t.Fatalf("fresh account lookback age=%s, want ~15m", age)
+	}
+
+	// 4. Legacy backlog older than 30d Stripe retention inherits start and surfaces explicit retention error.
+	expiredStart := now.Add(-31 * 24 * time.Hour)
+	if _, err := pool.Exec(ctx, `INSERT INTO payment_event_recovery(account_id,window_start,window_end,page_cursor)
+		VALUES($1,$2,$3,'')`, expiredAccID, expiredStart, expiredStart.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	expiredAccount := payment.WebhookAccount{AccountKey: "acct_ExpiredLegacy", Environment: "sandbox"}
+	adapter := &groupedRecoveryFixture{
+		account: expiredAccount,
+		listFunc: func(context.Context, stripe.EventQuery) (stripe.Page[stripe.Event], error) {
+			t.Fatal("ListEvents must not be called when window exceeds 30d retention")
+			return stripe.Page[stripe.Event]{}, nil
+		},
+	}
+	s := &service{adapters: payment.NewAdapters(adapter)}
+	s.recoverStripeEventWindow(ctx)
+	var lastErr string
+	if err := pool.QueryRow(ctx, `SELECT COALESCE(last_error,'') FROM payment_event_recovery_groups
+		WHERE account_id=$1 AND group_key=$2`, expiredAccID, groups[0].Key).Scan(&lastErr); err != nil {
+		t.Fatal(err)
+	}
+	if lastErr == "" {
+		t.Fatal("expected explicit retention-exceeded error recorded on >30d legacy backlog")
+	}
+}
