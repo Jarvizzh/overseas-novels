@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { CreditCard, SlidersHorizontal } from 'lucide-react';
-import { Link, useSearchParams } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { usePermission } from '../context/PermissionContext';
 import { apiRequest } from '../utils/api';
 import CustomSelect from '../components/CustomSelect';
@@ -12,6 +12,8 @@ import {
   type ColumnOption,
   type FilterChip,
   FilterChipsBar,
+  type RowActionItem,
+  RowActionMenu,
   SearchInput,
   SkeletonRows,
   StatusDot,
@@ -103,6 +105,7 @@ export default function OrdersTab() {
   const canReadDisputes = canRead('payments.disputes');
   const canWriteRefunds = canWrite('payments.refunds');
   const searchFormId = useId();
+  const navigate = useNavigate();
   const [params, setParams] = useSearchParams();
   const { provider, environment, account_id } = paymentScope(params, '');
   const linkedOrder = params.get('order_id');
@@ -558,6 +561,36 @@ export default function OrdersTab() {
             ) : (
               orders.map((o) => {
                 const statusMeta = getOrderStatusMeta(o.status);
+                const providerLabel = providerLabels[o.payment_provider || ''] || '渠道待核对';
+                const credentialText = `${providerLabel} · ${o.external_ref_id || '凭证待确认'}`;
+                const hasMorePermissions =
+                  canReadReconciliation || canReadRisk || canReadDisputes || canWriteRefunds;
+                const moreActionItems: RowActionItem[] = hasMorePermissions
+                  ? o.payment_environment
+                    ? ([
+                        ['reconciliation', '流水', canReadReconciliation],
+                        ['risk', '风控', canReadRisk],
+                        ['disputes', '争议', canReadDisputes],
+                        ['refunds', '退款', canWriteRefunds],
+                      ] as const)
+                        .filter(([, , allowed]) => allowed)
+                        .map(([view, label]) => ({
+                          label,
+                          onClick: () =>
+                            navigate(
+                              `/payments/${view}?${paymentParams({
+                                order_id: String(o.id),
+                                environment: o.payment_environment,
+                                provider: providerLabels[o.payment_provider ?? '']
+                                  ? o.payment_provider
+                                  : undefined,
+                                account_id: o.payment_account_id,
+                              })}`,
+                            ),
+                        }))
+                    : [{ label: '渠道环境待核对', onClick: () => {}, disabled: true }]
+                  : [];
+
                 return (
                   <tr
                     key={o.id}
@@ -573,13 +606,15 @@ export default function OrdersTab() {
                       <button
                         type="button"
                         onClick={() => void handleOpenPaymentDetails(o.id)}
-                        className="focus-ring inline-flex items-center gap-1.5 text-[var(--cms-fg)] hover:underline cursor-pointer tabular-nums"
-                        title="点击查看第三方支付凭据"
+                        className="focus-ring inline-flex items-center gap-1.5 max-w-[260px] text-[var(--cms-fg)] hover:underline cursor-pointer tabular-nums"
+                        title={
+                          o.external_ref_id
+                            ? `${credentialText}（点击查看第三方支付凭据）`
+                            : '点击查看第三方支付凭据'
+                        }
                       >
                         <CreditCard size={13} className="text-[var(--cms-muted-fg)] shrink-0" aria-hidden="true" />
-                        <span>
-                          {providerLabels[o.payment_provider || ''] || '渠道待核对'} · {o.external_ref_id || '凭证待确认'}
-                        </span>
+                        <span className="truncate min-w-0">{credentialText}</span>
                       </button>
                       <div className="mt-0.5 text-[var(--cms-muted-fg)]">
                         {environmentLabels[o.payment_environment || ''] || '环境待核对'}
@@ -625,36 +660,12 @@ export default function OrdersTab() {
                       <StatusDot tone={statusMeta.tone} label={statusMeta.label} />
                     </td>
                     <td className="text-right whitespace-nowrap">
-                      <button type="button" onClick={() => void handleOpenPaymentDetails(o.id)} className="btn-detail">
-                        详情
-                      </button>
-                      {(canReadReconciliation || canReadRisk || canReadDisputes || canWriteRefunds) && (
-                        o.payment_environment ? (
-                          ([
-                            ['reconciliation', '流水', canReadReconciliation],
-                            ['risk', '风控', canReadRisk],
-                            ['disputes', '争议', canReadDisputes],
-                            ['refunds', '退款', canWriteRefunds],
-                          ] as const)
-                            .filter(([, , allowed]) => allowed)
-                            .map(([view, label]) => (
-                              <Link
-                                key={view}
-                                to={`/payments/${view}?${paymentParams({
-                                  order_id: String(o.id),
-                                  environment: o.payment_environment,
-                                  provider: providerLabels[o.payment_provider ?? ''] ? o.payment_provider : undefined,
-                                  account_id: o.payment_account_id,
-                                })}`}
-                                className="btn-detail"
-                              >
-                                {label}
-                              </Link>
-                            ))
-                        ) : (
-                          <span>渠道环境待核对</span>
-                        )
-                      )}
+                      <div className="inline-flex items-center justify-end gap-0.5 whitespace-nowrap">
+                        <button type="button" onClick={() => void handleOpenPaymentDetails(o.id)} className="btn-detail">
+                          详情
+                        </button>
+                        <RowActionMenu ariaLabel={`订单 #${o.id} 更多操作`} items={moreActionItems} />
+                      </div>
                     </td>
                   </tr>
                 );
