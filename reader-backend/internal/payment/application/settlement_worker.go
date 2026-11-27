@@ -65,6 +65,13 @@ func (s *service) reconcileStripeReportRuns(ctx context.Context) {
 		cfg.BalanceChangeReportType = appCfg.StripeBalanceChangeReportType
 		cfg.PayoutReconciliationReportType = appCfg.StripePayoutReconciliationReportType
 		cfg.IncludeMoRColumns = appCfg.StripeReportMoRColumnsEnabled
+		if appCfg.StripeReportStartDate != "" {
+			if parsed, err := time.Parse("2006-01-02", appCfg.StripeReportStartDate); err == nil {
+				cfg.StartDate = parsed.UTC()
+			} else {
+				log.Printf("task=stripe_report_schedule action=parse_start_date value=%q error=%v", appCfg.StripeReportStartDate, err)
+			}
+		}
 	}
 	if _, err := repo.ScheduleDueStripeReportRuns(ctx, environment, cfg, time.Now().UTC()); err != nil {
 		log.Printf("task=stripe_report_schedule action=schedule error=%s", stripe.RedactSecrets(err.Error()))

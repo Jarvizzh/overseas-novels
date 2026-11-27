@@ -399,3 +399,136 @@ func TestReviewReportScheduleCatchesUpMissingDays(t *testing.T) {
 		t.Fatalf("total scheduled day windows=%d, want 9 (Nov 23..Dec 1)", distinctDays)
 	}
 }
+
+func TestReviewScheduleBeforeFirstSuccess(t *testing.T) {
+	pool := testdb.Open(t)
+	ctx := t.Context()
+	accID, _ := seedEncryptedStripeAccount(t, pool, "acct_ReportFirstFail", "rk_test_firstfail_secret")
+	repo := settlement.NewRepository(pool)
+
+	// Set initial ledger sync window to Nov 23..24 and disable actor before first schedule attempt.
+	nov23 := time.Date(2026, 11, 23, 0, 0, 0, 0, time.UTC)
+	nov24 := time.Date(2026, 11, 24, 0, 0, 0, 0, time.UTC)
+	if _, err := pool.Exec(ctx, `UPDATE payment_ledger_sync_settings SET window_start=$2, window_end=$3 WHERE account_id=$1`,
+		accID, nov23, nov24); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE admins SET status=0 WHERE id='finance-report'`); err != nil {
+		t.Fatal(err)
+	}
+
+	// Real worker config (StartDate is zero). Disabled actor yields 0 runs on Nov 24.
+	workerCfg := settlement.ReportScheduleConfig{}
+	createdWhileDisabled, err := repo.ScheduleDueStripeReportRuns(ctx, "sandbox", workerCfg, nov24.Add(3*time.Hour))
+	if err != nil || createdWhileDisabled != 0 {
+		t.Fatalf("disabled actor schedule: created=%d err=%v (want 0)", createdWhileDisabled, err)
+	}
+
+	// Restore actor on Nov 27 -> must catch up all 4 days (Nov 23, 24, 25, 26).
+	if _, err := pool.Exec(ctx, `UPDATE admins SET status=1 WHERE id='finance-report'`); err != nil {
+		t.Fatal(err)
+	}
+	nov27 := time.Date(2026, 11, 27, 4, 0, 0, 0, time.UTC)
+	createdRestored, err := repo.ScheduleDueStripeReportRuns(ctx, "sandbox", workerCfg, nov27)
+	if err != nil || createdRestored != 8 {
+		t.Fatalf("restored actor: created=%d err=%v (want 8 = 4 days x 2 report types)", createdRestored, err)
+	}
+	var distinctDays int
+	if err := pool.QueryRow(ctx, `SELECT count(DISTINCT (parameters->>'interval_start')::bigint)
+		FROM payment_stripe_report_runs WHERE account_id=$1`, accID).Scan(&distinctDays); err != nil {
+		t.Fatal(err)
+	}
+	if distinctDays != 4 {
+		t.Fatalf("restored actor: daily windows=%d; want 4 days Nov 23..26", distinctDays)
+	}
+
+	// Subsequent payout sync advancing window_start earlier or later must NOT alter immutable report anchor.
+	if _, err := pool.Exec(ctx, `UPDATE payment_ledger_sync_settings SET window_start=$2, window_end=$3 WHERE account_id=$1`,
+		accID, nov23.Add(-5*24*time.Hour), nov27); err != nil {
+		t.Fatal(err)
+	}
+	createdAfterSyncMove, err := repo.ScheduleDueStripeReportRuns(ctx, "sandbox", workerCfg, nov27)
+	if err != nil || createdAfterSyncMove != 0 {
+		t.Fatalf("payout window_start drift should not backfill prior to first exact daily run: created=%d err=%v", createdAfterSyncMove, err)
+	}
+}
+
+func TestReviewScheduleMoRColumnsChange(t *testing.T) {
+	pool := testdb.Open(t)
+	ctx := t.Context()
+	accID, _ := seedEncryptedStripeAccount(t, pool, "acct_ReportMoRSwitch", "rk_test_morswitch_secret")
+	repo := settlement.NewRepository(pool)
+
+	nov27 := time.Date(2026, 11, 27, 4, 0, 0, 0, time.UTC)
+	// 1. Default (non-MoR) config schedules 2 runs for Nov 26.
+	createdPlain, err := repo.ScheduleDueStripeReportRuns(ctx, "sandbox", settlement.ReportScheduleConfig{IncludeMoRColumns: false}, nov27)
+	if err != nil || createdPlain != 2 {
+		t.Fatalf("plain schedule: created=%d err=%v (want 2)", createdPlain, err)
+	}
+
+	// 2. Switching to IncludeMoRColumns=true on the same day must create 2 new MoR runs while keeping old plain runs intact.
+	createdMoR, err := repo.ScheduleDueStripeReportRuns(ctx, "sandbox", settlement.ReportScheduleConfig{IncludeMoRColumns: true}, nov27)
+	if err != nil || createdMoR != 2 {
+		t.Fatalf("MoR columns enabled: created=%d err=%v (want 2)", createdMoR, err)
+	}
+	var plainCount, morCount int
+	if err := pool.QueryRow(ctx, `SELECT
+		count(*) FILTER (WHERE NOT include_mor_columns),
+		count(*) FILTER (WHERE include_mor_columns)
+		FROM payment_stripe_report_runs WHERE account_id=$1`, accID).Scan(&plainCount, &morCount); err != nil {
+		t.Fatal(err)
+	}
+	if plainCount != 2 || morCount != 2 {
+		t.Fatalf("expected plain=2 mor=2, got plain=%d mor=%d", plainCount, morCount)
+	}
+
+	// 3. Re-running with IncludeMoRColumns=true is idempotent (0 new runs).
+	createdRepeat, err := repo.ScheduleDueStripeReportRuns(ctx, "sandbox", settlement.ReportScheduleConfig{IncludeMoRColumns: true}, nov27)
+	if err != nil || createdRepeat != 0 {
+		t.Fatalf("repeat MoR schedule: created=%d err=%v (want 0)", createdRepeat, err)
+	}
+}
+
+func TestReviewScheduleManualOffsetWindow(t *testing.T) {
+	pool := testdb.Open(t)
+	ctx := t.Context()
+	accID, _ := seedEncryptedStripeAccount(t, pool, "acct_ReportOffset", "rk_test_offset_secret")
+	account := payment.WebhookAccount{AccountKey: "acct_ReportOffset", Environment: "sandbox"}
+	repo := settlement.NewRepository(pool)
+
+	// Manually schedule a noon-to-noon 24h window (Nov 24 12:00Z -> Nov 25 12:00Z).
+	noonStart := time.Date(2026, 11, 24, 12, 0, 0, 0, time.UTC)
+	noonEnd := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
+	if _, created, err := repo.EnsureReportRunSchedule(ctx, settlement.ReportScheduleRequest{
+		Account:       account,
+		ReportType:    stripe.DefaultBalanceChangeReportType,
+		IntervalStart: noonStart,
+		IntervalEnd:   noonEnd,
+		ActorID:       "finance-report",
+		Reason:        "manual offset window",
+	}); err != nil || !created {
+		t.Fatalf("manual offset schedule failed: created=%v err=%v", created, err)
+	}
+
+	// Scheduling exact UTC daily runs on Nov 25 must NOT treat the noon-to-noon run as covering Nov 24 00:00..25 00:00.
+	nov25 := time.Date(2026, 11, 25, 3, 0, 0, 0, time.UTC)
+	created, err := repo.ScheduleDueStripeReportRuns(ctx, "sandbox", settlement.ReportScheduleConfig{}, nov25)
+	if err != nil || created != 2 {
+		t.Fatalf("manual offset report masked daily coverage: created=%d err=%v (want 2)", created, err)
+	}
+
+	var exactDailyCount int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM payment_stripe_report_runs
+		WHERE account_id=$1
+		  AND (parameters->>'interval_start')::bigint = $2
+		  AND (parameters->>'interval_end')::bigint = $3`,
+		accID,
+		time.Date(2026, 11, 24, 0, 0, 0, 0, time.UTC).Unix(),
+		time.Date(2026, 11, 25, 0, 0, 0, 0, time.UTC).Unix(),
+	).Scan(&exactDailyCount); err != nil {
+		t.Fatal(err)
+	}
+	if exactDailyCount != 2 {
+		t.Fatalf("exact daily schedules=%d; want 2", exactDailyCount)
+	}
+}

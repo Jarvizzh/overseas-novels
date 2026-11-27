@@ -228,12 +228,13 @@ func (r *Repository) ScheduleDueStripeReportRuns(ctx context.Context, environmen
 	}
 
 	type enabledAccount struct {
-		accountID int64
-		account   payment.WebhookAccount
-		actorID   string
-		reason    string
+		accountID        int64
+		account          payment.WebhookAccount
+		actorID          string
+		reason           string
+		initialSyncStart time.Time
 	}
-	rows, err := r.pool.Query(ctx, `SELECT a.id, a.account_key, a.environment, s.actor_id, s.reason
+	rows, err := r.pool.Query(ctx, `SELECT a.id, a.account_key, a.environment, s.actor_id, s.reason, s.window_start
 		FROM payment_ledger_sync_settings s
 		JOIN payment_channel_accounts a ON a.id = s.account_id
 		JOIN admins u ON u.id = s.actor_id AND public.admin_has_permission(u.id, 'payments.reconciliation:write')
@@ -245,7 +246,7 @@ func (r *Repository) ScheduleDueStripeReportRuns(ctx context.Context, environmen
 	var accounts []enabledAccount
 	for rows.Next() {
 		var item enabledAccount
-		if err := rows.Scan(&item.accountID, &item.account.AccountKey, &item.account.Environment, &item.actorID, &item.reason); err != nil {
+		if err := rows.Scan(&item.accountID, &item.account.AccountKey, &item.account.Environment, &item.actorID, &item.reason, &item.initialSyncStart); err != nil {
 			rows.Close()
 			return 0, err
 		}
@@ -259,8 +260,13 @@ func (r *Repository) ScheduleDueStripeReportRuns(ctx context.Context, environmen
 	createdCount := 0
 	var errs []error
 	for _, item := range accounts {
+		accountEarliestExactDaily, err := r.loadEarliestExactDailyStartForAccount(ctx, item.accountID, item.account.Environment)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
 		for _, reportType := range reportTypes {
-			existingStarts, earliestStart, err := r.loadScheduledDailyReportStarts(ctx, item.accountID, item.account.Environment, reportType)
+			existingKeys, earliestExactDaily, err := r.loadScheduledReportState(ctx, item.accountID, item.account.Environment, reportType)
 			if err != nil {
 				errs = append(errs, err)
 				continue
@@ -268,8 +274,25 @@ func (r *Repository) ScheduleDueStripeReportRuns(ctx context.Context, environmen
 			firstStart := latestStart
 			if !cfg.StartDate.IsZero() {
 				firstStart = cfg.StartDate.UTC().Truncate(reportScheduleDayDuration)
-			} else if !earliestStart.IsZero() && earliestStart.Before(firstStart) {
-				firstStart = earliestStart
+			} else if !earliestExactDaily.IsZero() {
+				// Once at least one exact UTC daily run exists for this report type,
+				// anchor strictly on that immutable history rather than sync window_start.
+				if earliestExactDaily.Before(firstStart) {
+					firstStart = earliestExactDaily
+				}
+			} else {
+				// Before the first successful run of this report type, recover from the
+				// earliest stable anchor: any sibling report type's exact daily start or
+				// the account's initial sync window_start (when <= latestStart).
+				if !accountEarliestExactDaily.IsZero() && accountEarliestExactDaily.Before(firstStart) {
+					firstStart = accountEarliestExactDaily
+				}
+				if !item.initialSyncStart.IsZero() {
+					syncDay := item.initialSyncStart.UTC().Truncate(reportScheduleDayDuration)
+					if !syncDay.After(latestStart) && syncDay.Before(firstStart) {
+						firstStart = syncDay
+					}
+				}
 			}
 			if firstStart.After(latestStart) {
 				continue
@@ -277,10 +300,7 @@ func (r *Repository) ScheduleDueStripeReportRuns(ctx context.Context, environmen
 
 			scheduledThisPair := 0
 			for dayStart := firstStart; !dayStart.After(latestStart) && scheduledThisPair < maxDaysPerTick; dayStart = dayStart.Add(reportScheduleDayDuration) {
-				if existingStarts[dayStart.Unix()] {
-					continue
-				}
-				_, created, err := r.EnsureReportRunSchedule(ctx, ReportScheduleRequest{
+				req := ReportScheduleRequest{
 					Account:           item.account,
 					ReportType:        reportType,
 					IntervalStart:     dayStart,
@@ -288,12 +308,21 @@ func (r *Repository) ScheduleDueStripeReportRuns(ctx context.Context, environmen
 					IncludeMoRColumns: cfg.IncludeMoRColumns,
 					ActorID:           item.actorID,
 					Reason:            item.reason,
-				})
+				}
+				scheduleKey, _, _, _, _, keyErr := BuildReportScheduleKey(req)
+				if keyErr != nil {
+					errs = append(errs, keyErr)
+					break
+				}
+				if existingKeys[scheduleKey] {
+					continue
+				}
+				_, created, err := r.EnsureReportRunSchedule(ctx, req)
 				if err != nil {
 					errs = append(errs, err)
 					break
 				}
-				existingStarts[dayStart.Unix()] = true
+				existingKeys[scheduleKey] = true
 				if created {
 					createdCount++
 					scheduledThisPair++
@@ -304,36 +333,60 @@ func (r *Repository) ScheduleDueStripeReportRuns(ctx context.Context, environmen
 	return createdCount, errors.Join(errs...)
 }
 
-func (r *Repository) loadScheduledDailyReportStarts(ctx context.Context, accountID int64, environment, reportType string) (map[int64]bool, time.Time, error) {
-	rows, err := r.pool.Query(ctx, `SELECT (parameters->>'interval_start')::bigint
+func (r *Repository) loadEarliestExactDailyStartForAccount(ctx context.Context, accountID int64, environment string) (time.Time, error) {
+	var minStart *int64
+	err := r.pool.QueryRow(ctx, `SELECT MIN((parameters->>'interval_start')::bigint)
 		FROM payment_stripe_report_runs
 		WHERE account_id = $1
 		  AND environment = $2
-		  AND report_type = $3
 		  AND parameters ? 'interval_start'
 		  AND parameters ? 'interval_end'
-		  AND ((parameters->>'interval_end')::bigint - (parameters->>'interval_start')::bigint) = $4
-		ORDER BY (parameters->>'interval_start')::bigint ASC`,
+		  AND ((parameters->>'interval_start')::bigint % $3) = 0
+		  AND ((parameters->>'interval_end')::bigint - (parameters->>'interval_start')::bigint) = $3`,
+		accountID, environment, reportScheduleDaySeconds).Scan(&minStart)
+	if err != nil || minStart == nil {
+		return time.Time{}, err
+	}
+	return time.Unix(*minStart, 0).UTC(), nil
+}
+
+func (r *Repository) loadScheduledReportState(ctx context.Context, accountID int64, environment, reportType string) (map[string]bool, time.Time, error) {
+	rows, err := r.pool.Query(ctx, `SELECT schedule_key,
+			CASE
+				WHEN parameters ? 'interval_start'
+				 AND parameters ? 'interval_end'
+				 AND ((parameters->>'interval_start')::bigint % $4) = 0
+				 AND ((parameters->>'interval_end')::bigint - (parameters->>'interval_start')::bigint) = $4
+				THEN (parameters->>'interval_start')::bigint
+				ELSE NULL
+			END AS exact_daily_start
+		FROM payment_stripe_report_runs
+		WHERE account_id = $1
+		  AND environment = $2
+		  AND report_type = $3`,
 		accountID, environment, reportType, reportScheduleDaySeconds)
 	if err != nil {
 		return nil, time.Time{}, err
 	}
 	defer rows.Close()
 
-	starts := make(map[int64]bool)
+	keys := make(map[string]bool)
 	var earliest time.Time
 	for rows.Next() {
-		var ts int64
-		if err := rows.Scan(&ts); err != nil {
+		var key string
+		var exactStart *int64
+		if err := rows.Scan(&key, &exactStart); err != nil {
 			return nil, time.Time{}, err
 		}
-		day := time.Unix(ts, 0).UTC().Truncate(reportScheduleDayDuration)
-		starts[day.Unix()] = true
-		if earliest.IsZero() || day.Before(earliest) {
-			earliest = day
+		keys[key] = true
+		if exactStart != nil {
+			day := time.Unix(*exactStart, 0).UTC()
+			if earliest.IsZero() || day.Before(earliest) {
+				earliest = day
+			}
 		}
 	}
-	return starts, earliest, rows.Err()
+	return keys, earliest, rows.Err()
 }
 
 type reportRunJob struct {

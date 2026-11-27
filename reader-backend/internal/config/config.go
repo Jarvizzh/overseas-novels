@@ -31,6 +31,7 @@ type Config struct {
 	StripeBalanceChangeReportType        string
 	StripePayoutReconciliationReportType string
 	StripeReportMoRColumnsEnabled        bool
+	StripeReportStartDate                string
 	PaymentAccounts                      []PaymentAccount
 	DefaultDomain                        string
 	StorageType                          string
@@ -85,6 +86,7 @@ func LoadConfig() {
 		StripeBalanceChangeReportType:        strings.TrimSpace(getEnv("STRIPE_REPORT_TYPE_BALANCE_CHANGE", "")),
 		StripePayoutReconciliationReportType: strings.TrimSpace(getEnv("STRIPE_REPORT_TYPE_PAYOUT_RECONCILIATION", "")),
 		StripeReportMoRColumnsEnabled:        getEnvBool("STRIPE_REPORT_MOR_COLUMNS_ENABLED", false),
+		StripeReportStartDate:                strings.TrimSpace(getEnv("STRIPE_REPORT_START_DATE", "")),
 		DefaultDomain:                        getEnv("DEFAULT_DOMAIN", "https://h5.starsfic.com"),
 		StorageType:                          getEnv("STORAGE_TYPE", "postgres"),
 		OSSEndpoint:                          getEnv("OSS_ENDPOINT", ""),
