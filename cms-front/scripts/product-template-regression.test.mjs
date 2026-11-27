@@ -30,6 +30,11 @@ test('TC-FE-01: ProductsPage Stripe MoR echo, published-only accounts, and per-a
   }, 'vip');
   assert.deepEqual(echoed, { taxCode: 'txcd_20030000', taxBehavior: 'inclusive' });
 
+  assert.equal(prodHelpers.DEFAULT_STRIPE_SALES_MODE, 'merchant_of_record');
+  assert.equal(prodHelpers.resolveDefaultStripeSalesMode(undefined), 'merchant_of_record');
+  assert.equal(prodHelpers.resolveDefaultStripeSalesMode('direct'), 'direct');
+  assert.equal(prodHelpers.resolveDefaultStripeSalesMode('merchant_of_record'), 'merchant_of_record');
+
   assert.equal(prodHelpers.defaultStripeMoRTaxCode('vip'), 'txcd_10302003');
   assert.equal(prodHelpers.defaultStripeMoRTaxCode('whole_book'), 'txcd_10000000');
   assert.equal(prodHelpers.defaultStripeMoRTaxCode('single'), 'txcd_10000000');

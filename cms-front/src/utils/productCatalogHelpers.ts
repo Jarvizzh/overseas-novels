@@ -1,8 +1,13 @@
-import type { ChannelAccount, ChannelBindingView, PaymentEnvironment, PaymentProvider, ProductType, ProductView } from './paymentCatalogApi';
+import type { ChannelAccount, ChannelBindingView, PaymentEnvironment, PaymentProvider, ProductType, ProductView, StripeSalesMode } from './paymentCatalogApi';
 
+export const DEFAULT_STRIPE_SALES_MODE: StripeSalesMode = 'merchant_of_record';
 export const STRIPE_MOR_TAX_CODE_VIP = 'txcd_10302003';
 export const STRIPE_MOR_TAX_CODE_WHOLE_BOOK = 'txcd_10000000';
 export const STRIPE_MOR_TAX_CODE_SINGLE = 'txcd_10000000';
+
+export function resolveDefaultStripeSalesMode(existing?: StripeSalesMode): StripeSalesMode {
+  return existing ?? DEFAULT_STRIPE_SALES_MODE;
+}
 
 export function defaultStripeMoRTaxCode(productType?: ProductType): string {
   switch (productType) {

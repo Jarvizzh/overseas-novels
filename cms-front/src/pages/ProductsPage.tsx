@@ -38,12 +38,14 @@ import {
   type VipCycle,
 } from '../utils/paymentCatalogApi';
 import {
+  DEFAULT_STRIPE_SALES_MODE,
   defaultStripeMoRTaxCode,
   extractStripeCatalogTax,
   filterPublishedChannelAccounts,
   findBindingForAccount,
   nextCopyCode,
   parseSpecificNovelIds as combineSpecificNovelIds,
+  resolveDefaultStripeSalesMode,
   toggleSpecificNovelScope,
 } from '../utils/productCatalogHelpers';
 import {
@@ -160,8 +162,8 @@ export default function ProductsPage() {
   const [bindingProduct, setBindingProduct] = useState<ProductView | null>(null);
   const [ppForm, setPpForm] = useState<PayPalBindForm>({ account_id: '', external_product_ref: '', external_price_ref: '', enabled: true, reason: '' });
   const [stForm, setStForm] = useState<StripeBindForm>({
-    account_id: '', sales_mode: 'direct', tax_code: defaultStripeMoRTaxCode(),
-    tax_behavior: 'exclusive', countries: formatDefaultStripeCountriesInput('direct'), release_evidence: '', market_policy: '', reprovision: false, enabled: true, reason: '',
+    account_id: '', sales_mode: DEFAULT_STRIPE_SALES_MODE, tax_code: defaultStripeMoRTaxCode(),
+    tax_behavior: 'exclusive', countries: formatDefaultStripeCountriesInput(DEFAULT_STRIPE_SALES_MODE), release_evidence: '', market_policy: '', reprovision: false, enabled: true, reason: '',
   });
 
   const [statusDialog, setStatusDialog] = useState<{ product: ProductView; action: 'publish' | 'pause' | 'retire' } | null>(null);
@@ -342,7 +344,7 @@ export default function ProductsPage() {
       enabled: ppBinding?.enabled ?? true,
       reason: '',
     });
-    const stSalesMode: StripeSalesMode = stBinding?.sales_mode ?? 'direct';
+    const stSalesMode: StripeSalesMode = resolveDefaultStripeSalesMode(stBinding?.sales_mode);
     setStForm({
       account_id: stAccountId,
       sales_mode: stSalesMode,
@@ -1344,7 +1346,7 @@ export default function ProductsPage() {
                     onChange={(v) => {
                       const matched = findBindingForAccount(bindingProduct, 'stripe', v);
                       const { taxCode, taxBehavior } = extractStripeCatalogTax(matched?.validated_catalog, bindingProduct?.product_type);
-                      const nextSalesMode: StripeSalesMode = matched?.sales_mode ?? 'direct';
+                      const nextSalesMode: StripeSalesMode = resolveDefaultStripeSalesMode(matched?.sales_mode);
                       setStForm({
                         account_id: v,
                         sales_mode: nextSalesMode,
