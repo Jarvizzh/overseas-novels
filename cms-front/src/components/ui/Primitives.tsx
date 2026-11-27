@@ -180,6 +180,7 @@ interface ToolbarPopoverProps {
   triggerClassName?: string;
   panelClassName?: string;
   ariaLabel?: string;
+  onOpen?: () => void;
   children: (helpers: { close: () => void }) => React.ReactNode;
 }
 
@@ -192,6 +193,7 @@ export const ToolbarPopover: React.FC<ToolbarPopoverProps> = ({
   triggerClassName = 'h-9 px-3 rounded-[10px] border border-[var(--cms-border)] bg-[var(--cms-card)] hover:bg-[var(--cms-content)] text-xs font-medium text-[var(--cms-fg)]',
   panelClassName = 'w-72 p-4',
   ariaLabel,
+  onOpen,
   children,
 }) => {
   const { popoverId, anchorName, triggerRef, popRef, handleToggle, hidePopover, anchorClass } =
@@ -220,7 +222,10 @@ export const ToolbarPopover: React.FC<ToolbarPopoverProps> = ({
         ref={popRef}
         id={popoverId}
         popover="auto"
-        onToggle={handleToggle}
+        onToggle={(event) => {
+          handleToggle(event);
+          if (event.newState === 'open') onOpen?.();
+        }}
         style={{ positionAnchor: anchorName } as React.CSSProperties}
         className={`cms-popover ${anchorClass} text-left text-xs ${panelClassName}`}
       >

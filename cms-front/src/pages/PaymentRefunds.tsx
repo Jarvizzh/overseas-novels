@@ -1,11 +1,19 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { History, ListChecks } from 'lucide-react';
 import { Link, useSearchParams } from 'react-router-dom';
 import CustomSelect from '../components/CustomSelect';
 import { CmsDialog } from '../components/ui/CmsDialog';
 import { Pagination } from '../components/ui/Pagination';
-import { FilterChipsBar, SearchInput, SkeletonRows, StatusDot, TableRegion } from '../components/ui/Primitives';
-import { PaymentLoadError, PaymentScopeBar, PaymentTabs } from '../components/payments/PaymentWorkspace';
+import {
+  type FilterChip,
+  SearchInput,
+  SkeletonRows,
+  StatusDot,
+  type TableDensity,
+  TableRegion,
+  ViewOptionsPopover,
+} from '../components/ui/Primitives';
+import { PaymentFilterBar, PaymentLoadError, PaymentScopeBar, PaymentTabs } from '../components/payments/PaymentWorkspace';
 import { usePermission } from '../context/PermissionContext';
 import { ApiError, apiRequest } from '../utils/api';
 import {
@@ -630,10 +638,15 @@ export function PaymentRefunds({ actor }: { actor?: string }) {
   const effectiveActor = actor || admin?.id || '';
   const canWriteRefunds = canWrite('payments.refunds');
   const canReadDisputes = canRead('payments.disputes');
+  const searchFormId = useId();
   const [params, setParams] = useSearchParams();
   const [search, setSearch] = useState('');
   const [searchField, setSearchField] = useState<'order' | 'command'>('order');
   const [error, setError] = useState('');
+  const [density, setDensity] = useState<TableDensity>('comfortable');
+  const [lookupDialogOpen, setLookupDialogOpen] = useState(false);
+  const [lookupOrderInput, setLookupOrderInput] = useState('');
+  const [lookupOrderError, setLookupOrderError] = useState('');
   const [revision, setRevision] = useState(0);
   const refresh = useCallback(() => setRevision((value) => value + 1), []);
   const triggerRef = useRef<HTMLElement | null>(null);
@@ -668,8 +681,25 @@ export function PaymentRefunds({ actor }: { actor?: string }) {
     setParams(next);
   }
 
-  function startLookup(openReceipts = false) {
+  function openOrderReceipts(orderID: string) {
+    update({
+      ...scope,
+      order_id: orderID,
+      receipt_id: '',
+      legacy_command: '',
+      target_provider: '',
+      target_environment: '',
+      target_account_id: '',
+    });
+  }
+
+  function startLookup() {
     const value = search.trim();
+    if (!value) {
+      setError('');
+      update({ queue_order_id: '', command_id: '', page: '' });
+      return;
+    }
     if (searchField === 'command') {
       if (!/^[\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12}$/i.test(value)) {
         setError('请输入完整的退款操作号。');
@@ -694,20 +724,56 @@ export function PaymentRefunds({ actor }: { actor?: string }) {
     }
     setError('');
     const orderID = value.replace(/^0+/, '');
-    if (!openReceipts) {
-      update({ queue_order_id: orderID, command_id: '', page: '' });
-      return;
-    }
-    triggerRef.current = document.activeElement as HTMLElement | null;
-    update({
-      ...scope,
-      order_id: orderID,
-      receipt_id: '',
-      legacy_command: '',
-      target_provider: '',
-      target_environment: '',
-      target_account_id: '',
-    });
+    update({ queue_order_id: orderID, command_id: '', page: '' });
+  }
+
+  const hasAnyFilter = Boolean(search || queueOrder || command || status);
+  const chips: FilterChip[] = [
+    ...(queueOrder
+      ? [
+          {
+            key: 'queue_order_id',
+            label: `订单号: ${queueOrder}`,
+            onClear: () => {
+              if (searchField === 'order') {
+                setSearch('');
+                setError('');
+              }
+              update({ queue_order_id: '', page: '' });
+            },
+          },
+        ]
+      : []),
+    ...(status && statuses[status as keyof typeof statuses]
+      ? [
+          {
+            key: 'status',
+            label: `状态: ${statuses[status as keyof typeof statuses].label}`,
+            onClear: () => update({ status: '', page: '' }),
+          },
+        ]
+      : []),
+    ...(command
+      ? [
+          {
+            key: 'command_id',
+            label: `退款操作号: ${command}`,
+            onClear: () => {
+              if (searchField === 'command') {
+                setSearch('');
+                setError('');
+              }
+              update({ command_id: '', page: '' });
+            },
+          },
+        ]
+      : []),
+  ];
+
+  function resetFilters() {
+    setSearch('');
+    setError('');
+    update({ status: '', command_id: '', queue_order_id: '', page: '' });
   }
 
   return (
@@ -715,56 +781,86 @@ export function PaymentRefunds({ actor }: { actor?: string }) {
       tabs={tabs}
       value={view}
       label="退款视图"
-      onChange={(tab) => update({ tab, status: '', command_id: '', page: '' })}
+      onChange={(tab) => {
+        setSearch('');
+        setError('');
+        update({ tab, status: '', command_id: '', page: '' });
+      }}
     >
       <PaymentScopeBar
         scope={scope}
         onChange={(next) => update({ ...next, page: '', order_id: '', receipt_id: '', legacy_command: '' })}
       />
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <search>
-          <form
-            aria-label="查询退款"
-            className="flex flex-wrap items-center gap-2"
-            onSubmit={(event) => {
-              event.preventDefault();
-              startLookup();
-            }}
-          >
-            <CustomSelect
-              aria-label="退款查询字段"
-              width="142px"
-              value={searchField}
-              options={[
-                { value: 'order', label: '订单号' },
-                { value: 'command', label: '退款操作号' },
-              ]}
-              onChange={(value) => {
-                setSearchField(value === 'command' ? 'command' : 'order');
-                setSearch('');
-                setError('');
+      <PaymentFilterBar
+        error={error}
+        chips={chips}
+        onResetAll={resetFilters}
+        right={
+          <>
+            {result?.data && <span className="tabular-nums">共 {result.data.total} 笔</span>}
+            <ViewOptionsPopover density={density} onDensityChange={setDensity} />
+            <button
+              type="button"
+              className="btn-primary h-9 px-3 text-xs"
+              onClick={(event) => {
+                triggerRef.current = event.currentTarget;
+                const candidate = (searchField === 'order' ? search.trim() : '') || queueOrder;
+                if (candidate && /^\d+$/.test(candidate) && !/^0+$/.test(candidate)) {
+                  openOrderReceipts(candidate.replace(/^0+/, ''));
+                  return;
+                }
+                setLookupOrderInput(candidate || '');
+                setLookupOrderError('');
+                setLookupDialogOpen(true);
               }}
-            />
-            <SearchInput
-              value={search}
-              onChange={(value) => {
-                setSearch(value);
-                setError('');
-              }}
-              placeholder={searchField === 'order' ? '输入订单号' : '输入退款操作号'}
-            />
-            <button type="submit" className="btn-secondary">
-              {searchField === 'order' ? '筛选退款' : '查操作记录'}
+            >
+              查原收款
             </button>
-            {searchField === 'order' && (
-              <button type="button" className="btn-secondary" onClick={() => startLookup(true)}>
-                查原收款
-              </button>
-            )}
-          </form>
-        </search>
+          </>
+        }
+      >
+        <form
+          id={searchFormId}
+          aria-label="查询退款"
+          className="flex items-center gap-1.5 w-full sm:w-auto"
+          onSubmit={(event) => {
+            event.preventDefault();
+            startLookup();
+          }}
+        >
+          <CustomSelect
+            aria-label="退款查询字段"
+            width="128px"
+            value={searchField}
+            options={[
+              { value: 'order', label: '订单号' },
+              { value: 'command', label: '退款操作号' },
+            ]}
+            onChange={(value) => {
+              setSearchField(value === 'command' ? 'command' : 'order');
+              setSearch('');
+              setError('');
+            }}
+          />
+          <SearchInput
+            className="flex-1 sm:w-56"
+            value={search}
+            onChange={(value) => {
+              setSearch(value);
+              setError('');
+            }}
+            onClear={() => {
+              setSearch('');
+              setError('');
+              if (searchField === 'order' && queueOrder) update({ queue_order_id: '', page: '' });
+              else if (searchField === 'command' && command) update({ command_id: '', page: '' });
+            }}
+            placeholder={searchField === 'order' ? '输入订单号...' : '输入退款操作号...'}
+          />
+        </form>
         <CustomSelect
           aria-label="退款状态"
+          width="140px"
           value={status}
           options={[
             { value: '', label: '全部状态' },
@@ -774,44 +870,15 @@ export function PaymentRefunds({ actor }: { actor?: string }) {
           ]}
           onChange={(value) => update({ status: value, page: '' })}
         />
-      </div>
-      {error && (
-        <p role="alert" className="text-sm text-[var(--cms-error)]">
-          {error}
-        </p>
-      )}
-      <FilterChipsBar
-        chips={[
-          ...(queueOrder
-            ? [
-                {
-                  key: 'queue_order_id',
-                  label: `订单号 ${queueOrder}`,
-                  onClear: () => update({ queue_order_id: '', page: '' }),
-                },
-              ]
-            : []),
-          ...(status && statuses[status as keyof typeof statuses]
-            ? [
-                {
-                  key: 'status',
-                  label: statuses[status as keyof typeof statuses].label,
-                  onClear: () => update({ status: '', page: '' }),
-                },
-              ]
-            : []),
-          ...(command
-            ? [
-                {
-                  key: 'command_id',
-                  label: `退款操作号 ${command}`,
-                  onClear: () => update({ command_id: '', page: '' }),
-                },
-              ]
-            : []),
-        ]}
-        onResetAll={() => update({ status: '', command_id: '', queue_order_id: '', page: '' })}
-      />
+        <button type="submit" form={searchFormId} className="btn-secondary h-9 px-3 text-xs font-normal whitespace-nowrap">
+          查询
+        </button>
+        {hasAnyFilter && (
+          <button type="button" className="btn-ghost h-9 text-xs text-[var(--cms-muted-fg)]" onClick={resetFilters}>
+            重置
+          </button>
+        )}
+      </PaymentFilterBar>
       {result?.error ? (
         <PaymentLoadError message={result.error} onRetry={() => setRevision((value) => value + 1)} />
       ) : (
@@ -828,7 +895,7 @@ export function PaymentRefunds({ actor }: { actor?: string }) {
             )
           }
         >
-          <table className="cms-table" aria-busy={!result}>
+          <table className="cms-table" data-density={density} aria-busy={!result}>
             <thead>
               <tr>
                 <th scope="col">订单 / 原收款</th>
@@ -920,6 +987,57 @@ export function PaymentRefunds({ actor }: { actor?: string }) {
           onUpdated={refresh}
         />
       )}
+      <CmsDialog
+        open={lookupDialogOpen}
+        onClose={() => setLookupDialogOpen(false)}
+        title="按订单查原收款"
+        subtitle={canWriteRefunds ? '输入数字订单号以查看原收款并发起退款' : '输入数字订单号以查看原收款与退款记录'}
+        size="sm"
+      >
+        <form
+          className="space-y-3 text-sm"
+          onSubmit={(event) => {
+            event.preventDefault();
+            const value = lookupOrderInput.trim();
+            if (!/^\d+$/.test(value) || /^0+$/.test(value)) {
+              setLookupOrderError('请输入有效的订单号。');
+              return;
+            }
+            setLookupOrderError('');
+            setLookupDialogOpen(false);
+            openOrderReceipts(value.replace(/^0+/, ''));
+          }}
+        >
+          <label className="grid gap-1 text-xs">
+            <span className="text-[var(--cms-muted-fg)]">订单号</span>
+            <input
+              type="text"
+              inputMode="numeric"
+              className="input-field tabular-nums"
+              placeholder="输入数字订单号..."
+              data-dialog-initial-focus
+              value={lookupOrderInput}
+              onChange={(event) => {
+                setLookupOrderInput(event.target.value);
+                setLookupOrderError('');
+              }}
+            />
+          </label>
+          {lookupOrderError && (
+            <p role="alert" className="text-xs text-[var(--cms-error)] m-0">
+              {lookupOrderError}
+            </p>
+          )}
+          <div className="flex justify-end gap-2 pt-1">
+            <button type="button" className="btn-secondary" onClick={() => setLookupDialogOpen(false)}>
+              取消
+            </button>
+            <button type="submit" className="btn-primary">
+              查看原收款
+            </button>
+          </div>
+        </form>
+      </CmsDialog>
     </PaymentTabs>
   );
 }

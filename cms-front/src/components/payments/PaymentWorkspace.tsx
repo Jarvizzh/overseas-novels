@@ -1,5 +1,6 @@
 import { useId, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import CustomSelect from '../CustomSelect';
+import { type FilterChip, FilterChipsBar } from '../ui/Primitives';
 import {
   environmentLabels,
   providerLabels,
@@ -173,6 +174,68 @@ export function PaymentScopeBar({
         {children}
       </div>
     </div>
+  );
+}
+
+export function PaymentFilterBar({
+  children,
+  right,
+  error,
+  chips,
+  onResetAll,
+}: {
+  children: ReactNode;
+  right?: ReactNode;
+  error?: string;
+  chips?: FilterChip[];
+  onResetAll?: () => void;
+}) {
+  return (
+    <search className="block space-y-2">
+      <div className="flex flex-wrap items-center justify-between gap-2.5">
+        <div className="flex flex-wrap items-center gap-2 flex-1 min-w-[260px]">{children}</div>
+        {right && (
+          <div className="flex items-center gap-2 text-xs text-[var(--cms-muted-fg)] shrink-0">{right}</div>
+        )}
+      </div>
+      {error && (
+        <p role="alert" className="text-xs text-[var(--cms-error)] m-0">
+          {error}
+        </p>
+      )}
+      {chips && chips.length > 0 && <FilterChipsBar chips={chips} onResetAll={onResetAll} />}
+    </search>
+  );
+}
+
+export function PaymentFilterToggle({
+  checked,
+  onChange,
+  label,
+}: {
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+  label: string;
+}) {
+  return (
+    <button
+      type="button"
+      aria-pressed={checked}
+      onClick={() => onChange(!checked)}
+      className={`focus-ring h-9 px-3 rounded-[10px] border text-xs font-medium inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer transition-colors ${
+        checked
+          ? 'border-[var(--cms-primary)] bg-[var(--cms-accent)] text-[var(--cms-primary)]'
+          : 'border-[var(--cms-border)] bg-[var(--cms-card)] text-[var(--cms-muted-fg)] hover:bg-[var(--cms-content)] hover:text-[var(--cms-fg)]'
+      }`}
+    >
+      <span
+        className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+          checked ? 'bg-[var(--cms-primary)]' : 'bg-[var(--cms-placeholder)]'
+        }`}
+        aria-hidden="true"
+      />
+      <span>{label}</span>
+    </button>
   );
 }
 

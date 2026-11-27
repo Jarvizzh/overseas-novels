@@ -1,11 +1,25 @@
 import { useEffect, useId, useRef, useState, type FormEvent } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
-import { Activity, FileSearch, ListChecks } from 'lucide-react';
+import { Activity, FileSearch, ListChecks, SlidersHorizontal } from 'lucide-react';
 import CustomSelect from '../components/CustomSelect';
 import { CmsDialog } from '../components/ui/CmsDialog';
 import { CursorPagination } from '../components/ui/Pagination';
-import { FilterChipsBar, SearchInput, SkeletonRows, StatusDot, TableRegion } from '../components/ui/Primitives';
-import { PaymentLoadError, PaymentScopeBar, PaymentTabs } from '../components/payments/PaymentWorkspace';
+import {
+  type FilterChip,
+  SearchInput,
+  SkeletonRows,
+  StatusDot,
+  type TableDensity,
+  TableRegion,
+  ToolbarPopover,
+  ViewOptionsPopover,
+} from '../components/ui/Primitives';
+import {
+  PaymentFilterBar,
+  PaymentLoadError,
+  PaymentScopeBar,
+  PaymentTabs,
+} from '../components/payments/PaymentWorkspace';
 import { usePermission } from '../context/PermissionContext';
 import { apiRequest, paymentCaseOwnersPath, type PaymentCaseOwnerScope } from '../utils/api';
 import { copyTextToClipboard } from '../utils/clipboard';
@@ -534,8 +548,139 @@ const signalEmptyStates = {
 };
 type CasePage = CursorPage<CaseRow> & { signal_state?: keyof typeof signalEmptyStates | null };
 
+function CaseAdvancedFilterPopover({
+  ownerId,
+  deadline,
+  attention,
+  showDeadline,
+  owners,
+  ownersError,
+  onRetryOwners,
+  onApply,
+}: {
+  ownerId: string;
+  deadline: string;
+  attention: boolean;
+  showDeadline: boolean;
+  owners: Owner[];
+  ownersError?: string;
+  onRetryOwners: () => void;
+  onApply: (fields: Record<string, string>) => void;
+}) {
+  const [draftOwner, setDraftOwner] = useState(ownerId);
+  const [draftDeadline, setDraftDeadline] = useState(deadline);
+  const [draftAttention, setDraftAttention] = useState(attention);
+
+  useEffect(() => {
+    setDraftOwner(ownerId);
+    setDraftDeadline(deadline);
+    setDraftAttention(attention);
+  }, [ownerId, deadline, attention]);
+
+  const ownerOptions = [
+    { value: '', label: '全部负责人' },
+    ...owners.map((owner) => ({ value: owner.id, label: owner.name })),
+  ];
+  if (draftOwner && !ownerOptions.some((item) => item.value === draftOwner)) {
+    ownerOptions.push({ value: draftOwner, label: `负责人 #${draftOwner}` });
+  }
+
+  const badgeCount =
+    (ownerId ? 1 : 0) + (showDeadline && deadline ? 1 : 0) + (attention ? 1 : 0);
+
+  return (
+    <ToolbarPopover
+      align="start"
+      label="更多筛选"
+      icon={<SlidersHorizontal size={13} className="text-[var(--cms-muted-fg)]" aria-hidden="true" />}
+      badgeCount={badgeCount}
+      panelClassName="w-72 p-4"
+      onOpen={() => {
+        setDraftOwner(ownerId);
+        setDraftDeadline(deadline);
+        setDraftAttention(attention);
+      }}
+    >
+      {({ close }) => (
+        <form
+          className="space-y-3"
+          onSubmit={(event) => {
+            event.preventDefault();
+            onApply({
+              owner_id: draftOwner,
+              deadline: showDeadline ? draftDeadline : '',
+              attention: draftAttention ? 'true' : '',
+            });
+            close();
+          }}
+        >
+          <div className="font-semibold text-[var(--cms-fg)]">负责人与期限筛选</div>
+          <label className="block space-y-1">
+            <span className="block text-[var(--cms-muted-fg)]">负责人</span>
+            <CustomSelect
+              aria-label="负责人"
+              width="100%"
+              value={draftOwner}
+              options={ownerOptions}
+              onChange={setDraftOwner}
+            />
+          </label>
+          {ownersError && (
+            <div role="alert" className="flex items-center justify-between gap-2 text-xs text-[var(--cms-error)]">
+              <span className="truncate">{ownersError}</span>
+              <button type="button" className="btn-detail shrink-0" onClick={onRetryOwners}>
+                重试
+              </button>
+            </div>
+          )}
+          {showDeadline && (
+            <label className="block space-y-1">
+              <span className="block text-[var(--cms-muted-fg)]">案件期限</span>
+              <CustomSelect
+                aria-label="案件期限"
+                width="100%"
+                value={draftDeadline}
+                options={deadlineOptions}
+                onChange={setDraftDeadline}
+              />
+            </label>
+          )}
+          <label className="flex items-center gap-2 px-1 py-1.5 rounded-lg hover:bg-[var(--cms-secondary)] cursor-pointer text-[var(--cms-fg)]">
+            <input
+              type="checkbox"
+              className="w-3.5 h-3.5 cursor-pointer rounded"
+              checked={draftAttention}
+              onChange={(event) => setDraftAttention(event.target.checked)}
+            />
+            <span>仅看待处理与期限提醒</span>
+          </label>
+          <div className="pt-2 border-t border-[var(--cms-border)] flex items-center justify-end gap-2">
+            <button
+              type="button"
+              className="btn-ghost text-[var(--cms-muted-fg)]"
+              onClick={() => {
+                setDraftOwner('');
+                setDraftDeadline('');
+                setDraftAttention(false);
+                onApply({ owner_id: '', deadline: '', attention: '' });
+                close();
+              }}
+            >
+              清空
+            </button>
+            <button type="submit" className="btn-primary h-8 px-3 text-xs">
+              应用筛选
+            </button>
+          </div>
+        </form>
+      )}
+    </ToolbarPopover>
+  );
+}
+
 export default function PaymentCases({ view }: { view: View }) {
   const { canRead, canWrite } = usePermission();
+  const searchFormId = useId();
   const roleScope: PaymentCaseOwnerScope = view === 'risk' ? 'risk' : 'disputes';
   const canWriteCases = view === 'risk' ? canWrite('payments.risk') : canWrite('payments.disputes');
   const canReadOrders = canRead('payments.orders');
@@ -544,11 +689,13 @@ export default function PaymentCases({ view }: { view: View }) {
   const canReadDisputes = canRead('payments.disputes');
   const [params, setParams] = useSearchParams();
   const [revision, setRevision] = useState(0);
+  const [ownersRevision, setOwnersRevision] = useState(0);
   const [detailRevision, setDetailRevision] = useState(0);
   const [notice, setNotice] = useState('');
   const [searchField, setSearchField] = useState('order_id');
   const [search, setSearch] = useState('');
   const [searchError, setSearchError] = useState('');
+  const [density, setDensity] = useState<TableDensity>('comfortable');
   const trigger = useRef<HTMLButtonElement | null>(null);
   const pollAttempts = useRef(0);
   const selected = params.get('case_id');
@@ -600,7 +747,7 @@ export default function PaymentCases({ view }: { view: View }) {
     (['provider', 'environment', 'account_id'] as const).every(
       (key) => !params.get(key) || detail.data?.[key] === params.get(key),
     );
-  const owners = usePaymentQuery<Owner[]>(decisions ? '' : paymentCaseOwnersPath(roleScope), revision);
+  const owners = usePaymentQuery<Owner[]>(decisions ? '' : paymentCaseOwnersPath(roleScope), ownersRevision);
   const data = decisions ? decisionsPage : cases;
   const signalState = cases?.data?.signal_state;
   const headers = decisions
@@ -660,17 +807,93 @@ export default function PaymentCases({ view }: { view: View }) {
     update({ tab, order_id: '', receipt: '', external_id: '', [field]: value });
   }
 
-  const chips = searchFields.flatMap(({ value, label }) =>
-    params.get(value) && (!decisions || value === 'order_id')
+  const ownerId = params.get('owner_id') ?? '';
+  const workState = params.get('work_state') ?? '';
+  const deadline = params.get('deadline') ?? '';
+  const attention = params.get('attention') === 'true';
+  const showDeadline = tab === 'review' || tab === 'cases';
+  const hasAnyFilter = Boolean(
+    search ||
+      params.get('order_id') ||
+      (!decisions &&
+        (params.get('receipt') ||
+          params.get('external_id') ||
+          ownerId ||
+          workState ||
+          (showDeadline && deadline) ||
+          attention)),
+  );
+
+  const chips: FilterChip[] = [
+    ...searchFields.flatMap(({ value, label }) =>
+      params.get(value) && (!decisions || value === 'order_id')
+        ? [
+            {
+              key: value,
+              label: `${label}: ${params.get(value)}`,
+              onClear: () => {
+                if (searchField === value || decisions) {
+                  setSearch('');
+                  setSearchError('');
+                }
+                update({ [value]: '' });
+              },
+            },
+          ]
+        : [],
+    ),
+    ...(!decisions && workState
       ? [
           {
-            key: value,
-            label: `${label} ${params.get(value)}`,
-            onClear: () => update({ [value]: '' }),
+            key: 'work_state',
+            label: `状态: ${labels[workState] ?? workState}`,
+            onClear: () => update({ work_state: '' }),
           },
         ]
-      : [],
-  );
+      : []),
+    ...(!decisions && ownerId
+      ? [
+          {
+            key: 'owner_id',
+            label: `负责人: ${owners?.data?.find((owner) => owner.id === ownerId)?.name ?? ownerId}`,
+            onClear: () => update({ owner_id: '' }),
+          },
+        ]
+      : []),
+    ...(!decisions && showDeadline && deadline
+      ? [
+          {
+            key: 'deadline',
+            label: `期限: ${deadlineOptions.find((option) => option.value === deadline)?.label ?? deadline}`,
+            onClear: () => update({ deadline: '' }),
+          },
+        ]
+      : []),
+    ...(!decisions && attention
+      ? [
+          {
+            key: 'attention',
+            label: '仅看: 待处理与期限提醒',
+            onClear: () => update({ attention: '' }),
+          },
+        ]
+      : []),
+  ];
+
+  function resetFilters() {
+    setSearch('');
+    setSearchError('');
+    update({
+      order_id: '',
+      receipt: '',
+      external_id: '',
+      owner_id: '',
+      work_state: '',
+      deadline: '',
+      attention: '',
+    });
+  }
+
   const cursorFooter = data?.data && (
     <CursorPagination
       page={before ? trail.length + 2 : 1}
@@ -697,80 +920,90 @@ export default function PaymentCases({ view }: { view: View }) {
       }}
     >
       <PaymentScopeBar scope={scope} showAccount={!decisions} onChange={(next) => update(next)} />
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <form className="flex flex-wrap items-center gap-2" onSubmit={updateSearch}>
+      <PaymentFilterBar
+        error={searchError}
+        chips={chips}
+        onResetAll={resetFilters}
+        right={
+          <>
+            {data?.data && (
+              <span className="tabular-nums">
+                本页 {data.data.items.length} {decisions ? '条' : '件'}
+              </span>
+            )}
+            <ViewOptionsPopover density={density} onDensityChange={setDensity} />
+          </>
+        }
+      >
+        <form
+          id={searchFormId}
+          className={decisions ? 'w-full sm:w-56' : 'flex items-center gap-1.5 w-full sm:w-auto'}
+          onSubmit={updateSearch}
+        >
           {!decisions && (
             <CustomSelect
               aria-label="查询字段"
-              width="142px"
+              width="136px"
               options={searchFields}
               value={searchField}
               onChange={(value) => {
                 setSearchField(value);
                 setSearch('');
+                setSearchError('');
               }}
             />
           )}
           <SearchInput
+            className={decisions ? 'w-full' : 'flex-1 sm:w-56'}
             value={search}
-            placeholder={`搜索${decisions ? '订单号' : searchFields.find((field) => field.value === searchField)?.label}`}
+            placeholder={`搜索${decisions ? '订单号' : searchFields.find((field) => field.value === searchField)?.label}...`}
             onChange={(value) => {
               setSearch(value);
               setSearchError('');
             }}
+            onClear={() => {
+              setSearch('');
+              setSearchError('');
+              const activeField = decisions ? 'order_id' : searchField;
+              if (params.get(activeField)) {
+                update({ [activeField]: '' });
+              }
+            }}
           />
-          <button type="submit" className="btn-secondary">
-            查询
-          </button>
         </form>
         {!decisions && (
-          <div className="flex flex-wrap items-center gap-2">
-            <CustomSelect
-              aria-label="负责人"
-              width="132px"
-              value={params.get('owner_id') ?? ''}
-              options={[
-                { value: '', label: '全部负责人' },
-                ...(owners?.data ?? []).map((owner) => ({ value: owner.id, label: owner.name })),
-              ]}
-              onChange={(owner_id) => update({ owner_id })}
-            />
+          <>
             <CustomSelect
               aria-label="处理状态"
-              width="142px"
-              value={params.get('work_state') ?? ''}
+              width="140px"
+              value={workState}
               options={[
                 { value: '', label: '全部处理状态' },
                 ...caseStates.map((value) => ({ value, label: labels[value] })),
               ]}
-              onChange={(work_state) => update({ work_state })}
+              onChange={(value) => update({ work_state: value })}
             />
-            {(tab === 'review' || tab === 'cases') && (
-              <CustomSelect
-                aria-label="案件期限"
-                width="142px"
-                value={params.get('deadline') ?? ''}
-                options={deadlineOptions}
-                onChange={(deadline) => update({ deadline })}
-              />
-            )}
-            <label className="flex items-center gap-1 text-xs">
-              <input
-                type="checkbox"
-                checked={params.get('attention') === 'true'}
-                onChange={(event) => update({ attention: event.target.checked ? 'true' : '' })}
-              />
-              待处理与期限提醒
-            </label>
-          </div>
+            <CaseAdvancedFilterPopover
+              ownerId={ownerId}
+              deadline={deadline}
+              attention={attention}
+              showDeadline={showDeadline}
+              owners={owners?.data ?? []}
+              ownersError={owners?.error}
+              onRetryOwners={() => setOwnersRevision((value) => value + 1)}
+              onApply={(fields) => update(fields)}
+            />
+          </>
         )}
-      </div>
-      {searchError && (
-        <p role="alert" className="text-sm text-[var(--cms-error)]">
-          {searchError}
-        </p>
-      )}
-      <FilterChipsBar chips={chips} onResetAll={() => update({ order_id: '', receipt: '', external_id: '' })} />
+        <button type="submit" form={searchFormId} className="btn-secondary h-9 px-3 text-xs font-normal whitespace-nowrap">
+          查询
+        </button>
+        {hasAnyFilter && (
+          <button type="button" className="btn-ghost h-9 text-xs text-[var(--cms-muted-fg)]" onClick={resetFilters}>
+            重置
+          </button>
+        )}
+      </PaymentFilterBar>
       {notice && (
         <p role="status" className="text-xs text-[var(--cms-muted-fg)]">
           {notice}
@@ -780,7 +1013,7 @@ export default function PaymentCases({ view }: { view: View }) {
         <PaymentLoadError message={data.error} onRetry={() => setRevision((value) => value + 1)} />
       ) : (
         <TableRegion ariaLabel={tabs.find((item) => item.value === tab)?.label || '支付案件'} footer={cursorFooter}>
-          <table className="cms-table" aria-busy={!data}>
+          <table className="cms-table" data-density={density} aria-busy={!data}>
             <thead>
               <tr>
                 {headers.map((header) => (

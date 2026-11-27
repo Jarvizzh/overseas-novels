@@ -36,6 +36,7 @@ const kinds = {
   bank_match: '匹配银行流水',
 } as const;
 type Kind = keyof typeof kinds;
+export type SettlementCommandAction = 'paypal_report' | 'stripe_payout' | 'stripe_report' | 'bank_statement' | 'automatic';
 export type SettlementOrigin = PaymentScope &
   ({ kind: 'bank_match'; reference: string } | { kind: 'paypal_report' | 'stripe_report'; report: ReportIssueOrigin });
 type Command = PaymentScope & {
@@ -422,6 +423,9 @@ export function SettlementCommands({
   origin,
   onOriginClose,
   onSettled,
+  hideActionBar = false,
+  externalAction,
+  onActionStateChange,
 }: {
   actor: string;
   scope: PaymentScope;
@@ -431,16 +435,32 @@ export function SettlementCommands({
   origin?: SettlementOrigin;
   onOriginClose: () => void;
   onSettled: () => void;
+  hideActionBar?: boolean;
+  externalAction?: { type: SettlementCommandAction; nonce: number };
+  onActionStateChange?: (state: { scopeKey: string; hasDraft: boolean; provider?: string }) => void;
 }) {
   const { canWrite } = usePermission();
   const canWriteRecon = canWrite('payments.reconciliation');
   const [kind, setKind] = useState<Kind>();
   const [draft, setDraft] = useState(() => readSettlementDraft(actor));
   const currentOrigin = useRef<SettlementOrigin | undefined>(undefined);
+  const lastExternalNonce = useRef<number>(externalAction?.nonce ?? 0);
   const [resume, setResume] = useState(false);
   const [lookupRevision, setLookupRevision] = useState(0);
   const [lookup, setLookup] = useState<{ key: string; state: 'missing' | 'error' }>();
   const [automatic, setAutomatic] = useState(false);
+
+  useEffect(() => {
+    if (!canWriteRecon || !externalAction || externalAction.nonce === lastExternalNonce.current) return;
+    lastExternalNonce.current = externalAction.nonce;
+    if (externalAction.type === 'automatic') {
+      setAutomatic(true);
+      return;
+    }
+    if (!draft) {
+      setKind(externalAction.type);
+    }
+  }, [canWriteRecon, externalAction, draft]);
   const [selected, setSelected] = useState<Command>();
   const [tracked, setTracked] = useState('');
   const [revision, setRevision] = useState(0);
@@ -455,6 +475,11 @@ export function SettlementCommands({
     ) ?? [];
   const provider =
     scope.provider || scopedAccounts.find((account) => String(account.id) === scope.account_id)?.provider;
+  const scopeKey = `${scope.environment}/${scope.provider}/${scope.account_id}`;
+  const hasDraft = Boolean(draft);
+  useEffect(() => {
+    onActionStateChange?.({ scopeKey, hasDraft, provider });
+  }, [scopeKey, hasDraft, provider, onActionStateChange]);
   const state = usePaymentQuery<{ total: number; commands: Command[] }>(
     history
       ? `${base}/commands?${paymentParams({
@@ -535,35 +560,47 @@ export function SettlementCommands({
       ) ?? [])
     : scopedAccounts;
   const lookupState = draft && lookup?.key === draft.key ? lookup.state : undefined;
+  const showInlineActions = canWriteRecon && !hideActionBar;
+  const hasVisibleBody = Boolean(
+    showInlineActions ||
+      (canWriteRecon && draft && !activeKind) ||
+      accounts?.error ||
+      tracked ||
+      trackedResult?.error ||
+      state?.error ||
+      (history && !state?.error),
+  );
   return (
-    <div className="space-y-3">
-      {canWriteRecon && (
-        <div className="flex flex-wrap items-center gap-2">
-          {provider === 'paypal' && (
-            <button className="btn-secondary" disabled={Boolean(draft)} onClick={() => setKind('paypal_report')}>
-              导入 PayPal 报表分卷
-            </button>
-          )}
-          {provider === 'stripe' && (
-            <>
-              <button className="btn-secondary" disabled={Boolean(draft)} onClick={() => setKind('stripe_payout')}>
-                拉取 Stripe 划拨
+    <>
+      {hasVisibleBody && (
+        <div className="space-y-3">
+          {showInlineActions && (
+            <div className="flex flex-wrap items-center gap-2">
+              {provider === 'paypal' && (
+                <button className="btn-secondary" disabled={Boolean(draft)} onClick={() => setKind('paypal_report')}>
+                  导入 PayPal 报表分卷
+                </button>
+              )}
+              {provider === 'stripe' && (
+                <>
+                  <button className="btn-secondary" disabled={Boolean(draft)} onClick={() => setKind('stripe_payout')}>
+                    拉取 Stripe 划拨
+                  </button>
+                  <button className="btn-secondary" disabled={Boolean(draft)} onClick={() => setKind('stripe_report')}>
+                    导入 Stripe 报表
+                  </button>
+                </>
+              )}
+              <button className="btn-secondary" disabled={Boolean(draft)} onClick={() => setKind('bank_statement')}>
+                导入银行流水
               </button>
-              <button className="btn-secondary" disabled={Boolean(draft)} onClick={() => setKind('stripe_report')}>
-                导入 Stripe 报表
-              </button>
-            </>
+              {provider && (
+                <button className="btn-secondary" onClick={() => setAutomatic(true)}>
+                  定期拉取设置
+                </button>
+              )}
+            </div>
           )}
-          <button className="btn-secondary" disabled={Boolean(draft)} onClick={() => setKind('bank_statement')}>
-            导入银行流水
-          </button>
-          {provider && (
-            <button className="btn-secondary" onClick={() => setAutomatic(true)}>
-              定期拉取设置
-            </button>
-          )}
-        </div>
-      )}
       {canWriteRecon && draft && !activeKind && (
         <div className="cms-card flex flex-wrap items-center justify-between gap-2 px-4 py-3 text-sm">
           <p role="status">
@@ -671,6 +708,8 @@ export function SettlementCommands({
           </table>
         </TableRegion>
       )}
+        </div>
+      )}
       <CmsDialog
         open={Boolean(selected)}
         onClose={() => setSelected(undefined)}
@@ -753,6 +792,6 @@ export function SettlementCommands({
           }}
         />
       )}
-    </div>
+    </>
   );
 }

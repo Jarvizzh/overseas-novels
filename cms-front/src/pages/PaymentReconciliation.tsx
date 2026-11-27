@@ -1,19 +1,27 @@
-import { SettlementCommands, type SettlementOrigin } from './SettlementCommands';
-import { Activity, FileSearch, History, ListChecks, SlidersHorizontal } from 'lucide-react';
-import { useEffect, useState, type ReactNode } from 'react';
+import { SettlementCommands, type SettlementCommandAction, type SettlementOrigin } from './SettlementCommands';
+import { Activity, ChevronDown, FileSearch, History, ListChecks, SlidersHorizontal } from 'lucide-react';
+import { useEffect, useId, useState, type ReactNode } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { Pagination } from '../components/ui/Pagination';
 import {
-  FilterChipsBar,
+  type FilterChip,
   SearchInput,
   SkeletonRows,
   StatusDot,
+  type TableDensity,
   TableRegion,
   ToolbarPopover,
+  ViewOptionsPopover,
 } from '../components/ui/Primitives';
 import { CmsDialog } from '../components/ui/CmsDialog';
 import CustomSelect from '../components/CustomSelect';
-import { PaymentLoadError, PaymentScopeBar, PaymentTabs } from '../components/payments/PaymentWorkspace';
+import {
+  PaymentFilterBar,
+  PaymentFilterToggle,
+  PaymentLoadError,
+  PaymentScopeBar,
+  PaymentTabs,
+} from '../components/payments/PaymentWorkspace';
 import { usePermission } from '../context/PermissionContext';
 import {
   PAYMENT_PAGE_SIZE,
@@ -164,16 +172,18 @@ function ReconciliationTable({
   children,
   label,
   footer,
+  density = 'compact',
 }: {
   headers: readonly (string | { amount: string })[];
   loading: boolean;
   children: ReactNode;
   label: string;
   footer?: ReactNode;
+  density?: TableDensity;
 }) {
   return (
     <TableRegion ariaLabel={label} footer={footer}>
-      <table className="cms-table whitespace-nowrap" data-density="compact" aria-label={label} aria-busy={loading}>
+      <table className="cms-table whitespace-nowrap" data-density={density} aria-label={label} aria-busy={loading}>
         <thead>
           <tr>
             {headers.map((column) => {
@@ -197,11 +207,13 @@ function MovementRows({
   onOpen,
   loading,
   footer,
+  density,
 }: {
   rows: LedgerMovement[];
   onOpen: (entry: Entry) => void;
   loading: boolean;
   footer?: ReactNode;
+  density: TableDensity;
 }) {
   const headers = [
     '流水',
@@ -212,7 +224,7 @@ function MovementRows({
     '操作',
   ];
   return (
-    <ReconciliationTable headers={headers} loading={loading} footer={footer} label="USD 资金流水">
+    <ReconciliationTable headers={headers} loading={loading} footer={footer} label="USD 资金流水" density={density}>
       {rows.map((row) => (
         <tr key={row.id}>
           <td className="font-mono">{row.movement_key}</td>
@@ -243,11 +255,13 @@ function PayoutRows({
   onOpen,
   loading,
   footer,
+  density,
 }: {
   rows: Payout[];
   onOpen: (entry: Entry) => void;
   loading: boolean;
   footer?: ReactNode;
+  density: TableDensity;
 }) {
   const headers = [
     '结算批次',
@@ -259,7 +273,7 @@ function PayoutRows({
     '操作',
   ];
   return (
-    <ReconciliationTable headers={headers} loading={loading} footer={footer} label="USD 结算批次">
+    <ReconciliationTable headers={headers} loading={loading} footer={footer} label="USD 结算批次" density={density}>
       {rows.map((row) => (
         <tr key={row.id}>
           <td className="font-mono">{row.external_ref}</td>
@@ -521,30 +535,41 @@ function ReconciliationDetail({
   }
 }
 
-function MovementDateFilter({
+function MovementAdvancedFilterPopover({
   from,
   through,
+  onlyIssues,
   onApply,
 }: {
   from: string;
   through: string;
-  onApply: (dates: { from: string; through: string }) => void;
+  onlyIssues: boolean;
+  onApply: (fields: Record<string, string>) => void;
 }) {
   const [start, setStart] = useState(from);
   const [end, setEnd] = useState(through);
+  const [draftOnlyIssues, setDraftOnlyIssues] = useState(onlyIssues);
   const [error, setError] = useState('');
   useEffect(() => {
     setStart(from);
     setEnd(through);
+    setDraftOnlyIssues(onlyIssues);
     setError('');
-  }, [from, through]);
+  }, [from, through, onlyIssues]);
+  const badgeCount = (from || through ? 1 : 0) + (onlyIssues ? 1 : 0);
   return (
     <ToolbarPopover
       align="start"
-      label="流水日期"
+      label="更多筛选"
       icon={<SlidersHorizontal size={13} className="text-[var(--cms-muted-fg)]" aria-hidden="true" />}
-      badgeCount={Number(Boolean(from)) + Number(Boolean(through))}
+      badgeCount={badgeCount}
       panelClassName="w-80 p-4"
+      onOpen={() => {
+        setStart(from);
+        setEnd(through);
+        setDraftOnlyIssues(onlyIssues);
+        setError('');
+      }}
     >
       {({ close }) => (
         <form
@@ -555,10 +580,11 @@ function MovementDateFilter({
               setError('开始日期不能晚于结束日期。');
               return;
             }
-            onApply({ from: start, through: end });
+            onApply({ from: start, through: end, review_required: draftOnlyIssues ? 'true' : '' });
             close();
           }}
         >
+          <div className="font-semibold text-[var(--cms-fg)]">日期与异常筛选</div>
           <div className="grid grid-cols-2 gap-2.5">
             <label className="block space-y-1">
               <span className="block text-[var(--cms-muted-fg)]">起始日期 UTC</span>
@@ -585,20 +611,30 @@ function MovementDateFilter({
               />
             </label>
           </div>
+          <label className="flex items-center gap-2 px-1 py-1.5 rounded-lg hover:bg-[var(--cms-secondary)] cursor-pointer text-[var(--cms-fg)]">
+            <input
+              type="checkbox"
+              className="w-3.5 h-3.5 cursor-pointer rounded"
+              checked={draftOnlyIssues}
+              onChange={(event) => setDraftOnlyIssues(event.target.checked)}
+            />
+            <span>仅显示证据待核对</span>
+          </label>
           {error && (
-            <p role="alert" className="text-xs text-[var(--cms-error)]">
+            <p role="alert" className="text-xs text-[var(--cms-error)] m-0">
               {error}
             </p>
           )}
           <div className="pt-2 border-t border-[var(--cms-border)] flex justify-end items-center gap-2">
             <button
               type="button"
-              className="btn-ghost"
+              className="btn-ghost text-[var(--cms-muted-fg)]"
               onClick={() => {
                 setStart('');
                 setEnd('');
+                setDraftOnlyIssues(false);
                 setError('');
-                onApply({ from: '', through: '' });
+                onApply({ from: '', through: '', review_required: '' });
                 close();
               }}
             >
@@ -629,6 +665,7 @@ const reconciliationFilters = {
 
 export default function PaymentReconciliation({ actor }: { actor?: string }) {
   const { admin, canRead, canWrite } = usePermission();
+  const searchFormId = useId();
   const effectiveActor = actor || admin?.id || '';
   const canWriteRecon = canWrite('payments.reconciliation');
   const canReadOrders = canRead('payments.orders');
@@ -650,6 +687,21 @@ export default function PaymentReconciliation({ actor }: { actor?: string }) {
   const onlyIssues = params.get(issueKey) === 'true';
   const [search, setSearch] = useState('');
   const [searchByInternalId, setSearchByInternalId] = useState(false);
+  const [density, setDensity] = useState<TableDensity>('compact');
+  const scopeKey = `${scope.environment}/${scope.provider}/${scope.account_id}`;
+  const [commandActionState, setCommandActionState] = useState<{
+    scopeKey: string;
+    hasDraft: boolean;
+    provider?: string;
+  }>({
+    scopeKey,
+    hasDraft: false,
+    provider: scope.provider,
+  });
+  const [commandAction, setCommandAction] = useState<{ type: SettlementCommandAction; nonce: number }>();
+  const sameCommandScope = commandActionState.scopeKey === scopeKey;
+  const actionProvider = scope.provider || (sameCommandScope ? (commandActionState.provider ?? '') : '');
+  const hasCommandDraft = commandActionState.hasDraft;
   const searchKey =
     view === 'payouts'
       ? searchByInternalId
@@ -721,7 +773,7 @@ export default function PaymentReconciliation({ actor }: { actor?: string }) {
     if (row.view === 'report-issues') setReportEntry(row);
     else update({ detail_id: row.row.id }, false);
   }
-  const chips = (
+  const chips: FilterChip[] = (
     [
       ['order_id', order, '订单号'],
       ['payout_id', payout, '内部批次号'],
@@ -729,13 +781,36 @@ export default function PaymentReconciliation({ actor }: { actor?: string }) {
       ['movement_key', movementKey, '流水编号'],
       ['payout_ref', payoutRef, '渠道批次号'],
       ['kind', movementKinds[kind], '流水类型'],
-      ['from', from, '开始日期 UTC'],
+      ['from', from, '起始日期 UTC'],
       ['through', through, '结束日期 UTC'],
-      [issueKey, onlyIssues ? '是' : '', '仅显示异常'],
+      [issueKey, onlyIssues ? (view === 'payouts' ? '异常批次' : '证据待核对') : '', '仅看'],
     ] as const
   ).flatMap(([key, value, label]) =>
-    value ? [{ key, label: `${label} ${value}`, onClear: () => update({ [key]: '' }) }] : [],
+    value
+      ? [
+          {
+            key,
+            label: `${label}: ${value}`,
+            onClear: () => {
+              if (key === searchKey) {
+                setSearch('');
+                setSearchError('');
+              }
+              update({ [key]: '' });
+            },
+          },
+        ]
+      : [],
   );
+  const hasAnyFilter = Boolean(search || chips.length > 0);
+  function resetFilters() {
+    setSearch('');
+    setSearchError('');
+    update(reconciliationFilters);
+  }
+  function triggerCommand(type: SettlementCommandAction) {
+    setCommandAction((prev) => ({ type, nonce: (prev?.nonce ?? 0) + 1 }));
+  }
   const footer = result && (
     <Pagination
       page={page}
@@ -760,12 +835,98 @@ export default function PaymentReconciliation({ actor }: { actor?: string }) {
     >
       <PaymentScopeBar
         scope={scope}
-        onChange={(next) =>
-          update({ ...next, payout_id: '', movement_id: '', order_id: '', movement_key: '', payout_ref: '' })
-        }
-      />
+        onChange={(next) => {
+          setSearch('');
+          setSearchError('');
+          update({ ...next, payout_id: '', movement_id: '', order_id: '', movement_key: '', payout_ref: '' });
+        }}
+      >
+        {canWriteRecon && (
+          <ToolbarPopover
+            align="end"
+            label={
+              <span className="inline-flex items-center gap-1.5">
+                <span>对账操作</span>
+                <ChevronDown size={13} className="text-[var(--cms-muted-fg)]" aria-hidden="true" />
+              </span>
+            }
+            ariaLabel="对账操作"
+            panelClassName="w-52 p-1.5 space-y-0.5"
+          >
+            {({ close }) => (
+              <>
+                {actionProvider === 'paypal' && (
+                  <button
+                    type="button"
+                    disabled={hasCommandDraft}
+                    className="block whitespace-nowrap focus-ring w-full text-left px-2.5 py-1.5 rounded-lg cursor-pointer transition-colors font-medium text-[var(--cms-fg)] hover:bg-[var(--cms-secondary)] disabled:opacity-40 disabled:cursor-not-allowed"
+                    onClick={() => {
+                      close();
+                      triggerCommand('paypal_report');
+                    }}
+                  >
+                    导入 PayPal 报表分卷
+                  </button>
+                )}
+                {actionProvider === 'stripe' && (
+                  <>
+                    <button
+                      type="button"
+                      disabled={hasCommandDraft}
+                      className="block whitespace-nowrap focus-ring w-full text-left px-2.5 py-1.5 rounded-lg cursor-pointer transition-colors font-medium text-[var(--cms-fg)] hover:bg-[var(--cms-secondary)] disabled:opacity-40 disabled:cursor-not-allowed"
+                      onClick={() => {
+                        close();
+                        triggerCommand('stripe_payout');
+                      }}
+                    >
+                      拉取 Stripe 划拨
+                    </button>
+                    <button
+                      type="button"
+                      disabled={hasCommandDraft}
+                      className="block whitespace-nowrap focus-ring w-full text-left px-2.5 py-1.5 rounded-lg cursor-pointer transition-colors font-medium text-[var(--cms-fg)] hover:bg-[var(--cms-secondary)] disabled:opacity-40 disabled:cursor-not-allowed"
+                      onClick={() => {
+                        close();
+                        triggerCommand('stripe_report');
+                      }}
+                    >
+                      导入 Stripe 报表
+                    </button>
+                  </>
+                )}
+                <button
+                  type="button"
+                  disabled={hasCommandDraft}
+                  className="block whitespace-nowrap focus-ring w-full text-left px-2.5 py-1.5 rounded-lg cursor-pointer transition-colors font-medium text-[var(--cms-fg)] hover:bg-[var(--cms-secondary)] disabled:opacity-40 disabled:cursor-not-allowed"
+                  onClick={() => {
+                    close();
+                    triggerCommand('bank_statement');
+                  }}
+                >
+                  导入银行流水
+                </button>
+                {actionProvider && (
+                  <>
+                    <div className="my-1 border-t border-[var(--cms-border)]" />
+                    <button
+                      type="button"
+                      className="block whitespace-nowrap focus-ring w-full text-left px-2.5 py-1.5 rounded-lg cursor-pointer transition-colors font-medium text-[var(--cms-fg)] hover:bg-[var(--cms-secondary)]"
+                      onClick={() => {
+                        close();
+                        triggerCommand('automatic');
+                      }}
+                    >
+                      定期拉取设置
+                    </button>
+                  </>
+                )}
+              </>
+            )}
+          </ToolbarPopover>
+        )}
+      </PaymentScopeBar>
       <SettlementCommands
-        key={`${scope.environment}/${scope.provider}/${scope.account_id}`}
+        key={scopeKey}
         actor={effectiveActor}
         scope={scope}
         history={view === 'commands'}
@@ -776,13 +937,31 @@ export default function PaymentReconciliation({ actor }: { actor?: string }) {
         origin={canWriteRecon ? origin : undefined}
         onOriginClose={() => setOrigin(undefined)}
         onSettled={() => setRetry((value) => value + 1)}
+        hideActionBar
+        externalAction={commandAction}
+        onActionStateChange={setCommandActionState}
       />
       {view !== 'commands' && (
         <>
           {(view === 'movements' || view === 'payouts') && (
-            <div className="flex flex-wrap items-center justify-between gap-2">
+            <PaymentFilterBar
+              error={searchError}
+              chips={chips}
+              onResetAll={resetFilters}
+              right={
+                <>
+                  {result && (
+                    <span className="tabular-nums">
+                      共 {result.total} {view === 'payouts' ? '批' : '条'}
+                    </span>
+                  )}
+                  <ViewOptionsPopover density={density} onDensityChange={setDensity} />
+                </>
+              }
+            >
               <form
-                className="flex flex-wrap items-center gap-2"
+                id={searchFormId}
+                className="flex items-center gap-1.5 w-full sm:w-auto"
                 onSubmit={(event) => {
                   event.preventDefault();
                   const value = search.trim();
@@ -803,7 +982,7 @@ export default function PaymentReconciliation({ actor }: { actor?: string }) {
               >
                 <CustomSelect
                   aria-label="对账查询字段"
-                  width="140px"
+                  width="128px"
                   value={searchByInternalId ? 'internal' : 'channel'}
                   options={[
                     { value: 'channel', label: searchLabels[0] },
@@ -816,50 +995,63 @@ export default function PaymentReconciliation({ actor }: { actor?: string }) {
                   }}
                 />
                 <SearchInput
+                  className="flex-1 sm:w-56"
                   value={search}
                   onChange={(value) => {
                     setSearch(value);
                     setSearchError('');
                   }}
-                  placeholder={`输入${searchLabels[Number(searchByInternalId)]}`}
+                  onClear={() => {
+                    setSearch('');
+                    setSearchError('');
+                    if (params.get(searchKey)) {
+                      update({ [searchKey]: '' });
+                    }
+                  }}
+                  placeholder={`输入${searchLabels[Number(searchByInternalId)]}...`}
                 />
-                <button className="btn-secondary" type="submit">
-                  查询
-                </button>
               </form>
-              <div className="flex flex-wrap items-center gap-2">
-                {view === 'movements' && (
-                  <>
-                    <CustomSelect
-                      aria-label="流水类型"
-                      width="140px"
-                      value={kind}
-                      options={[
-                        { value: '', label: '全部流水类型' },
-                        ...Object.entries(movementKinds).map(([value, label]) => ({ value, label })),
-                      ]}
-                      onChange={(kind) => update({ kind })}
-                    />
-                    <MovementDateFilter from={from} through={through} onApply={update} />
-                  </>
-                )}
-                <label className="flex items-center gap-1 text-xs">
-                  <input
-                    type="checkbox"
-                    checked={onlyIssues}
-                    onChange={(event) => update({ [issueKey]: event.target.checked ? 'true' : '' })}
+              {view === 'movements' && (
+                <>
+                  <CustomSelect
+                    aria-label="流水类型"
+                    width="136px"
+                    value={kind}
+                    options={[
+                      { value: '', label: '全部流水类型' },
+                      ...Object.entries(movementKinds).map(([value, label]) => ({ value, label })),
+                    ]}
+                    onChange={(kind) => update({ kind })}
                   />
-                  {view === 'payouts' ? '仅显示异常批次' : '仅显示证据待核对'}
-                </label>
-              </div>
-            </div>
+                  <MovementAdvancedFilterPopover
+                    from={from}
+                    through={through}
+                    onlyIssues={onlyIssues}
+                    onApply={update}
+                  />
+                </>
+              )}
+              {view === 'payouts' && (
+                <PaymentFilterToggle
+                  checked={onlyIssues}
+                  onChange={(checked) => update({ [issueKey]: checked ? 'true' : '' })}
+                  label="仅看异常批次"
+                />
+              )}
+              <button
+                type="submit"
+                form={searchFormId}
+                className="btn-secondary h-9 px-3 text-xs font-normal whitespace-nowrap"
+              >
+                查询
+              </button>
+              {hasAnyFilter && (
+                <button type="button" className="btn-ghost h-9 text-xs text-[var(--cms-muted-fg)]" onClick={resetFilters}>
+                  重置
+                </button>
+              )}
+            </PaymentFilterBar>
           )}
-          {searchError && (
-            <p role="alert" className="text-sm text-[var(--cms-error)]">
-              {searchError}
-            </p>
-          )}
-          <FilterChipsBar chips={chips} onResetAll={() => update(reconciliationFilters)} />
           {result?.view === 'movements' && Object.keys(result.totals).length > 0 && (
             <section className="cms-card space-y-2 p-4">
               <h2 className="text-sm font-semibold">当前筛选的已确认流水汇总 · USD</h2>
@@ -880,6 +1072,7 @@ export default function PaymentReconciliation({ actor }: { actor?: string }) {
                   rows={result?.view === view ? result.items : []}
                   onOpen={openEntry}
                   footer={footer}
+                  density={density}
                 />
               )}
               {view === 'payouts' && (
@@ -888,6 +1081,7 @@ export default function PaymentReconciliation({ actor }: { actor?: string }) {
                   rows={result?.view === view ? result.items : []}
                   onOpen={openEntry}
                   footer={footer}
+                  density={density}
                 />
               )}
               {view === 'report-issues' && (

@@ -1,13 +1,21 @@
 import { StripeMarketReview } from '../components/StripeMarketReview';
-import { useEffect, useState } from 'react';
+import { useEffect, useId, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { usePermission } from '../context/PermissionContext';
 import { PaymentChannelsPanel } from './PaymentChannelsPanel';
 import { CmsDialog } from '../components/ui/CmsDialog';
-import { SearchInput, SkeletonRows, StatusDot, TableRegion } from '../components/ui/Primitives';
+import {
+  type FilterChip,
+  SearchInput,
+  SkeletonRows,
+  StatusDot,
+  type TableDensity,
+  TableRegion,
+  ViewOptionsPopover,
+} from '../components/ui/Primitives';
 import { Pagination } from '../components/ui/Pagination';
 import CustomSelect from '../components/CustomSelect';
-import { PaymentLoadError, PaymentScopeBar } from '../components/payments/PaymentWorkspace';
+import { PaymentFilterBar, PaymentLoadError, PaymentScopeBar } from '../components/payments/PaymentWorkspace';
 import {
   PAYMENT_PAGE_SIZE,
   environmentLabels,
@@ -67,12 +75,14 @@ export function PaymentSubscriptions() {
   const canReadOrders = canRead('payments.orders');
   const canReadRefunds = canRead('payments.refunds');
   const canReadDisputes = canRead('payments.disputes');
+  const searchFormId = useId();
   const [params, setParams] = useSearchParams();
   const userID = params.get('user_id') ?? '';
   const [user, setUser] = useState(userID);
   useEffect(() => setUser(userID), [userID]);
   const [selected, setSelected] = useState<Subscription>();
   const [inputError, setInputError] = useState('');
+  const [density, setDensity] = useState<TableDensity>('comfortable');
   const [revision, setRevision] = useState(0);
   const [periodRevision, setPeriodRevision] = useState(0);
   const scope = paymentScope(params, '');
@@ -100,12 +110,55 @@ export function PaymentSubscriptions() {
     setParams(next);
   }
 
+  const hasAnyFilter = Boolean(user || userID || status);
+  const chips: FilterChip[] = [
+    ...(userID
+      ? [
+          {
+            key: 'user_id',
+            label: `用户 ID: ${userID}`,
+            onClear: () => {
+              setUser('');
+              setInputError('');
+              update({ user_id: '' });
+            },
+          },
+        ]
+      : []),
+    ...(status
+      ? [
+          {
+            key: 'status',
+            label: `状态: ${subscriptionStates[status as keyof typeof subscriptionStates]?.label ?? status}`,
+            onClear: () => update({ status: '' }),
+          },
+        ]
+      : []),
+  ];
+
+  function resetFilters() {
+    setUser('');
+    setInputError('');
+    update({ user_id: '', status: '' });
+  }
+
   return (
     <div className="space-y-4">
       <PaymentScopeBar allEnvironments scope={scope} onChange={(value) => update(value)} />
-      <div className="flex flex-wrap items-center justify-between gap-2">
+      <PaymentFilterBar
+        error={inputError}
+        chips={chips}
+        onResetAll={resetFilters}
+        right={
+          <>
+            {list?.data && <span className="tabular-nums">共 {list.data.total} 条</span>}
+            <ViewOptionsPopover density={density} onDensityChange={setDensity} />
+          </>
+        }
+      >
         <form
-          className="flex flex-wrap items-center gap-2"
+          id={searchFormId}
+          className="w-full sm:w-56"
           onSubmit={(event) => {
             event.preventDefault();
             const value = user.trim();
@@ -113,36 +166,29 @@ export function PaymentSubscriptions() {
               setInputError('请输入有效的用户 ID。');
               return;
             }
+            setInputError('');
             update({ user_id: value });
           }}
         >
           <SearchInput
+            className="w-full"
+            ariaLabel="精确用户 ID"
             value={user}
-            placeholder="输入用户 ID"
+            placeholder="精确用户 ID..."
             onChange={(value) => {
               setUser(value);
               setInputError('');
             }}
+            onClear={() => {
+              setUser('');
+              setInputError('');
+              if (userID) update({ user_id: '' });
+            }}
           />
-          <button type="submit" className="btn-secondary">
-            查询
-          </button>
-          {userID && (
-            <button
-              type="button"
-              className="btn-ghost"
-              onClick={() => {
-                setUser('');
-                setInputError('');
-                update({ user_id: '' });
-              }}
-            >
-              清除用户筛选
-            </button>
-          )}
         </form>
         <CustomSelect
           aria-label="订阅状态"
+          width="148px"
           value={status}
           options={[
             { value: '', label: '全部订阅状态' },
@@ -150,12 +196,15 @@ export function PaymentSubscriptions() {
           ]}
           onChange={(value) => update({ status: value })}
         />
-      </div>
-      {inputError && (
-        <p role="alert" className="text-sm text-[var(--cms-error)]">
-          {inputError}
-        </p>
-      )}
+        <button type="submit" form={searchFormId} className="btn-secondary h-9 px-3 text-xs font-normal whitespace-nowrap">
+          查询
+        </button>
+        {hasAnyFilter && (
+          <button type="button" className="btn-ghost h-9 text-xs text-[var(--cms-muted-fg)]" onClick={resetFilters}>
+            重置
+          </button>
+        )}
+      </PaymentFilterBar>
       {list?.error ? (
         <PaymentLoadError message={list.error} onRetry={() => setRevision((value) => value + 1)} />
       ) : (
@@ -173,7 +222,7 @@ export function PaymentSubscriptions() {
             )
           }
         >
-          <table className="cms-table" aria-busy={!list}>
+          <table className="cms-table" data-density={density} aria-busy={!list}>
             <thead>
               <tr>
                 <th scope="col">订阅编号</th>
