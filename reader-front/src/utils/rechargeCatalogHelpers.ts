@@ -27,15 +27,50 @@ export type RechargeSlotItem = {
 export function vipCycleLabel(cycle?: string): string {
   switch ((cycle || '').toLowerCase()) {
     case 'day':
-      return 'VIP Daily Pass';
+      return 'Daily Plan';
     case 'week':
-      return 'VIP Weekly Pass';
+      return 'Weekly Plan';
     case 'year':
-      return 'VIP Annual Pass';
+      return 'Annual Plan';
     case 'month':
     default:
-      return 'VIP Monthly Pass';
+      return 'Monthly Plan';
   }
+}
+
+export function formatSubscriptionEquivalent(priceCents: number, cycle?: string): string {
+  if (!Number.isFinite(priceCents) || priceCents <= 0) return '';
+  switch ((cycle || '').toLowerCase()) {
+    case 'year':
+      return `≈ $${(priceCents / 100 / 12).toFixed(2)}/mo`;
+    case 'month':
+      return `≈ $${(priceCents / 100 / 30).toFixed(2)}/day`;
+    case 'week':
+      return `≈ $${(priceCents / 100 / 7).toFixed(2)}/day`;
+    case 'day':
+      return `$${(priceCents / 100).toFixed(2)}/day`;
+    default:
+      return '';
+  }
+}
+
+export function calcCoinBonusPercent(coins: number, bonus: number): string {
+  if (!Number.isFinite(coins) || !Number.isFinite(bonus) || coins <= 0 || bonus <= 0) return '';
+  const pct = Math.round((bonus / coins) * 100);
+  return pct > 0 ? `+${pct}%` : '';
+}
+
+export function resolveInitialCarouselIndex(
+  subscriptionPacks: Array<{ id: number; isHighlighted: boolean }>,
+  selectedPack: number | null,
+): number {
+  if (subscriptionPacks.length === 0) return 0;
+  if (selectedPack !== null) {
+    const selectedIdx = subscriptionPacks.findIndex((pack) => pack.id === selectedPack);
+    if (selectedIdx >= 0) return selectedIdx;
+  }
+  const highlightedIdx = subscriptionPacks.findIndex((pack) => pack.isHighlighted);
+  return highlightedIdx >= 0 ? highlightedIdx : 0;
 }
 
 export function buildSubscriptionPacks(slots: RechargeSlotItem[]) {

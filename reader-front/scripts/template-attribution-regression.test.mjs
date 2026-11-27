@@ -125,3 +125,32 @@ test('TC-FE-05 (Reader): App.tsx ignores ?template_id and api.ts never sends X-R
   assert.equal(appSource.includes("'template_id'"), false);
   assert.equal(appSource.includes('X-Recharge-Template-ID'), false);
 });
+
+test('Case 1 helpers format North American plan names, equivalent prices, and bonus percentages', async () => {
+  assert.equal(rechargeHelpers.vipCycleLabel('day'), 'Daily Plan');
+  assert.equal(rechargeHelpers.vipCycleLabel('week'), 'Weekly Plan');
+  assert.equal(rechargeHelpers.vipCycleLabel('month'), 'Monthly Plan');
+  assert.equal(rechargeHelpers.vipCycleLabel('year'), 'Annual Plan');
+
+  assert.equal(rechargeHelpers.formatSubscriptionEquivalent(99, 'day'), '$0.99/day');
+  assert.equal(rechargeHelpers.formatSubscriptionEquivalent(499, 'week'), '≈ $0.71/day');
+  assert.equal(rechargeHelpers.formatSubscriptionEquivalent(1499, 'month'), '≈ $0.50/day');
+  assert.equal(rechargeHelpers.formatSubscriptionEquivalent(9999, 'year'), '≈ $8.33/mo');
+  assert.equal(rechargeHelpers.formatSubscriptionEquivalent(0, 'month'), '');
+
+  assert.equal(rechargeHelpers.calcCoinBonusPercent(499, 50), '+10%');
+  assert.equal(rechargeHelpers.calcCoinBonusPercent(999, 150), '+15%');
+  assert.equal(rechargeHelpers.calcCoinBonusPercent(1999, 400), '+20%');
+  assert.equal(rechargeHelpers.calcCoinBonusPercent(4999, 1250), '+25%');
+  assert.equal(rechargeHelpers.calcCoinBonusPercent(499, 0), '');
+
+  const subPacks = [
+    { id: 1, isHighlighted: false },
+    { id: 2, isHighlighted: true },
+    { id: 3, isHighlighted: false },
+  ];
+  assert.equal(rechargeHelpers.resolveInitialCarouselIndex(subPacks, 3), 2);
+  assert.equal(rechargeHelpers.resolveInitialCarouselIndex(subPacks, 999), 1);
+  assert.equal(rechargeHelpers.resolveInitialCarouselIndex(subPacks, null), 1);
+  assert.equal(rechargeHelpers.resolveInitialCarouselIndex([], null), 0);
+});

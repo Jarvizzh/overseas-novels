@@ -1,6 +1,6 @@
 import { readerStorage } from '../utils/readerStorage';
 import React, { useState, useEffect, useCallback, useRef, useId } from 'react';
-import { ChevronLeft, Crown, Check, Sparkles, BookOpen, CreditCard } from 'lucide-react';
+import { ChevronLeft, Crown, Sparkles, BookOpen, CreditCard } from 'lucide-react';
 import { useToast } from '../context/toastStore';
 import { GoldCoin } from '../components/GoldCoin';
 import { api, ApiError, type PurchaseIntent } from '../utils/api';
@@ -8,7 +8,9 @@ import { LegalModal, type LegalModalType } from '../components/LegalModal';
 import {
   buildCoinPacks,
   buildSubscriptionPacks,
-  formatCoinPackSubtitle,
+  calcCoinBonusPercent,
+  formatSubscriptionEquivalent,
+  resolveInitialCarouselIndex,
   type RechargeSlotItem,
 } from '../utils/rechargeCatalogHelpers';
 import {
@@ -99,6 +101,7 @@ const emptyPaymentMethods: PaymentMethodsState = {
 export const Recharge: React.FC<RechargeProps> = ({
   authReady = true,
   userId,
+  userCoins,
   novelId,
   novelTitle,
   onRefreshStatus,
@@ -133,6 +136,12 @@ export const Recharge: React.FC<RechargeProps> = ({
   const [isVipSuccess, setIsVipSuccess] = useState(false);
   const [vipSuccessTitle, setVipSuccessTitle] = useState('');
   const [activeLegalModal, setActiveLegalModal] = useState<LegalModalType | null>(null);
+  const [activeSlideIndex, setActiveSlideIndex] = useState(0);
+  const [autoRotatePaused, setAutoRotatePaused] = useState(false);
+  const carouselRef = useRef<HTMLDivElement | null>(null);
+  const hasAlignedInitialSlideRef = useRef(false);
+  const activeSlideIndexRef = useRef(0);
+  const programmaticScrollUntilRef = useRef(0);
 
   const [slots, setSlots] = useState<RechargeSlotItem[]>([]);
   const [loadingTemplates, setLoadingTemplates] = useState(true);
@@ -223,6 +232,7 @@ export const Recharge: React.FC<RechargeProps> = ({
 
   const handleSelectPack = (packId: number) => {
     userManuallySelectedRef.current = true;
+    setAutoRotatePaused(true);
     setSelectedPack(packId);
   };
 
@@ -360,6 +370,71 @@ export const Recharge: React.FC<RechargeProps> = ({
 
   const subscriptionPacks = buildSubscriptionPacks(slots);
   const coinPacks = buildCoinPacks(slots, novelId);
+
+  const scrollCarouselTo = useCallback((index: number, behavior: ScrollBehavior = 'smooth') => {
+    const track = carouselRef.current;
+    if (!track || track.clientWidth <= 0) return;
+    programmaticScrollUntilRef.current = behavior === 'smooth' ? Date.now() + 600 : 0;
+    track.scrollTo({ left: index * track.clientWidth, behavior });
+  }, []);
+
+  useEffect(() => {
+    if (loadingTemplates || offersNovelId !== novelId || subscriptionPacks.length === 0) return;
+    if (hasAlignedInitialSlideRef.current || autoRotatePaused) return;
+    if (returnedLookupState === 'loading') return;
+
+    const visibleIds = new Set([
+      ...subscriptionPacks.map((pack) => pack.id),
+      ...coinPacks.map((pack) => pack.id),
+    ]);
+    const visibleSlots = slots.filter((slot) => visibleIds.has(slot.id));
+    const pendingSelection = resolveRechargeSelection({
+      visibleSlots,
+      currentSelected: selectedPack,
+      userManuallySelected: userManuallySelectedRef.current,
+      returnedLookupState,
+      returnedPendingIntent,
+    });
+    if (pendingSelection.selectedSlotId !== null && selectedPack !== pendingSelection.selectedSlotId) return;
+
+    const initialIndex = resolveInitialCarouselIndex(subscriptionPacks, selectedPack);
+    hasAlignedInitialSlideRef.current = true;
+    activeSlideIndexRef.current = initialIndex;
+    setActiveSlideIndex(initialIndex);
+    requestAnimationFrame(() => {
+      scrollCarouselTo(initialIndex, 'auto');
+    });
+  }, [
+    loadingTemplates,
+    offersNovelId,
+    novelId,
+    slots,
+    subscriptionPacks,
+    coinPacks,
+    selectedPack,
+    returnedLookupState,
+    returnedPendingIntent,
+    autoRotatePaused,
+    scrollCarouselTo,
+  ]);
+
+  useEffect(() => {
+    if (loadingTemplates || offersNovelId !== novelId) return;
+    if (subscriptionPacks.length <= 1 || autoRotatePaused || isProcessing) return;
+    if (typeof window !== 'undefined' && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) {
+      return;
+    }
+
+    const intervalId = window.setInterval(() => {
+      if (document.visibilityState !== 'visible') return;
+      const next = (activeSlideIndexRef.current + 1) % subscriptionPacks.length;
+      activeSlideIndexRef.current = next;
+      setActiveSlideIndex(next);
+      scrollCarouselTo(next, 'smooth');
+    }, 3000);
+
+    return () => window.clearInterval(intervalId);
+  }, [loadingTemplates, offersNovelId, novelId, subscriptionPacks.length, autoRotatePaused, isProcessing, scrollCarouselTo]);
 
   const startUnifiedPurchase = async (tSlot: RechargeSlotItem, book: number, returnPath: string, provider: PaymentProvider) => {
     if (!userId) return;
@@ -509,6 +584,10 @@ export const Recharge: React.FC<RechargeProps> = ({
       ? paymentMethods.stripe_vip || paymentMethods.stripe_vip_slots.includes(selectedSlot.id)
       : paymentMethods.stripe_single || paymentMethods.stripe_slots.includes(selectedSlot.id)),
   );
+  useEffect(() => {
+    hasAlignedInitialSlideRef.current = false;
+  }, [novelId]);
+
   const cardLabel = 'Card';
   const selectedSummaryTitle = !selectedSlot
     ? ''
@@ -522,6 +601,13 @@ export const Recharge: React.FC<RechargeProps> = ({
     : selectedSubscriptionPack
       ? `${selectedSubscriptionPack.price}/${selectedSubscriptionPack.cycle}`
       : selectedSlot.price;
+  const selectedSummaryHint = !selectedSlot
+    ? ''
+    : selectedSubscriptionPack
+      ? `Auto-renews at ${selectedSubscriptionPack.price}/${selectedSubscriptionPack.cycle} · Cancel anytime`
+      : selectedSlot.type === 'whole_book'
+        ? 'One-time unlock · Forever access'
+        : 'Instant delivery · Coins never expire';
 
   const handleReturnToContent = () => {
     let returnPath = readingReturnPath(pendingReturnPathRef.current);
@@ -576,7 +662,7 @@ export const Recharge: React.FC<RechargeProps> = ({
         <div className="page-container-full animate-fade-in" style={{ backgroundColor: 'var(--bg-primary)' }}>
           {/* Top Bar */}
           <header className="detail-top-bar glass-panel">
-            <div className="sn-narrow-container" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <div className="sn-narrow-container" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px' }}>
               <button
                 type="button"
                 className="header-btn"
@@ -592,103 +678,182 @@ export const Recharge: React.FC<RechargeProps> = ({
                 <ChevronLeft size={20} strokeWidth={1.8} aria-hidden="true" />
               </button>
               <h1 className="header-title">Membership &amp; Coins</h1>
-              <div style={{ width: '40px' }} />
+              {typeof userCoins === 'number' ? (
+                <div className="recharge-balance-pill" aria-label={`Current balance: ${userCoins.toLocaleString()} coins`}>
+                  <GoldCoin size={14} />
+                  <span className="tabular-nums">{userCoins.toLocaleString()}</span>
+                </div>
+              ) : (
+                <div style={{ width: '40px' }} />
+              )}
             </div>
           </header>
 
-          <div className="scroll-container" style={{ flex: 1, minHeight: 0 }}>
+          <div className="scroll-container recharge-scroll-container" style={{ flex: 1, minHeight: 0 }}>
             <div className="sn-narrow-container" style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
-              {/* VIP Passes */}
+              {/* Unlimited Reading Full-Width Carousel */}
               {subscriptionPacks.length > 0 && (
-                <section style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-                  <h2 className="hot-tags-title" style={{ margin: 0 }}>Unlimited Membership</h2>
-                  {subscriptionPacks.map((pack) => {
-                    const isSelected = selectedPack === pack.id;
-                    return (
+                <section style={{ display: 'flex', flexDirection: 'column', gap: '10px' }} aria-label="Unlimited Reading plans">
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px' }}>
+                    <h2 className="hot-tags-title" style={{ margin: 0 }}>Unlimited Reading</h2>
+                    {subscriptionPacks.length > 1 && (
                       <button
                         type="button"
-                        key={pack.id}
-                        onClick={() => handleSelectPack(pack.id)}
-                        aria-pressed={isSelected}
-                        style={{
-                          width: '100%',
-                          textAlign: 'left',
-                          display: 'flex',
-                          justifyContent: 'space-between',
-                          alignItems: 'center',
-                          gap: '16px',
-                          backgroundColor: isSelected ? 'var(--hero-bg)' : 'var(--bg-secondary)',
-                          color: isSelected ? 'var(--hero-text)' : 'var(--text-primary)',
-                          borderRadius: '16px',
-                          padding: '16px 18px',
-                          border: isSelected ? '1.5px solid #D4AE68' : '1px solid var(--border-color)',
-                          cursor: 'pointer',
-                          transition: 'var(--transition-fast)',
-                        }}
+                        className="vip-carousel-status-btn tabular-nums"
+                        onClick={() => setAutoRotatePaused((prev) => !prev)}
+                        aria-label={autoRotatePaused ? 'Resume plan auto-rotation' : 'Pause plan auto-rotation'}
                       >
-                        <div style={{ display: 'flex', gap: '12px', alignItems: 'flex-start', minWidth: 0 }}>
-                          <Crown
-                            size={20}
-                            strokeWidth={1.8}
-                            style={{ color: isSelected ? '#E2BB6B' : 'var(--accent-color)', marginTop: '2px', flexShrink: 0 }}
-                            aria-hidden="true"
-                          />
-                          <div style={{ minWidth: 0 }}>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
-                              <span style={{ fontFamily: 'var(--font-display)', fontSize: '1.0625rem', fontWeight: 600 }}>
-                                {pack.name}
-                              </span>
-                              <span
-                                style={{
-                                  fontSize: '0.625rem',
-                                  backgroundColor: isSelected ? 'rgba(212, 174, 104, 0.2)' : 'var(--accent-light)',
-                                  color: isSelected ? '#E2BB6B' : 'var(--accent-text)',
-                                  fontWeight: 600,
-                                  padding: '2px 8px',
-                                  borderRadius: '999px',
-                                  textTransform: 'uppercase',
-                                }}
-                              >
-                                {pack.cycle}
-                              </span>
+                        {autoRotatePaused ? '' : 'Auto · '}
+                        {Math.min(activeSlideIndex + 1, subscriptionPacks.length)}/{subscriptionPacks.length}
+                      </button>
+                    )}
+                  </div>
+
+                  <div
+                    ref={carouselRef}
+                    className="vip-carousel-track"
+                    aria-live="off"
+                    onFocus={() => setAutoRotatePaused(true)}
+                    onPointerDown={() => {
+                      programmaticScrollUntilRef.current = 0;
+                      setAutoRotatePaused(true);
+                    }}
+                    onTouchStart={() => {
+                      programmaticScrollUntilRef.current = 0;
+                      setAutoRotatePaused(true);
+                    }}
+                    onWheel={() => {
+                      programmaticScrollUntilRef.current = 0;
+                      setAutoRotatePaused(true);
+                    }}
+                    onScroll={(e) => {
+                      if (Date.now() < programmaticScrollUntilRef.current) return;
+                      const track = e.currentTarget;
+                      if (track.clientWidth <= 0) return;
+                      const nextIndex = Math.max(
+                        0,
+                        Math.min(subscriptionPacks.length - 1, Math.round(track.scrollLeft / track.clientWidth)),
+                      );
+                      if (nextIndex !== activeSlideIndexRef.current) {
+                        activeSlideIndexRef.current = nextIndex;
+                        setActiveSlideIndex(nextIndex);
+                      }
+                    }}
+                  >
+                    {subscriptionPacks.map((pack) => {
+                      const isSelected = selectedPack === pack.id;
+                      const eqPrice = formatSubscriptionEquivalent(pack.priceCents, pack.cycle);
+                      return (
+                        <div key={pack.id} className="vip-carousel-slide">
+                          <button
+                            type="button"
+                            onClick={() => handleSelectPack(pack.id)}
+                            aria-pressed={isSelected}
+                            className={`vip-carousel-card${isSelected ? ' is-selected' : ''}`}
+                          >
+                            <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '10px' }}>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0 }}>
+                                <Crown
+                                  size={18}
+                                  strokeWidth={1.9}
+                                  style={{ color: isSelected ? '#E2BB6B' : 'var(--accent-color)', flexShrink: 0 }}
+                                  aria-hidden="true"
+                                />
+                                <span
+                                  style={{
+                                    fontFamily: 'var(--font-display)',
+                                    fontSize: '1.0625rem',
+                                    fontWeight: 600,
+                                    overflow: 'hidden',
+                                    textOverflow: 'ellipsis',
+                                    whiteSpace: 'nowrap',
+                                  }}
+                                >
+                                  {pack.name}
+                                </span>
+                              </div>
                               {pack.badge && (
                                 <span
                                   style={{
                                     fontSize: '0.625rem',
-                                    backgroundColor: isSelected ? 'rgba(226, 187, 107, 0.28)' : 'var(--bg-tertiary)',
-                                    color: isSelected ? '#FAF8F5' : 'var(--text-primary)',
-                                    border: isSelected ? '1px solid rgba(226, 187, 107, 0.45)' : '1px solid var(--border-color)',
+                                    backgroundColor: isSelected ? 'rgba(226, 187, 107, 0.24)' : 'var(--accent-light)',
+                                    color: isSelected ? '#E2BB6B' : 'var(--accent-text)',
+                                    border: isSelected ? '1px solid rgba(226, 187, 107, 0.42)' : 'none',
                                     fontWeight: 700,
                                     padding: '2px 8px',
                                     borderRadius: '999px',
+                                    whiteSpace: 'nowrap',
+                                    flexShrink: 0,
                                   }}
                                 >
                                   {pack.badge}
                                 </span>
                               )}
                             </div>
-                            <p
+
+                            <span
                               style={{
+                                display: 'block',
                                 fontSize: '0.75rem',
-                                color: isSelected ? 'rgba(250, 248, 245, 0.74)' : 'var(--text-secondary)',
-                                marginTop: '4px',
+                                color: isSelected ? 'rgba(250, 248, 245, 0.76)' : 'var(--text-secondary)',
                                 lineHeight: 1.45,
                               }}
                             >
                               {pack.desc}
-                            </p>
-                          </div>
-                        </div>
+                            </span>
 
-                        <div style={{ textAlign: 'right', flexShrink: 0 }}>
-                          <div className="tabular-nums" style={{ fontSize: '1.0625rem', fontWeight: 700 }}>
-                            {pack.price}
-                          </div>
-                          <div style={{ fontSize: '0.6875rem', opacity: 0.7 }}>/{pack.cycle}</div>
+                            <div
+                              style={{
+                                display: 'flex',
+                                alignItems: 'baseline',
+                                justifyContent: 'space-between',
+                                gap: '12px',
+                                paddingTop: '10px',
+                                borderTop: isSelected
+                                  ? '1px solid rgba(255, 255, 255, 0.14)'
+                                  : '1px solid var(--border-color)',
+                              }}
+                            >
+                              <span
+                                className="tabular-nums"
+                                style={{
+                                  fontSize: '0.75rem',
+                                  fontWeight: 600,
+                                  color: isSelected ? '#E2BB6B' : 'var(--accent-text)',
+                                }}
+                              >
+                                {eqPrice || 'Cancel anytime'}
+                              </span>
+                              <span className="tabular-nums" style={{ fontSize: '1.125rem', fontWeight: 700 }}>
+                                {pack.price}
+                                <span style={{ fontSize: '0.75rem', fontWeight: 400, opacity: 0.72 }}>/{pack.cycle}</span>
+                              </span>
+                            </div>
+                          </button>
                         </div>
-                      </button>
-                    );
-                  })}
+                      );
+                    })}
+                  </div>
+
+                  {subscriptionPacks.length > 1 && (
+                    <div className="vip-carousel-dots" role="group" aria-label="Membership plan slides">
+                      {subscriptionPacks.map((pack, idx) => (
+                        <button
+                          key={pack.id}
+                          type="button"
+                          aria-pressed={activeSlideIndex === idx}
+                          aria-label={`View ${pack.name}`}
+                          className={`vip-carousel-dot${activeSlideIndex === idx ? ' is-active' : ''}`}
+                          onClick={() => {
+                            setAutoRotatePaused(true);
+                            activeSlideIndexRef.current = idx;
+                            setActiveSlideIndex(idx);
+                            scrollCarouselTo(idx, 'smooth');
+                          }}
+                        />
+                      ))}
+                    </div>
+                  )}
                 </section>
               )}
 
@@ -703,143 +868,94 @@ export const Recharge: React.FC<RechargeProps> = ({
                   <div className="coin-packs-grid">
                     {coinPacks.map((pack) => {
                       const isSelected = selectedPack === pack.id;
+                      const bonusPct = pack.type === 'single' ? calcCoinBonusPercent(pack.coins, pack.bonus) : '';
+                      const isWholeBook = pack.type === 'whole_book';
                       return (
                         <button
                           type="button"
                           key={pack.id}
                           onClick={() => handleSelectPack(pack.id)}
                           aria-pressed={isSelected}
-                          style={{
-                            backgroundColor: 'var(--bg-secondary)',
-                            color: 'var(--text-primary)',
-                            borderRadius: '14px',
-                            padding: '14px 12px',
-                            border: isSelected ? '1.5px solid var(--accent-color)' : '1px solid var(--border-color)',
-                            boxShadow: isSelected ? '0 0 0 1px var(--accent-color)' : 'none',
-                            cursor: 'pointer',
-                            display: 'flex',
-                            flexDirection: 'column',
-                            alignItems: 'stretch',
-                            justifyContent: 'space-between',
-                            gap: '10px',
-                            textAlign: 'left',
-                            transition: 'var(--transition-fast)',
-                          }}
+                          className={`recharge-coin-card${isSelected ? ' is-selected' : ''}${isWholeBook ? ' coin-pack-whole-book' : ''}`}
                         >
-                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '6px' }}>
-                            {pack.type === 'whole_book' ? (
-                              <span
-                                style={{
-                                  backgroundColor: 'var(--accent-light)',
-                                  color: 'var(--accent-text)',
-                                  fontSize: '0.625rem',
-                                  fontWeight: 600,
-                                  padding: '2px 7px',
-                                  borderRadius: '999px',
-                                }}
-                              >
-                                {pack.badge || 'Full Book'}
-                              </span>
-                            ) : pack.badge ? (
-                              <span
-                                style={{
-                                  backgroundColor: 'var(--accent-light)',
-                                  color: 'var(--accent-text)',
-                                  fontSize: '0.625rem',
-                                  fontWeight: 600,
-                                  padding: '2px 7px',
-                                  borderRadius: '999px',
-                                }}
-                              >
-                                {pack.badge}
-                              </span>
-                            ) : pack.bonus > 0 ? (
-                              <span
-                                className="tabular-nums"
-                                style={{
-                                  backgroundColor: 'var(--accent-light)',
-                                  color: 'var(--accent-text)',
-                                  fontSize: '0.625rem',
-                                  fontWeight: 600,
-                                  padding: '2px 7px',
-                                  borderRadius: '999px',
-                                }}
-                              >
-                                +{pack.bonus} bonus
-                              </span>
-                            ) : (
-                              <span />
-                            )}
-
-                            <span
-                              aria-hidden="true"
-                              style={{
-                                width: '16px',
-                                height: '16px',
-                                borderRadius: '50%',
-                                border: isSelected ? 'none' : '1.5px solid var(--border-strong)',
-                                backgroundColor: isSelected ? 'var(--accent-color)' : 'transparent',
-                                color: '#FFFFFF',
-                                display: 'inline-flex',
-                                alignItems: 'center',
-                                justifyContent: 'center',
-                                flexShrink: 0,
-                              }}
-                            >
-                              {isSelected && <Check size={11} strokeWidth={2.6} />}
-                            </span>
-                          </div>
-
-                          {pack.type === 'whole_book' ? (
-                            <div>
-                              <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                                <BookOpen size={15} strokeWidth={1.9} style={{ color: 'var(--accent-color)', flexShrink: 0 }} aria-hidden="true" />
-                                <span style={{ fontSize: '0.9375rem', fontWeight: 700, color: 'var(--text-primary)', lineHeight: 1.25 }}>
-                                  {pack.name || 'Unlock Entire Novel'}
+                          {isWholeBook ? (
+                            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px' }}>
+                              <div style={{ minWidth: 0 }}>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                  <BookOpen size={15} strokeWidth={1.9} style={{ color: 'var(--accent-color)', flexShrink: 0 }} aria-hidden="true" />
+                                  <span style={{ fontSize: '0.9375rem', fontWeight: 700, color: 'var(--text-primary)', lineHeight: 1.25 }}>
+                                    {pack.name || 'Unlock Entire Novel'}
+                                  </span>
+                                </div>
+                                <span
+                                  style={{
+                                    fontSize: '0.6875rem',
+                                    color: 'var(--text-tertiary)',
+                                    display: 'block',
+                                    marginTop: '3px',
+                                    overflow: 'hidden',
+                                    textOverflow: 'ellipsis',
+                                    whiteSpace: 'nowrap',
+                                  }}
+                                >
+                                  {novelTitle ? `${novelTitle} · Forever access` : 'One-time unlock · Forever access'}
                                 </span>
                               </div>
-                              <span
-                                style={{
-                                  fontSize: '0.6875rem',
-                                  color: 'var(--text-tertiary)',
-                                  display: 'block',
-                                  marginTop: '3px',
-                                  overflow: 'hidden',
-                                  textOverflow: 'ellipsis',
-                                  whiteSpace: 'nowrap',
-                                }}
-                              >
-                                {novelTitle ? `${novelTitle} · Forever access` : 'One-time unlock · Forever access'}
+                              <span className="tabular-nums" style={{ fontSize: '0.9375rem', fontWeight: 700, color: 'var(--text-primary)', flexShrink: 0 }}>
+                                {pack.price}
                               </span>
                             </div>
                           ) : (
-                            <div>
-                              <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                                <GoldCoin size={16} />
-                                <span className="tabular-nums" style={{ fontSize: '1.125rem', fontWeight: 700, color: 'var(--text-primary)' }}>
-                                  {pack.coins.toLocaleString()}
+                            <>
+                              <div>
+                                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '6px' }}>
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px', minWidth: 0 }}>
+                                    <GoldCoin size={15} />
+                                    <span className="tabular-nums" style={{ fontSize: '1.0625rem', fontWeight: 700, color: 'var(--text-primary)' }}>
+                                      {pack.coins.toLocaleString()}
+                                    </span>
+                                  </div>
+                                  {bonusPct && (
+                                    <span
+                                      className="tabular-nums"
+                                      style={{
+                                        backgroundColor: 'var(--accent-light)',
+                                        color: 'var(--accent-text)',
+                                        fontSize: '0.625rem',
+                                        fontWeight: 700,
+                                        padding: '2px 7px',
+                                        borderRadius: '999px',
+                                        flexShrink: 0,
+                                      }}
+                                    >
+                                      {bonusPct}
+                                    </span>
+                                  )}
+                                </div>
+                                <span className="tabular-nums" style={{ fontSize: '0.6875rem', color: 'var(--text-tertiary)', display: 'block', marginTop: '3px' }}>
+                                  {pack.bonus > 0 ? `+${pack.bonus.toLocaleString()} bonus` : pack.name || 'Coin Top-up'}
                                 </span>
                               </div>
-                              <span className="tabular-nums" style={{ fontSize: '0.6875rem', color: 'var(--text-tertiary)', display: 'block', marginTop: '2px' }}>
-                                {formatCoinPackSubtitle(pack)}
-                              </span>
-                            </div>
-                          )}
 
-                          <div
-                            className="tabular-nums"
-                            style={{
-                              fontSize: '0.8125rem',
-                              fontWeight: 600,
-                              backgroundColor: isSelected ? 'var(--cta-bg)' : 'var(--bg-tertiary)',
-                              color: isSelected ? 'var(--cta-text)' : 'var(--text-primary)',
-                              textAlign: 'center',
-                              padding: '7px 0',
-                              borderRadius: '8px',
-                            }}
-                          >
-                            {pack.price}
-                          </div>
+                              <div
+                                style={{
+                                  display: 'flex',
+                                  alignItems: 'baseline',
+                                  justifyContent: 'space-between',
+                                  gap: '8px',
+                                  paddingTop: '8px',
+                                  borderTop: '1px solid var(--border-color)',
+                                }}
+                              >
+                                <span className="tabular-nums" style={{ fontSize: '0.6875rem', color: 'var(--text-tertiary)' }}>
+                                  {pack.total.toLocaleString()} total
+                                </span>
+                                <span className="tabular-nums" style={{ fontSize: '0.9375rem', fontWeight: 700, color: 'var(--text-primary)' }}>
+                                  {pack.price}
+                                </span>
+                              </div>
+                            </>
+                          )}
                         </button>
                       );
                     })}
@@ -864,81 +980,6 @@ export const Recharge: React.FC<RechargeProps> = ({
                 </div>
               )}
 
-              {/* Payment Method Checkout Actions */}
-              {selectedSlot ? (
-                <section className="recharge-checkout-section" aria-label="Payment methods">
-                  <div className="recharge-checkout-summary">
-                    <span className="recharge-checkout-summary-title">{selectedSummaryTitle}</span>
-                    <span className="recharge-checkout-summary-price tabular-nums">{selectedSummaryPrice}</span>
-                  </div>
-
-                  {selectedPayPalAvailable || selectedStripeAvailable ? (
-                    <div
-                      className="recharge-checkout-actions"
-                      style={{
-                        gridTemplateColumns:
-                          selectedPayPalAvailable && selectedStripeAvailable ? 'repeat(2, minmax(0, 1fr))' : '1fr',
-                      }}
-                    >
-                      {selectedPayPalAvailable && (
-                        <button
-                          type="button"
-                          className="recharge-pay-btn"
-                          onClick={() => void handlePurchase('paypal')}
-                          disabled={isProcessing}
-                        >
-                          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true" style={{ flexShrink: 0 }}>
-                            <defs>
-                              <clipPath id={paypalClipId}>
-                                <path d="M5.8 1.5h7.4c4.2 0 6.4 2 5.6 6-.7 3.6-3.4 5.5-7.4 5.5H8.5l-1.1 7.2H3.0L5.8 1.5Z" />
-                              </clipPath>
-                            </defs>
-                            <path
-                              className="recharge-paypal-back"
-                              d="M5.8 1.5h7.4c4.2 0 6.4 2 5.6 6-.7 3.6-3.4 5.5-7.4 5.5H8.5l-1.1 7.2H3.0L5.8 1.5Z"
-                            />
-                            <path
-                              className="recharge-paypal-front"
-                              d="M8.5 5.2h6.3c3.9 0 5.9 1.9 5.2 5.5-.7 3.3-3.1 5.1-6.8 5.1h-2.5l-1.1 6.7H5.9L8.5 5.2Z"
-                            />
-                            <path
-                              className="recharge-paypal-overlap"
-                              clipPath={`url(#${paypalClipId})`}
-                              d="M8.5 5.2h6.3c3.9 0 5.9 1.9 5.2 5.5-.7 3.3-3.1 5.1-6.8 5.1h-2.5l-1.1 6.7H5.9L8.5 5.2Z"
-                            />
-                          </svg>
-                          <span className="recharge-btn-label">{isProcessing && activeCheckoutProvider === 'paypal' ? 'Connecting...' : 'PayPal'}</span>
-                        </button>
-                      )}
-
-                      {selectedStripeAvailable && (
-                        <button
-                          type="button"
-                          className="recharge-pay-btn"
-                          disabled={isProcessing}
-                          onClick={() => void handlePurchase('stripe')}
-                        >
-                          <CreditCard size={18} strokeWidth={2} aria-hidden="true" style={{ flexShrink: 0 }} />
-                          <span className="recharge-btn-label">{isProcessing && activeCheckoutProvider === 'stripe' ? 'Connecting...' : cardLabel}</span>
-                        </button>
-                      )}
-                    </div>
-                  ) : (
-                    <p role="status" style={{ textAlign: 'center', fontSize: '0.8125rem', color: 'var(--text-secondary)', margin: 0 }}>
-                      No payment channel is currently active for the selected item.
-                    </p>
-                  )}
-                </section>
-              ) : (subscriptionPacks.length > 0 || coinPacks.length > 0) ? (
-                <section className="recharge-checkout-section" aria-label="Package selection prompt">
-                  <p role="status" style={{ textAlign: 'center', fontSize: '0.8125rem', color: 'var(--text-secondary)', margin: 0 }}>
-                    {returnedLookupState === 'loading'
-                      ? 'Checking your previous checkout… or select a package above to continue.'
-                      : 'Select a package above to continue.'}
-                  </p>
-                </section>
-              ) : null}
-
               {/* Notes */}
               <div
                 style={{
@@ -951,7 +992,7 @@ export const Recharge: React.FC<RechargeProps> = ({
                   lineHeight: 1.65,
                 }}
               >
-                <p>• <strong>VIP Unlimited Pass:</strong> Instant access to all novel chapters across the site without consuming coins.</p>
+                <p>• <strong>Unlimited Membership:</strong> Instant access to all novel chapters across the site without consuming coins.</p>
                 <p>• <strong>Coin Top-up:</strong> Permanent coins to unlock individual chapters across StarNovel.</p>
                 <p>
                   • Need help?{' '}
@@ -973,29 +1014,120 @@ export const Recharge: React.FC<RechargeProps> = ({
                   justifyContent: 'center',
                   alignItems: 'center',
                   gap: '8px 12px',
-                  paddingBottom: '12px',
+                  paddingBottom: '8px',
                   fontSize: '0.75rem',
                   color: 'var(--text-tertiary)',
                 }}
               >
-                <button type="button" onClick={() => setActiveLegalModal('terms')} style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', textDecoration: 'underline' }}>
+                <button type="button" onClick={() => setActiveLegalModal('terms')} style={{ background: 'none', border: 'none', padding: 0, color: 'inherit', cursor: 'pointer', textDecoration: 'underline' }}>
                   Terms of Service
                 </button>
                 <span aria-hidden="true">·</span>
-                <button type="button" onClick={() => setActiveLegalModal('privacy')} style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', textDecoration: 'underline' }}>
+                <button type="button" onClick={() => setActiveLegalModal('privacy')} style={{ background: 'none', border: 'none', padding: 0, color: 'inherit', cursor: 'pointer', textDecoration: 'underline' }}>
                   Privacy Policy
                 </button>
                 <span aria-hidden="true">·</span>
-                <button type="button" onClick={() => setActiveLegalModal('refund')} style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', textDecoration: 'underline' }}>
+                <button type="button" onClick={() => setActiveLegalModal('refund')} style={{ background: 'none', border: 'none', padding: 0, color: 'inherit', cursor: 'pointer', textDecoration: 'underline' }}>
                   Refund Policy
                 </button>
                 <span aria-hidden="true">·</span>
-                <button type="button" onClick={() => setActiveLegalModal('contact')} style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', textDecoration: 'underline' }}>
+                <button type="button" onClick={() => setActiveLegalModal('contact')} style={{ background: 'none', border: 'none', padding: 0, color: 'inherit', cursor: 'pointer', textDecoration: 'underline' }}>
                   Contact Us
                 </button>
               </div>
             </div>
           </div>
+
+          {/* Sticky Bottom Checkout Dock */}
+          {selectedSlot ? (
+            <section className="recharge-checkout-dock" aria-label="Payment methods">
+              <div className="sn-narrow-container recharge-checkout-section">
+                <div className="recharge-checkout-summary">
+                  <div style={{ minWidth: 0 }}>
+                    <div className="recharge-checkout-summary-title">{selectedSummaryTitle}</div>
+                    <div className="recharge-checkout-summary-hint">{selectedSummaryHint}</div>
+                  </div>
+                  <span className="recharge-checkout-summary-price tabular-nums">{selectedSummaryPrice}</span>
+                </div>
+
+                {selectedPayPalAvailable || selectedStripeAvailable ? (
+                  <div
+                    className="recharge-checkout-actions"
+                    style={{
+                      gridTemplateColumns:
+                        selectedPayPalAvailable && selectedStripeAvailable ? 'repeat(2, minmax(0, 1fr))' : '1fr',
+                    }}
+                  >
+                    {selectedPayPalAvailable && (
+                      <button
+                        type="button"
+                        className="recharge-pay-btn recharge-pay-btn--paypal"
+                        onClick={() => void handlePurchase('paypal')}
+                        disabled={isProcessing}
+                      >
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true" style={{ flexShrink: 0 }}>
+                          <defs>
+                            <clipPath id={paypalClipId}>
+                              <path d="M5.8 1.5h7.4c4.2 0 6.4 2 5.6 6-.7 3.6-3.4 5.5-7.4 5.5H8.5l-1.1 7.2H3.0L5.8 1.5Z" />
+                            </clipPath>
+                          </defs>
+                          <path
+                            className="recharge-paypal-back"
+                            d="M5.8 1.5h7.4c4.2 0 6.4 2 5.6 6-.7 3.6-3.4 5.5-7.4 5.5H8.5l-1.1 7.2H3.0L5.8 1.5Z"
+                          />
+                          <path
+                            className="recharge-paypal-front"
+                            d="M8.5 5.2h6.3c3.9 0 5.9 1.9 5.2 5.5-.7 3.3-3.1 5.1-6.8 5.1h-2.5l-1.1 6.7H5.9L8.5 5.2Z"
+                          />
+                          <path
+                            className="recharge-paypal-overlap"
+                            clipPath={`url(#${paypalClipId})`}
+                            d="M8.5 5.2h6.3c3.9 0 5.9 1.9 5.2 5.5-.7 3.3-3.1 5.1-6.8 5.1h-2.5l-1.1 6.7H5.9L8.5 5.2Z"
+                          />
+                        </svg>
+                        <span className="recharge-btn-label">{isProcessing && activeCheckoutProvider === 'paypal' ? 'Connecting...' : 'PayPal'}</span>
+                      </button>
+                    )}
+
+                    {selectedStripeAvailable && (
+                      <button
+                        type="button"
+                        className="recharge-pay-btn recharge-pay-btn--card"
+                        disabled={isProcessing}
+                        onClick={() => void handlePurchase('stripe')}
+                      >
+                        <CreditCard size={17} strokeWidth={2} aria-hidden="true" style={{ flexShrink: 0 }} />
+                        <span className="recharge-btn-label">{isProcessing && activeCheckoutProvider === 'stripe' ? 'Connecting...' : cardLabel}</span>
+                        {!isProcessing && (
+                          <span className="recharge-card-brands" aria-hidden="true">
+                            <span className="recharge-brand-visa">VISA</span>
+                            <span className="recharge-brand-mc">
+                              <span className="recharge-brand-mc-left" />
+                              <span className="recharge-brand-mc-right" />
+                            </span>
+                          </span>
+                        )}
+                      </button>
+                    )}
+                  </div>
+                ) : (
+                  <p role="status" style={{ textAlign: 'center', fontSize: '0.8125rem', color: 'var(--text-secondary)', margin: 0 }}>
+                    No payment channel is currently active for the selected item.
+                  </p>
+                )}
+              </div>
+            </section>
+          ) : (subscriptionPacks.length > 0 || coinPacks.length > 0) ? (
+            <section className="recharge-checkout-dock" aria-label="Package selection prompt">
+              <div className="sn-narrow-container recharge-checkout-section">
+                <p role="status" style={{ textAlign: 'center', fontSize: '0.8125rem', color: 'var(--text-secondary)', margin: 0 }}>
+                  {returnedLookupState === 'loading'
+                    ? 'Checking your previous checkout… or select a package above to continue.'
+                    : 'Select a package above to continue.'}
+                </p>
+              </div>
+            </section>
+          ) : null}
 
           {/* Payment Processing Loading Overlay */}
           {isProcessing && (
@@ -1077,7 +1209,7 @@ export const Recharge: React.FC<RechargeProps> = ({
           {isVipSuccess ? <Crown size={24} strokeWidth={1.8} aria-hidden="true" /> : <Sparkles size={24} strokeWidth={1.8} aria-hidden="true" />}
         </div>
         <h2 id={successTitleId} style={{ fontFamily: 'var(--font-display)', fontSize: '1.25rem', fontWeight: 600, marginBottom: '8px' }}>
-          {isVipSuccess ? 'VIP Unlimited Activated' : 'Purchase Complete'}
+          {isVipSuccess ? 'Unlimited Membership Activated' : 'Purchase Complete'}
         </h2>
         <p style={{ fontSize: '0.875rem', color: 'var(--text-secondary)', marginBottom: '18px', lineHeight: 1.5 }}>
           {isVipSuccess

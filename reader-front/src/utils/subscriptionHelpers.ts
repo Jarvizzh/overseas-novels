@@ -104,14 +104,14 @@ export function buildSubscriptionViewModel(
 
   const fallbackPlanName =
     sub.cycle === 'day'
-      ? 'VIP Daily Pass'
+      ? 'Daily Plan'
       : sub.cycle === 'week'
-        ? 'VIP Weekly Pass'
+        ? 'Weekly Plan'
         : sub.cycle === 'month'
-          ? 'VIP Monthly Pass'
+          ? 'Monthly Plan'
           : sub.cycle === 'year'
-            ? 'VIP Annual Pass'
-            : 'VIP Membership';
+            ? 'Annual Plan'
+            : 'Unlimited Membership';
   const planName = sub.plan_name?.trim() || fallbackPlanName;
   const priceLabel = formatSubscriptionPrice(sub.price_cents, sub.currency, sub.cycle);
 
@@ -143,14 +143,14 @@ export function buildSubscriptionViewModel(
       statusTone = 'warning';
       statusLabel = 'Cancellation Pending';
       statusDescription = paidThroughLabel
-        ? `Awaiting confirmation from ${providerLabel}. You keep full VIP access through ${paidThroughLabel}.`
+        ? `Awaiting confirmation from ${providerLabel}. You keep full reading access through ${paidThroughLabel}.`
         : `Awaiting cancellation confirmation from ${providerLabel}.`;
       break;
     case 'canceled_with_paid_period':
       statusTone = 'muted';
       statusLabel = 'Auto-Renew Stopped';
       statusDescription = paidThroughLabel
-        ? `Auto-renewal is off and you will not be charged again. VIP access remains active through ${paidThroughLabel}.`
+        ? `Auto-renewal is off and you will not be charged again. Unlimited access remains active through ${paidThroughLabel}.`
         : 'Auto-renewal is off. Your remaining paid access continues until the end of the current period.';
       break;
     case 'renewal_failed':
