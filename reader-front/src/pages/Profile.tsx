@@ -305,11 +305,22 @@ export const Profile: React.FC<ProfileProps> = ({
     return e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom;
   };
 
-  const vipSummary = isVip
-    ? subscription?.current_period_end
-      ? `VIP Active · Until ${new Date(subscription.current_period_end).toLocaleDateString()}`
-      : 'VIP Unlimited Active'
-    : 'Standard Reader';
+  const paidThroughDate = subscription?.paid_through || subscription?.current_period_end;
+  const vipSummary = subscription?.normalized_status === 'cancel_pending'
+    ? paidThroughDate
+      ? `Cancel Pending · Through ${new Date(paidThroughDate).toLocaleDateString()}`
+      : 'Cancellation Pending'
+    : subscription?.normalized_status === 'canceled_with_paid_period'
+      ? paidThroughDate
+        ? `Auto-Renew Off · Through ${new Date(paidThroughDate).toLocaleDateString()}`
+        : 'Auto-Renew Off'
+      : subscription?.normalized_status === 'renewal_failed'
+        ? 'Renewal Payment Issue'
+        : isVip
+          ? paidThroughDate
+            ? `VIP Active · Until ${new Date(paidThroughDate).toLocaleDateString()}`
+            : 'VIP Unlimited Active'
+          : 'Manage Subscription';
 
   return (
     <div className="scroll-container animate-fade-in">
@@ -433,10 +444,10 @@ export const Profile: React.FC<ProfileProps> = ({
                 </button>
               )}
 
-              <button type="button" className="settings-item" onClick={() => onNavigate('recharge')}>
+              <button type="button" className="settings-item" onClick={() => onNavigate('subscription')}>
                 <span style={{ display: 'inline-flex', alignItems: 'center', gap: '8px' }}>
                   <Crown size={16} strokeWidth={1.8} style={{ color: 'var(--accent-color)' }} aria-hidden="true" />
-                  <span>Membership Status</span>
+                  <span>My Membership &amp; Subscription</span>
                 </span>
                 <span className="settings-item-value" style={{ color: isVip ? 'var(--accent-text)' : 'var(--text-tertiary)', fontWeight: isVip ? 600 : 400 }}>
                   <span>{vipSummary}</span>

@@ -20,7 +20,7 @@ type Service interface {
 	GetStripeVIPOfferSlots(context.Context, int64) ([]int, error)
 	StartStripeVIP(context.Context, int64, int, string, string, checkoutAttribution) (*PurchaseIntent, error)
 	GetStripeVIPPurchase(context.Context, int64, string) (*PurchaseIntent, error)
-	OpenStripeVIPPortal(context.Context, int64, string, string) (string, error)
+	OpenStripeVIPPortal(context.Context, int64, string, string, string) (string, error)
 	GetPurchase(context.Context, int64, string, string) (*PurchaseIntent, error)
 	GetVIPPurchase(context.Context, int64, string, string) (*PurchaseIntent, error)
 	ListRecentPurchases(context.Context, int64) ([]PurchaseIntent, error)
@@ -32,6 +32,7 @@ type Service interface {
 	GetManagedSubscription(ctx context.Context, userID int64) (*model.UserSubscription, error)
 	ListManagedSubscriptions(context.Context, int64) ([]model.UserSubscription, error)
 	CancelSubscription(ctx context.Context, userID int64, subscriptionID string, reason string) error
+	CancelSubscriptionWithResult(ctx context.Context, userID int64, subscriptionID string, reason string) (*SubscriptionCancelResult, error)
 	ProcessSubscriptionWebhook(ctx context.Context, providerName string, payload []byte, headers map[string]string) error
 	ProcessChannelWebhook(ctx context.Context, token string, payload []byte, headers map[string]string) error
 	GetRechargeTemplates(ctx context.Context, userID int64, novelID int64) (*model.RechargeTemplate, error)

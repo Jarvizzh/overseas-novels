@@ -269,31 +269,65 @@ export interface CheckInState {
   rewards: number[];
 }
 
+export type SubscriptionNormalizedStatus =
+  | 'none'
+  | 'active'
+  | 'pending'
+  | 'cancel_pending'
+  | 'canceled_with_paid_period'
+  | 'canceled'
+  | 'renewal_failed';
+
+export interface SubscriptionCapabilities {
+  can_cancel_auto_renew: boolean;
+  cancel_pending: boolean;
+  can_open_billing_portal: boolean;
+  billing_portal_endpoint?: string;
+  can_open_mor_link_portal: boolean;
+  mor_link_url?: string;
+}
+
 export interface SubscriptionInfo {
   id: number;
   user_id: number;
   subscription_id: string;
   plan_id: string;
+  plan_name?: string;
   slot_id: number;
   template_id: number;
   status: string;
+  normalized_status?: SubscriptionNormalizedStatus;
   cycle: string;
   price_cents: number;
   currency: string;
   payment_method: string;
+  provider?: 'paypal' | 'stripe' | string;
+  sales_mode?: 'direct' | 'merchant_of_record' | string;
   management?: 'stripe_portal' | 'stripe_link';
   renewal_failed_at?: string;
   current_period_start?: string;
   current_period_end?: string;
+  paid_through?: string;
   next_billing_time?: string;
+  next_billing_at?: string;
   last_payment_time?: string;
   cancelled_at?: string;
+  capabilities?: SubscriptionCapabilities;
 }
 
 export interface SubscriptionStatusResponse {
   is_vip: boolean;
+  status?: SubscriptionNormalizedStatus;
   subscription: SubscriptionInfo | null;
   subscriptions: SubscriptionInfo[];
+}
+
+export interface SubscriptionCancelResponse {
+  subscription_id?: string;
+  status?: SubscriptionNormalizedStatus;
+  already_requested?: boolean;
+  paid_through?: string;
+  message: string;
 }
 
 async function sendShelfBatches<T>(
@@ -517,10 +551,10 @@ export const api = {
   getStripeVIPPurchase: (intentId: string, signal?: AbortSignal) =>
     request<PurchaseIntent>(`/wallet/subscription/stripe/purchase/${encodeURIComponent(intentId)}`, { signal, cache: 'no-store' }),
 
-  openStripeVIPPortal: (subscriptionId: string) =>
+  openStripeVIPPortal: (subscriptionId: string, returnPath: string = '/subscription') =>
     request<{ portal_url: string }>('/wallet/subscription/stripe/portal', {
       method: 'POST',
-      body: JSON.stringify({ subscription_id: subscriptionId }),
+      body: JSON.stringify({ subscription_id: subscriptionId, return_path: returnPath }),
     }),
 
   getReturnedPurchase: (intentId: string, paypalOrderId: string, vip: boolean, signal?: AbortSignal) => {
@@ -588,10 +622,10 @@ export const api = {
     }),
 
   getSubscriptionStatus: (signal?: AbortSignal) =>
-    request<SubscriptionStatusResponse>('/wallet/subscription/status', { signal }),
+    request<SubscriptionStatusResponse>('/wallet/subscription/status', { signal, cache: 'no-store' }),
 
   cancelSubscription: (subscriptionId: string, reason: string = 'User requested cancellation') =>
-    request<{ message: string }>('/wallet/subscription/cancel', {
+    request<SubscriptionCancelResponse>('/wallet/subscription/cancel', {
       method: 'POST',
       body: JSON.stringify({
         subscription_id: subscriptionId,

@@ -153,31 +153,48 @@ type RechargeTemplate struct {
 	Slots     []RechargeSlot `json:"slots" db:"-"`
 }
 
+// SubscriptionCapabilities describes server-authorized self-service actions for a subscription.
+type SubscriptionCapabilities struct {
+	CanCancelAutoRenew    bool   `json:"can_cancel_auto_renew"`
+	CancelPending         bool   `json:"cancel_pending"`
+	CanOpenBillingPortal  bool   `json:"can_open_billing_portal"`
+	BillingPortalEndpoint string `json:"billing_portal_endpoint,omitempty"`
+	CanOpenMoRLinkPortal  bool   `json:"can_open_mor_link_portal"`
+	MoRLinkURL            string `json:"mor_link_url,omitempty"`
+}
+
 // UserSubscription represents recurring subscription state and membership status
 type UserSubscription struct {
-	ID                 int64      `json:"id" db:"id"`
-	UserID             int64      `json:"user_id" db:"user_id"`
-	SubscriptionID     string     `json:"subscription_id" db:"subscription_id"` // Provider Sub ID (e.g. I-XXXXX)
-	ProductID          *int64     `json:"product_id,omitempty" db:"product_id"`
-	PlanID             string     `json:"plan_id" db:"plan_id"`
-	SlotID             int        `json:"slot_id" db:"slot_id"`
-	TemplateID         int        `json:"template_id" db:"template_id"`
-	Status             string     `json:"status" db:"status"` // 'PENDING', 'ACTIVE', 'CANCELLED', 'SUSPENDED', 'EXPIRED'
-	Cycle              string     `json:"cycle" db:"cycle"`   // 'day', 'week', 'month'
-	PriceCents         int        `json:"price_cents" db:"price_cents"`
-	Currency           string     `json:"currency" db:"currency"`
-	PaymentMethod      string     `json:"payment_method" db:"payment_method"`
-	Management         string     `json:"management,omitempty"`
-	Environment        string     `json:"-"`
-	RenewalFailedAt    *time.Time `json:"renewal_failed_at,omitempty"`
-	CurrentPeriodStart *time.Time `json:"current_period_start" db:"current_period_start"`
-	CurrentPeriodEnd   *time.Time `json:"current_period_end" db:"current_period_end"`
-	NextBillingTime    *time.Time `json:"next_billing_time" db:"next_billing_time"`
-	LastPaymentTime    *time.Time `json:"last_payment_time" db:"last_payment_time"`
-	CancelledAt        *time.Time `json:"cancelled_at" db:"cancelled_at"`
-	RawPayload         string     `json:"raw_payload,omitempty" db:"raw_payload"`
-	CreatedAt          time.Time  `json:"created_at" db:"created_at"`
-	UpdatedAt          time.Time  `json:"updated_at" db:"updated_at"`
+	ID                 int64                     `json:"id" db:"id"`
+	UserID             int64                     `json:"user_id" db:"user_id"`
+	SubscriptionID     string                    `json:"subscription_id" db:"subscription_id"` // Provider Sub ID (e.g. I-XXXXX)
+	ProductID          *int64                    `json:"product_id,omitempty" db:"product_id"`
+	PlanID             string                    `json:"plan_id" db:"plan_id"`
+	PlanName           string                    `json:"plan_name,omitempty"`
+	SlotID             int                       `json:"slot_id" db:"slot_id"`
+	TemplateID         int                       `json:"template_id" db:"template_id"`
+	Status             string                    `json:"status" db:"status"` // 'PENDING', 'ACTIVE', 'CANCELLED', 'SUSPENDED', 'EXPIRED'
+	NormalizedStatus   string                    `json:"normalized_status,omitempty"`
+	Cycle              string                    `json:"cycle" db:"cycle"` // 'day', 'week', 'month'
+	PriceCents         int                       `json:"price_cents" db:"price_cents"`
+	Currency           string                    `json:"currency" db:"currency"`
+	PaymentMethod      string                    `json:"payment_method" db:"payment_method"`
+	Provider           string                    `json:"provider,omitempty"`
+	SalesMode          string                    `json:"sales_mode,omitempty"`
+	Management         string                    `json:"management,omitempty"`
+	Environment        string                    `json:"-"`
+	RenewalFailedAt    *time.Time                `json:"renewal_failed_at,omitempty"`
+	CurrentPeriodStart *time.Time                `json:"current_period_start" db:"current_period_start"`
+	CurrentPeriodEnd   *time.Time                `json:"current_period_end" db:"current_period_end"`
+	PaidThrough        *time.Time                `json:"paid_through,omitempty"`
+	NextBillingTime    *time.Time                `json:"next_billing_time" db:"next_billing_time"`
+	NextBillingAt      *time.Time                `json:"next_billing_at,omitempty"`
+	LastPaymentTime    *time.Time                `json:"last_payment_time" db:"last_payment_time"`
+	CancelledAt        *time.Time                `json:"cancelled_at" db:"cancelled_at"`
+	Capabilities       *SubscriptionCapabilities `json:"capabilities,omitempty"`
+	RawPayload         string                    `json:"raw_payload,omitempty" db:"raw_payload"`
+	CreatedAt          time.Time                 `json:"created_at" db:"created_at"`
+	UpdatedAt          time.Time                 `json:"updated_at" db:"updated_at"`
 }
 
 // ThirdPartyPaymentOrder represents third-party payment transaction details (e.g. PayPal, Stripe)

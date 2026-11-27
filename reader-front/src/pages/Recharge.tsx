@@ -16,6 +16,10 @@ import {
   resolveRechargeSelection,
   type ReturnedLookupState,
 } from '../utils/rechargeSelectionHelpers';
+import {
+  evaluatePurchaseLookupOutcome,
+  isCheckoutPendingConflict,
+} from '../utils/checkoutPendingHelpers';
 
 type PaymentProvider = 'paypal' | 'stripe';
 
@@ -276,7 +280,12 @@ export const Recharge: React.FC<RechargeProps> = ({
         pendingReturnPathRef.current = intent.return_path || '';
         setReturnedPendingIntent(isPendingPurchaseStatus(intent.status) ? intent : null);
         setReturnedLookupState('resolved');
-        if (intent.status === 'completed' || intent.status === 'refunded') {
+        const decision = evaluatePurchaseLookupOutcome(intent, {
+          cancelled: purchaseLocator.cancelled,
+          elapsedMs: Date.now() - startedAt,
+          maxWaitMs: endAt - startedAt,
+        });
+        if (decision.shouldClearDraft) {
           const storageKey = purchaseRequestStorageKey(userId, intent.slot_id, intent.product_id || 0, intent.novel_id || 0);
           try {
             const saved = JSON.parse(sessionStorage.getItem(storageKey) || 'null');
@@ -285,7 +294,7 @@ export const Recharge: React.FC<RechargeProps> = ({
             // Server-owned purchase status does not depend on the draft.
           }
           if (requestDraft.current?.intentId === intent.intent_id) requestDraft.current = null;
-          if (intent.status === 'completed' && shownPurchaseRef.current !== (intent.intent_id || intent.order_id)) {
+          if (decision.shouldShowSuccess && shownPurchaseRef.current !== (intent.intent_id || intent.order_id)) {
             shownPurchaseRef.current = intent.intent_id || intent.order_id || '';
             setSuccessAmount(intent.coins);
             setIsVipSuccess(intent.order_type === 'subscription');
@@ -294,12 +303,12 @@ export const Recharge: React.FC<RechargeProps> = ({
             }
             setIsWholeBookSuccess(intent.order_type === 'whole_book');
             setShowSuccess(true);
-            void onRefreshStatusRef.current?.();
+            if (decision.shouldRefreshWallet) {
+              void onRefreshStatusRef.current?.();
+            }
           }
         }
-        const isTerminalFailure = ['payment_declined', 'payment_blocked', 'payment_action_required'].includes(intent.confirmation_code || '') ||
-          intent.status === 'review';
-        if (isTerminalFailure) {
+        if (decision.outcome === 'terminal_failure') {
           const failureKey = `${intent.intent_id}:${intent.status}:${intent.confirmation_code || ''}`;
           if (shownFailureRef.current !== failureKey) {
             shownFailureRef.current = failureKey;
@@ -309,10 +318,8 @@ export const Recharge: React.FC<RechargeProps> = ({
             );
           }
         }
-        const stopAutoPolling = purchaseLocator.cancelled || isTerminalFailure;
-        if (!stopAutoPolling && ['confirming', 'awaiting_approval'].includes(intent.status) && Date.now() < endAt) {
-          const delayMs = Date.now() - startedAt < 10_000 ? 1000 : 3000;
-          timer = window.setTimeout(() => void lookup(), delayMs);
+        if (decision.shouldContinuePolling && decision.nextPollDelayMs !== null) {
+          timer = window.setTimeout(() => void lookup(), decision.nextPollDelayMs);
         }
       } catch (error) {
         if (controller.signal.aborted) return;
@@ -412,7 +419,7 @@ export const Recharge: React.FC<RechargeProps> = ({
       try {
         checkout = await startCheckout(provider, intent.intent_id, signal);
       } catch (err) {
-        if (!signal?.aborted && err instanceof ApiError && err.status === 409 && err.code === 'checkout_pending') {
+        if (!signal?.aborted && err instanceof ApiError && isCheckoutPendingConflict(err)) {
           showPurchase(intent.intent_id);
           setPurchaseRefresh((value) => value + 1);
         }

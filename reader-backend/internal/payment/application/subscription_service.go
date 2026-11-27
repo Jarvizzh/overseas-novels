@@ -175,25 +175,69 @@ func (s *service) ActivateSubscription(
 }
 
 func (s *service) GetManagedSubscription(ctx context.Context, userID int64) (*model.UserSubscription, error) {
-	return s.repo.GetManagedSubscriptionByUserID(ctx, userID)
+	subscriptions, err := s.ListManagedSubscriptions(ctx, userID)
+	if err != nil || len(subscriptions) == 0 {
+		return nil, err
+	}
+	return &subscriptions[0], nil
 }
 
 func (s *service) CancelSubscription(ctx context.Context, userID int64, subscriptionID string, reason string) error {
+	_, err := s.CancelSubscriptionWithResult(ctx, userID, subscriptionID, reason)
+	return err
+}
+
+func (s *service) CancelSubscriptionWithResult(ctx context.Context, userID int64, subscriptionID string, reason string) (*SubscriptionCancelResult, error) {
 	sub, err := s.repo.GetSubscriptionByID(ctx, subscriptionID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if sub == nil || sub.UserID != userID || sub.Environment != conversion.Environment() {
-		return ErrCheckoutUnavailable
+		return nil, ErrCheckoutUnavailable
+	}
+	now := time.Now().UTC()
+	switch sub.Status {
+	case "CANCEL_PENDING":
+		return &SubscriptionCancelResult{
+			SubscriptionID:   sub.SubscriptionID,
+			NormalizedStatus: SubscriptionStatusCancelPending,
+			AlreadyRequested: true,
+			PaidThrough:      sub.CurrentPeriodEnd,
+			Message:          "Cancellation is already awaiting payment provider confirmation. Access continues through the paid period.",
+		}, nil
+	case "CANCELLED", "EXPIRED":
+		normalized := normalizeSubscriptionStatus(*sub, now)
+		msg := "Auto-renewal is already stopped."
+		if normalized == SubscriptionStatusCanceledWithPaidPeriod {
+			msg = "Auto-renewal is already stopped. Access continues through the paid period."
+		}
+		return &SubscriptionCancelResult{
+			SubscriptionID:   sub.SubscriptionID,
+			NormalizedStatus: normalized,
+			AlreadyRequested: true,
+			PaidThrough:      sub.CurrentPeriodEnd,
+			Message:          msg,
+		}, nil
 	}
 	switch sub.PaymentMethod {
 	case payment.ProviderPayPal:
-		return s.repo.enqueuePayPalCancellation(ctx, subscriptionID, userID, reason)
+		if err := s.repo.enqueuePayPalCancellation(ctx, subscriptionID, userID, reason); err != nil {
+			return nil, err
+		}
 	case payment.ProviderStripe:
-		return s.cancelStripeVIP(ctx, userID, subscriptionID, reason)
+		if err := s.cancelStripeVIP(ctx, userID, subscriptionID, reason); err != nil {
+			return nil, err
+		}
 	default:
-		return ErrCheckoutUnavailable
+		return nil, ErrCheckoutUnavailable
 	}
+	return &SubscriptionCancelResult{
+		SubscriptionID:   sub.SubscriptionID,
+		NormalizedStatus: SubscriptionStatusCancelPending,
+		AlreadyRequested: false,
+		PaidThrough:      sub.CurrentPeriodEnd,
+		Message:          "Cancellation requested. Access continues through the paid period.",
+	}, nil
 }
 
 func (s *service) recordPayPalSubscriptionTransaction(ctx context.Context, sub *model.UserSubscription,
@@ -248,5 +292,15 @@ func (s *service) HasSubscriptionAccess(ctx context.Context, id int64) (bool, er
 }
 
 func (s *service) ListManagedSubscriptions(ctx context.Context, id int64) ([]model.UserSubscription, error) {
-	return s.repo.ListManagedSubscriptions(ctx, id)
+	subscriptions, err := s.repo.ListManagedSubscriptions(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now().UTC()
+	morLinkURL := resolveStripeMoRLinkURL()
+	enriched := make([]model.UserSubscription, len(subscriptions))
+	for i, sub := range subscriptions {
+		enriched[i] = enrichManagedSubscription(sub, now, morLinkURL)
+	}
+	return enriched, nil
 }

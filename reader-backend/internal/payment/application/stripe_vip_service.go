@@ -110,7 +110,7 @@ func (s *service) GetStripeVIPPurchase(ctx context.Context, userID int64, rawID 
 	return stripeVIPPurchase(ctx, userID, account, id.String())
 }
 
-func (s *service) OpenStripeVIPPortal(ctx context.Context, userID int64, subscription, origin string) (string, error) {
+func (s *service) OpenStripeVIPPortal(ctx context.Context, userID int64, subscription, origin, returnPath string) (string, error) {
 	account, err := stripeVIPAccountForOwner(ctx, userID, subscription, false)
 	if err != nil {
 		return "", err
@@ -130,7 +130,7 @@ func (s *service) OpenStripeVIPPortal(ctx context.Context, userID int64, subscri
 	if err != nil {
 		return "", err
 	}
-	site.Path = "/recharge"
+	site.Path = normalizePortalReturnPath(returnPath)
 	request, cancel := context.WithTimeout(ctx, stripeVIPRequestTimeout)
 	defer cancel()
 	proof, err := adapter.ReadStripeVIPSubscription(request, subscription)

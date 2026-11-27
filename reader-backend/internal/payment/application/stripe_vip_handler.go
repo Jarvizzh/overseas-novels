@@ -28,15 +28,17 @@ func (h *Handler) GetStripeVIPPurchase(c *gin.Context) {
 func (h *Handler) OpenStripeVIPPortal(c *gin.Context) {
 	var req struct {
 		SubscriptionID string `json:"subscription_id" binding:"required,max=100"`
+		ReturnPath     string `json:"return_path" binding:"max=128"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		httpx.Fail(c, http.StatusBadRequest, "invalid_request", "Invalid subscription", nil)
 		return
 	}
-	portal, err := h.service.OpenStripeVIPPortal(c.Request.Context(), c.GetInt64("user_id"), req.SubscriptionID, c.GetHeader("Origin"))
+	portal, err := h.service.OpenStripeVIPPortal(c.Request.Context(), c.GetInt64("user_id"), req.SubscriptionID, c.GetHeader("Origin"), req.ReturnPath)
 	if err != nil {
 		writePurchaseError(c, err)
 		return
 	}
+	c.Header("Cache-Control", "private, no-store")
 	c.JSON(http.StatusOK, gin.H{"portal_url": portal})
 }

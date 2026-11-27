@@ -27,6 +27,7 @@ type Config struct {
 	PaymentTaskMetrics                   bool
 	StripeSingleCheckoutEnabled          bool
 	StripeVIPCheckoutEnabled             bool
+	StripeMoRLinkURL                     string
 	StripeBalanceChangeReportType        string
 	StripePayoutReconciliationReportType string
 	StripeReportMoRColumnsEnabled        bool
@@ -80,6 +81,7 @@ func LoadConfig() {
 		PaymentTaskMetrics:                   getEnvBool("PAYMENT_TASK_METRICS_ENABLED", true),
 		StripeSingleCheckoutEnabled:          getEnvBool("STRIPE_SINGLE_CHECKOUT_ENABLED", false),
 		StripeVIPCheckoutEnabled:             getEnvBool("STRIPE_VIP_CHECKOUT_ENABLED", false),
+		StripeMoRLinkURL:                     getEnv("STRIPE_MOR_LINK_URL", "https://app.link.com/login"),
 		StripeBalanceChangeReportType:        strings.TrimSpace(getEnv("STRIPE_REPORT_TYPE_BALANCE_CHANGE", "")),
 		StripePayoutReconciliationReportType: strings.TrimSpace(getEnv("STRIPE_REPORT_TYPE_PAYOUT_RECONCILIATION", "")),
 		StripeReportMoRColumnsEnabled:        getEnvBool("STRIPE_REPORT_MOR_COLUMNS_ENABLED", false),

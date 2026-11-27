@@ -2237,3 +2237,254 @@
   border-radius: 50%;
   animation: spin 0.9s linear infinite;
 }
+
+/* ============================================
+   Subscription Self-Service Management Page
+   ============================================ */
+.sub-mgmt-container {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding-top: 12px;
+  padding-bottom: 32px;
+}
+
+.sub-mgmt-header-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 16px;
+  border-radius: 16px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+}
+
+.sub-mgmt-header-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  flex: 1;
+}
+
+.sub-mgmt-crown-badge {
+  width: 40px;
+  height: 40px;
+  border-radius: 12px;
+  background: var(--accent-soft, rgba(217, 119, 6, 0.12));
+  color: var(--accent-color);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.sub-mgmt-title {
+  font-family: var(--font-display);
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 0;
+}
+
+.sub-mgmt-subtitle {
+  font-size: 0.75rem;
+  color: var(--text-tertiary);
+  margin: 3px 0 0;
+  line-height: 1.4;
+}
+
+.sub-mgmt-refresh-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border-radius: 999px;
+  min-height: 36px;
+  padding: 6px 12px;
+  font-size: 0.75rem;
+  flex-shrink: 0;
+}
+
+.sub-mgmt-list {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.sub-mgmt-card {
+  padding: 16px;
+  border-radius: 16px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.sub-mgmt-state-card {
+  align-items: center;
+  text-align: center;
+  padding: 32px 20px;
+  gap: 8px;
+}
+
+.sub-mgmt-state-title {
+  font-size: 0.9375rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 4px 0 0;
+}
+
+.sub-mgmt-state-desc {
+  font-size: 0.8125rem;
+  color: var(--text-secondary);
+  margin: 0;
+  max-width: 320px;
+  line-height: 1.5;
+}
+
+.sub-mgmt-card-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.sub-mgmt-plan-name {
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 0;
+}
+
+.sub-mgmt-plan-price {
+  font-size: 0.8125rem;
+  color: var(--text-secondary);
+  margin: 3px 0 0;
+}
+
+.sub-status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.sub-status-active {
+  background: rgba(16, 185, 129, 0.14);
+  color: #059669;
+}
+
+.sub-status-warning {
+  background: rgba(245, 158, 11, 0.16);
+  color: #B45309;
+}
+
+.sub-status-danger {
+  background: rgba(220, 38, 38, 0.14);
+  color: #DC2626;
+}
+
+.sub-status-muted {
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+}
+
+.sub-status-note {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 10px;
+  font-size: 0.8125rem;
+  line-height: 1.45;
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+}
+
+.sub-note-danger {
+  background: rgba(220, 38, 38, 0.08);
+  color: #B91C1C;
+}
+
+.sub-note-warning {
+  background: rgba(245, 158, 11, 0.1);
+  color: #92400E;
+}
+
+.sub-meta-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 12px;
+  margin: 0;
+}
+
+.sub-meta-item dt {
+  font-size: 0.6875rem;
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 2px;
+}
+
+.sub-meta-item dd {
+  margin: 0;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+
+.sub-meta-mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.75rem !important;
+  color: var(--text-secondary) !important;
+}
+
+.sub-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding-top: 4px;
+}
+
+.sub-action-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 40px;
+  padding: 8px 16px;
+  border-radius: 10px;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  text-decoration: none;
+  flex: 1 1 160px;
+}
+
+.sub-cancel-btn {
+  color: #DC2626;
+}
+
+.sub-mgmt-footer {
+  display: flex;
+  justify-content: center;
+  padding-top: 4px;
+}
+
+@keyframes sub-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.spin-icon {
+  animation: sub-spin 0.9s linear infinite;
+}

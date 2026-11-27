@@ -378,8 +378,12 @@ func (h *Handler) GetSubscriptionStatus(c *gin.Context) {
 		return
 	}
 	var sub *model.UserSubscription
+	overallStatus := SubscriptionStatusNone
 	if len(subscriptions) > 0 {
 		sub = &subscriptions[0]
+		if sub.NormalizedStatus != "" {
+			overallStatus = sub.NormalizedStatus
+		}
 	}
 
 	vip, err := h.service.HasSubscriptionAccess(ctx, userID)
@@ -387,8 +391,10 @@ func (h *Handler) GetSubscriptionStatus(c *gin.Context) {
 		c.AbortWithStatus(503)
 		return
 	}
+	c.Header("Cache-Control", "private, no-store")
 	c.JSON(http.StatusOK, gin.H{
 		"is_vip":        vip,
+		"status":        overallStatus,
 		"subscription":  sub,
 		"subscriptions": subscriptions,
 	})
@@ -408,7 +414,7 @@ func (h *Handler) CancelSubscription(c *gin.Context) {
 	}
 
 	ctx := c.Request.Context()
-	err := h.service.CancelSubscription(ctx, userID, req.SubscriptionID, req.Reason)
+	result, err := h.service.CancelSubscriptionWithResult(ctx, userID, req.SubscriptionID, req.Reason)
 	if errors.Is(err, ErrCheckoutUnavailable) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Subscription unavailable"})
 		return
@@ -418,7 +424,8 @@ func (h *Handler) CancelSubscription(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusAccepted, gin.H{"message": "Cancellation requested. Access continues through the paid period."})
+	c.Header("Cache-Control", "private, no-store")
+	c.JSON(http.StatusAccepted, result)
 }
 
 func (h *Handler) SubscriptionWebhook(c *gin.Context) {

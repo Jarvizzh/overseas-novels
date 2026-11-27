@@ -71,9 +71,13 @@ func (r *dbRepository) GetManagedSubscriptionByUserID(ctx context.Context, userI
 }
 func (r *dbRepository) ListManagedSubscriptions(ctx context.Context, userID int64) ([]model.UserSubscription, error) {
 	query := `
-		SELECT id, user_id, subscription_id, COALESCE(plan_id, ''), COALESCE(product_id, 0), COALESCE(slot_id, 0), COALESCE(template_id, 0),
+		SELECT id, user_id, subscription_id, COALESCE(plan_id, ''),
+		       COALESCE(NULLIF(product_snapshot->>'display_alias', ''), NULLIF(product_snapshot->>'name', ''), ''),
+		       COALESCE(product_id, 0), COALESCE(slot_id, 0), COALESCE(template_id, 0),
 		       status, cycle, price_cents, currency, payment_method, current_period_start, current_period_end,
 		       next_billing_time, last_payment_time, cancelled_at, COALESCE(raw_payload::text, '{}'), created_at, updated_at,
+		       COALESCE((SELECT v.sales_mode
+		        FROM payment_stripe_subscription_intents v WHERE v.id=user_subscriptions.checkout_intent_id AND v.checkout_environment=$2),''),
 		       COALESCE((SELECT CASE v.sales_mode WHEN 'direct' THEN 'stripe_portal' ELSE 'stripe_link' END
 		        FROM payment_stripe_subscription_intents v WHERE v.id=user_subscriptions.checkout_intent_id AND v.checkout_environment=$2),''),paypal_renewal_failed_at
 		FROM user_subscriptions
@@ -91,9 +95,9 @@ func (r *dbRepository) ListManagedSubscriptions(ctx context.Context, userID int6
 
 		var s model.UserSubscription
 		err := row.Scan(
-			&s.ID, &s.UserID, &s.SubscriptionID, &s.PlanID, &s.ProductID, &s.SlotID, &s.TemplateID,
+			&s.ID, &s.UserID, &s.SubscriptionID, &s.PlanID, &s.PlanName, &s.ProductID, &s.SlotID, &s.TemplateID,
 			&s.Status, &s.Cycle, &s.PriceCents, &s.Currency, &s.PaymentMethod, &s.CurrentPeriodStart, &s.CurrentPeriodEnd,
-			&s.NextBillingTime, &s.LastPaymentTime, &s.CancelledAt, &s.RawPayload, &s.CreatedAt, &s.UpdatedAt, &s.Management, &s.RenewalFailedAt,
+			&s.NextBillingTime, &s.LastPaymentTime, &s.CancelledAt, &s.RawPayload, &s.CreatedAt, &s.UpdatedAt, &s.SalesMode, &s.Management, &s.RenewalFailedAt,
 		)
 		if err != nil {
 			return nil, err

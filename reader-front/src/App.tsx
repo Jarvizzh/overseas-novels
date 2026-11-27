@@ -13,6 +13,7 @@ import { Shelf } from './pages/Shelf';
 import { Profile } from './pages/Profile';
 import { Rewards } from './pages/Rewards';
 import { Recharge } from './pages/Recharge';
+import { Subscription } from './pages/Subscription';
 import { api, ApiError, registerSessionRefreshHandler } from './utils/api';
 import type { BookshelfItem, Novel, User, Transaction, SubscriptionInfo, SavedProgress } from './utils/api';
 import { useProgressOutbox } from './utils/useProgressOutbox';
@@ -482,6 +483,8 @@ function AppContent() {
         targetPath = '/rewards';
       } else if (pageOrPath === 'profile') {
         targetPath = '/profile';
+      } else if (pageOrPath === 'subscription') {
+        targetPath = '/subscription';
       } else if (pageOrPath === 'recharge') {
         targetPath = '/recharge';
         if (typeof params?.id === 'number') mergedParams.set('novel_id', String(params.id));
@@ -699,6 +702,8 @@ function AppContent() {
         return { title: 'Daily Rewards', showBack: false };
       case '/profile':
         return { title: 'Profile', showBack: false };
+      case '/subscription':
+        return { title: 'Membership & Subscription', showBack: true, onBack: navigateBack };
       default:
         return { title: 'StarNovel', showBack: false };
     }
@@ -1001,6 +1006,17 @@ function AppContent() {
                 onUnmarkChapterUnlocked={unmarkChapterUnlocked}
                 onUnlockChapter={handleUnlockChapter}
                 userCoins={userCoins}
+              />
+            }
+          />
+          <Route
+            path="/subscription"
+            element={
+              <Subscription
+                key={user?.id}
+                authReady={authReady}
+                onRefreshStatus={reloadWallet}
+                onNavigate={navigateTo}
               />
             }
           />
