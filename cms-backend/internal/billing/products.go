@@ -52,6 +52,7 @@ var (
 	errProductNotFound   = errors.New("product not found")
 	errProductInvalid    = errors.New("invalid product specification")
 	errProductGateFailed = errors.New("product is not ready on both PayPal and Stripe channels")
+	errProductImmutable  = errors.New("product is locked and cannot be edited or deleted")
 )
 
 type ProductPublicationView struct {
@@ -116,6 +117,9 @@ type ProductView struct {
 	ReadinessReasons   []string                          `json:"readiness_reasons"`
 	LinkedTemplateIDs  []int                             `json:"linked_template_ids"`
 	LinkedTemplateList []string                          `json:"linked_template_names"`
+	Editable           bool                              `json:"editable"`
+	Deletable          bool                              `json:"deletable"`
+	DraftLockReason    string                            `json:"draft_lock_reason,omitempty"`
 }
 
 type productSpecInput struct {
@@ -540,7 +544,88 @@ func loadProductViews(ctx context.Context, singleID int64, env, filterType, filt
 		)
 		p.DualChannelReady = p.PayPalReady && p.StripeReady
 	}
+	if err := populateProductDraftMutability(ctx, products, byID); err != nil {
+		return nil, err
+	}
 	return products, nil
+}
+
+func formatDraftLockReason(hasPublished, hasBinding, hasSlot, hasChild, hasTrade bool) string {
+	switch {
+	case hasPublished:
+		return "商品已在沙箱或正式环境上架过，不可编辑或删除，请使用复制调价"
+	case hasBinding:
+		return "商品已生成或启用渠道绑定，不可编辑或删除，请使用复制调价"
+	case hasSlot:
+		return "商品已被充值模板引用，不可编辑或删除"
+	case hasChild:
+		return "已有新版本从该商品复制生成，不可编辑或删除"
+	case hasTrade:
+		return "商品已有订单、订阅或支付意向记录，不可编辑或删除"
+	default:
+		return ""
+	}
+}
+
+func populateProductDraftMutability(ctx context.Context, products []ProductView, byID map[int64]int) error {
+	if len(products) == 0 {
+		return nil
+	}
+	ids := make([]int64, len(products))
+	for i := range products {
+		ids[i] = products[i].ID
+	}
+	rows, err := db.DB.Query(ctx, `
+		SELECT
+			p.id,
+			EXISTS (
+				SELECT 1 FROM product_publications pub
+				WHERE pub.product_id = p.id
+				  AND (pub.status <> 'draft' OR pub.published_at IS NOT NULL OR pub.paused_at IS NOT NULL OR pub.retired_at IS NOT NULL)
+			) AS has_published,
+			EXISTS (
+				SELECT 1 FROM product_channel_bindings b
+				WHERE b.product_id = p.id
+				  AND (
+					  b.external_product_ref <> ''
+					  OR b.external_price_ref <> ''
+					  OR b.enabled = true
+					  OR b.review_required = true
+					  OR b.validation_status IN ('verified', 'review', 'pending')
+				  )
+			) AS has_binding,
+			EXISTS (SELECT 1 FROM recharge_slots s WHERE s.product_id = p.id) AS has_slot,
+			EXISTS (SELECT 1 FROM products c WHERE c.source_product_id = p.id) AS has_child,
+			(
+				EXISTS (SELECT 1 FROM recharge_orders o WHERE o.product_id = p.id)
+				OR EXISTS (SELECT 1 FROM user_subscriptions u WHERE u.product_id = p.id)
+				OR EXISTS (SELECT 1 FROM paypal_subscription_intents pi WHERE pi.product_id = p.id)
+				OR EXISTS (SELECT 1 FROM payment_vip_checkout_intents vi WHERE vi.product_id = p.id)
+				OR EXISTS (SELECT 1 FROM payment_stripe_subscription_intents si WHERE si.product_id = p.id)
+				OR EXISTS (SELECT 1 FROM payment_checkout_requests cr WHERE cr.product_id = p.id)
+			) AS has_trade
+		FROM products p
+		WHERE p.id = ANY($1::bigint[])`, ids)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var pid int64
+		var hasPublished, hasBinding, hasSlot, hasChild, hasTrade bool
+		if err := rows.Scan(&pid, &hasPublished, &hasBinding, &hasSlot, &hasChild, &hasTrade); err != nil {
+			return err
+		}
+		idx, ok := byID[pid]
+		if !ok {
+			continue
+		}
+		reason := formatDraftLockReason(hasPublished, hasBinding, hasSlot, hasChild, hasTrade)
+		products[idx].Editable = reason == ""
+		products[idx].Deletable = reason == ""
+		products[idx].DraftLockReason = reason
+	}
+	return rows.Err()
 }
 
 type bigintOrInt64 int64
@@ -624,6 +709,219 @@ func (h *Handler) CreateProduct(c *gin.Context) {
 	c.JSON(http.StatusCreated, gin.H{"id": id, "code": code, "status": pubStatusDraft})
 }
 
+func (h *Handler) UpdateProduct(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || id <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid product ID"})
+		return
+	}
+	var in productSpecInput
+	if err := c.ShouldBindJSON(&in); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	code, err := updateDraftProductRecord(c.Request.Context(), c.GetString("admin_id"), id, in)
+	if err != nil {
+		writeProductError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"id": id, "code": code, "updated": true})
+}
+
+func (h *Handler) DeleteProduct(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || id <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid product ID"})
+		return
+	}
+	if err := deleteDraftProductRecord(c.Request.Context(), c.GetString("admin_id"), id); err != nil {
+		writeProductError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"id": id, "deleted": true})
+}
+
+func checkProductMutableDraftTx(ctx context.Context, tx pgx.Tx, productID int64) (string, error) {
+	// Strict global lock order: products -> product_publications -> product_channel_bindings.
+	if _, err := tx.Exec(ctx, `SELECT 1 FROM product_publications WHERE product_id = $1 FOR UPDATE`, productID); err != nil {
+		return "", err
+	}
+	if _, err := tx.Exec(ctx, `SELECT 1 FROM product_channel_bindings WHERE product_id = $1 FOR UPDATE`, productID); err != nil {
+		return "", err
+	}
+	var hasPublished, hasBinding, hasSlot, hasChild, hasTrade bool
+	err := tx.QueryRow(ctx, `
+		SELECT
+			EXISTS (
+				SELECT 1 FROM product_publications pub
+				WHERE pub.product_id = $1
+				  AND (pub.status <> 'draft' OR pub.published_at IS NOT NULL OR pub.paused_at IS NOT NULL OR pub.retired_at IS NOT NULL)
+			) AS has_published,
+			EXISTS (
+				SELECT 1 FROM product_channel_bindings b
+				WHERE b.product_id = $1
+				  AND (
+					  b.external_product_ref <> ''
+					  OR b.external_price_ref <> ''
+					  OR b.enabled = true
+					  OR b.review_required = true
+					  OR b.validation_status IN ('verified', 'review', 'pending')
+				  )
+			) AS has_binding,
+			EXISTS (SELECT 1 FROM recharge_slots s WHERE s.product_id = $1) AS has_slot,
+			EXISTS (SELECT 1 FROM products c WHERE c.source_product_id = $1) AS has_child,
+			(
+				EXISTS (SELECT 1 FROM recharge_orders o WHERE o.product_id = $1)
+				OR EXISTS (SELECT 1 FROM user_subscriptions u WHERE u.product_id = $1)
+				OR EXISTS (SELECT 1 FROM paypal_subscription_intents pi WHERE pi.product_id = $1)
+				OR EXISTS (SELECT 1 FROM payment_vip_checkout_intents vi WHERE vi.product_id = $1)
+				OR EXISTS (SELECT 1 FROM payment_stripe_subscription_intents si WHERE si.product_id = $1)
+				OR EXISTS (SELECT 1 FROM payment_checkout_requests cr WHERE cr.product_id = $1)
+			) AS has_trade`, productID).
+		Scan(&hasPublished, &hasBinding, &hasSlot, &hasChild, &hasTrade)
+	if err != nil {
+		return "", err
+	}
+	return formatDraftLockReason(hasPublished, hasBinding, hasSlot, hasChild, hasTrade), nil
+}
+
+func updateDraftProductRecord(ctx context.Context, actor string, id int64, in productSpecInput) (string, error) {
+	tx, err := db.DB.Begin(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback(context.WithoutCancel(ctx))
+	if err := requirePermissionTx(ctx, tx, actor, ErrRefundForbidden, auth.PermPaymentsProductsWrite); err != nil {
+		return "", err
+	}
+
+	var before productSpecInput
+	err = tx.QueryRow(ctx, `
+		SELECT code, product_type, name, description, price_cents, coins, bonus, COALESCE(vip_cycle, ''), novel_scope_type, novel_scope_ids
+		FROM products WHERE id = $1 FOR UPDATE`, id).
+		Scan(&before.Code, &before.ProductType, &before.Name, &before.Description, &before.PriceCents, &before.Coins, &before.Bonus, &before.VipCycle, &before.NovelScopeType, &before.NovelScopeIDs)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", errProductNotFound
+	}
+	if err != nil {
+		return "", err
+	}
+
+	if strings.TrimSpace(in.Code) == "" {
+		in.Code = before.Code
+	}
+	if err := normalizeAndValidateProductSpec(&in); err != nil {
+		return "", err
+	}
+	lockReason, err := checkProductMutableDraftTx(ctx, tx, id)
+	if err != nil {
+		return "", err
+	}
+	if lockReason != "" {
+		return "", fmt.Errorf("%w: %s", errProductImmutable, lockReason)
+	}
+	if in.NovelScopeType == scopeSpecificNovels {
+		var count int
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM novels WHERE id = ANY($1::bigint[])`, in.NovelScopeIDs).Scan(&count); err != nil {
+			return "", err
+		}
+		if count != len(in.NovelScopeIDs) {
+			return "", fmt.Errorf("%w: one or more novel_scope_ids do not exist", errProductInvalid)
+		}
+	}
+
+	// Clear any prior empty failed binding rows so stale request_key/idempotency keys are not reused
+	// with mutated commercial specs on the next Stripe/PayPal provisioning attempt.
+	if _, err := tx.Exec(ctx, `DELETE FROM product_channel_bindings WHERE product_id = $1`, id); err != nil {
+		return "", err
+	}
+
+	var vipCycleArg any
+	if in.VipCycle != "" {
+		vipCycleArg = in.VipCycle
+	}
+	_, err = tx.Exec(ctx, `
+		UPDATE products
+		SET code = $2,
+		    product_type = $3,
+		    name = $4,
+		    description = $5,
+		    price_cents = $6,
+		    coins = $7,
+		    bonus = $8,
+		    vip_cycle = $9,
+		    novel_scope_type = $10,
+		    novel_scope_ids = $11
+		WHERE id = $1`,
+		id, in.Code, in.ProductType, in.Name, in.Description,
+		in.PriceCents, in.Coins, in.Bonus, vipCycleArg, in.NovelScopeType, in.NovelScopeIDs)
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return "", fmt.Errorf("%w: duplicate product code %s", errProductInvalid, in.Code)
+		}
+		return "", err
+	}
+
+	beforeJSON, _ := json.Marshal(before)
+	afterJSON, _ := json.Marshal(in)
+	if err := billingAuditLogTx(ctx, tx, actor, "update_product", strconv.FormatInt(id, 10), string(beforeJSON), string(afterJSON)); err != nil {
+		return "", err
+	}
+	return in.Code, tx.Commit(ctx)
+}
+
+func deleteDraftProductRecord(ctx context.Context, actor string, id int64) error {
+	tx, err := db.DB.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(context.WithoutCancel(ctx))
+	if err := requirePermissionTx(ctx, tx, actor, ErrRefundForbidden, auth.PermPaymentsProductsWrite); err != nil {
+		return err
+	}
+
+	var before productSpecInput
+	err = tx.QueryRow(ctx, `
+		SELECT code, product_type, name, description, price_cents, coins, bonus, COALESCE(vip_cycle, ''), novel_scope_type, novel_scope_ids
+		FROM products WHERE id = $1 FOR UPDATE`, id).
+		Scan(&before.Code, &before.ProductType, &before.Name, &before.Description, &before.PriceCents, &before.Coins, &before.Bonus, &before.VipCycle, &before.NovelScopeType, &before.NovelScopeIDs)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return errProductNotFound
+	}
+	if err != nil {
+		return err
+	}
+
+	lockReason, err := checkProductMutableDraftTx(ctx, tx, id)
+	if err != nil {
+		return err
+	}
+	if lockReason != "" {
+		return fmt.Errorf("%w: %s", errProductImmutable, lockReason)
+	}
+
+	if _, err := tx.Exec(ctx, `DELETE FROM product_channel_bindings WHERE product_id = $1`, id); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM product_publications WHERE product_id = $1`, id); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM products WHERE id = $1`, id); err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23503" {
+			return fmt.Errorf("%w: product is referenced by existing records", errProductImmutable)
+		}
+		return err
+	}
+
+	beforeJSON, _ := json.Marshal(before)
+	if err := billingAuditLogTx(ctx, tx, actor, "delete_product", strconv.FormatInt(id, 10), string(beforeJSON), `{"deleted":true}`); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
 type copyProductReq struct {
 	Code           string  `json:"code"`
 	ProductType    string  `json:"product_type"`
@@ -648,18 +946,33 @@ func (h *Handler) CopyProduct(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	var src productSpecInput
-	err = db.DB.QueryRow(c.Request.Context(), `
-		SELECT product_type, name, description, price_cents, coins, bonus, COALESCE(vip_cycle, ''), novel_scope_type, novel_scope_ids
-		FROM products WHERE id = $1`, sourceID).
-		Scan(&src.ProductType, &src.Name, &src.Description, &src.PriceCents, &src.Coins, &src.Bonus, &src.VipCycle, &src.NovelScopeType, &src.NovelScopeIDs)
-	if errors.Is(err, pgx.ErrNoRows) {
-		writeProductError(c, errProductNotFound)
-		return
-	}
+	id, code, err := copyProductRecord(c.Request.Context(), c.GetString("admin_id"), sourceID, req)
 	if err != nil {
 		writeProductError(c, err)
 		return
+	}
+	c.JSON(http.StatusCreated, gin.H{"id": id, "code": code, "source_product_id": sourceID, "status": pubStatusDraft})
+}
+
+func copyProductRecord(ctx context.Context, actor string, sourceID int64, req copyProductReq) (int64, string, error) {
+	tx, err := db.DB.Begin(ctx)
+	if err != nil {
+		return 0, "", err
+	}
+	defer tx.Rollback(context.WithoutCancel(ctx))
+	if err := requirePermissionTx(ctx, tx, actor, ErrRefundForbidden, auth.PermPaymentsProductsWrite); err != nil {
+		return 0, "", err
+	}
+	var src productSpecInput
+	err = tx.QueryRow(ctx, `
+		SELECT product_type, name, description, price_cents, coins, bonus, COALESCE(vip_cycle, ''), novel_scope_type, novel_scope_ids
+		FROM products WHERE id = $1 FOR SHARE`, sourceID).
+		Scan(&src.ProductType, &src.Name, &src.Description, &src.PriceCents, &src.Coins, &src.Bonus, &src.VipCycle, &src.NovelScopeType, &src.NovelScopeIDs)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, "", errProductNotFound
+	}
+	if err != nil {
+		return 0, "", err
 	}
 
 	target := productSpecInput{
@@ -715,13 +1028,14 @@ func (h *Handler) CopyProduct(c *gin.Context) {
 			}
 		}
 	}
-
-	id, code, err := createProductRecord(c.Request.Context(), c.GetString("admin_id"), &sourceID, target)
-	if err != nil {
-		writeProductError(c, err)
-		return
+	if err := normalizeAndValidateProductSpec(&target); err != nil {
+		return 0, "", err
 	}
-	c.JSON(http.StatusCreated, gin.H{"id": id, "code": code, "source_product_id": sourceID, "status": pubStatusDraft})
+	id, code, err := insertProductRecordTx(ctx, tx, actor, &sourceID, target)
+	if err != nil {
+		return 0, "", err
+	}
+	return id, code, tx.Commit(ctx)
 }
 
 func createProductRecord(ctx context.Context, actor string, sourceID *int64, in productSpecInput) (int64, string, error) {
@@ -736,6 +1050,14 @@ func createProductRecord(ctx context.Context, actor string, sourceID *int64, in 
 	if err := requirePermissionTx(ctx, tx, actor, ErrRefundForbidden, auth.PermPaymentsProductsWrite); err != nil {
 		return 0, "", err
 	}
+	id, code, err := insertProductRecordTx(ctx, tx, actor, sourceID, in)
+	if err != nil {
+		return 0, "", err
+	}
+	return id, code, tx.Commit(ctx)
+}
+
+func insertProductRecordTx(ctx context.Context, tx pgx.Tx, actor string, sourceID *int64, in productSpecInput) (int64, string, error) {
 	if in.NovelScopeType == scopeSpecificNovels {
 		var count int
 		if err := tx.QueryRow(ctx, `SELECT count(*) FROM novels WHERE id = ANY($1::bigint[])`, in.NovelScopeIDs).Scan(&count); err != nil {
@@ -751,7 +1073,7 @@ func createProductRecord(ctx context.Context, actor string, sourceID *int64, in 
 		vipCycleArg = in.VipCycle
 	}
 	var id int64
-	err = tx.QueryRow(ctx, `
+	err := tx.QueryRow(ctx, `
 		INSERT INTO products (
 			code, source_product_id, product_type, name, description,
 			price_cents, currency, coins, bonus, vip_cycle, novel_scope_type, novel_scope_ids, created_by
@@ -781,7 +1103,7 @@ func createProductRecord(ctx context.Context, actor string, sourceID *int64, in 
 	if err := billingAuditLogTx(ctx, tx, actor, "create_product", strconv.FormatInt(id, 10), "", string(afterJSON)); err != nil {
 		return 0, "", err
 	}
-	return id, in.Code, tx.Commit(ctx)
+	return id, in.Code, nil
 }
 
 type bindPayPalProductReq struct {
@@ -894,12 +1216,13 @@ func (h *Handler) UpsertProductPayPalBinding(c *gin.Context) {
 		return
 	}
 
-	// Reserve idempotent request_key & mark first_sent_at before external VIP writes.
-	reqKey, reviewReq, existingPlan, existingProd, err := preparePayPalBindingWriteTx(ctx, productID, accountID, req.Environment, actor)
+	// Reserve idempotent request_key, lock product row, & mark pending before external writes.
+	reqKey, reviewReq, existingPlan, existingProd, lockedSpec, err := preparePayPalBindingWriteTx(ctx, productID, accountID, req.Environment, actor)
 	if err != nil {
 		writeProductError(c, err)
 		return
 	}
+	pType, pCode, pName, pDesc, priceCents, pCycle = lockedSpec.ProductType, lockedSpec.Code, lockedSpec.Name, lockedSpec.Description, lockedSpec.PriceCents, lockedSpec.VipCycle
 	if pType == productTypeVIP && req.ExternalPriceRef == "" && reviewReq && existingPlan == "" {
 		c.JSON(http.StatusConflict, gin.H{"error": "PayPal VIP plan creation previously timed out or requires manual Plan ID verification; provide the confirmed P-... Plan ID"})
 		return
@@ -973,14 +1296,33 @@ func requireProductChannelWriteTx(ctx context.Context, tx pgx.Tx, actor string) 
 	return requirePermissionTx(ctx, tx, actor, errCaseForbidden, auth.PermPaymentsProductsWrite, auth.PermPaymentsChannelsWrite)
 }
 
-func preparePayPalBindingWriteTx(ctx context.Context, productID, accountID int64, env, actor string) (reqKey string, reviewRequired bool, existingPlan, existingProd string, err error) {
+func preparePayPalBindingWriteTx(ctx context.Context, productID, accountID int64, env, actor string) (reqKey string, reviewRequired bool, existingPlan, existingProd string, spec productSpecInput, err error) {
 	tx, err := db.DB.Begin(ctx)
 	if err != nil {
-		return "", false, "", "", err
+		return "", false, "", "", spec, err
 	}
 	defer tx.Rollback(context.WithoutCancel(ctx))
 	if err := requireProductChannelWriteTx(ctx, tx, actor); err != nil {
-		return "", false, "", "", err
+		return "", false, "", "", spec, err
+	}
+	// Strict global lock order: products -> product_publications -> product_channel_bindings.
+	err = tx.QueryRow(ctx, `
+		SELECT product_type, code, name, description, price_cents, COALESCE(vip_cycle, '')
+		FROM products WHERE id = $1 FOR SHARE`, productID).
+		Scan(&spec.ProductType, &spec.Code, &spec.Name, &spec.Description, &spec.PriceCents, &spec.VipCycle)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", false, "", "", spec, errProductNotFound
+	}
+	if err != nil {
+		return "", false, "", "", spec, err
+	}
+	var pubStatus string
+	err = tx.QueryRow(ctx, `SELECT status FROM product_publications WHERE product_id = $1 AND environment = $2 FOR SHARE`, productID, env).Scan(&pubStatus)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return "", false, "", "", spec, err
+	}
+	if pubStatus == pubStatusRetired {
+		return "", false, "", "", spec, fmt.Errorf("%w: Retired products cannot be bound to payment channels", errProductImmutable)
 	}
 	err = tx.QueryRow(ctx, `
 		INSERT INTO product_channel_bindings (
@@ -989,14 +1331,18 @@ func preparePayPalBindingWriteTx(ctx context.Context, productID, accountID int64
 		) VALUES ($1, $2, 'paypal', $3, 'direct', ARRAY['US'], 'pending', now(), $4, $4)
 		ON CONFLICT (product_id, account_id) DO UPDATE SET
 			first_sent_at = COALESCE(product_channel_bindings.first_sent_at, now()),
+			validation_status = CASE
+				WHEN product_channel_bindings.validation_status = 'failed' THEN 'pending'
+				ELSE product_channel_bindings.validation_status
+			END,
 			updated_by = EXCLUDED.updated_by,
 			updated_at = now()
 		RETURNING request_key::text, review_required, external_price_ref, external_product_ref`,
 		productID, accountID, env, actor).Scan(&reqKey, &reviewRequired, &existingPlan, &existingProd)
 	if err != nil {
-		return "", false, "", "", err
+		return "", false, "", "", spec, err
 	}
-	return reqKey, reviewRequired, existingPlan, existingProd, tx.Commit(ctx)
+	return reqKey, reviewRequired, existingPlan, existingProd, spec, tx.Commit(ctx)
 }
 
 type payPalHTTPError struct {
@@ -1229,7 +1575,7 @@ func savePayPalBindingResultTx(
 	if state == validationVerified {
 		valAt = time.Now().UTC()
 	}
-	_, err = tx.Exec(ctx, `
+	tag, err := tx.Exec(ctx, `
 		UPDATE product_channel_bindings
 		SET external_product_ref = $3,
 		    external_price_ref = $4,
@@ -1245,6 +1591,9 @@ func savePayPalBindingResultTx(
 		productID, accountID, prodRef, planRef, stringOrNilJSON(catalog), state, errMsg, reviewReq, valAt, enabled, actor)
 	if err != nil {
 		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return errProductNotFound
 	}
 	auditAfter, _ := json.Marshal(map[string]any{
 		"provider": "paypal", "environment": env, "account_id": accountID,
@@ -1380,10 +1729,6 @@ func (h *Handler) UpsertProductStripeBinding(c *gin.Context) {
 		writeProductError(c, err)
 		return
 	}
-	if err := resolveStripeBindingTaxCode(&req, pType); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
 
 	var pubStatus string
 	err = db.DB.QueryRow(ctx, `SELECT status FROM product_publications WHERE product_id = $1 AND environment = $2`, productID, req.Environment).Scan(&pubStatus)
@@ -1446,11 +1791,12 @@ func (h *Handler) UpsertProductStripeBinding(c *gin.Context) {
 		return
 	}
 
-	reqKey, catalogRevision, prevValStatus, existingProd, existingPrice, err := prepareStripeBindingWriteTx(ctx, productID, accountID, actor, req)
+	reqKey, catalogRevision, prevValStatus, existingProd, existingPrice, lockedSpec, err := prepareStripeBindingWriteTx(ctx, productID, accountID, actor, &req)
 	if err != nil {
 		writeProductError(c, err)
 		return
 	}
+	pType, pCode, pName, pDesc, priceCents, pCycle = lockedSpec.ProductType, lockedSpec.Code, lockedSpec.Name, lockedSpec.Description, lockedSpec.PriceCents, lockedSpec.VipCycle
 
 	prodRef, priceRef, catalogBytes, verifyErr := ensureAndVerifyStripeCatalog(
 		ctx, accountKey, key, req, productID, accountID, actor, pType, pCode, pName, pDesc, pCycle, priceCents,
@@ -1487,15 +1833,37 @@ var (
 )
 
 func prepareStripeBindingWriteTx(
-	ctx context.Context, productID, accountID int64, actor string, req bindStripeProductReq,
-) (reqKey string, catalogRevision int, prevValidationStatus, existingProd, existingPrice string, err error) {
+	ctx context.Context, productID, accountID int64, actor string, req *bindStripeProductReq,
+) (reqKey string, catalogRevision int, prevValidationStatus, existingProd, existingPrice string, spec productSpecInput, err error) {
 	tx, err := db.DB.Begin(ctx)
 	if err != nil {
-		return "", 0, "", "", "", err
+		return "", 0, "", "", "", spec, err
 	}
 	defer tx.Rollback(context.WithoutCancel(ctx))
 	if err := requireProductChannelWriteTx(ctx, tx, actor); err != nil {
-		return "", 0, "", "", "", err
+		return "", 0, "", "", "", spec, err
+	}
+	// Strict global lock order: products -> product_publications -> product_channel_bindings.
+	err = tx.QueryRow(ctx, `
+		SELECT product_type, code, name, description, price_cents, COALESCE(vip_cycle, '')
+		FROM products WHERE id = $1 FOR SHARE`, productID).
+		Scan(&spec.ProductType, &spec.Code, &spec.Name, &spec.Description, &spec.PriceCents, &spec.VipCycle)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", 0, "", "", "", spec, errProductNotFound
+	}
+	if err != nil {
+		return "", 0, "", "", "", spec, err
+	}
+	if err := resolveStripeBindingTaxCode(req, spec.ProductType); err != nil {
+		return "", 0, "", "", "", spec, fmt.Errorf("%w: %s", errProductInvalid, err.Error())
+	}
+	var pubStatus string
+	err = tx.QueryRow(ctx, `SELECT status FROM product_publications WHERE product_id = $1 AND environment = $2 FOR SHARE`, productID, req.Environment).Scan(&pubStatus)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return "", 0, "", "", "", spec, err
+	}
+	if pubStatus == pubStatusRetired {
+		return "", 0, "", "", "", spec, fmt.Errorf("%w: Retired products cannot be bound to payment channels", errProductImmutable)
 	}
 	err = tx.QueryRow(ctx, `
 		SELECT validation_status FROM product_channel_bindings
@@ -1503,7 +1871,7 @@ func prepareStripeBindingWriteTx(
 	if errors.Is(err, pgx.ErrNoRows) {
 		prevValidationStatus = ""
 	} else if err != nil {
-		return "", 0, "", "", "", err
+		return "", 0, "", "", "", spec, err
 	}
 	err = tx.QueryRow(ctx, `
 		INSERT INTO product_channel_bindings (
@@ -1515,16 +1883,19 @@ func prepareStripeBindingWriteTx(
 		)
 		ON CONFLICT (product_id, account_id) DO UPDATE SET
 			first_sent_at = COALESCE(product_channel_bindings.first_sent_at, now()),
-			validation_status = 'pending',
+			validation_status = CASE
+				WHEN product_channel_bindings.validation_status = 'failed' THEN 'pending'
+				ELSE product_channel_bindings.validation_status
+			END,
 			updated_by = EXCLUDED.updated_by,
 			updated_at = now()
 		RETURNING request_key::text, catalog_revision, external_product_ref, external_price_ref`,
 		productID, accountID, req.Environment, req.SalesMode, req.AllowedCountries,
 		req.ReleaseEvidence, req.MarketPolicy, actor).Scan(&reqKey, &catalogRevision, &existingProd, &existingPrice)
 	if err != nil {
-		return "", 0, "", "", "", err
+		return "", 0, "", "", "", spec, err
 	}
-	return reqKey, catalogRevision, prevValidationStatus, existingProd, existingPrice, tx.Commit(ctx)
+	return reqKey, catalogRevision, prevValidationStatus, existingProd, existingPrice, spec, tx.Commit(ctx)
 }
 
 func advanceStripePriceRevisionTx(ctx context.Context, productID, accountID int64, actor, currentPriceRef string) (int, error) {
@@ -1606,7 +1977,7 @@ func saveStripeBindingResultTx(
 	if valState == validationVerified {
 		valAt = time.Now().UTC()
 	}
-	_, err = tx.Exec(ctx, `
+	tag, err := tx.Exec(ctx, `
 		UPDATE product_channel_bindings
 		SET external_product_ref = $3,
 		    external_price_ref = $4,
@@ -1626,6 +1997,9 @@ func saveStripeBindingResultTx(
 		stringOrNilJSON(catalogBytes), req.ReleaseEvidence, req.MarketPolicy, valState, valErr, valAt, effectiveEnabled, actor)
 	if err != nil {
 		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return errProductNotFound
 	}
 	auditAfter, _ := json.Marshal(map[string]any{
 		"provider": "stripe", "environment": req.Environment, "account_id": accountID,
@@ -1970,6 +2344,16 @@ func (h *Handler) transitionProductStatus(c *gin.Context, targetStatus, auditAct
 		writeProductError(c, err)
 		return
 	}
+	// Strict global lock order: lock products FOR SHARE before product_publications FOR UPDATE.
+	var productExists int
+	if err := tx.QueryRow(ctx, `SELECT 1 FROM products WHERE id = $1 FOR SHARE`, id).Scan(&productExists); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeProductError(c, errProductNotFound)
+			return
+		}
+		writeProductError(c, err)
+		return
+	}
 	var currentStatus string
 	err = tx.QueryRow(ctx, `
 		SELECT status FROM product_publications
@@ -2084,7 +2468,7 @@ func writeProductError(c *gin.Context, err error) {
 		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
 	case errors.Is(err, errProductInvalid):
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-	case errors.Is(err, errProductGateFailed):
+	case errors.Is(err, errProductGateFailed), errors.Is(err, errProductImmutable):
 		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
 	case errors.Is(err, errKeyringUnavailable):
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": err.Error()})

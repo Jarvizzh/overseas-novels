@@ -65,7 +65,7 @@ func openTestBillingPool(t *testing.T, dsn string) *pgxpool.Pool {
 		dbassets.PaymentCompletionSQL, dbassets.PaymentRecoverySQL, dbassets.PaymentReviewFixesSQL,
 		dbassets.PaymentCatalogAndChannelSQL, dbassets.PaymentVIPSwitchSQL, dbassets.PaymentTemplateCatalogFixesSQL,
 		dbassets.ConversionCenterReviewSQL, dbassets.ConversionBatchSQL, dbassets.ConversionThroughputRereviewSQL,
-		dbassets.ConversionCredentialHealthSQL, dbassets.RBACPermissionsSQL, dbassets.PromotionEnvironmentSQL, dbassets.StripeTaxLiabilityRelaxSQL, dbassets.StripeLocalCurrencyCustomerSQL, dbassets.StripeRefundDisputeMitigationSQL, dbassets.StripeRadarAndEventRecoverySQL, dbassets.StripeReportScheduleSQL,
+		dbassets.ConversionCredentialHealthSQL, dbassets.RBACPermissionsSQL, dbassets.PromotionEnvironmentSQL, dbassets.StripeTaxLiabilityRelaxSQL, dbassets.StripeLocalCurrencyCustomerSQL, dbassets.StripeRefundDisputeMitigationSQL, dbassets.StripeRadarAndEventRecoverySQL, dbassets.StripeReportScheduleSQL, dbassets.ProductDraftMutationSQL,
 	} {
 		if _, err := pool.Exec(ctx, stmt); err != nil {
 			t.Fatal(err)
@@ -490,12 +490,45 @@ func TestProductCatalogDualChannelGateAndTemplateDecoupling(t *testing.T) {
 		ID *int64 `json:"id"`
 	}{&vipID})
 
-	// Database immutability trigger forbids mutating commercial terms
-	if _, err := db.DB.Exec(ctx, `UPDATE products SET price_cents = 1 WHERE id = $1`, vipID); err == nil {
-		t.Fatal("expected products UPDATE trigger to fail")
+	// 2b. Never-published, unbound, unreferenced draft supports edit and delete
+	if rec := doJSON(t, r, http.MethodGet, fmt.Sprintf("/cms/products/%d?environment=sandbox", vipID), "cfg-finance", nil); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"editable":true`) || !strings.Contains(rec.Body.String(), `"deletable":true`) {
+		t.Fatalf("expected fresh draft editable/deletable, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if rec := doJSON(t, r, http.MethodPut, fmt.Sprintf("/cms/products/%d", vipID), "cfg-support", map[string]any{
+		"product_type": "vip", "name": "Unauthorized Edit", "price_cents": 8888, "vip_cycle": "year",
+	}); rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for support editing draft, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if rec := doJSON(t, r, http.MethodPut, fmt.Sprintf("/cms/products/%d", vipID), "cfg-finance", map[string]any{
+		"code": "CAT_VIP_YEAR_9999", "product_type": "vip", "name": "VIP Annual Plan Edited",
+		"description": "Unlimited annual reading (edited)", "price_cents": 9999, "vip_cycle": "year",
+	}); rec.Code != http.StatusOK {
+		t.Fatalf("edit pure draft failed (%d): %s", rec.Code, rec.Body.String())
 	}
 
-	// Copy creates a new immutable version
+	// Scratch draft can be deleted cleanly and returns 404 afterward
+	var scratchID int64
+	scratchRec := doJSON(t, r, http.MethodPost, "/cms/products", "cfg-finance", map[string]any{
+		"code": "CAT_SCRATCH_DEL_199", "product_type": "single", "name": "Scratch Coins",
+		"price_cents": 199, "coins": 199, "bonus": 0,
+	})
+	if scratchRec.Code != http.StatusCreated {
+		t.Fatalf("create scratch draft failed (%d): %s", scratchRec.Code, scratchRec.Body.String())
+	}
+	_ = json.Unmarshal(scratchRec.Body.Bytes(), &struct {
+		ID *int64 `json:"id"`
+	}{&scratchID})
+	if rec := doJSON(t, r, http.MethodDelete, fmt.Sprintf("/cms/products/%d", scratchID), "cfg-support", nil); rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for support deleting draft, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if rec := doJSON(t, r, http.MethodDelete, fmt.Sprintf("/cms/products/%d", scratchID), "cfg-finance", nil); rec.Code != http.StatusOK {
+		t.Fatalf("delete pure draft failed (%d): %s", rec.Code, rec.Body.String())
+	}
+	if rec := doJSON(t, r, http.MethodGet, fmt.Sprintf("/cms/products/%d?environment=sandbox", scratchID), "cfg-finance", nil); rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 after draft delete, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Copy creates a new version and locks the source product from edit/delete
 	var copyID int64
 	copyRec := doJSON(t, r, http.MethodPost, fmt.Sprintf("/cms/products/%d/copy", vipID), "cfg-finance", map[string]any{
 		"code": "CAT_VIP_YEAR_9999_V2", "name": "VIP Annual Plan V2",
@@ -506,6 +539,19 @@ func TestProductCatalogDualChannelGateAndTemplateDecoupling(t *testing.T) {
 	_ = json.Unmarshal(copyRec.Body.Bytes(), &struct {
 		ID *int64 `json:"id"`
 	}{&copyID})
+
+	// Once referenced by a copied child version, both API and DB trigger forbid mutation/deletion
+	if rec := doJSON(t, r, http.MethodPut, fmt.Sprintf("/cms/products/%d", vipID), "cfg-finance", map[string]any{
+		"product_type": "vip", "name": "Locked Edit", "price_cents": 7777, "vip_cycle": "year",
+	}); rec.Code != http.StatusConflict {
+		t.Fatalf("expected 409 editing copied source product, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if rec := doJSON(t, r, http.MethodDelete, fmt.Sprintf("/cms/products/%d", vipID), "cfg-finance", nil); rec.Code != http.StatusConflict {
+		t.Fatalf("expected 409 deleting copied source product, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if _, err := db.DB.Exec(ctx, `UPDATE products SET price_cents = 1 WHERE id = $1`, vipID); err == nil {
+		t.Fatal("expected products UPDATE trigger to fail once referenced")
+	}
 
 	// 3. Dual-channel publish gate: PayPal alone must NOT allow publish
 	for _, provider := range []string{"paypal", "stripe"} {
@@ -591,6 +637,28 @@ func TestProductCatalogDualChannelGateAndTemplateDecoupling(t *testing.T) {
 		"environment": "sandbox",
 	}); rec.Code != http.StatusOK {
 		t.Fatalf("expected dual-channel ready publish success (200), got %d: %s", rec.Code, rec.Body.String())
+	}
+	// DB protection triggers must block direct deletion of active bindings or published product_publications
+	if _, err := db.DB.Exec(ctx, `DELETE FROM product_channel_bindings WHERE product_id = $1`, vipID); err == nil {
+		t.Fatal("expected trg_product_bindings_protect_active to forbid deleting verified bindings")
+	}
+	if _, err := db.DB.Exec(ctx, `DELETE FROM product_publications WHERE product_id = $1 AND environment = 'sandbox'`, vipID); err == nil {
+		t.Fatal("expected trg_product_publications_protect_non_draft to forbid deleting published row")
+	}
+	// Editing a draft that had a failed empty binding cleans up that stale failed row (rotating request_key)
+	if _, err := db.DB.Exec(ctx, `
+		INSERT INTO product_channel_bindings (product_id, account_id, provider, environment, sales_mode, allowed_countries, validation_status, enabled)
+		VALUES ($1, $2, 'stripe', 'sandbox', 'direct', ARRAY['US'], 'failed', false)`, copyID, stID); err != nil {
+		t.Fatalf("seed empty failed binding on copyID failed: %v", err)
+	}
+	if rec := doJSON(t, r, http.MethodPut, fmt.Sprintf("/cms/products/%d", copyID), "cfg-finance", map[string]any{
+		"product_type": "vip", "name": "VIP Annual Plan V2 Edited", "price_cents": 8999, "vip_cycle": "year",
+	}); rec.Code != http.StatusOK {
+		t.Fatalf("edit draft with empty failed binding failed (%d): %s", rec.Code, rec.Body.String())
+	}
+	var remainingFailedBindings int
+	if err := db.DB.QueryRow(ctx, `SELECT count(*) FROM product_channel_bindings WHERE product_id = $1`, copyID).Scan(&remainingFailedBindings); err != nil || remainingFailedBindings != 0 {
+		t.Fatalf("expected empty failed bindings purged on draft edit, got %d err=%v", remainingFailedBindings, err)
 	}
 	// ProductReadOnly (lacking payments.channels:read) must NOT see binding details; FinanceManager (has payments.channels:read) DOES see them
 	if rec := doJSON(t, r, http.MethodGet, fmt.Sprintf("/cms/products/%d?environment=sandbox", vipID), "cfg-support", nil); rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), "price_AnnualVIP9999") || !strings.Contains(rec.Body.String(), `"dual_channel_ready":true`) {

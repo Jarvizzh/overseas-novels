@@ -220,3 +220,8 @@ var StripeRadarAndEventRecoverySQL string
 //
 //go:embed migrations/2026111941.sql
 var StripeReportScheduleSQL string
+
+// ProductDraftMutationSQL relaxes product immutability strictly for never-published, unbound, unreferenced drafts.
+//
+//go:embed migrations/2026111942.sql
+var ProductDraftMutationSQL string

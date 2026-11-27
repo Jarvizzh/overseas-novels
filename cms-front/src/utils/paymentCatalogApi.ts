@@ -140,6 +140,9 @@ export interface ProductView {
   readiness_reasons: string[];
   linked_template_ids: number[];
   linked_template_names: string[];
+  editable: boolean;
+  deletable: boolean;
+  draft_lock_reason?: string;
 }
 
 export interface CreateProductPayload {
@@ -293,6 +296,10 @@ export const productsApi = {
     apiRequest('GET', `/products/${id}?environment=${environment}`, undefined, false, signal),
   create: (payload: CreateProductPayload): Promise<{ id: number; code: string }> =>
     apiRequest('POST', '/products', payload),
+  update: (id: number, payload: CreateProductPayload): Promise<{ id: number; code: string; updated: boolean }> =>
+    apiRequest('PUT', `/products/${id}`, payload),
+  delete: (id: number): Promise<{ id: number; deleted: boolean }> =>
+    apiRequest('DELETE', `/products/${id}`),
   copy: (id: number, overrides: Partial<CreateProductPayload>): Promise<{ id: number; code: string; source_product_id: number }> =>
     apiRequest('POST', `/products/${id}/copy`, overrides),
   bindPayPal: (id: number, payload: BindPayPalProductPayload) =>

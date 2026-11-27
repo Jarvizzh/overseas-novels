@@ -155,6 +155,7 @@ export default function ProductsPage() {
 
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [copySource, setCopySource] = useState<ProductView | null>(null);
+  const [editingProduct, setEditingProduct] = useState<ProductView | null>(null);
   const [formState, setFormState] = useState<ProductFormState>(INITIAL_PRODUCT_FORM);
   const [novelOptions, setNovelOptions] = useState<RecommendationNovel[]>([]);
   const [novelSearch, setNovelSearch] = useState('');
@@ -168,6 +169,7 @@ export default function ProductsPage() {
 
   const [statusDialog, setStatusDialog] = useState<{ product: ProductView; action: 'publish' | 'pause' | 'retire' } | null>(null);
   const [statusReason, setStatusReason] = useState('');
+  const [deleteTarget, setDeleteTarget] = useState<ProductView | null>(null);
 
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState('');
@@ -179,6 +181,7 @@ export default function ProductsPage() {
     bindingSequence.current += 1;
     setBindingProduct(null);
     setStatusDialog(null);
+    setDeleteTarget(null);
   }, [env]);
 
   const loadData = useCallback(async (signal?: AbortSignal) => {
@@ -256,12 +259,34 @@ export default function ProductsPage() {
 
   const openCreateDrawer = () => {
     setCopySource(null);
+    setEditingProduct(null);
     setFormState(INITIAL_PRODUCT_FORM);
     setFormError('');
     setDrawerOpen(true);
   };
 
+  const openEditDrawer = (prod: ProductView) => {
+    setCopySource(null);
+    setEditingProduct(prod);
+    setFormState({
+      code: prod.code,
+      product_type: prod.product_type,
+      name: prod.name,
+      description: prod.description || '',
+      price_usd: (prod.price_cents / 100).toFixed(2),
+      coins: prod.product_type === 'single' ? String(prod.coins || 0) : '1000',
+      bonus: prod.product_type === 'single' ? String(prod.bonus || 0) : '0',
+      vip_cycle: (prod.vip_cycle || 'month') as VipCycle,
+      novel_scope_type: prod.novel_scope_type === 'none' ? 'all_published' : prod.novel_scope_type,
+      novel_scope_ids: prod.novel_scope_ids ?? [],
+      manual_novel_ids: '',
+    });
+    setFormError('');
+    setDrawerOpen(true);
+  };
+
   const openCopyDrawer = (prod: ProductView) => {
+    setEditingProduct(null);
     setCopySource(prod);
     setFormState({
       code: nextCopyCode(prod.code),
@@ -269,8 +294,8 @@ export default function ProductsPage() {
       name: `${prod.name} (新版本)`,
       description: prod.description || '',
       price_usd: (prod.price_cents / 100).toFixed(2),
-      coins: String(prod.coins || 0),
-      bonus: String(prod.bonus || 0),
+      coins: prod.product_type === 'single' ? String(prod.coins || 0) : '1000',
+      bonus: prod.product_type === 'single' ? String(prod.bonus || 0) : '0',
       vip_cycle: (prod.vip_cycle || 'month') as VipCycle,
       novel_scope_type: prod.novel_scope_type === 'none' ? 'all_published' : prod.novel_scope_type,
       novel_scope_ids: prod.novel_scope_ids ?? [],
@@ -312,17 +337,45 @@ export default function ProductsPage() {
 
     setSubmitting(true);
     try {
-      if (copySource) {
+      if (editingProduct) {
+        await productsApi.update(editingProduct.id, payload);
+        showToast('草稿商品已更新', 'success');
+      } else if (copySource) {
         await productsApi.copy(copySource.id, payload);
-        showToast('已复制并创建不可变新商品，请为其绑定 PayPal 与 Stripe 渠道', 'success');
+        showToast('已复制并创建新商品，请为其绑定 PayPal 与 Stripe 渠道', 'success');
       } else {
         await productsApi.create(payload);
         showToast('商品创建成功，请继续配置 PayPal 与 Stripe 双渠道绑定', 'success');
       }
       setDrawerOpen(false);
+      setEditingProduct(null);
+      setCopySource(null);
       await loadData();
     } catch (err) {
-      setFormError(errMsg(err, '创建商品失败'));
+      setFormError(errMsg(err, editingProduct ? '更新草稿商品失败' : '创建商品失败'));
+      if (editingProduct) void loadData();
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const handleDeleteProduct = async () => {
+    if (!deleteTarget || !canWrite || submitting) return;
+    setSubmitting(true);
+    setFormError('');
+    try {
+      const targetId = deleteTarget.id;
+      await productsApi.delete(targetId);
+      setDeleteTarget(null);
+      if (bindingProduct?.id === targetId) {
+        bindingSequence.current += 1;
+        setBindingProduct(null);
+      }
+      showToast('草稿商品已删除', 'success');
+      await loadData();
+    } catch (err) {
+      setFormError(errMsg(err, '删除草稿商品失败'));
+      void loadData();
     } finally {
       setSubmitting(false);
     }
@@ -761,10 +814,23 @@ export default function ProductsPage() {
                       },
                     });
                   }
+                  if (canWrite && p.editable) {
+                    menuItems.push({ label: '编辑草稿', onClick: () => openEditDrawer(p) });
+                  }
                   if (canWrite) {
                     menuItems.push({ label: '复制调价', onClick: () => openCopyDrawer(p) });
                   }
-                  if (canPublish && pubStatus !== 'retired') {
+                  if (canWrite && p.deletable) {
+                    menuItems.push({
+                      label: '删除草稿',
+                      tone: 'danger',
+                      dividerBefore: menuItems.length > 0,
+                      onClick: () => {
+                        setFormError('');
+                        setDeleteTarget(p);
+                      },
+                    });
+                  } else if (canPublish && pubStatus !== 'retired') {
                     menuItems.push({
                       label: '下线商品',
                       tone: 'danger',
@@ -902,21 +968,31 @@ export default function ProductsPage() {
         </TableRegion>
       )}
 
-      {/* 新建 / 复制商品抽屉 */}
+      {/* 新建 / 编辑 / 复制商品抽屉 */}
       <CmsDialog
         open={drawerOpen}
-        onClose={() => { if (!submitting) setDrawerOpen(false); }}
+        onClose={() => { if (!submitting) { setDrawerOpen(false); setEditingProduct(null); setCopySource(null); } }}
         variant="drawer"
         size="md"
-        title={copySource ? `基于 ${copySource.code} 复制新建商品` : '新建不可变商业商品'}
-        subtitle="商品一经创建，价格与核心权益即永久锁定；如需调整定价，请复制生成新商品"
+        title={
+          editingProduct
+            ? `编辑草稿商品 · ${editingProduct.code}`
+            : copySource
+              ? `基于 ${copySource.code} 复制新建商品`
+              : '新建商业商品'
+        }
+        subtitle={
+          editingProduct
+            ? '仅在双环境未上架、未绑定渠道且无业务引用前支持原地修改；绑定渠道或上架后将自动锁定'
+            : '创建后处于草稿状态，在绑定渠道或上架前支持编辑与删除；上架后价格与核心权益永久锁定'
+        }
         closedBy="closerequest"
         closeDisabled={submitting}
         footer={
           <>
-            <button type="button" className="btn-secondary" disabled={submitting} onClick={() => setDrawerOpen(false)}>取消</button>
+            <button type="button" className="btn-secondary" disabled={submitting} onClick={() => { setDrawerOpen(false); setEditingProduct(null); setCopySource(null); }}>取消</button>
             <button type="submit" form={`${formId}-prod`} className="btn-primary" disabled={submitting}>
-              {submitting ? '提交中…' : copySource ? '创建新版本商品' : '创建商品（草稿）'}
+              {submitting ? '提交中…' : editingProduct ? '保存草稿修改' : copySource ? '创建新版本商品' : '创建商品（草稿）'}
             </button>
           </>
         }
@@ -960,7 +1036,7 @@ export default function ProductsPage() {
                 id={`${formId}-code`}
                 type="text"
                 className="input-field w-full font-mono-code uppercase"
-                placeholder="留空自动生成"
+                placeholder={editingProduct ? '留空保留原编码' : '留空自动生成'}
                 value={formState.code}
                 onChange={(e) => setFormState((prev) => ({ ...prev, code: e.target.value.toUpperCase() }))}
               />
@@ -1652,6 +1728,38 @@ export default function ProductsPage() {
                 onChange={(e) => setStatusReason(e.target.value)}
               />
             </div>
+            {formError && <p role="alert" className="text-xs text-[var(--cms-error)]">{formError}</p>}
+          </div>
+        )}
+      </CmsDialog>
+      {/* 删除草稿确认弹窗 */}
+      <CmsDialog
+        open={deleteTarget !== null}
+        onClose={() => { if (!submitting) setDeleteTarget(null); }}
+        size="sm"
+        title="删除草稿商品"
+        subtitle={deleteTarget ? `${deleteTarget.name} · ${deleteTarget.code}` : undefined}
+        closedBy="closerequest"
+        closeDisabled={submitting}
+        footer={
+          <>
+            <button type="button" data-dialog-initial-focus className="btn-secondary" disabled={submitting} onClick={() => setDeleteTarget(null)}>取消</button>
+            <button
+              type="button"
+              className="btn-primary bg-[var(--cms-error)] border-[var(--cms-error)]"
+              disabled={submitting}
+              onClick={() => void handleDeleteProduct()}
+            >
+              {submitting ? '删除中…' : '确认删除'}
+            </button>
+          </>
+        }
+      >
+        {deleteTarget && (
+          <div className="space-y-3 text-sm">
+            <p className="text-xs text-[var(--cms-warning)]">
+              确认永久删除该未上架草稿商品（{deleteTarget.price} USD · {PRODUCT_TYPE_LABELS[deleteTarget.product_type]}）？删除后不可恢复。
+            </p>
             {formError && <p role="alert" className="text-xs text-[var(--cms-error)]">{formError}</p>}
           </div>
         )}

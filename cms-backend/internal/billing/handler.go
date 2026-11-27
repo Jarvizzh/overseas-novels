@@ -86,6 +86,8 @@ func (h *Handler) RegisterRoutes(rg *gin.RouterGroup) {
 		products.GET("", productsRead, h.ListProducts)
 		products.GET("/:id", productsRead, h.GetProduct)
 		products.POST("", productsWrite, h.CreateProduct)
+		products.PUT("/:id", productsWrite, h.UpdateProduct)
+		products.DELETE("/:id", productsWrite, h.DeleteProduct)
 		products.POST("/:id/copy", productsWrite, h.CopyProduct)
 		products.PUT("/:id/bindings/paypal", productBindingsWrite, h.UpsertProductPayPalBinding)
 		products.PUT("/:id/bindings/stripe", productBindingsWrite, h.UpsertProductStripeBinding)

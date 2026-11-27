@@ -102,7 +102,8 @@ const (
 	stripeLocalCurrencyVersion        int64 = 2026111938
 	stripeRefundDisputeVersion        int64 = 2026111939
 	stripeRadarEventRecoveryVersion   int64 = 2026111940
-	RequiredSchemaVersion             int64 = 2026111941
+	stripeReportScheduleVersion       int64 = 2026111941
+	RequiredSchemaVersion             int64 = 2026111942
 )
 
 // BootstrapAdminConfig holds environment-injected credentials for initializing
@@ -392,7 +393,12 @@ func autoMigrateInternal(ctx context.Context, pool *pgxpool.Pool, bootstrap *Boo
 			return fmt.Errorf("schema migration %d: %w", stripeRadarEventRecoveryVersion, err)
 		}
 	}
-	if _, err := tx.Exec(ctx, dbassets.StripeReportScheduleSQL); err != nil {
+	if version < stripeReportScheduleVersion {
+		if _, err := tx.Exec(ctx, dbassets.StripeReportScheduleSQL); err != nil {
+			return fmt.Errorf("schema migration %d: %w", stripeReportScheduleVersion, err)
+		}
+	}
+	if _, err := tx.Exec(ctx, dbassets.ProductDraftMutationSQL); err != nil {
 		return fmt.Errorf("schema migration %d: %w", RequiredSchemaVersion, err)
 	}
 	if bootstrap != nil {
