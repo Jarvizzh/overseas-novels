@@ -82,7 +82,7 @@ func LoadConfig() {
 		StripeVIPCheckoutEnabled:             getEnvBool("STRIPE_VIP_CHECKOUT_ENABLED", false),
 		StripeBalanceChangeReportType:        strings.TrimSpace(getEnv("STRIPE_REPORT_TYPE_BALANCE_CHANGE", "")),
 		StripePayoutReconciliationReportType: strings.TrimSpace(getEnv("STRIPE_REPORT_TYPE_PAYOUT_RECONCILIATION", "")),
-		StripeReportMoRColumnsEnabled:        getEnvBool("STRIPE_REPORT_MOR_COLUMNS_ENABLED", true),
+		StripeReportMoRColumnsEnabled:        getEnvBool("STRIPE_REPORT_MOR_COLUMNS_ENABLED", false),
 		DefaultDomain:                        getEnv("DEFAULT_DOMAIN", "https://h5.starsfic.com"),
 		StorageType:                          getEnv("STORAGE_TYPE", "postgres"),
 		OSSEndpoint:                          getEnv("OSS_ENDPOINT", ""),

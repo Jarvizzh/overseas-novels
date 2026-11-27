@@ -58,9 +58,9 @@ func (s *service) reconcileStripeReportRuns(ctx context.Context) {
 		return
 	}
 	repo := s.settlementRepository(ctx)
-	cfg := settlement.ReportScheduleConfig{
-		IncludeMoRColumns: true,
-	}
+	// MoR tax/fee columns are opt-in so Direct-only accounts are not asked for
+	// columns Stripe does not return for them.
+	cfg := settlement.ReportScheduleConfig{}
 	if appCfg := config.Get(); appCfg != nil {
 		cfg.BalanceChangeReportType = appCfg.StripeBalanceChangeReportType
 		cfg.PayoutReconciliationReportType = appCfg.StripePayoutReconciliationReportType
