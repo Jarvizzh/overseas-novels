@@ -181,7 +181,7 @@ func TestReaderPaymentReviewUpgrade(t *testing.T) {
 			pool, _ := migrationPool(t)
 			reviewSQL, recoverySQL := dbassets.ReaderPaymentReviewSQL, dbassets.ReaderPaymentRecoverySQL
 			evidenceSQL := dbassets.ReaderSubscriptionEvidenceSQL
-			reviewFixesSQL, catalogSQL, switchSQL, templateFixesSQL, conversionReviewSQL, batchSQL, rereviewSQL, credentialHealthSQL, rbacSQL, promoEnvSQL, taxRelaxSQL, localCurrSQL, mitigationSQL, radarEventSQL := dbassets.PaymentReviewFixesSQL, dbassets.PaymentCatalogAndChannelSQL, dbassets.PaymentVIPSwitchSQL, dbassets.PaymentTemplateCatalogFixesSQL, dbassets.ConversionCenterReviewSQL, dbassets.ConversionBatchSQL, dbassets.ConversionThroughputRereviewSQL, dbassets.ConversionCredentialHealthSQL, dbassets.RBACPermissionsSQL, dbassets.PromotionEnvironmentSQL, dbassets.StripeTaxLiabilityRelaxSQL, dbassets.StripeLocalCurrencyCustomerSQL, dbassets.StripeRefundDisputeMitigationSQL, dbassets.StripeRadarAndEventRecoverySQL
+			reviewFixesSQL, catalogSQL, switchSQL, templateFixesSQL, conversionReviewSQL, batchSQL, rereviewSQL, credentialHealthSQL, rbacSQL, promoEnvSQL, taxRelaxSQL, localCurrSQL, mitigationSQL, radarEventSQL, reportScheduleSQL := dbassets.PaymentReviewFixesSQL, dbassets.PaymentCatalogAndChannelSQL, dbassets.PaymentVIPSwitchSQL, dbassets.PaymentTemplateCatalogFixesSQL, dbassets.ConversionCenterReviewSQL, dbassets.ConversionBatchSQL, dbassets.ConversionThroughputRereviewSQL, dbassets.ConversionCredentialHealthSQL, dbassets.RBACPermissionsSQL, dbassets.PromotionEnvironmentSQL, dbassets.StripeTaxLiabilityRelaxSQL, dbassets.StripeLocalCurrencyCustomerSQL, dbassets.StripeRefundDisputeMitigationSQL, dbassets.StripeRadarAndEventRecoverySQL, dbassets.StripeReportScheduleSQL
 			paymentSQL, checkoutSQL, vipSQL, ledgerSQL, settlementSQL, decisionSQL, aftercareSQL, stripeCheckoutSQL, stripeVIPSQL, completionSQL, paymentRecoverySQL := dbassets.PaymentDomainFoundationSQL, dbassets.PaymentCheckoutSQL, dbassets.VIPOfferVersionsSQL, dbassets.PaymentLedgerSQL, dbassets.PaymentSettlementSQL, dbassets.PaymentCheckoutDecisionsSQL, dbassets.PaymentAftercareSQL, dbassets.StripeOneTimeCheckoutSQL, dbassets.StripeVIPCheckoutSQL, dbassets.PaymentCompletionSQL, dbassets.PaymentRecoverySQL
 			t.Cleanup(func() {
 				dbassets.ReaderPaymentReviewSQL, dbassets.ReaderPaymentRecoverySQL = reviewSQL, recoverySQL
@@ -204,7 +204,7 @@ func TestReaderPaymentReviewUpgrade(t *testing.T) {
 			dbassets.ReaderPaymentReviewSQL, dbassets.ReaderPaymentRecoverySQL = reviewSQL, recoverySQL
 			dbassets.ReaderSubscriptionEvidenceSQL = evidenceSQL
 			dbassets.PaymentDomainFoundationSQL, dbassets.PaymentCheckoutSQL, dbassets.VIPOfferVersionsSQL, dbassets.PaymentLedgerSQL, dbassets.PaymentSettlementSQL, dbassets.PaymentCheckoutDecisionsSQL, dbassets.PaymentAftercareSQL, dbassets.StripeOneTimeCheckoutSQL, dbassets.StripeVIPCheckoutSQL, dbassets.PaymentCompletionSQL, dbassets.PaymentRecoverySQL = paymentSQL, checkoutSQL, vipSQL, ledgerSQL, settlementSQL, decisionSQL, aftercareSQL, stripeCheckoutSQL, stripeVIPSQL, completionSQL, paymentRecoverySQL
-			dbassets.PaymentReviewFixesSQL, dbassets.PaymentCatalogAndChannelSQL, dbassets.PaymentVIPSwitchSQL, dbassets.PaymentTemplateCatalogFixesSQL, dbassets.ConversionCenterReviewSQL, dbassets.ConversionBatchSQL, dbassets.ConversionThroughputRereviewSQL, dbassets.ConversionCredentialHealthSQL, dbassets.RBACPermissionsSQL, dbassets.PromotionEnvironmentSQL, dbassets.StripeTaxLiabilityRelaxSQL, dbassets.StripeLocalCurrencyCustomerSQL, dbassets.StripeRefundDisputeMitigationSQL, dbassets.StripeRadarAndEventRecoverySQL = reviewFixesSQL, catalogSQL, switchSQL, templateFixesSQL, conversionReviewSQL, batchSQL, rereviewSQL, credentialHealthSQL, rbacSQL, promoEnvSQL, taxRelaxSQL, localCurrSQL, mitigationSQL, radarEventSQL
+			dbassets.PaymentReviewFixesSQL, dbassets.PaymentCatalogAndChannelSQL, dbassets.PaymentVIPSwitchSQL, dbassets.PaymentTemplateCatalogFixesSQL, dbassets.ConversionCenterReviewSQL, dbassets.ConversionBatchSQL, dbassets.ConversionThroughputRereviewSQL, dbassets.ConversionCredentialHealthSQL, dbassets.RBACPermissionsSQL, dbassets.PromotionEnvironmentSQL, dbassets.StripeTaxLiabilityRelaxSQL, dbassets.StripeLocalCurrencyCustomerSQL, dbassets.StripeRefundDisputeMitigationSQL, dbassets.StripeRadarAndEventRecoverySQL, dbassets.StripeReportScheduleSQL = reviewFixesSQL, catalogSQL, switchSQL, templateFixesSQL, conversionReviewSQL, batchSQL, rereviewSQL, credentialHealthSQL, rbacSQL, promoEnvSQL, taxRelaxSQL, localCurrSQL, mitigationSQL, radarEventSQL, reportScheduleSQL
 			var version int64
 			if err := pool.QueryRow(ctx, "SELECT max(version) FROM reader_schema_migrations").Scan(&version); err != nil || version != baseline.version {
 				t.Fatalf("upgrade fixture schema=%d, err=%v", version, err)
@@ -360,7 +360,7 @@ func TestPaymentDomainFoundationUpgrade(t *testing.T) {
 	}
 
 	dbassets.PaymentDomainFoundationSQL, dbassets.PaymentCheckoutSQL, dbassets.VIPOfferVersionsSQL, dbassets.PaymentLedgerSQL, dbassets.PaymentSettlementSQL, dbassets.PaymentCheckoutDecisionsSQL, dbassets.PaymentAftercareSQL, dbassets.StripeOneTimeCheckoutSQL, dbassets.StripeVIPCheckoutSQL, dbassets.PaymentCompletionSQL, dbassets.PaymentRecoverySQL = migration, checkout, vipSQL, ledgerSQL, settlementSQL, decisionSQL, aftercareSQL, stripeCheckoutSQL, stripeVIPSQL, completionSQL, paymentRecoverySQL
-	dbassets.PaymentReviewFixesSQL, dbassets.PaymentCatalogAndChannelSQL, dbassets.PaymentVIPSwitchSQL, dbassets.PaymentTemplateCatalogFixesSQL, dbassets.ConversionCenterReviewSQL, dbassets.ConversionBatchSQL, dbassets.ConversionThroughputRereviewSQL, dbassets.ConversionCredentialHealthSQL, dbassets.RBACPermissionsSQL, dbassets.PromotionEnvironmentSQL, dbassets.StripeTaxLiabilityRelaxSQL, dbassets.StripeLocalCurrencyCustomerSQL, dbassets.StripeRefundDisputeMitigationSQL, dbassets.StripeRadarAndEventRecoverySQL = reviewFixesSQL, catalogSQL, switchSQL, templateFixesSQL, conversionReviewSQL, batchSQL, rereviewSQL, credentialHealthSQL, rbacSQL, promoEnvSQL, taxRelaxSQL, localCurrSQL, mitigationSQL, radarEventSQL
+	dbassets.PaymentReviewFixesSQL, dbassets.PaymentCatalogAndChannelSQL, dbassets.PaymentVIPSwitchSQL, dbassets.PaymentTemplateCatalogFixesSQL, dbassets.ConversionCenterReviewSQL, dbassets.ConversionBatchSQL, dbassets.ConversionThroughputRereviewSQL, dbassets.ConversionCredentialHealthSQL, dbassets.RBACPermissionsSQL, dbassets.PromotionEnvironmentSQL, dbassets.StripeTaxLiabilityRelaxSQL, dbassets.StripeLocalCurrencyCustomerSQL, dbassets.StripeRefundDisputeMitigationSQL, dbassets.StripeRadarAndEventRecoverySQL, dbassets.StripeReportScheduleSQL = reviewFixesSQL, catalogSQL, switchSQL, templateFixesSQL, conversionReviewSQL, batchSQL, rereviewSQL, credentialHealthSQL, rbacSQL, promoEnvSQL, taxRelaxSQL, localCurrSQL, mitigationSQL, radarEventSQL, reportScheduleSQL
 	for range 2 {
 		if err := autoMigrate(ctx, pool); err != nil {
 			t.Fatal(err)
@@ -465,7 +465,7 @@ func TestCheckoutDecisionUpgradeFromSettlement(t *testing.T) {
 		t.Fatal(err)
 	}
 	dbassets.PaymentCheckoutDecisionsSQL, dbassets.PaymentAftercareSQL, dbassets.StripeOneTimeCheckoutSQL, dbassets.StripeVIPCheckoutSQL, dbassets.PaymentCompletionSQL, dbassets.PaymentRecoverySQL = migration, aftercare, stripeCheckoutSQL, stripeVIPSQL, completionSQL, paymentRecoverySQL
-	dbassets.PaymentReviewFixesSQL, dbassets.PaymentCatalogAndChannelSQL, dbassets.PaymentVIPSwitchSQL, dbassets.PaymentTemplateCatalogFixesSQL, dbassets.ConversionCenterReviewSQL, dbassets.ConversionBatchSQL, dbassets.ConversionThroughputRereviewSQL, dbassets.ConversionCredentialHealthSQL, dbassets.RBACPermissionsSQL, dbassets.PromotionEnvironmentSQL, dbassets.StripeTaxLiabilityRelaxSQL, dbassets.StripeLocalCurrencyCustomerSQL, dbassets.StripeRefundDisputeMitigationSQL, dbassets.StripeRadarAndEventRecoverySQL = reviewFixesSQL, catalogSQL, switchSQL, templateFixesSQL, conversionReviewSQL, batchSQL, rereviewSQL, credentialHealthSQL, rbacSQL, promoEnvSQL, taxRelaxSQL, localCurrSQL, mitigationSQL, radarEventSQL
+	dbassets.PaymentReviewFixesSQL, dbassets.PaymentCatalogAndChannelSQL, dbassets.PaymentVIPSwitchSQL, dbassets.PaymentTemplateCatalogFixesSQL, dbassets.ConversionCenterReviewSQL, dbassets.ConversionBatchSQL, dbassets.ConversionThroughputRereviewSQL, dbassets.ConversionCredentialHealthSQL, dbassets.RBACPermissionsSQL, dbassets.PromotionEnvironmentSQL, dbassets.StripeTaxLiabilityRelaxSQL, dbassets.StripeLocalCurrencyCustomerSQL, dbassets.StripeRefundDisputeMitigationSQL, dbassets.StripeRadarAndEventRecoverySQL, dbassets.StripeReportScheduleSQL = reviewFixesSQL, catalogSQL, switchSQL, templateFixesSQL, conversionReviewSQL, batchSQL, rereviewSQL, credentialHealthSQL, rbacSQL, promoEnvSQL, taxRelaxSQL, localCurrSQL, mitigationSQL, radarEventSQL, reportScheduleSQL
 	if err := autoMigrate(ctx, pool); err != nil {
 		t.Fatal(err)
 	}
@@ -512,7 +512,7 @@ func TestPaymentReviewFixesUpgradeFromRecovery(t *testing.T) {
 		FROM payment_channel_accounts WHERE account_key='upgrade-sandbox'`); err != nil {
 		t.Fatal(err)
 	}
-	dbassets.PaymentReviewFixesSQL, dbassets.PaymentCatalogAndChannelSQL, dbassets.PaymentVIPSwitchSQL, dbassets.PaymentTemplateCatalogFixesSQL, dbassets.ConversionCenterReviewSQL, dbassets.ConversionBatchSQL, dbassets.ConversionThroughputRereviewSQL, dbassets.ConversionCredentialHealthSQL, dbassets.RBACPermissionsSQL, dbassets.PromotionEnvironmentSQL, dbassets.StripeTaxLiabilityRelaxSQL, dbassets.StripeLocalCurrencyCustomerSQL, dbassets.StripeRefundDisputeMitigationSQL, dbassets.StripeRadarAndEventRecoverySQL = migration, catalogSQL, switchSQL, templateFixesSQL, conversionReviewSQL, batchSQL, rereviewSQL, credentialHealthSQL, rbacSQL, promoEnvSQL, taxRelaxSQL, localCurrSQL, mitigationSQL, radarEventSQL
+	dbassets.PaymentReviewFixesSQL, dbassets.PaymentCatalogAndChannelSQL, dbassets.PaymentVIPSwitchSQL, dbassets.PaymentTemplateCatalogFixesSQL, dbassets.ConversionCenterReviewSQL, dbassets.ConversionBatchSQL, dbassets.ConversionThroughputRereviewSQL, dbassets.ConversionCredentialHealthSQL, dbassets.RBACPermissionsSQL, dbassets.PromotionEnvironmentSQL, dbassets.StripeTaxLiabilityRelaxSQL, dbassets.StripeLocalCurrencyCustomerSQL, dbassets.StripeRefundDisputeMitigationSQL, dbassets.StripeRadarAndEventRecoverySQL, dbassets.StripeReportScheduleSQL = migration, catalogSQL, switchSQL, templateFixesSQL, conversionReviewSQL, batchSQL, rereviewSQL, credentialHealthSQL, rbacSQL, promoEnvSQL, taxRelaxSQL, localCurrSQL, mitigationSQL, radarEventSQL, reportScheduleSQL
 	if err := autoMigrate(ctx, pool); err != nil {
 		t.Fatal(err)
 	}
@@ -548,7 +548,7 @@ func TestVIPSwitchUpgradePreservesPendingCheckout(t *testing.T) {
 		VALUES(1929,1929,999,'month','sandbox','{}','paypal','df09db5f-9c72-4a32-a2c3-cd19bfdf4c21','I-UPGRADE')`); err != nil {
 		t.Fatal(err)
 	}
-	dbassets.PaymentVIPSwitchSQL, dbassets.PaymentTemplateCatalogFixesSQL, dbassets.ConversionCenterReviewSQL, dbassets.ConversionBatchSQL, dbassets.ConversionThroughputRereviewSQL, dbassets.ConversionCredentialHealthSQL, dbassets.RBACPermissionsSQL, dbassets.PromotionEnvironmentSQL, dbassets.StripeTaxLiabilityRelaxSQL, dbassets.StripeLocalCurrencyCustomerSQL, dbassets.StripeRefundDisputeMitigationSQL, dbassets.StripeRadarAndEventRecoverySQL = switchSQL, templateFixesSQL, conversionReviewSQL, batchSQL, rereviewSQL, credentialHealthSQL, rbacSQL, promoEnvSQL, taxRelaxSQL, localCurrSQL, mitigationSQL, radarEventSQL
+	dbassets.PaymentVIPSwitchSQL, dbassets.PaymentTemplateCatalogFixesSQL, dbassets.ConversionCenterReviewSQL, dbassets.ConversionBatchSQL, dbassets.ConversionThroughputRereviewSQL, dbassets.ConversionCredentialHealthSQL, dbassets.RBACPermissionsSQL, dbassets.PromotionEnvironmentSQL, dbassets.StripeTaxLiabilityRelaxSQL, dbassets.StripeLocalCurrencyCustomerSQL, dbassets.StripeRefundDisputeMitigationSQL, dbassets.StripeRadarAndEventRecoverySQL, dbassets.StripeReportScheduleSQL = switchSQL, templateFixesSQL, conversionReviewSQL, batchSQL, rereviewSQL, credentialHealthSQL, rbacSQL, promoEnvSQL, taxRelaxSQL, localCurrSQL, mitigationSQL, radarEventSQL, reportScheduleSQL
 	if err := autoMigrate(ctx, pool); err != nil {
 		t.Fatal(err)
 	}
@@ -573,6 +573,7 @@ func TestConversionRereviewUpgradeFromBatchLedger(t *testing.T) {
 	localCurrSQL := dbassets.StripeLocalCurrencyCustomerSQL
 	mitigationSQL := dbassets.StripeRefundDisputeMitigationSQL
 	radarEventSQL := dbassets.StripeRadarAndEventRecoverySQL
+	reportScheduleSQL := dbassets.StripeReportScheduleSQL
 	t.Cleanup(func() {
 		dbassets.ConversionThroughputRereviewSQL = rereview
 		dbassets.ConversionCredentialHealthSQL = credentialHealth
@@ -582,7 +583,9 @@ func TestConversionRereviewUpgradeFromBatchLedger(t *testing.T) {
 		dbassets.StripeLocalCurrencyCustomerSQL = localCurrSQL
 		dbassets.StripeRefundDisputeMitigationSQL = mitigationSQL
 		dbassets.StripeRadarAndEventRecoverySQL = radarEventSQL
+		dbassets.StripeReportScheduleSQL = reportScheduleSQL
 	})
+	dbassets.StripeReportScheduleSQL = ""
 	dbassets.StripeRadarAndEventRecoverySQL = ""
 	dbassets.StripeRefundDisputeMitigationSQL = ""
 	dbassets.StripeLocalCurrencyCustomerSQL = ""
@@ -628,6 +631,7 @@ func TestConversionRereviewUpgradeFromBatchLedger(t *testing.T) {
 	dbassets.StripeLocalCurrencyCustomerSQL = localCurrSQL
 	dbassets.StripeRefundDisputeMitigationSQL = mitigationSQL
 	dbassets.StripeRadarAndEventRecoverySQL = radarEventSQL
+	dbassets.StripeReportScheduleSQL = reportScheduleSQL
 	if err := autoMigrate(ctx, pool); err != nil {
 		t.Fatal(err)
 	}
@@ -645,8 +649,8 @@ func TestConversionRereviewUpgradeFromBatchLedger(t *testing.T) {
 }
 
 func TestRBACMigrationSQLAssetIntegrity(t *testing.T) {
-	if RequiredSchemaVersion != 2026111940 {
-		t.Fatalf("RequiredSchemaVersion = %d, want 2026111940", RequiredSchemaVersion)
+	if RequiredSchemaVersion != 2026111941 {
+		t.Fatalf("RequiredSchemaVersion = %d, want 2026111941", RequiredSchemaVersion)
 	}
 	for _, want := range []string{
 		"presentment_currency",
@@ -672,6 +676,19 @@ func TestRBACMigrationSQLAssetIntegrity(t *testing.T) {
 	} {
 		if !strings.Contains(dbassets.StripeRefundDisputeMitigationSQL, want) {
 			t.Fatalf("2026111939.sql missing expected statement/token: %s", want)
+		}
+	}
+	for _, want := range []string{
+		"payment_stripe_report_runs",
+		"payment_settlement_rows",
+		"withheld_tax_minor",
+		"fee_net_of_withheld_tax_minor",
+		"schedule_key",
+		"report_run_id",
+		"2026111941",
+	} {
+		if !strings.Contains(dbassets.StripeReportScheduleSQL, want) {
+			t.Fatalf("2026111941.sql missing expected statement/token: %s", want)
 		}
 	}
 	for _, want := range []string{

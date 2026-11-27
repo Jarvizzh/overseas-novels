@@ -13,12 +13,32 @@ import (
 	"reader-backend/internal/payment/stripe"
 )
 
+// StripeReportImportOptions configures optional header validation during
+// Stripe Report Run CSV import while preserving manual import compatibility.
+type StripeReportImportOptions struct {
+	ExpectedColumns   []string
+	RequireMoRColumns bool
+}
+
 func ImportStripeReport(ctx context.Context, client *stripe.Client, repo *Repository, runID string, audit Audit) (ImportResult, error) {
+	return ImportStripeReportWithOptions(ctx, client, repo, runID, audit, StripeReportImportOptions{})
+}
+
+func ImportStripeReportWithOptions(ctx context.Context, client *stripe.Client, repo *Repository, runID string, audit Audit, opts StripeReportImportOptions) (ImportResult, error) {
 	file, err := client.OpenReportCSV(ctx, runID)
 	if err != nil {
 		return ImportResult{}, err
 	}
 	defer file.Close()
+	required := append([]string(nil), opts.ExpectedColumns...)
+	if opts.RequireMoRColumns {
+		required = append(required, stripe.MoRReportColumns()...)
+	}
+	if len(required) > 0 {
+		if err := file.ValidateColumns(required...); err != nil {
+			return ImportResult{}, err
+		}
+	}
 	staged, err := newStagedSettlement()
 	if err != nil {
 		return ImportResult{}, err

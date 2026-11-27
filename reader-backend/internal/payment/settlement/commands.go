@@ -24,19 +24,27 @@ type settlementJob struct {
 }
 
 type settlementParameters struct {
-	Reference       string `json:"reference"`
-	BankAccount     string `json:"bank_account"`
-	BankTransaction string `json:"bank_transaction"`
-	BankEvidence    string `json:"bank_evidence"`
+	Reference         string   `json:"reference"`
+	BankAccount       string   `json:"bank_account"`
+	BankTransaction   string   `json:"bank_transaction"`
+	BankEvidence      string   `json:"bank_evidence"`
+	ExpectedColumns   []string `json:"expected_columns,omitempty"`
+	RequireMoRColumns bool     `json:"require_mor_columns,omitempty"`
+}
+
+func reportImportCommandID(account payment.WebhookAccount, runID string) uuid.UUID {
+	return uuid.NewSHA1(uuid.NameSpaceOID, []byte("stripe-report-import:"+account.Environment+":"+account.AccountKey+":"+runID))
 }
 
 // ScheduleStripeNotice uses the same durable import queue as Finance. Enabled
 // accounts can process a provider event once even if inbox completion is retried.
+// For Stripe Report Runs (frr_*), the command ID is keyed by (account, environment,
+// report_run_id) so duplicate webhook deliveries and poll completions enqueue at most once.
 func (r *Repository) ScheduleStripeNotice(ctx context.Context, account payment.WebhookAccount, eventID, reference string) error {
-	kind := "stripe_payout"
 	if strings.HasPrefix(reference, "frr_") {
-		kind = "stripe_report"
-	} else if !strings.HasPrefix(reference, "po_") {
+		return r.scheduleStripeReportNotice(ctx, account, eventID, reference)
+	}
+	if !strings.HasPrefix(reference, "po_") {
 		return errors.New("invalid Stripe settlement notification reference")
 	}
 	id := uuid.NewSHA1(uuid.NameSpaceOID, []byte("stripe-settlement:"+account.Environment+":"+account.AccountKey+":"+eventID))
@@ -47,7 +55,54 @@ func (r *Repository) ScheduleStripeNotice(ctx context.Context, account payment.W
 		FROM payment_channel_accounts a JOIN payment_ledger_sync_settings s ON s.account_id=a.id AND s.enabled
 		JOIN admins u ON u.id = s.actor_id AND public.admin_has_permission(u.id, 'payments.reconciliation:write')
 		WHERE a.provider='stripe' AND a.account_key=$5 AND a.environment=$6 ON CONFLICT DO NOTHING`,
-		id, kind, eventID, reference, account.AccountKey, account.Environment)
+		id, StripePayout, eventID, reference, account.AccountKey, account.Environment)
+	return err
+}
+
+func (r *Repository) scheduleStripeReportNotice(ctx context.Context, account payment.WebhookAccount, eventID, runID string) error {
+	cmdID := reportImportCommandID(account, runID)
+	paramsMap := map[string]any{
+		"reference":    runID,
+		"source_event": eventID,
+	}
+	var expectedCols []string
+	var includeMoR bool
+	err := r.pool.QueryRow(ctx, `SELECT r.expected_columns, r.include_mor_columns
+		FROM payment_stripe_report_runs r
+		JOIN payment_channel_accounts a ON a.id = r.account_id
+		WHERE a.provider='stripe' AND a.account_key=$1 AND r.environment=$2 AND r.report_run_id=$3`,
+		account.AccountKey, account.Environment, runID).Scan(&expectedCols, &includeMoR)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return err
+	}
+	if len(expectedCols) > 0 {
+		paramsMap["expected_columns"] = expectedCols
+	}
+	if includeMoR {
+		paramsMap["require_mor_columns"] = true
+	}
+	paramsJSON, err := json.Marshal(paramsMap)
+	if err != nil {
+		return err
+	}
+	_, err = r.pool.Exec(ctx, `INSERT INTO payment_settlement_commands
+		(id,request_key,actor_id,kind,account_id,environment,reason,parameters,request_digest)
+		SELECT $1,$1,s.actor_id,$2,a.id,a.environment,'Stripe event '||$3::text,
+			$4::jsonb,$5::text
+		FROM payment_channel_accounts a JOIN payment_ledger_sync_settings s ON s.account_id=a.id AND s.enabled
+		JOIN admins u ON u.id = s.actor_id AND public.admin_has_permission(u.id, 'payments.reconciliation:write')
+		WHERE a.provider='stripe' AND a.account_key=$6 AND a.environment=$7 ON CONFLICT DO NOTHING`,
+		cmdID, StripeReport, eventID, paramsJSON, runID, account.AccountKey, account.Environment)
+	if err != nil {
+		return err
+	}
+	_, err = r.pool.Exec(ctx, `UPDATE payment_stripe_report_runs r
+		SET status=$4, import_command_id=COALESCE(r.import_command_id, $5),
+			last_error=NULL, lease_token=NULL, lease_until=NULL, updated_at=now()
+		FROM payment_channel_accounts a
+		WHERE r.account_id=a.id AND a.provider='stripe' AND a.account_key=$1 AND r.environment=$2
+			AND r.report_run_id=$3 AND EXISTS (SELECT 1 FROM payment_settlement_commands c WHERE c.id=$5)`,
+		account.AccountKey, account.Environment, runID, ReportRunStatusEnqueued, cmdID)
 	return err
 }
 
@@ -137,7 +192,10 @@ func (r *Repository) executeSettlementCommand(ctx context.Context, job settlemen
 		if job.kind == "stripe_payout" {
 			return ImportStripePayout(ctx, client, r, params.Reference, audit)
 		}
-		return ImportStripeReport(ctx, client, r, params.Reference, audit)
+		return ImportStripeReportWithOptions(ctx, client, r, params.Reference, audit, StripeReportImportOptions{
+			ExpectedColumns:   params.ExpectedColumns,
+			RequireMoRColumns: params.RequireMoRColumns,
+		})
 	default:
 		return nil, fmt.Errorf("unknown settlement command kind %q", job.kind)
 	}

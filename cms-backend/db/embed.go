@@ -215,3 +215,8 @@ var StripeRefundDisputeMitigationSQL string
 //
 //go:embed migrations/2026111940.sql
 var StripeRadarAndEventRecoverySQL string
+
+// StripeReportScheduleSQL adds persistent Stripe Report Run scheduling and MoR tax/fee settlement columns.
+//
+//go:embed migrations/2026111941.sql
+var StripeReportScheduleSQL string

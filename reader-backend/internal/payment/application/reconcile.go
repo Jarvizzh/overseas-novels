@@ -41,6 +41,7 @@ func (s *service) RunReconciliation(ctx context.Context) {
 		{func(ctx context.Context) { s.eachStripeAccount(ctx, (*service).reconcileStripeRefunds) }, stripeCheckoutInterval, nil},
 		{s.reconcileSettlementCommands, stripeCheckoutInterval, nil},
 		{s.reconcileAutomaticLedger, paymentEventRecoveryInterval, nil},
+		{s.reconcileStripeReportRuns, paymentEventRecoveryInterval, nil},
 	}
 	if config.AppConfig.PaymentTaskMetrics {
 		scheduled = append(scheduled, scheduledWorker{s.observePaymentTasks, 30 * time.Second, nil})

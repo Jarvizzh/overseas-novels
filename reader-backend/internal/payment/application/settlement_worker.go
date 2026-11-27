@@ -3,7 +3,9 @@ package application
 import (
 	"context"
 	"log"
+	"time"
 
+	"reader-backend/internal/config"
 	"reader-backend/internal/conversion"
 	"reader-backend/internal/db"
 	"reader-backend/internal/payment/settlement"
@@ -47,5 +49,27 @@ func (s *service) reconcileAutomaticLedger(ctx context.Context) {
 	}
 	if _, err := s.settlementRepository(ctx).SyncNextLedgerPage(ctx, environment); err != nil {
 		log.Printf("task=automatic_payment_ledger action=execute error=%s", stripe.RedactSecrets(err.Error()))
+	}
+}
+
+func (s *service) reconcileStripeReportRuns(ctx context.Context) {
+	environment := currentPaymentLedgerEnvironment()
+	if environment == "" {
+		return
+	}
+	repo := s.settlementRepository(ctx)
+	cfg := settlement.ReportScheduleConfig{
+		IncludeMoRColumns: true,
+	}
+	if appCfg := config.Get(); appCfg != nil {
+		cfg.BalanceChangeReportType = appCfg.StripeBalanceChangeReportType
+		cfg.PayoutReconciliationReportType = appCfg.StripePayoutReconciliationReportType
+		cfg.IncludeMoRColumns = appCfg.StripeReportMoRColumnsEnabled
+	}
+	if _, err := repo.ScheduleDueStripeReportRuns(ctx, environment, cfg, time.Now().UTC()); err != nil {
+		log.Printf("task=stripe_report_schedule action=schedule error=%s", stripe.RedactSecrets(err.Error()))
+	}
+	if _, err := repo.ProcessNextStripeReportRun(ctx, environment); err != nil {
+		log.Printf("task=stripe_report_schedule action=process error=%s", stripe.RedactSecrets(err.Error()))
 	}
 }

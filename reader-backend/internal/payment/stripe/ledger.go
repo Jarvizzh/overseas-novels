@@ -248,6 +248,14 @@ func validateStripeBalanceAmounts(amounts map[payment.LedgerComponent]payment.Le
 	if hasFee && hasNet && !decimal.NewFromInt(gross.Minor).Add(decimal.NewFromInt(fee.Minor)).Equal(decimal.NewFromInt(net.Minor)) {
 		return errors.New("Stripe gross, fee and net do not reconcile")
 	}
+	withheldTax, hasWithheldTax := amounts[payment.LedgerWithheldTax]
+	processingFee, hasProcessingFee := amounts[payment.LedgerProcessingFee]
+	if hasFee && hasWithheldTax && hasProcessingFee &&
+		fee.Currency == withheldTax.Currency && fee.Currency == processingFee.Currency {
+		if !decimal.NewFromInt(withheldTax.Minor).Add(decimal.NewFromInt(processingFee.Minor)).Equal(decimal.NewFromInt(fee.Minor)) {
+			return errors.New("Stripe fee, withheld_tax and fee_net_of_withheld_tax do not reconcile")
+		}
+	}
 	return nil
 }
 

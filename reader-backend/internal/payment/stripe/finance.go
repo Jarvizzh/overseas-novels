@@ -4,10 +4,127 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"strconv"
 	"strings"
 
 	stripego "github.com/stripe/stripe-go/v87"
 )
+
+const (
+	// Supported itemized Stripe reporting prefixes and default configured versions.
+	ReportTypeBalanceChangeItemizedPrefix        = "balance_change_from_activity.itemized."
+	ReportTypePayoutReconciliationItemizedPrefix = "payout_reconciliation.itemized."
+	DefaultBalanceChangeReportType               = "balance_change_from_activity.itemized.6"
+	DefaultPayoutReconciliationReportType        = "payout_reconciliation.itemized.7"
+
+	// Canonical Stripe itemized report CSV column names.
+	ReportColumnBalanceTransactionID   = "balance_transaction_id"
+	ReportColumnSourceID               = "source_id"
+	ReportColumnChargeID               = "charge_id"
+	ReportColumnPaymentIntentID        = "payment_intent_id"
+	ReportColumnInvoiceID              = "invoice_id"
+	ReportColumnSubscriptionID         = "subscription_id"
+	ReportColumnAutomaticPayoutID      = "automatic_payout_id"
+	ReportColumnReportingCategory      = "reporting_category"
+	ReportColumnCurrency               = "currency"
+	ReportColumnGross                  = "gross"
+	ReportColumnFee                    = "fee"
+	ReportColumnNet                    = "net"
+	ReportColumnWithheldTax            = "withheld_tax"
+	ReportColumnFeeNetOfWithheldTax    = "fee_net_of_withheld_tax"
+	ReportColumnCustomerFacingCurrency = "customer_facing_currency"
+	ReportColumnCustomerFacingAmount   = "customer_facing_amount"
+	ReportColumnExchangeRate           = "exchange_rate"
+	ReportColumnIsManagedPayments      = "is_managed_payments"
+)
+
+// IsSupportedItemizedReportType reports whether reportType is a versioned
+// balance_change_from_activity.itemized.* or payout_reconciliation.itemized.* report.
+func IsSupportedItemizedReportType(reportType string) bool {
+	var suffix string
+	switch {
+	case strings.HasPrefix(reportType, ReportTypeBalanceChangeItemizedPrefix):
+		suffix = strings.TrimPrefix(reportType, ReportTypeBalanceChangeItemizedPrefix)
+	case strings.HasPrefix(reportType, ReportTypePayoutReconciliationItemizedPrefix):
+		suffix = strings.TrimPrefix(reportType, ReportTypePayoutReconciliationItemizedPrefix)
+	default:
+		return false
+	}
+	v, err := strconv.Atoi(suffix)
+	return err == nil && v > 0 && strconv.Itoa(v) == suffix
+}
+
+// ValidateItemizedReportType validates that reportType is a supported versioned
+// itemized settlement report.
+func ValidateItemizedReportType(reportType string) error {
+	if !IsSupportedItemizedReportType(reportType) {
+		return fmt.Errorf("unsupported Stripe itemized report type %q", reportType)
+	}
+	return nil
+}
+
+// MoRReportColumns returns the explicit tax and net-fee columns required for
+// Merchant of Record (Managed Payments) reconciliation reports.
+func MoRReportColumns() []string {
+	return []string{ReportColumnWithheldTax, ReportColumnFeeNetOfWithheldTax}
+}
+
+// ResolveReportColumns returns the deduplicated column list to pass to Stripe
+// Report Runs. When includeMoR is true, withheld_tax and fee_net_of_withheld_tax
+// are explicitly requested alongside the itemized columns.
+func ResolveReportColumns(reportType string, requested []string, includeMoR bool) []string {
+	if len(requested) == 0 && !includeMoR {
+		return nil
+	}
+	base := requested
+	if len(base) == 0 {
+		base = []string{
+			ReportColumnBalanceTransactionID,
+			ReportColumnSourceID,
+			ReportColumnChargeID,
+			ReportColumnPaymentIntentID,
+			ReportColumnInvoiceID,
+			ReportColumnSubscriptionID,
+		}
+		if strings.HasPrefix(reportType, ReportTypePayoutReconciliationItemizedPrefix) {
+			base = append(base, ReportColumnAutomaticPayoutID)
+		}
+		base = append(base,
+			ReportColumnReportingCategory,
+			ReportColumnCurrency,
+			ReportColumnGross,
+			ReportColumnFee,
+			ReportColumnNet,
+			ReportColumnCustomerFacingCurrency,
+			ReportColumnCustomerFacingAmount,
+			ReportColumnExchangeRate,
+			ReportColumnIsManagedPayments,
+		)
+	}
+	seen := make(map[string]struct{}, len(base)+2)
+	resolved := make([]string, 0, len(base)+2)
+	add := func(col string) {
+		col = strings.TrimSpace(col)
+		if col == "" {
+			return
+		}
+		if _, ok := seen[col]; ok {
+			return
+		}
+		seen[col] = struct{}{}
+		resolved = append(resolved, col)
+	}
+	for _, col := range base {
+		add(col)
+	}
+	if includeMoR {
+		for _, col := range MoRReportColumns() {
+			add(col)
+		}
+	}
+	return resolved
+}
 
 func (c *Client) GetBalance(ctx context.Context) (*stripego.Balance, error) {
 	return apiResult(c.api.V1Balance.Retrieve(ctx, nil))
@@ -124,19 +241,24 @@ func (c *Client) ListPayouts(ctx context.Context, created TimeRange, page PageOp
 }
 
 type ReportRequest struct {
-	Type           string
-	Interval       TimeRange
-	Columns        []string
-	Currency       string
-	PayoutID       string
-	IdempotencyKey string
+	Type              string
+	Interval          TimeRange
+	Columns           []string
+	IncludeMoRColumns bool
+	Currency          string
+	PayoutID          string
+	IdempotencyKey    string
 }
 
 func (c *Client) CreateReportRun(ctx context.Context, req ReportRequest) (*stripego.ReportingReportRun, error) {
 	if !validToken(strings.ReplaceAll(req.Type, ".", "_")) {
 		return nil, errors.New("invalid Stripe report type")
 	}
-	report := &stripego.ReportingReportRunCreateParametersParams{Columns: stripego.StringSlice(req.Columns)}
+	columns := ResolveReportColumns(req.Type, req.Columns, req.IncludeMoRColumns)
+	report := &stripego.ReportingReportRunCreateParametersParams{}
+	if len(columns) > 0 {
+		report.Columns = stripego.StringSlice(columns)
+	}
 	if req.PayoutID != "" {
 		if !validID(req.PayoutID, "po_") {
 			return nil, errors.New("invalid Stripe report Payout ID")

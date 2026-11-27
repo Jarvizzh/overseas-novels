@@ -45,11 +45,13 @@ type Report struct {
 }
 
 type ReportRow struct {
-	File, ReviewReason string
-	Number             int
-	Payload            json.RawMessage
-	Evidence           *payment.LedgerEvidence
-	Payout             *payment.PayoutEvidence
+	File, ReviewReason       string
+	Number                   int
+	Payload                  json.RawMessage
+	Evidence                 *payment.LedgerEvidence
+	Payout                   *payment.PayoutEvidence
+	WithheldTaxMinor         *int64
+	FeeNetOfWithheldTaxMinor *int64
 }
 
 type ImportResult struct {
@@ -62,6 +64,7 @@ type ImportResult struct {
 type settlementDatabase interface {
 	Begin(context.Context) (pgx.Tx, error)
 	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+	Query(context.Context, string, ...any) (pgx.Rows, error)
 	QueryRow(context.Context, string, ...any) pgx.Row
 }
 
@@ -193,9 +196,25 @@ func recordReportRow(ctx context.Context, tx pgx.Tx, report Report, accountID in
 			row.ReviewReason = "conflicting_ledger_evidence"
 		}
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO payment_settlement_rows(import_id,source_file,row_number,movement_id,payload,review_reason)
-		VALUES($1,$2,$3,$4,$5,NULLIF($6,''))`,
-		result.ImportID, row.File, row.Number, movementID, row.Payload, row.ReviewReason); err != nil {
+	withheldTaxMinor := row.WithheldTaxMinor
+	feeNetOfWithheldTaxMinor := row.FeeNetOfWithheldTaxMinor
+	if row.Evidence != nil {
+		if withheldTaxMinor == nil {
+			if m, ok := row.Evidence.Amounts[payment.LedgerWithheldTax]; ok {
+				v := m.Minor
+				withheldTaxMinor = &v
+			}
+		}
+		if feeNetOfWithheldTaxMinor == nil {
+			if m, ok := row.Evidence.Amounts[payment.LedgerProcessingFee]; ok {
+				v := m.Minor
+				feeNetOfWithheldTaxMinor = &v
+			}
+		}
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO payment_settlement_rows(import_id,source_file,row_number,movement_id,payload,review_reason,withheld_tax_minor,fee_net_of_withheld_tax_minor)
+		VALUES($1,$2,$3,$4,$5,NULLIF($6,''),$7,$8)`,
+		result.ImportID, row.File, row.Number, movementID, row.Payload, row.ReviewReason, withheldTaxMinor, feeNetOfWithheldTaxMinor); err != nil {
 		return err
 	}
 	result.Rows++

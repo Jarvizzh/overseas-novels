@@ -18,16 +18,39 @@ import (
 )
 
 var (
-	ErrReportPending     = errors.New("Stripe report run is pending")
-	ErrReportFailed      = errors.New("Stripe report run failed")
-	ErrReportUnavailable = errors.New("Stripe report CSV is unavailable")
+	ErrReportPending        = errors.New("Stripe report run is pending")
+	ErrReportFailed         = errors.New("Stripe report run failed")
+	ErrReportUnavailable    = errors.New("Stripe report CSV is unavailable")
+	ErrMissingReportColumns = errors.New("Stripe report CSV is missing expected columns")
 )
+
+// MissingReportColumnsError records exact missing header columns so callers
+// fail diagnostically instead of silently zeroing or dropping tax/fee values.
+type MissingReportColumnsError struct {
+	RunID      string
+	ReportType string
+	Missing    []string
+}
+
+func (e *MissingReportColumnsError) Error() string {
+	cols := strings.Join(e.Missing, ", ")
+	if e.RunID != "" || e.ReportType != "" {
+		return fmt.Sprintf("Stripe report %s (%s) is missing expected CSV columns: %s", e.RunID, e.ReportType, cols)
+	}
+	return fmt.Sprintf("Stripe report CSV is missing expected columns: %s", cols)
+}
+
+func (e *MissingReportColumnsError) Unwrap() error {
+	return ErrMissingReportColumns
+}
 
 type ReportCSV struct {
 	RunID, ReportType, FileID string
+	RequestedColumns          []string
 	body                      io.ReadCloser
 	reader                    *csv.Reader
 	columns                   []string
+	columnSet                 map[string]bool
 }
 
 // OpenReportCSV downloads the file belonging to a completed run from the
@@ -123,13 +146,63 @@ func (c *Client) OpenReportCSV(ctx context.Context, runID string) (*ReportCSV, e
 		}
 		names[name] = true
 	}
-	return &ReportCSV{
+	var requestedCols []string
+	if run.Parameters != nil && len(run.Parameters.Columns) > 0 {
+		requestedCols = append([]string(nil), run.Parameters.Columns...)
+	}
+	report := &ReportCSV{
 		RunID: run.ID, ReportType: run.ReportType, FileID: file.ID,
-		body: response.Body, reader: reader, columns: columns,
-	}, nil
+		RequestedColumns: requestedCols,
+		body:             response.Body, reader: reader, columns: columns, columnSet: names,
+	}
+	if len(requestedCols) > 0 {
+		if err := report.ValidateColumns(requestedCols...); err != nil {
+			_ = response.Body.Close()
+			return nil, err
+		}
+	}
+	return report, nil
 }
 
 func (r *ReportCSV) Close() error { return r.body.Close() }
+
+// Columns returns a copy of the CSV header column names.
+func (r *ReportCSV) Columns() []string {
+	return append([]string(nil), r.columns...)
+}
+
+// HasColumn reports whether the CSV header contains name.
+func (r *ReportCSV) HasColumn(name string) bool {
+	return r.columnSet[name]
+}
+
+// ValidateColumns verifies that every expected column is present in the CSV
+// header, returning a diagnostic *MissingReportColumnsError if any are absent.
+func (r *ReportCSV) ValidateColumns(required ...string) error {
+	var missing []string
+	seen := make(map[string]struct{}, len(required))
+	for _, col := range required {
+		col = strings.TrimSpace(col)
+		if col == "" {
+			continue
+		}
+		if _, dup := seen[col]; dup {
+			continue
+		}
+		seen[col] = struct{}{}
+		if !r.columnSet[col] {
+			missing = append(missing, col)
+		}
+	}
+	if len(missing) > 0 {
+		return &MissingReportColumnsError{
+			RunID:      r.RunID,
+			ReportType: r.ReportType,
+			Missing:    missing,
+		}
+	}
+	return nil
+}
 
 // ReportRow preserves Stripe's headers and values exactly, including new columns.
 type ReportRow map[string]string
@@ -160,15 +233,15 @@ type ReportBalanceTransaction struct {
 // reports are available through Read and don't have a balance transaction ID.
 func (r ReportRow) BalanceTransaction() (ReportBalanceTransaction, error) {
 	item := ReportBalanceTransaction{
-		ID: r["balance_transaction_id"], SourceID: r["source_id"], ChargeID: r["charge_id"],
-		PaymentIntentID: r["payment_intent_id"], InvoiceID: r["invoice_id"], SubscriptionID: r["subscription_id"],
-		PayoutID: r["automatic_payout_id"], ReportingCategory: r["reporting_category"],
-		Currency: r["currency"], CustomerFacingCurrency: r["customer_facing_currency"],
+		ID: r[ReportColumnBalanceTransactionID], SourceID: r[ReportColumnSourceID], ChargeID: r[ReportColumnChargeID],
+		PaymentIntentID: r[ReportColumnPaymentIntentID], InvoiceID: r[ReportColumnInvoiceID], SubscriptionID: r[ReportColumnSubscriptionID],
+		PayoutID: r[ReportColumnAutomaticPayoutID], ReportingCategory: r[ReportColumnReportingCategory],
+		Currency: r[ReportColumnCurrency], CustomerFacingCurrency: r[ReportColumnCustomerFacingCurrency],
 	}
 	if !validID(item.ID, "txn_") || item.Currency == "" {
 		return ReportBalanceTransaction{}, errors.New("Stripe report row requires a balance transaction ID and currency")
 	}
-	if v := strings.TrimSpace(r["is_managed_payments"]); v != "" {
+	if v := strings.TrimSpace(r[ReportColumnIsManagedPayments]); v != "" {
 		managed, err := strconv.ParseBool(v)
 		if err != nil {
 			return ReportBalanceTransaction{}, errors.New("invalid Stripe report is_managed_payments")
@@ -179,13 +252,13 @@ func (r ReportRow) BalanceTransaction() (ReportBalanceTransaction, error) {
 		name string
 		dest **decimal.Decimal
 	}{
-		{"gross", &item.Gross},
-		{"fee", &item.Fee},
-		{"net", &item.Net},
-		{"withheld_tax", &item.WithheldTax},
-		{"fee_net_of_withheld_tax", &item.FeeNetOfWithheldTax},
-		{"customer_facing_amount", &item.CustomerFacingAmount},
-		{"exchange_rate", &item.ExchangeRate},
+		{ReportColumnGross, &item.Gross},
+		{ReportColumnFee, &item.Fee},
+		{ReportColumnNet, &item.Net},
+		{ReportColumnWithheldTax, &item.WithheldTax},
+		{ReportColumnFeeNetOfWithheldTax, &item.FeeNetOfWithheldTax},
+		{ReportColumnCustomerFacingAmount, &item.CustomerFacingAmount},
+		{ReportColumnExchangeRate, &item.ExchangeRate},
 	} {
 		if v := strings.TrimSpace(r[field.name]); v != "" {
 			value, err := decimal.NewFromString(v)
@@ -193,6 +266,21 @@ func (r ReportRow) BalanceTransaction() (ReportBalanceTransaction, error) {
 				return ReportBalanceTransaction{}, fmt.Errorf("invalid Stripe report decimal in %s", field.name)
 			}
 			*field.dest = &value
+		}
+	}
+	if item.ManagedPayments != nil && *item.ManagedPayments {
+		var missing []string
+		for _, col := range MoRReportColumns() {
+			if _, present := r[col]; !present {
+				missing = append(missing, col)
+			}
+		}
+		if len(missing) > 0 {
+			return ReportBalanceTransaction{}, &MissingReportColumnsError{Missing: missing}
+		}
+		if item.WithheldTax == nil || item.FeeNetOfWithheldTax == nil {
+			return ReportBalanceTransaction{}, fmt.Errorf("%w: MoR row %s has blank %s or %s",
+				ErrMissingReportColumns, item.ID, ReportColumnWithheldTax, ReportColumnFeeNetOfWithheldTax)
 		}
 	}
 	return item, nil
