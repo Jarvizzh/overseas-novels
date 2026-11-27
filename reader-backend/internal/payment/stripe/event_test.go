@@ -152,3 +152,40 @@ func TestVerifiedEventsDecodeChannelEvidence(t *testing.T) {
 		})
 	}
 }
+
+func TestRecoveryEventTypesPartitionedToAtMost20PerGroup(t *testing.T) {
+	all := RecoveryEventTypes()
+	if len(all) <= MaxEventTypesPerRequest {
+		t.Fatalf("expected >%d whitelisted event types, got %d", MaxEventTypesPerRequest, len(all))
+	}
+	groups := RecoveryEventGroups()
+	if len(groups) < 2 {
+		t.Fatalf("expected at least 2 recovery groups, got %d", len(groups))
+	}
+	seen := make(map[string]struct{}, len(all))
+	for _, g := range groups {
+		if g.Key == "" || len(g.Types) == 0 || len(g.Types) > MaxEventTypesPerRequest {
+			t.Fatalf("invalid event group: %+v", g)
+		}
+		for _, typ := range g.Types {
+			if _, dup := seen[typ]; dup {
+				t.Fatalf("duplicate event type %q across groups", typ)
+			}
+			seen[typ] = struct{}{}
+		}
+	}
+	if len(seen) != len(all) {
+		t.Fatalf("partition covered %d types, want %d", len(seen), len(all))
+	}
+
+	// Custom >20 list with duplicates & blanks splits cleanly.
+	custom := make([]string, 0, 45)
+	for i := range 42 {
+		custom = append(custom, fmt.Sprintf("evt.type.%02d", i))
+	}
+	custom = append(custom, "evt.type.00", "", "  ")
+	chunks := PartitionEventTypes(custom, MaxEventTypesPerRequest)
+	if len(chunks) != 3 || len(chunks[0]) != 20 || len(chunks[1]) != 20 || len(chunks[2]) != 2 {
+		t.Fatalf("unexpected custom partition sizes: %d (%d, %d, %d)", len(chunks), len(chunks[0]), len(chunks[1]), len(chunks[2]))
+	}
+}

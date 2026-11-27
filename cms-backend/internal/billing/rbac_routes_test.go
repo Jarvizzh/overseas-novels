@@ -85,6 +85,7 @@ func TestBillingRoutesEnforceRBACPermissions(t *testing.T) {
 		{http.MethodGet, "/payments/refunds"},
 		{http.MethodGet, "/payments/cases?view=risk"},
 		{http.MethodGet, "/payments/cases/owners"},
+		{http.MethodGet, "/payments/cases/101/evidence-export"},
 		{http.MethodGet, "/payments/reconciliation/movements"},
 		{http.MethodGet, "/products"},
 		{http.MethodGet, "/recharge-templates"},
@@ -143,6 +144,15 @@ func TestBillingRoutesEnforceRBACPermissions(t *testing.T) {
 	}
 	if w := call("risk-read", http.MethodGet, "/payments/cases/owners?role_scope=invalid", ""); w.Code != http.StatusBadRequest {
 		t.Fatalf("risk-read GET cases/owners invalid role_scope = %d, want 400", w.Code)
+	}
+	if w := call("orders-read", http.MethodGet, "/payments/cases/101/evidence-export", ""); w.Code != http.StatusForbidden {
+		t.Fatalf("orders-read GET cases/101/evidence-export = %d, want 403", w.Code)
+	}
+	if w := call("risk-read", http.MethodGet, "/payments/cases/not-a-number/evidence-export", ""); w.Code != http.StatusBadRequest {
+		t.Fatalf("risk-read GET cases/not-a-number/evidence-export = %d, want 400 (past authz)", w.Code)
+	}
+	if w := call("disputes-read", http.MethodGet, "/payments/cases/not-a-number/evidence-export", ""); w.Code != http.StatusBadRequest {
+		t.Fatalf("disputes-read GET cases/not-a-number/evidence-export = %d, want 400 (past authz)", w.Code)
 	}
 
 	// Product bindings require BOTH payments.products:write AND payments.channels:write

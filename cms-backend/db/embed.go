@@ -210,3 +210,8 @@ var StripeLocalCurrencyCustomerSQL string
 //
 //go:embed migrations/2026111939.sql
 var StripeRefundDisputeMitigationSQL string
+
+// StripeRadarAndEventRecoverySQL adds persisted Stripe Radar approval commands and per-group event recovery cursors.
+//
+//go:embed migrations/2026111940.sql
+var StripeRadarAndEventRecoverySQL string

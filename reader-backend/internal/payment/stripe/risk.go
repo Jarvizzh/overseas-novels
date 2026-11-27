@@ -52,6 +52,8 @@ func (c *Client) ListOpenReviews(ctx context.Context, page PageOptions) (Page[*s
 	return listPage(c.api.V1Reviews.List(ctx, &stripego.ReviewListParams{ListParams: params}))
 }
 
+const ReviewClosedReasonApproved = string(stripego.ReviewClosedReasonApproved)
+
 // ApproveReview updates Stripe's review. The caller owns authorization and fulfillment.
 func (c *Client) ApproveReview(ctx context.Context, id, key string) (*stripego.Review, error) {
 	if !validID(id, "prv_") {
@@ -61,7 +63,11 @@ func (c *Client) ApproveReview(ctx context.Context, id, key string) (*stripego.R
 	if err != nil {
 		return nil, err
 	}
-	return apiResult(c.api.V1Reviews.Approve(ctx, id, &stripego.ReviewApproveParams{Params: params}))
+	review, err := apiResult(c.api.V1Reviews.Approve(ctx, id, &stripego.ReviewApproveParams{Params: params}))
+	if err != nil {
+		return nil, ClassifyPurposeError(c.scope, PurposeAftercare, err)
+	}
+	return review, nil
 }
 
 // ListEarlyFraudWarningsByTime backfills warnings without requiring a known Charge.

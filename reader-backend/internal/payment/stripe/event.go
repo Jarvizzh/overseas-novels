@@ -4,9 +4,122 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"strings"
 
 	stripego "github.com/stripe/stripe-go/v87"
 )
+
+// MaxEventTypesPerRequest is Stripe's per-request limit on the Events API types[] filter.
+const MaxEventTypesPerRequest = 20
+
+// EventTypeGroup is a deterministic subset of whitelisted Stripe event types
+// bounded by MaxEventTypesPerRequest so Events API pagination advances per group.
+type EventTypeGroup struct {
+	Key   string
+	Types []string
+}
+
+var stripeRecoveryEventWhitelist = []string{
+	// Checkout sessions
+	string(EventCheckoutSessionCompleted),
+	string(EventCheckoutSessionAsyncPaymentSucceeded),
+	string(EventCheckoutSessionAsyncPaymentFailed),
+	string(EventCheckoutSessionExpired),
+	// Invoices and invoice payments
+	string(EventInvoicePaymentPaid),
+	string(EventInvoicePaid),
+	string(EventInvoicePaymentSucceeded),
+	string(EventInvoicePaymentFailed),
+	string(EventInvoicePaymentActionRequired),
+	string(EventInvoiceFinalized),
+	string(EventInvoiceVoided),
+	string(EventInvoiceMarkedUncollectible),
+	// Subscriptions
+	string(EventCustomerSubscriptionCreated),
+	string(EventCustomerSubscriptionUpdated),
+	string(EventCustomerSubscriptionDeleted),
+	// Refunds
+	string(EventRefundCreated),
+	string(EventRefundUpdated),
+	string(EventRefundFailed),
+	// Risk, Radar reviews, EFW, and disputes
+	string(EventChargeSucceeded),
+	string(EventChargeFailed),
+	string(EventPaymentIntentPaymentFailed),
+	string(EventReviewOpened),
+	string(EventReviewClosed),
+	string(stripego.EventTypeRadarEarlyFraudWarningCreated),
+	string(stripego.EventTypeRadarEarlyFraudWarningUpdated),
+	string(stripego.EventTypeChargeDisputeCreated),
+	string(stripego.EventTypeChargeDisputeUpdated),
+	string(stripego.EventTypeChargeDisputeClosed),
+	string(stripego.EventTypeChargeDisputeFundsWithdrawn),
+	string(stripego.EventTypeChargeDisputeFundsReinstated),
+	// Settlement and reporting
+	string(EventPayoutPaid),
+	string(EventPayoutFailed),
+	string(EventPayoutCanceled),
+	string(EventPayoutReconciliationCompleted),
+	string(EventReportingReportRunSucceeded),
+}
+
+// RecoveryEventTypes returns a copy of the whitelisted Stripe event types used
+// for Events API recovery.
+func RecoveryEventTypes() []string {
+	out := make([]string, len(stripeRecoveryEventWhitelist))
+	copy(out, stripeRecoveryEventWhitelist)
+	return out
+}
+
+// PartitionEventTypes deduplicates event types (preserving order) and splits
+// them into slices of at most maxPerGroup (clamped to MaxEventTypesPerRequest).
+func PartitionEventTypes(types []string, maxPerGroup int) [][]string {
+	if maxPerGroup <= 0 || maxPerGroup > MaxEventTypesPerRequest {
+		maxPerGroup = MaxEventTypesPerRequest
+	}
+	seen := make(map[string]struct{}, len(types))
+	deduped := make([]string, 0, len(types))
+	for _, item := range types {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		if _, ok := seen[item]; ok {
+			continue
+		}
+		seen[item] = struct{}{}
+		deduped = append(deduped, item)
+	}
+	if len(deduped) == 0 {
+		return nil
+	}
+	groups := make([][]string, 0, (len(deduped)+maxPerGroup-1)/maxPerGroup)
+	for i := 0; i < len(deduped); i += maxPerGroup {
+		end := i + maxPerGroup
+		if end > len(deduped) {
+			end = len(deduped)
+		}
+		chunk := make([]string, end-i)
+		copy(chunk, deduped[i:end])
+		groups = append(groups, chunk)
+	}
+	return groups
+}
+
+// RecoveryEventGroups partitions the whitelisted recovery event types into
+// deterministic groups of at most MaxEventTypesPerRequest types each.
+func RecoveryEventGroups() []EventTypeGroup {
+	chunks := PartitionEventTypes(stripeRecoveryEventWhitelist, MaxEventTypesPerRequest)
+	groups := make([]EventTypeGroup, len(chunks))
+	for i, chunk := range chunks {
+		groups[i] = EventTypeGroup{
+			Key:   fmt.Sprintf("group_%d", i),
+			Types: chunk,
+		}
+	}
+	return groups
+}
 
 var (
 	ErrEventVersion         = errors.New("unsupported Stripe event API version")
@@ -46,7 +159,7 @@ func (c *Client) ListEvents(ctx context.Context, query EventQuery) (Page[Event],
 	if err != nil {
 		return Page[Event]{}, err
 	}
-	if len(query.Types) > 20 {
+	if len(query.Types) > MaxEventTypesPerRequest {
 		return Page[Event]{}, errors.New("Stripe event query supports at most 20 types")
 	}
 	list, err := listPage(c.api.V1Events.List(ctx, &stripego.EventListParams{

@@ -37,11 +37,21 @@ func caseWritePermission(kind string) string {
 	}
 }
 
+const (
+	providerStripe                    = "stripe"
+	reviewApprovalPendingConfirmation = "pending_confirmation"
+	reviewApprovalConfirmed           = "confirmed"
+	reviewApprovalFailed              = "failed"
+	reviewApprovalIdempotencyPrefix   = "radar-approve:"
+)
+
 // These predicates are used both to project available actions and to recheck
 // eligibility under the case lock at submission time.
 const caseCanApproveSQL = `c.kind='risk_review' AND c.work_state IN ('pending','refund_due','dispute_due')
 	AND NOT EXISTS(SELECT 1 FROM payment_case_receipts r JOIN payment_case_receipts d ON d.receipt_id=r.receipt_id
-		JOIN payment_cases dc ON dc.id=d.case_id AND dc.kind='dispute' AND dc.is_open WHERE r.case_id=c.id)`
+		JOIN payment_cases dc ON dc.id=d.case_id AND dc.kind='dispute' AND dc.is_open WHERE r.case_id=c.id)
+	AND NOT EXISTS(SELECT 1 FROM payment_stripe_review_approvals ra
+		WHERE ra.case_id=c.id AND ra.status IN ('pending_confirmation','confirmed'))`
 
 const caseCanRejectSQL = `c.kind='risk_review' AND c.work_state='pending'
 	AND EXISTS(SELECT 1 FROM payment_aftercare_policies p
@@ -105,7 +115,7 @@ func applyCaseAction(ctx context.Context, actor string, id int64, input caseActi
 		}
 		_, err = tx.Exec(ctx, `UPDATE payment_cases SET owner_id=$2,updated_at=now() WHERE id=$1`, id, input.Owner)
 	case "approve", "reject":
-		err = reviewCase(ctx, tx, id, input.Action)
+		err = reviewCase(ctx, tx, id, actor, input)
 	case "apply_loss", "restore":
 		if kind != "dispute" && kind != "reversal" {
 			return errCaseConflict
@@ -125,8 +135,57 @@ func applyCaseAction(ctx context.Context, actor string, id int64, input caseActi
 	return tx.Commit(ctx)
 }
 
-func reviewCase(ctx context.Context, tx pgx.Tx, id int64, decision string) error {
-	if decision == "approve" {
+func reviewCase(ctx context.Context, tx pgx.Tx, id int64, actor string, input caseAction) error {
+	if input.Action == "approve" {
+		var provider, environment, reviewID string
+		var accountID int64
+		err := tx.QueryRow(ctx, `SELECT a.provider,a.environment,c.account_id,c.external_id
+			FROM payment_cases c JOIN payment_channel_accounts a ON a.id=c.account_id
+			WHERE c.id=$1`, id).Scan(&provider, &environment, &accountID, &reviewID)
+		if err != nil {
+			return err
+		}
+		if provider == providerStripe {
+			var eligible bool
+			err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM payment_cases c WHERE c.id=$1 AND `+caseCanApproveSQL+`)`, id).Scan(&eligible)
+			if err != nil {
+				return err
+			}
+			if !eligible {
+				return errCaseConflict
+			}
+			tag, err := tx.Exec(ctx, `INSERT INTO payment_stripe_review_approvals(
+				id,case_id,account_id,environment,review_id,idempotency_key,requested_by,reason,status)
+				VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)
+				ON CONFLICT (account_id,environment,review_id) DO UPDATE SET
+					id=EXCLUDED.id,
+					case_id=EXCLUDED.case_id,
+					idempotency_key=EXCLUDED.idempotency_key,
+					requested_by=EXCLUDED.requested_by,
+					reason=EXCLUDED.reason,
+					status=$9,
+					closed_reason='',
+					lookup_only=false,
+					first_sent_at=NULL,
+					retry_until=NULL,
+					next_attempt_at=now(),
+					lease_token=NULL,
+					lease_until=NULL,
+					last_error=NULL,
+					finished_at=NULL,
+					updated_at=clock_timestamp()
+				WHERE payment_stripe_review_approvals.status=$10`,
+				input.RequestID, id, accountID, environment, reviewID,
+				reviewApprovalIdempotencyPrefix+input.RequestID.String(),
+				actor, input.Reason, reviewApprovalPendingConfirmation, reviewApprovalFailed)
+			if err != nil {
+				return err
+			}
+			if tag.RowsAffected() != 1 {
+				return errCaseConflict
+			}
+			return nil
+		}
 		tag, err := tx.Exec(ctx, `UPDATE payment_cases c SET work_state='approved',updated_at=now()
 			WHERE c.id=$1 AND `+caseCanApproveSQL, id)
 		if err == nil && tag.RowsAffected() != 1 {

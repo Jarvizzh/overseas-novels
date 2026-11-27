@@ -19,9 +19,10 @@ type roundTripper func(*http.Request) (*http.Response, error)
 func (f roundTripper) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
 
 var testConfig = Config{
-	Scope:         Scope{AccountID: "acct_merchant", Environment: Sandbox},
-	APIKey:        "sk_test_fake",
-	WebhookSecret: "whsec_fake",
+	Scope:          Scope{AccountID: "acct_merchant", Environment: Sandbox},
+	APIKey:         "sk_test_fake",
+	WebhookSecret:  "whsec_fake",
+	DisableRetries: true,
 }
 
 func stripeResponse(status int, body string) (*http.Response, error) {

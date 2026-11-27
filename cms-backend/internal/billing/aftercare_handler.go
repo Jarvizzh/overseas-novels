@@ -23,6 +23,7 @@ func (h *Handler) registerAftercareRoutes(payments *gin.RouterGroup) {
 	cases.GET("/owners", ownersRead, h.listCaseOwners)
 	cases.GET("/decisions", auth.RequirePermission(auth.PermPaymentsRiskRead), h.listCheckoutDecisions)
 	cases.GET("/:id", caseRead, h.getPaymentCase)
+	cases.GET("/:id/evidence-export", caseRead, h.exportPaymentCaseEvidence)
 	cases.POST("/:id/actions", caseWrite, h.actOnPaymentCase)
 }
 

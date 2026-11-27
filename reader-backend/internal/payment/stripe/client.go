@@ -3,11 +3,14 @@
 package stripe
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -35,12 +38,21 @@ type Scope struct {
 	Environment Environment
 }
 
+type RetryPolicy struct {
+	MaxRetries int
+	BaseDelay  time.Duration
+	MaxDelay   time.Duration
+	Sleep      func(context.Context, time.Duration) error
+}
+
 type Config struct {
 	Scope
 	APIKey                string
 	WebhookSecret         string
 	PreviousWebhookSecret string
 	HTTPClient            *http.Client
+	RetryPolicy           *RetryPolicy
+	DisableRetries        bool
 }
 
 type Client struct {
@@ -52,7 +64,183 @@ type Client struct {
 	reportHTTP            *http.Client
 }
 
-const defaultStripeHTTPTimeout = 15 * time.Second
+const (
+	defaultStripeHTTPTimeout = 15 * time.Second
+	defaultStripeMaxRetries  = 2
+	maxAllowedStripeRetries  = 3
+	defaultStripeRetryBase   = 200 * time.Millisecond
+	defaultStripeRetryMax    = 2 * time.Second
+)
+
+// DefaultRetryPolicy returns the bounded retry policy applied to pure reads and
+// writes carrying a stable Idempotency-Key.
+func DefaultRetryPolicy() RetryPolicy {
+	return RetryPolicy{
+		MaxRetries: defaultStripeMaxRetries,
+		BaseDelay:  defaultStripeRetryBase,
+		MaxDelay:   defaultStripeRetryMax,
+		Sleep:      sleepWithContext,
+	}
+}
+
+func resolveRetryPolicy(cfg Config) RetryPolicy {
+	if cfg.DisableRetries {
+		return RetryPolicy{}
+	}
+	if cfg.RetryPolicy == nil {
+		return DefaultRetryPolicy()
+	}
+	policy := *cfg.RetryPolicy
+	if policy.MaxRetries < 0 {
+		policy.MaxRetries = 0
+	}
+	if policy.MaxRetries > maxAllowedStripeRetries {
+		policy.MaxRetries = maxAllowedStripeRetries
+	}
+	if policy.BaseDelay <= 0 {
+		policy.BaseDelay = defaultStripeRetryBase
+	}
+	if policy.MaxDelay <= 0 {
+		policy.MaxDelay = defaultStripeRetryMax
+	}
+	if policy.MaxDelay < policy.BaseDelay {
+		policy.MaxDelay = policy.BaseDelay
+	}
+	if policy.Sleep == nil {
+		policy.Sleep = sleepWithContext
+	}
+	return policy
+}
+
+func sleepWithContext(ctx context.Context, d time.Duration) error {
+	if d <= 0 {
+		return ctx.Err()
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+type retryRoundTripper struct {
+	base   http.RoundTripper
+	policy RetryPolicy
+}
+
+func wrapHTTPClientWithRetries(base *http.Client, policy RetryPolicy) *http.Client {
+	if policy.MaxRetries <= 0 {
+		return base
+	}
+	transport := base.Transport
+	if transport == nil {
+		transport = http.DefaultTransport
+	}
+	cloned := *base
+	cloned.Transport = &retryRoundTripper{
+		base:   transport,
+		policy: policy,
+	}
+	return &cloned
+}
+
+func isRetryableStripeRequest(req *http.Request) (isRead bool, isIdempotentWrite bool) {
+	switch req.Method {
+	case http.MethodGet, http.MethodHead:
+		return true, false
+	case http.MethodPost, http.MethodPut, http.MethodDelete:
+		return false, strings.TrimSpace(req.Header.Get("Idempotency-Key")) != ""
+	default:
+		return false, false
+	}
+}
+
+func (rt *retryRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	isRead, isIdempotentWrite := isRetryableStripeRequest(req)
+	if rt.policy.MaxRetries <= 0 || (!isRead && !isIdempotentWrite) {
+		return rt.base.RoundTrip(req)
+	}
+
+	var bodyBytes []byte
+	if req.Body != nil {
+		var err error
+		bodyBytes, err = io.ReadAll(req.Body)
+		_ = req.Body.Close()
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	for attempt := 0; ; attempt++ {
+		attemptReq := req.Clone(req.Context())
+		if bodyBytes != nil {
+			attemptReq.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+			attemptReq.ContentLength = int64(len(bodyBytes))
+		}
+		resp, err := rt.base.RoundTrip(attemptReq)
+		if err != nil {
+			if req.Context().Err() != nil || attempt >= rt.policy.MaxRetries {
+				return nil, err
+			}
+			if sleepErr := rt.policy.Sleep(req.Context(), rt.backoff(attempt, nil)); sleepErr != nil {
+				return nil, err
+			}
+			continue
+		}
+		if !shouldRetryStripeResponse(resp, isIdempotentWrite) || attempt >= rt.policy.MaxRetries {
+			return resp, nil
+		}
+		delay := rt.backoff(attempt, resp.Header)
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+		if sleepErr := rt.policy.Sleep(req.Context(), delay); sleepErr != nil {
+			return nil, sleepErr
+		}
+	}
+}
+
+func shouldRetryStripeResponse(resp *http.Response, isIdempotentWrite bool) bool {
+	if resp == nil {
+		return false
+	}
+	switch resp.StatusCode {
+	case http.StatusTooManyRequests, http.StatusRequestTimeout,
+		http.StatusInternalServerError, http.StatusBadGateway,
+		http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return true
+	case http.StatusConflict:
+		if !isIdempotentWrite || resp.Body == nil {
+			return false
+		}
+		body, err := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		resp.Body = io.NopCloser(bytes.NewReader(body))
+		if err != nil {
+			return false
+		}
+		return strings.Contains(string(body), string(stripego.ErrorCodeIdempotencyKeyInUse))
+	default:
+		return false
+	}
+}
+
+func (rt *retryRoundTripper) backoff(attempt int, header http.Header) time.Duration {
+	delay := rt.policy.BaseDelay << attempt
+	if header != nil {
+		if raw := strings.TrimSpace(header.Get("Retry-After")); raw != "" {
+			if secs, err := strconv.Atoi(raw); err == nil && secs > 0 {
+				delay = time.Duration(secs) * time.Second
+			}
+		}
+	}
+	if delay > rt.policy.MaxDelay {
+		delay = rt.policy.MaxDelay
+	}
+	return delay
+}
 
 // NewClient checks that the credential belongs to the configured merchant account.
 func NewClient(ctx context.Context, cfg Config) (*Client, error) {
@@ -121,8 +309,10 @@ func initClient(ctx context.Context, cfg Config, httpClient *http.Client, verify
 		return nil, errors.New("invalid Stripe previous webhook secret")
 	}
 
+	retryPolicy := resolveRetryPolicy(cfg)
+	apiHTTP := wrapHTTPClientWithRetries(httpClient, retryPolicy)
 	backend := stripego.NewBackendsWithConfig(&stripego.BackendConfig{
-		HTTPClient:        httpClient,
+		HTTPClient:        apiHTTP,
 		MaxNetworkRetries: stripego.Int64(0),
 		LeveledLogger:     &stripego.LeveledLogger{Level: stripego.LevelNull},
 	})

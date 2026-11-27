@@ -181,3 +181,118 @@ func TestPaymentEventRecoveryKeepsScopeAndPageAcrossLeases(t *testing.T) {
 		t.Fatalf("completed scan cursor=%q error=%v", cursor, err)
 	}
 }
+
+type groupedRecoveryFixture struct {
+	account  payment.WebhookAccount
+	queries  []stripe.EventQuery
+	listFunc func(context.Context, stripe.EventQuery) (stripe.Page[stripe.Event], error)
+}
+
+func (g *groupedRecoveryFixture) Provider() string                     { return payment.ProviderStripe }
+func (g *groupedRecoveryFixture) AccountScope() payment.WebhookAccount { return g.account }
+func (g *groupedRecoveryFixture) ListEvents(ctx context.Context, q stripe.EventQuery) (stripe.Page[stripe.Event], error) {
+	g.queries = append(g.queries, q)
+	return g.listFunc(ctx, q)
+}
+func (g *groupedRecoveryFixture) PaymentNotice(e stripe.Event) (*payment.SingleCheckoutNotice, error) {
+	return &payment.SingleCheckoutNotice{EventID: e.ID, EventType: string(e.Type), InvoiceID: "in_" + e.ID, Account: g.account}, nil
+}
+
+func TestStripeGroupedEventRecoveryPaginatesIndependentlyWithoutMissingPages(t *testing.T) {
+	t.Setenv("CONVERSION_ENVIRONMENT", "sandbox")
+	pool := testdb.Open(t)
+	ctx := t.Context()
+	if _, err := pool.Exec(ctx, `INSERT INTO payment_channel_accounts(provider,account_key,environment,credentials_ref,webhook_ref)
+		VALUES('stripe','acct_Grouped','sandbox','test','test')`); err != nil {
+		t.Fatal(err)
+	}
+	account := payment.WebhookAccount{AccountKey: "acct_Grouped", Environment: "sandbox"}
+	groups := stripe.RecoveryEventGroups()
+	if len(groups) < 2 {
+		t.Fatalf("expected >=2 groups for >20 event types, got %d", len(groups))
+	}
+
+	g0FirstType := groups[0].Types[0]
+	g1FirstType := groups[1].Types[0]
+	g1FailOnce := true
+
+	adapter := &groupedRecoveryFixture{
+		account: account,
+		listFunc: func(_ context.Context, q stripe.EventQuery) (stripe.Page[stripe.Event], error) {
+			if len(q.Types) == 0 || len(q.Types) > stripe.MaxEventTypesPerRequest {
+				t.Fatalf("group query violated 20-type limit: %d", len(q.Types))
+			}
+			switch q.Types[0] {
+			case g0FirstType:
+				if q.StartingAfter == "" {
+					return stripe.Page[stripe.Event]{
+						Items:   []stripe.Event{{ID: "evt_g0_p1", Type: "invoice.paid"}},
+						HasMore: true,
+					}, nil
+				}
+				if q.StartingAfter == "evt_g0_p1" {
+					return stripe.Page[stripe.Event]{
+						Items:   []stripe.Event{{ID: "evt_g0_p2", Type: "invoice.paid"}},
+						HasMore: false,
+					}, nil
+				}
+				t.Fatalf("unexpected group_0 cursor %q", q.StartingAfter)
+			case g1FirstType:
+				if g1FailOnce {
+					g1FailOnce = false
+					return stripe.Page[stripe.Event]{}, errors.New("temporary 429 on group_1")
+				}
+				if q.StartingAfter == "" {
+					return stripe.Page[stripe.Event]{
+						Items:   []stripe.Event{{ID: "evt_g1_p1", Type: "payout.paid"}},
+						HasMore: true,
+					}, nil
+				}
+				if q.StartingAfter == "evt_g1_p1" {
+					return stripe.Page[stripe.Event]{
+						Items:   []stripe.Event{{ID: "evt_g1_p2", Type: "payout.paid"}},
+						HasMore: false,
+					}, nil
+				}
+				t.Fatalf("unexpected group_1 cursor %q", q.StartingAfter)
+			}
+			return stripe.Page[stripe.Event]{}, nil
+		},
+	}
+
+	s := &service{adapters: payment.NewAdapters(adapter)}
+	// Pass 1: group_0 fetches page 1 (cursor -> evt_g0_p1); group_1 fails transiently.
+	s.recoverStripeEventWindow(ctx)
+	var g0Cursor, g1Cursor string
+	if err := pool.QueryRow(ctx, `SELECT
+		(SELECT page_cursor FROM payment_event_recovery_groups WHERE group_key='group_0'),
+		(SELECT page_cursor FROM payment_event_recovery_groups WHERE group_key='group_1')`).Scan(&g0Cursor, &g1Cursor); err != nil {
+		t.Fatal(err)
+	}
+	if g0Cursor != "evt_g0_p1" || g1Cursor != "" {
+		t.Fatalf("after pass 1 cursors: g0=%q g1=%q", g0Cursor, g1Cursor)
+	}
+
+	// Make group_1 due again; Pass 2: group_0 finishes page 2 (cursor -> ''), group_1 fetches page 1 (cursor -> evt_g1_p1).
+	if _, err := pool.Exec(ctx, `UPDATE payment_event_recovery_groups SET next_attempt_at=now()-interval '1 second'`); err != nil {
+		t.Fatal(err)
+	}
+	s.recoverStripeEventWindow(ctx)
+	if err := pool.QueryRow(ctx, `SELECT
+		(SELECT page_cursor FROM payment_event_recovery_groups WHERE group_key='group_0'),
+		(SELECT page_cursor FROM payment_event_recovery_groups WHERE group_key='group_1')`).Scan(&g0Cursor, &g1Cursor); err != nil {
+		t.Fatal(err)
+	}
+	if g0Cursor != "" || g1Cursor != "evt_g1_p1" {
+		t.Fatalf("after pass 2 cursors: g0=%q g1=%q", g0Cursor, g1Cursor)
+	}
+
+	// Pass 3: group_1 finishes page 2.
+	s.recoverStripeEventWindow(ctx)
+
+	var count int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM payment_event_inbox
+		WHERE event_id IN ('evt_g0_p1','evt_g0_p2','evt_g1_p1','evt_g1_p2')`).Scan(&count); err != nil || count != 4 {
+		t.Fatalf("recovered events=%d want 4, err=%v", count, err)
+	}
+}

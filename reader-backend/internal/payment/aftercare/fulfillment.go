@@ -21,6 +21,8 @@ func EvaluateFulfillment(ctx context.Context, tx pgx.Tx, orderID, receiptID int6
 		ORDER BY c.id LIMIT 1 FOR UPDATE OF c
 	)
 	SELECT EXISTS(SELECT 1 FROM risk) OR COALESCE(loss.confirmed_loss_minor,0)>=o.amount_cents OR
+	    EXISTS(SELECT 1 FROM payment_stripe_review_approvals ra JOIN payment_case_receipts r ON r.case_id=ra.case_id
+	        WHERE r.receipt_id=$1 AND ra.status<>'confirmed') OR
 	    EXISTS(SELECT 1 FROM payment_refund_commands c WHERE c.receipt_id=$1 AND c.status IN ('pending','confirming','review')) OR
 	    EXISTS(SELECT 1 FROM payment_deferred_fulfillment h JOIN payment_case_receipts r ON r.receipt_id=h.receipt_id
 	        JOIN payment_cases c ON c.id=r.case_id AND c.kind='dispute' AND c.is_open

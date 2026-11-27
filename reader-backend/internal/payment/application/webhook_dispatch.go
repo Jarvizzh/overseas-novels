@@ -193,7 +193,7 @@ func (s *service) stripeEventResolver(account payment.WebhookAccount) (stripeWeb
 func (s *service) executeStripeNoticeJob(ctx context.Context, provider payment.SingleCheckoutAdapter, account payment.WebhookAccount, job stripeNoticeJob) error {
 	switch {
 	case len(job.aftercare) != 0:
-		return s.processQueuedStripeAftercare(ctx, job.aftercare)
+		return s.processStripeAftercareNotice(ctx, account, job.aftercare)
 	case !paymentEnvironmentMatches(account):
 		return ErrCheckoutPaused
 	case job.refundID != "":

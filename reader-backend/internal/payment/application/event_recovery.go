@@ -25,6 +25,7 @@ const (
 
 type paymentEventWindowLease struct {
 	accountID  int64
+	groupKey   string
 	start, end time.Time
 	cursor     string
 	token      uuid.UUID
@@ -45,16 +46,41 @@ func SchedulePaymentEventRecovery(ctx context.Context, provider string, account 
 	if end.After(now) {
 		end = now
 	}
-	result, err := db.Pool(ctx).Exec(ctx, `INSERT INTO payment_event_recovery(account_id,window_start,window_end)
+	tx, err := db.Pool(ctx).Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(context.WithoutCancel(ctx))
+
+	result, err := tx.Exec(ctx, `INSERT INTO payment_event_recovery(account_id,window_start,window_end)
 		SELECT id,$4,$5 FROM payment_channel_accounts WHERE provider=$1 AND account_key=$2 AND environment=$3
 		ON CONFLICT(account_id) DO UPDATE SET window_start=EXCLUDED.window_start,window_end=EXCLUDED.window_end,
 		page_cursor='',next_attempt_at=now(),lease_token=NULL,lease_until=NULL,last_error=NULL
 		WHERE payment_event_recovery.lease_until IS NULL OR payment_event_recovery.lease_until<=now()`,
 		provider, account.AccountKey, account.Environment, from, end)
-	if err == nil && result.RowsAffected() == 0 {
+	if err != nil {
+		return err
+	}
+	if result.RowsAffected() == 0 {
 		return errors.New("channel account was not found or a recovery page is currently leased")
 	}
-	return err
+	if provider == payment.ProviderStripe {
+		for _, group := range stripe.RecoveryEventGroups() {
+			groupResult, err := tx.Exec(ctx, `INSERT INTO payment_event_recovery_groups(account_id,group_key,window_start,window_end)
+				SELECT id,$4,$5,$6 FROM payment_channel_accounts WHERE provider=$1 AND account_key=$2 AND environment=$3
+				ON CONFLICT(account_id,group_key) DO UPDATE SET window_start=EXCLUDED.window_start,window_end=EXCLUDED.window_end,
+				page_cursor='',next_attempt_at=now(),lease_token=NULL,lease_until=NULL,last_error=NULL
+				WHERE payment_event_recovery_groups.lease_until IS NULL OR payment_event_recovery_groups.lease_until<=now()`,
+				provider, account.AccountKey, account.Environment, group.Key, from, end)
+			if err != nil {
+				return err
+			}
+			if groupResult.RowsAffected() == 0 {
+				return errors.New("channel account was not found or a recovery group page is currently leased")
+			}
+		}
+	}
+	return tx.Commit(ctx)
 }
 
 func claimPaymentEventWindow(ctx context.Context, provider string, account payment.WebhookAccount) (paymentEventWindowLease, error) {
@@ -153,7 +179,52 @@ func (s *service) enqueueRecoveredPayPal(ctx context.Context, event paypal.Event
 	return nil, nil
 }
 
+func claimStripeEventRecoveryGroup(ctx context.Context, account payment.WebhookAccount, groupKey string) (paymentEventWindowLease, error) {
+	var window paymentEventWindowLease
+	window.token = uuid.New()
+	window.groupKey = groupKey
+	pool := db.Pool(ctx)
+	_, err := pool.Exec(ctx, `INSERT INTO payment_event_recovery_groups(account_id,group_key,window_start,window_end)
+		SELECT id,$4,now()-make_interval(secs=>$5::int),now() FROM payment_channel_accounts
+		WHERE provider=$1 AND account_key=$2 AND environment=$3 ON CONFLICT DO NOTHING`,
+		payment.ProviderStripe, account.AccountKey, account.Environment, groupKey,
+		int(paymentEventInitialLookback/time.Second))
+	if err != nil {
+		return window, err
+	}
+	err = pool.QueryRow(ctx, `UPDATE payment_event_recovery_groups r SET lease_token=$5,lease_until=now()+interval '2 minutes'
+		FROM payment_channel_accounts a WHERE a.id=r.account_id AND a.provider=$1 AND a.account_key=$2 AND a.environment=$3
+		  AND r.group_key=$4 AND r.next_attempt_at<=now() AND (r.lease_until IS NULL OR r.lease_until<=now())
+		RETURNING r.account_id,r.window_start,r.window_end,r.page_cursor`,
+		payment.ProviderStripe, account.AccountKey, account.Environment, groupKey, window.token).
+		Scan(&window.accountID, &window.start, &window.end, &window.cursor)
+	return window, err
+}
+
+func finishStripeEventRecoveryGroup(ctx context.Context, window paymentEventWindowLease, next string, result error) error {
+	pool := db.Pool(ctx)
+	if result != nil {
+		_, err := pool.Exec(ctx, `UPDATE payment_event_recovery_groups SET lease_token=NULL,lease_until=NULL,last_error=left($4,500),
+			next_attempt_at=now()+interval '1 minute' WHERE account_id=$1 AND group_key=$2 AND lease_token=$3`,
+			window.accountID, window.groupKey, window.token, result.Error())
+		return err
+	}
+	_, err := pool.Exec(ctx, `UPDATE payment_event_recovery_groups SET page_cursor=$4,lease_token=NULL,lease_until=NULL,last_error=NULL,
+		last_complete_at=CASE WHEN $4='' THEN window_end ELSE last_complete_at END,
+		window_start=CASE WHEN $4='' THEN window_end-make_interval(secs=>$5::int) ELSE window_start END,
+		window_end=CASE WHEN $4='' THEN least(now(),window_end+make_interval(secs=>$6::int)) ELSE window_end END,
+		next_attempt_at=CASE WHEN $4='' AND window_end>=now()-interval '1 minute' THEN now()+interval '1 minute' ELSE now() END
+		WHERE account_id=$1 AND group_key=$2 AND lease_token=$3`,
+		window.accountID, window.groupKey, window.token, next,
+		int(paymentEventOverlap/time.Second), int(paymentEventWindow/time.Second))
+	return err
+}
+
 func (s *service) recoverStripeEventWindow(ctx context.Context) {
+	s.recoverStripeEventGroups(ctx, stripe.RecoveryEventGroups())
+}
+
+func (s *service) recoverStripeEventGroups(ctx context.Context, groups []stripe.EventTypeGroup) {
 	adapter, err := payment.Capability[interface {
 		AccountScope() payment.WebhookAccount
 		ListEvents(context.Context, stripe.EventQuery) (stripe.Page[stripe.Event], error)
@@ -198,39 +269,66 @@ func (s *service) recoverStripeEventWindow(ctx context.Context) {
 		}
 		return enqueueRecovered(ctx, event, raw)
 	})
-	s.recoverPaymentEventWindow(ctx, payment.ProviderStripe, account, func(ctx context.Context, w paymentEventWindowLease) (string, error) {
-		if time.Since(w.start) >= 30*24*time.Hour {
-			return "", errors.New("Stripe event window exceeds retention; recover from transaction resources")
+	for _, group := range groups {
+		if len(group.Types) == 0 {
+			continue
 		}
-		page, err := adapter.ListEvents(ctx, stripe.EventQuery{Created: stripe.TimeRange{From: w.start, Before: w.end},
-			PageOptions: stripe.PageOptions{Limit: paymentEventPageSize, StartingAfter: w.cursor}})
+		w, err := claimStripeEventRecoveryGroup(ctx, account, group.Key)
+		if errors.Is(err, pgx.ErrNoRows) {
+			continue
+		}
 		if err != nil {
-			return "", err
+			log.Printf("task=payment_event_recovery provider=stripe group=%s action=claim error=%v", group.Key, err)
+			continue
 		}
-		for _, event := range page.Items {
-			body, err := json.Marshal(event)
+		request, cancel := context.WithTimeout(ctx, 45*time.Second)
+		next, result := func(ctx context.Context, w paymentEventWindowLease) (string, error) {
+			if time.Since(w.start) >= 30*24*time.Hour {
+				return "", errors.New("Stripe event window exceeds retention; recover from transaction resources")
+			}
+			page, err := adapter.ListEvents(ctx, stripe.EventQuery{
+				Created:     stripe.TimeRange{From: w.start, Before: w.end},
+				Types:       group.Types,
+				PageOptions: stripe.PageOptions{Limit: paymentEventPageSize, StartingAfter: w.cursor},
+			})
 			if err != nil {
 				return "", err
 			}
-			review, transient := enqueueRecovered(ctx, event, body)
-			if transient != nil {
-				return "", transient
-			}
-			if review != nil {
-				if err := saveUnprocessedPaymentEvent(ctx, w.accountID, event.ID, body, review); err != nil {
+			for _, event := range page.Items {
+				body, err := json.Marshal(event)
+				if err != nil {
 					return "", err
 				}
-				continue
+				review, transient := enqueueRecovered(ctx, event, body)
+				if transient != nil {
+					return "", transient
+				}
+				if review != nil {
+					if err := saveUnprocessedPaymentEvent(ctx, w.accountID, event.ID, body, review); err != nil {
+						return "", err
+					}
+					continue
+				}
 			}
+			if !page.HasMore {
+				return "", nil
+			}
+			if len(page.Items) == 0 {
+				return "", errors.New("Stripe event page did not advance")
+			}
+			return page.Items[len(page.Items)-1].ID, nil
+		}(request, w)
+		cancel()
+		if result == nil && next != "" && next == w.cursor {
+			result = errors.New("payment event cursor did not advance")
 		}
-		if !page.HasMore {
-			return "", nil
+		if result != nil {
+			log.Printf("task=payment_event_recovery provider=stripe group=%s action=recover error=%v", group.Key, result)
 		}
-		if len(page.Items) == 0 {
-			return "", errors.New("Stripe event page did not advance")
+		if err := finishStripeEventRecoveryGroup(ctx, w, next, result); err != nil {
+			log.Printf("task=payment_event_recovery provider=stripe group=%s action=finish error=%v", group.Key, err)
 		}
-		return page.Items[len(page.Items)-1].ID, nil
-	})
+	}
 }
 
 func (s *service) recoverPaymentEventWindow(ctx context.Context, provider string, account payment.WebhookAccount,

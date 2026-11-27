@@ -185,4 +185,61 @@ func testAftercareRoutes(t *testing.T, service BillingService, exec func(string,
 	if detail.Receipts[0].Result == nil || detail.Receipts[0].Result.Status != "stale" || detail.Receipts[0].Action != "apply_loss" {
 		t.Fatalf("stale command keeps the current eligible action: %+v", detail.Receipts[0])
 	}
+
+	// P1-3: Stripe Radar approval persists pending_confirmation command + audit without immediately setting work_state=approved.
+	exec(`INSERT INTO payment_cases(id,account_id,kind,external_id,receipt_refs,provider_status,is_open,work_state,work_due_at,observed_at)
+		OVERRIDING SYSTEM VALUE VALUES
+		(5103,902,'risk_review','prv_stripe_cms',ARRAY['ch_fin03'],'open',true,'pending',now()+interval '1 hour',now());`)
+	const approveReq1 = `{"request_id":"50000000-0000-4000-8000-000000000011","action":"approve","reason":"verified stripe buyer"}`
+	check("test-finance", http.MethodPost, "/5103/actions", approveReq1, http.StatusOK)
+	// Idempotent replay with same request_id succeeds.
+	check("test-finance", http.MethodPost, "/5103/actions", approveReq1, http.StatusOK)
+	// Duplicate approval with a different request_id while pending_confirmation returns 409.
+	check("test-finance", http.MethodPost, "/5103/actions", `{"request_id":"50000000-0000-4000-8000-000000000012","action":"approve","reason":"second try"}`, http.StatusConflict)
+	found = check("test-finance", http.MethodGet, "/5103", "", http.StatusOK)
+	var stripeDetail struct {
+		WorkState        string   `json:"work_state"`
+		ApprovalState    string   `json:"approval_state"`
+		AvailableActions []string `json:"available_actions"`
+		ApprovalCommand  *struct {
+			Status   string `json:"status"`
+			ReviewID string `json:"review_id"`
+		} `json:"approval_command"`
+	}
+	if err := json.Unmarshal([]byte(found), &stripeDetail); err != nil {
+		t.Fatalf("stripe case detail: %s, %v", found, err)
+	}
+	if stripeDetail.WorkState != "pending" || stripeDetail.ApprovalState != reviewApprovalPendingConfirmation ||
+		stripeDetail.ApprovalCommand == nil || stripeDetail.ApprovalCommand.Status != reviewApprovalPendingConfirmation ||
+		stripeDetail.ApprovalCommand.ReviewID != "prv_stripe_cms" || slices.Contains(stripeDetail.AvailableActions, "approve") {
+		t.Fatalf("unexpected stripe approval projection: %+v", stripeDetail)
+	}
+	// After failure, approval becomes retryable with a new request_id.
+	exec(`UPDATE payment_stripe_review_approvals SET status='failed',last_error='transient error' WHERE case_id=5103`)
+	check("test-finance", http.MethodPost, "/5103/actions", `{"request_id":"50000000-0000-4000-8000-000000000013","action":"approve","reason":"retry after failure"}`, http.StatusOK)
+	found = check("test-finance", http.MethodGet, "/5103", "", http.StatusOK)
+	if !strings.Contains(found, `"approval_state":"pending_confirmation"`) && !strings.Contains(found, `"approval_state": "pending_confirmation"`) {
+		t.Fatalf("expected pending_confirmation after retry: %s", found)
+	}
+
+	// P2-3: Digital-delivery evidence export RBAC & payload verification.
+	exec(`INSERT INTO payment_case_evidence(case_id,source,source_ref,digest,observed_at,evidence)
+		VALUES(5101,'provider_api','dp_CMS',decode(repeat('bb',32),'hex'),now(),'{"NetworkReason":"10.4","document":"secret-doc"}'::jsonb)
+		ON CONFLICT DO NOTHING`)
+	check("test-support", http.MethodGet, "/5101/evidence-export", "", http.StatusForbidden)
+	exportBody := check("test-finance", http.MethodGet, "/5101/evidence-export?download=1", "", http.StatusOK)
+	var exported DigitalDeliveryEvidenceExport
+	if err := json.Unmarshal([]byte(exportBody), &exported); err != nil {
+		t.Fatalf("evidence export json: %s, %v", exportBody, err)
+	}
+	if exported.SchemaVersion != evidenceExportSchemaVersion ||
+		exported.VisaCE3Eligibility.Status != visaCE3StatusRequiresStripeConfirmation ||
+		exported.VisaCE3Eligibility.StripeConfirmed ||
+		exported.VisaCE3Eligibility.EligibleForSubmission ||
+		exported.VisaCE3Eligibility.StripeNetworkReasonCode != "10.4" {
+		t.Fatalf("unexpected evidence export CE 3.0 gating: %+v", exported.VisaCE3Eligibility)
+	}
+	if strings.Contains(exportBody, "secret-doc") || !strings.Contains(exportBody, "ch_fin03") || !strings.Contains(exportBody, "entitlement_delivery") {
+		t.Fatalf("unexpected evidence export payload: %s", exportBody)
+	}
 }

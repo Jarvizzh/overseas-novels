@@ -12,6 +12,7 @@ const caseColumns = `c.id::text AS id,a.provider,a.environment,a.id::text AS acc
 	c.owner_id,owner.username AS owner,c.amount_minor::text AS amount_minor,
 	c.original_currency,c.original_amount_minor::text AS original_amount_minor,
 	CASE WHEN a.provider='paypal' THEN 'direct' ELSE modes.mode END AS sales_mode,
+	ra.status AS approval_state,
 	EXISTS(SELECT 1 FROM payment_case_reminders r WHERE r.case_id=c.id AND r.due_at=c.due_at) AS reminder,
 	ARRAY(SELECT order_id FROM (
 		SELECT r.order_id::text FROM payment_case_receipts r WHERE r.case_id=c.id
@@ -21,6 +22,7 @@ const caseColumns = `c.id::text AS id,a.provider,a.environment,a.id::text AS acc
 
 const caseJoins = ` FROM payment_cases c JOIN payment_channel_accounts a ON a.id=c.account_id
 	LEFT JOIN admins owner ON owner.id=c.owner_id
+	LEFT JOIN payment_stripe_review_approvals ra ON ra.case_id=c.id
 	LEFT JOIN LATERAL (
 		SELECT CASE WHEN count(DISTINCT source.sales_mode)=1 THEN min(source.sales_mode) END AS mode FROM (
 			SELECT p.sales_mode FROM payment_case_receipts r JOIN payment_checkout_attempts p
@@ -86,6 +88,15 @@ func getCase(ctx context.Context, id int64) (string, json.RawMessage, error) {
 		array_remove(ARRAY['assign',CASE WHEN `+caseCanApproveSQL+` THEN 'approve' END,
 			CASE WHEN `+caseCanRejectSQL+` THEN 'reject' END],NULL) AS available_actions`+caseJoins+` WHERE c.id=$1)
 	SELECT detail.kind, to_jsonb(detail)||jsonb_build_object(
+		'approval_command',(SELECT jsonb_build_object(
+			'id',ra.id::text,
+			'review_id',ra.review_id,
+			'status',ra.status,
+			'closed_reason',ra.closed_reason,
+			'last_error',ra.last_error,
+			'requested_at',ra.created_at,
+			'finished_at',ra.finished_at
+		) FROM payment_stripe_review_approvals ra WHERE ra.case_id=$1),
 		'receipts',COALESCE((SELECT jsonb_agg(jsonb_build_object('id',r.receipt_id::text,'receipt',r.capture_id,
 			'order_id',r.order_id::text,'type',o.order_type,'state',o.status,'paid_at',o.paid_at,'fulfilled_at',o.fulfilled_at,
 			'paid_period_start',o.paid_period_start,'paid_period_end',o.paid_period_end,

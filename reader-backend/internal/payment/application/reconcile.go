@@ -33,6 +33,7 @@ func (s *service) RunReconciliation(ctx context.Context) {
 		{s.reconcilePayPalSubscriptions, 15 * time.Second, nil},
 		{func(ctx context.Context) { s.eachPayPalAccount(ctx, (*service).reconcileRefundCommands) }, 15 * time.Second, nil},
 		{s.reconcileAftercare, aftercareInterval, nil},
+		{func(ctx context.Context) { s.eachStripeAccount(ctx, (*service).reconcileStripeRadarApprovals) }, aftercareInterval, nil},
 		{func(ctx context.Context) { s.eachStripeAccount(ctx, (*service).reconcileStripeCheckouts) }, stripeCheckoutInterval, s.stripeEventsWake},
 		{func(ctx context.Context) { s.eachPayPalAccount(ctx, (*service).recoverPayPalEventWindow) }, paymentEventRecoveryInterval, nil},
 		{func(ctx context.Context) { s.eachStripeAccount(ctx, (*service).recoverStripeEventWindow) }, paymentEventRecoveryInterval, nil},
