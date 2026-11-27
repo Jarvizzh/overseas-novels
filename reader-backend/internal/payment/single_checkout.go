@@ -108,4 +108,12 @@ type StripeRefundProof struct {
 	AmountMinor                                int64
 }
 
-var ErrStripeRefundRequiresReview = errors.New("Stripe receipt is currently unavailable for refund")
+var (
+	ErrStripeRefundRequiresReview       = errors.New("Stripe receipt is currently unavailable for refund")
+	ErrStripeRefundOpenDispute          = errors.New("Stripe receipt has an open formal dispute; routed to dispute workflow")
+	ErrStripeRefundNonRefundableInquiry = errors.New("Stripe inquiry dispute marks charge non-refundable; routed to dispute workflow")
+	ErrStripeRefundDisputeLost          = errors.New("Stripe dispute is lost; receipt cannot be refunded")
+	ErrStripeRefundWonNotYetRefundable  = errors.New("Stripe dispute was won but charge is not yet marked refundable")
+	ErrStripeRefundVerificationPending  = errors.New("Stripe refund eligibility verification is pending or inconclusive")
+	ErrStripeRefundInsufficientBalance  = errors.New("Stripe charge remaining refundable balance is insufficient")
+)

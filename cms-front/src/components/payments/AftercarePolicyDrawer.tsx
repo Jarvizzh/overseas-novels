@@ -12,6 +12,9 @@ type Policy = {
   revision: string;
   dispute_lookup: boolean;
   hold_fulfillment: boolean;
+  auto_refund: boolean;
+  auto_cancel_subscription: boolean;
+  dispute_freeze: boolean;
   reviewer_id: string;
   finance_id: string;
   review_seconds: number | null;
@@ -65,6 +68,9 @@ function PolicyForm({
           revision: policy.revision,
           dispute_lookup: data.has('dispute_lookup'),
           hold_fulfillment: hold,
+          auto_refund: data.has('auto_refund'),
+          auto_cancel_subscription: data.has('auto_cancel_subscription'),
+          dispute_freeze: data.has('dispute_freeze'),
           reviewer_id: reviewer,
           finance_id: finance,
           reason: String(data.get('reason') || '').trim(),
@@ -99,6 +105,33 @@ function PolicyForm({
           onChange={(event) => setHold(event.target.checked)}
         />
         高风险收款暂缓履约
+      </label>
+      <label className="flex items-center gap-2">
+        <input
+          type="checkbox"
+          name="auto_refund"
+          defaultChecked={policy.auto_refund}
+          disabled={!canWrite || busy}
+        />
+        EFW / 可退问询自动止损退款（默认关闭）
+      </label>
+      <label className="flex items-center gap-2">
+        <input
+          type="checkbox"
+          name="auto_cancel_subscription"
+          defaultChecked={policy.auto_cancel_subscription}
+          disabled={!canWrite || busy}
+        />
+        EFW / 争议自动期末停订原协议（默认关闭）
+      </label>
+      <label className="flex items-center gap-2">
+        <input
+          type="checkbox"
+          name="dispute_freeze"
+          defaultChecked={policy.dispute_freeze}
+          disabled={!canWrite || busy}
+        />
+        正式争议期冻结关联权益（默认关闭）
       </label>
       <div className="grid gap-3 sm:grid-cols-2">
         <label className="grid gap-1">

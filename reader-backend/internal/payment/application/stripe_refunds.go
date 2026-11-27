@@ -6,12 +6,25 @@ import (
 	"log"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"reader-backend/internal/conversion"
 	"reader-backend/internal/db"
 	"reader-backend/internal/payment"
 	"reader-backend/internal/payment/aftercare"
 	"reader-backend/internal/payment/ledger"
+)
+
+const (
+	stripeRefundNonRefundableInquiryNote = "Stripe inquiry dispute marks charge non-refundable; routed to dispute workflow"
+	stripeRefundDisputeLostNote          = "Stripe dispute was lost; receipt is not refundable"
+	stripeRefundWonNotYetRefundableNote  = "Stripe dispute was won; waiting for remote charge refundability"
+	stripeRefundVerificationPendingNote  = "Verifying Stripe charge balance and live dispute eligibility"
+	stripeRefundInsufficientBalanceNote  = "Stripe charge remaining refundable balance is insufficient"
+	stripeRefundRequiresReviewNote       = "Stripe receipt has a dispute or insufficient refundable balance"
+	stripeRefundConfirmingNote           = "Checking the original Stripe refund request"
+	stripeRefundRetryDelay               = time.Minute
+	stripeRefundRequestTimeout           = 45 * time.Second
 )
 
 type stripeRefundAdapter interface {
@@ -23,7 +36,10 @@ type stripeRefundAdapter interface {
 
 func claimStripeRefunds(ctx context.Context, account payment.WebhookAccount) ([]refundJob, error) {
 	rows, err := db.Pool(ctx).Query(ctx, `WITH due AS (
-		SELECT c.id,p.capture_id,(c.first_sent_at IS NULL AND c.provider_refund_id IS NULL) AS send
+		SELECT c.id,p.capture_id,(c.first_sent_at IS NULL AND c.provider_refund_id IS NULL) AS send,
+			c.stop_loss_full_remaining,
+			EXISTS(SELECT 1 FROM payment_case_receipts r JOIN payment_cases pc ON pc.id=r.case_id
+				WHERE r.receipt_id=c.receipt_id AND pc.kind='dispute') AS verify_disputes
 		FROM payment_refund_commands c JOIN third_party_payment_orders p ON p.id=c.receipt_id
 		JOIN payment_channel_accounts a ON a.id=p.account_id JOIN recharge_orders o ON o.id=c.order_id
 		WHERE a.provider='stripe' AND a.account_key=$1 AND a.environment=$2 AND c.environment=$2 AND o.checkout_environment=$3
@@ -35,7 +51,8 @@ func claimStripeRefunds(ctx context.Context, account payment.WebhookAccount) ([]
 	UPDATE payment_refund_commands c SET claimed_until=now()+interval '5 minutes',status='confirming',
 		first_sent_at=CASE WHEN due.send THEN now() ELSE c.first_sent_at END,updated_at=now()
 	FROM due WHERE c.id=due.id
-	RETURNING c.id::text,c.order_id,c.receipt_id,c.claimed_until,due.capture_id,COALESCE(c.provider_refund_id,''),c.amount_minor,c.currency,due.send`,
+	RETURNING c.id::text,c.order_id,c.receipt_id,c.claimed_until,due.capture_id,COALESCE(c.provider_refund_id,''),
+		c.amount_minor,c.currency,due.send,due.verify_disputes,due.stop_loss_full_remaining`,
 		account.AccountKey, account.Environment, conversion.Environment())
 	if err != nil {
 		return nil, err
@@ -43,10 +60,72 @@ func claimStripeRefunds(ctx context.Context, account payment.WebhookAccount) ([]
 	return pgx.CollectRows(rows, func(row pgx.CollectableRow) (refundJob, error) {
 		job := refundJob{request: payment.RefundRequest{Account: account}}
 		err := row.Scan(&job.id, &job.orderID, &job.receiptID, &job.lease, &job.request.ReceiptID, &job.request.RefundID,
-			&job.request.AmountMinor, &job.request.Currency, &job.request.Send)
+			&job.request.AmountMinor, &job.request.Currency, &job.request.Send,
+			&job.request.VerifyDisputes, &job.request.StopLossFullRemaining)
 		job.request.RequestKey = job.id
 		return job, err
 	})
+}
+
+// verifyLocalStripeRefundEligibility checks local receipt gross, completed refunds,
+// and concurrent local refund reservations before sending a Stripe refund request.
+func verifyLocalStripeRefundEligibility(ctx context.Context, job *refundJob) error {
+	if !job.request.Send {
+		return nil
+	}
+	tx, err := db.Pool(ctx).Begin(ctx)
+	if err != nil {
+		return errors.Join(payment.ErrStripeRefundVerificationPending, err)
+	}
+	defer tx.Rollback(context.WithoutCancel(ctx))
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('stripe-capture:'||$1,0))`, job.request.ReceiptID); err != nil {
+		return errors.Join(payment.ErrStripeRefundVerificationPending, err)
+	}
+	var gross, refunded, otherReserved int64
+	err = tx.QueryRow(ctx, `SELECT (t.gross_amount*100)::bigint,
+		COALESCE((SELECT sum(amount_minor)::bigint FROM payment_stripe_refund_items WHERE receipt_id=t.id),0),
+		COALESCE((SELECT sum(c.amount_minor)::bigint FROM payment_refund_commands c
+			WHERE c.receipt_id=t.id AND c.id<>$2::uuid AND c.status IN ('pending','confirming','review')
+			  AND NOT EXISTS(SELECT 1 FROM payment_stripe_refund_items i
+				WHERE i.receipt_id=c.receipt_id AND i.refund_ref=c.provider_refund_id)),0)
+		FROM third_party_payment_orders t
+		JOIN payment_channel_accounts a ON a.id=t.account_id
+		WHERE t.id=$1 AND t.capture_id=$3 AND t.object_type='charge' AND t.status='VERIFIED' AND t.currency='USD'
+		  AND a.provider='stripe' AND a.account_key=$4 AND a.environment=$5`,
+		job.receiptID, job.id, job.request.ReceiptID, job.request.Account.AccountKey, job.request.Account.Environment).
+		Scan(&gross, &refunded, &otherReserved)
+	if err != nil {
+		return errors.Join(payment.ErrStripeRefundVerificationPending, err)
+	}
+	availableAfterCompleted := gross - refunded
+	availableAfterReserved := availableAfterCompleted - otherReserved
+	if availableAfterCompleted <= 0 {
+		return payment.ErrStripeRefundInsufficientBalance
+	}
+	if otherReserved > 0 && job.request.AmountMinor > availableAfterReserved {
+		// Another concurrent refund command holds a reservation on this charge;
+		// keep our reservation pending until concurrency resolves.
+		return payment.ErrStripeRefundVerificationPending
+	}
+	if job.request.StopLossFullRemaining && availableAfterReserved < job.request.AmountMinor {
+		if availableAfterReserved <= 0 {
+			return payment.ErrStripeRefundInsufficientBalance
+		}
+		if _, err := tx.Exec(ctx, `UPDATE payment_refund_commands SET amount_minor=$2,updated_at=now()
+			WHERE id=$1::uuid AND claimed_until=$3 AND status='confirming' AND provider_refund_id IS NULL`,
+			job.id, availableAfterReserved, job.lease); err != nil {
+			return errors.Join(payment.ErrStripeRefundVerificationPending, err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return errors.Join(payment.ErrStripeRefundVerificationPending, err)
+		}
+		job.request.AmountMinor = availableAfterReserved
+		return nil
+	}
+	if job.request.AmountMinor > availableAfterReserved {
+		return payment.ErrStripeRefundInsufficientBalance
+	}
+	return nil
 }
 
 func applyStripeRefundTx(ctx context.Context, tx pgx.Tx, account payment.WebhookAccount, proof *payment.StripeRefundProof) error {
@@ -145,29 +224,41 @@ func finalizeUnfulfilledStripeVIPRefund(ctx context.Context, tx pgx.Tx, orderID 
 	return conversion.RecordSubscriptionPaymentTx(ctx, tx, orderID, time.Now().UTC(), "stripe_pre_fulfillment_refund", conversion.Environment(), nil, false, false)
 }
 
-func stripeRefundStatus(proof *payment.StripeRefundProof, lookup error) (string, string, *time.Time) {
+func stripeRefundStatus(proof *payment.StripeRefundProof, lookup error) (status, note string, next *time.Time, clearFirstSent, routeDispute bool) {
 	var retry time.Duration
-	status, note := "review", "Refund result needs provider evidence"
+	status, note = "review", "Refund result needs provider evidence"
 	switch {
+	case errors.Is(lookup, payment.ErrStripeRefundOpenDispute):
+		note, clearFirstSent, routeDispute = aftercare.RefundDisputeReviewNote, true, true
+	case errors.Is(lookup, payment.ErrStripeRefundNonRefundableInquiry):
+		note, clearFirstSent, routeDispute = stripeRefundNonRefundableInquiryNote, true, true
+	case errors.Is(lookup, payment.ErrStripeRefundDisputeLost):
+		note, clearFirstSent, routeDispute = stripeRefundDisputeLostNote, true, true
+	case errors.Is(lookup, payment.ErrStripeRefundInsufficientBalance):
+		note, clearFirstSent = stripeRefundInsufficientBalanceNote, true
 	case errors.Is(lookup, payment.ErrStripeRefundRequiresReview):
-		note = "Stripe receipt has a dispute or insufficient refundable balance"
+		note, clearFirstSent = stripeRefundRequiresReviewNote, true
+	case errors.Is(lookup, payment.ErrStripeRefundWonNotYetRefundable):
+		status, note, retry, clearFirstSent = "confirming", stripeRefundWonNotYetRefundableNote, stripeRefundRetryDelay, true
+	case errors.Is(lookup, payment.ErrStripeRefundVerificationPending):
+		status, note, retry, clearFirstSent = "confirming", stripeRefundVerificationPendingNote, stripeRefundRetryDelay, true
 	case lookup != nil:
-		status, note, retry = "confirming", "Checking the original Stripe refund request", time.Minute
+		status, note, retry = "confirming", stripeRefundConfirmingNote, stripeRefundRetryDelay
 	case proof != nil:
 		switch proof.Status {
 		case "succeeded":
-			return "succeeded", "", nil
+			return "succeeded", "", nil, false, false
 		case "failed", "canceled":
-			return "failed", "Stripe confirmed refund failure", nil
+			return "failed", "Stripe confirmed refund failure", nil, false, false
 		case "pending", "requires_action":
-			status, note, retry = "confirming", "Stripe refund is pending", time.Minute
+			status, note, retry = "confirming", "Stripe refund is pending", stripeRefundRetryDelay
 		}
 	}
 	if retry == 0 {
-		return status, note, nil
+		return status, note, nil, clearFirstSent, routeDispute
 	}
-	next := time.Now().Add(retry)
-	return status, note, &next
+	t := time.Now().Add(retry)
+	return status, note, &t, clearFirstSent, routeDispute
 }
 
 func finishStripeRefund(ctx context.Context, job refundJob, proof *payment.StripeRefundProof, lookup error) error {
@@ -200,12 +291,27 @@ func finishStripeRefund(ctx context.Context, job refundJob, proof *payment.Strip
 			}
 		}
 	}
-	status, note, next := stripeRefundStatus(proof, lookup)
+	status, note, next, clearFirstSent, routeDispute := stripeRefundStatus(proof, lookup)
+	resetSend := clearFirstSent && job.request.Send && job.request.RefundID == ""
 	_, err = tx.Exec(ctx, `UPDATE payment_refund_commands SET status=$2,result_note=NULLIF($3,''),next_check_at=$4,
-		claimed_until=NULL,provider_refund_id=COALESCE($5,provider_refund_id),updated_at=now() WHERE id=$1`,
-		job.id, status, note, next, ref)
+		claimed_until=NULL,first_sent_at=CASE WHEN $6 THEN NULL ELSE first_sent_at END,
+		provider_refund_id=COALESCE($5,provider_refund_id),updated_at=now() WHERE id=$1`,
+		job.id, status, note, next, ref, resetSend)
 	if err != nil {
 		return err
+	}
+	if routeDispute {
+		auditReqID := uuid.NewSHA1(uuid.NameSpaceOID, []byte("stripe-refund-dispute-route:"+job.id+":"+note))
+		if _, err := tx.Exec(ctx, `INSERT INTO payment_case_audit(case_id,request_id,actor_id,action,reason,parameters)
+			SELECT r.case_id,$1::uuid,NULL,'refund_routed_to_dispute',$2,
+				jsonb_build_object('refund_command_id',$3::text,'charge_id',$4::text,'amount_minor',$5::bigint)
+			FROM payment_case_receipts r JOIN payment_cases c ON c.id=r.case_id
+			WHERE r.receipt_id=$6 AND c.kind='dispute'
+			ORDER BY c.is_open DESC,c.id DESC LIMIT 1
+			ON CONFLICT DO NOTHING`,
+			auditReqID, note, job.id, job.request.ReceiptID, job.request.AmountMinor, job.receiptID); err != nil {
+			return err
+		}
 	}
 	return tx.Commit(ctx)
 }
@@ -249,8 +355,12 @@ func (s *service) reconcileStripeRefunds(ctx context.Context) {
 		return
 	}
 	for _, job := range jobs {
-		request, cancel := context.WithTimeout(ctx, 45*time.Second)
-		proof, issue := adapter.ResolveStripeRefund(request, job.request)
+		request, cancel := context.WithTimeout(ctx, stripeRefundRequestTimeout)
+		var proof *payment.StripeRefundProof
+		issue := verifyLocalStripeRefundEligibility(request, &job)
+		if issue == nil {
+			proof, issue = adapter.ResolveStripeRefund(request, job.request)
+		}
 		if err := finishStripeRefund(request, job, proof, issue); err != nil {
 			log.Printf("task=stripe_refund action=save id=%s error=%v", job.id, err)
 		} else if err := syncStripeRefundEvidence(request, adapter, proof); err != nil {

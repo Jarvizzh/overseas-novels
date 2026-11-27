@@ -23,6 +23,8 @@ type CaseFact struct {
 	Open                           bool
 	DueAt                          *time.Time
 	AmountMinor                    *int64
+	OriginalCurrency               string
+	OriginalAmountMinor            *int64
 	ObservedAt                     time.Time
 	Source, SourceRef              string
 	Evidence                       json.RawMessage

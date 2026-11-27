@@ -24,5 +24,8 @@ func (r *Repository) RecordObservation(ctx context.Context, evidence *payment.Ca
 			return err
 		}
 	}
+	if err := ApplyStripeMitigationTx(ctx, tx, evidence.Fact); err != nil {
+		return err
+	}
 	return tx.Commit(ctx)
 }

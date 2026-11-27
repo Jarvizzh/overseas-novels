@@ -118,6 +118,131 @@ func setEntitlementAdjustmentTx(ctx context.Context, tx pgx.Tx, orderID, userID 
 	return err
 }
 
+const (
+	FreezeStatusNone       = "none"
+	FreezeStatusFrozen     = "frozen"
+	FreezeStatusWrittenOff = "written_off"
+)
+
+// ApplyDisputeFreezeTx freezes confirmed affected entitlement for an open formal
+// dispute without double-recovering if already refunded or blocked.
+func ApplyDisputeFreezeTx(ctx context.Context, tx pgx.Tx, caseID, orderID int64, disputeExternalID string) (bool, error) {
+	var userID int64
+	var charged, bonus int
+	var status string
+	var fulfilled bool
+	err := tx.QueryRow(ctx, `SELECT user_id,coins,bonus_coins_credited,status,fulfilled_at IS NOT NULL
+		FROM recharge_orders WHERE id=$1 FOR UPDATE`, orderID).Scan(&userID, &charged, &bonus, &status, &fulfilled)
+	if err != nil {
+		return false, err
+	}
+	if status == "Refunded" || !fulfilled {
+		return false, nil
+	}
+	var wasBlocked bool
+	var freezeStatus string
+	err = tx.QueryRow(ctx, `SELECT blocked,freeze_status FROM payment_entitlement_adjustments WHERE order_id=$1`, orderID).
+		Scan(&wasBlocked, &freezeStatus)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return false, err
+	}
+	if wasBlocked {
+		// Already blocked (either by a prior freeze, refund, or confirmed loss); do not double-debit.
+		return false, nil
+	}
+	evidenceKey := "dispute_freeze:" + disputeExternalID
+	if err := setEntitlementAdjustmentTx(ctx, tx, orderID, userID, charged, bonus, true, evidenceKey, "dispute_freeze"); err != nil {
+		return false, err
+	}
+	_, err = tx.Exec(ctx, `UPDATE payment_entitlement_adjustments
+		SET freeze_status=$2,freeze_case_id=$3,updated_at=now() WHERE order_id=$1`,
+		orderID, FreezeStatusFrozen, caseID)
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// ReleaseDisputeFreezeTx unfreezes entitlement when a dispute is won or closed
+// without loss, provided the order has not been refunded and no other open formal
+// dispute exists on the order.
+func ReleaseDisputeFreezeTx(ctx context.Context, tx pgx.Tx, caseID, orderID int64, disputeExternalID string) (bool, error) {
+	var userID int64
+	var charged, bonus int
+	var status string
+	var fulfilled bool
+	err := tx.QueryRow(ctx, `SELECT user_id,coins,bonus_coins_credited,status,fulfilled_at IS NOT NULL
+		FROM recharge_orders WHERE id=$1 FOR UPDATE`, orderID).Scan(&userID, &charged, &bonus, &status, &fulfilled)
+	if err != nil {
+		return false, err
+	}
+	if status == "Refunded" || !fulfilled {
+		return false, nil
+	}
+	var wasBlocked bool
+	var freezeStatus string
+	err = tx.QueryRow(ctx, `SELECT blocked,freeze_status FROM payment_entitlement_adjustments WHERE order_id=$1`, orderID).
+		Scan(&wasBlocked, &freezeStatus)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if !wasBlocked || freezeStatus != FreezeStatusFrozen {
+		return false, nil
+	}
+	var otherOpenFormal bool
+	err = tx.QueryRow(ctx, `SELECT EXISTS(
+		SELECT 1 FROM payment_case_receipts r JOIN payment_cases c ON c.id=r.case_id
+		WHERE r.order_id=$1 AND c.id<>$2 AND c.kind='dispute' AND c.is_open
+		  AND c.provider_status IN ('needs_response','under_review')
+	)`, orderID, caseID).Scan(&otherOpenFormal)
+	if err != nil {
+		return false, err
+	}
+	if otherOpenFormal {
+		return false, nil
+	}
+	evidenceKey := "dispute_unfreeze:" + disputeExternalID
+	if err := setEntitlementAdjustmentTx(ctx, tx, orderID, userID, charged, bonus, false, evidenceKey, "dispute_unfreeze"); err != nil {
+		return false, err
+	}
+	_, err = tx.Exec(ctx, `UPDATE payment_entitlement_adjustments
+		SET freeze_status=$2,freeze_case_id=NULL,updated_at=now() WHERE order_id=$1`,
+		orderID, FreezeStatusNone)
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// WriteOffDisputeFreezeTx marks a previously frozen entitlement as written off
+// when a dispute is lost, without double-debiting coins or duplicating clawback.
+func WriteOffDisputeFreezeTx(ctx context.Context, tx pgx.Tx, caseID, orderID int64, disputeExternalID string) (bool, error) {
+	var status string
+	err := tx.QueryRow(ctx, `SELECT status FROM recharge_orders WHERE id=$1 FOR UPDATE`, orderID).Scan(&status)
+	if err != nil {
+		return false, err
+	}
+	if status == "Refunded" {
+		// Refund already clawed back the entitlement; clear any stale freeze marker without touching wallet.
+		_, err = tx.Exec(ctx, `UPDATE payment_entitlement_adjustments
+			SET freeze_status=$2,freeze_case_id=NULL,updated_at=now()
+			WHERE order_id=$1 AND freeze_status=$3`,
+			orderID, FreezeStatusNone, FreezeStatusFrozen)
+		return false, err
+	}
+	tag, err := tx.Exec(ctx, `UPDATE payment_entitlement_adjustments
+		SET freeze_status=$2,freeze_case_id=$3,policy_evidence=$4,updated_at=now()
+		WHERE order_id=$1 AND blocked AND freeze_status=$5`,
+		orderID, FreezeStatusWrittenOff, caseID, "dispute_lost:"+disputeExternalID, FreezeStatusFrozen)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
 // FinalizeStripeRefund closes a fully refunded order and any grant it funded.
 // Receipt and cumulative amount checks belong to the caller.
 func FinalizeStripeRefund(ctx context.Context, tx pgx.Tx, orderID int64, refundRef string) error {
@@ -135,6 +260,11 @@ func FinalizeStripeRefund(ctx context.Context, tx pgx.Tx, orderID int64, refundR
 	}
 	if fulfilled {
 		if err := setEntitlementAdjustmentTx(ctx, tx, orderID, userID, charged, bonus, true, refundRef, "refund"); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `UPDATE payment_entitlement_adjustments
+			SET freeze_status=$2,freeze_case_id=NULL,updated_at=now()
+			WHERE order_id=$1 AND freeze_status<>$2`, orderID, FreezeStatusNone); err != nil {
 			return err
 		}
 	}

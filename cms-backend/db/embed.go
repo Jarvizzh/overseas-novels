@@ -204,3 +204,9 @@ var StripeTaxLiabilityRelaxSQL string
 //
 //go:embed migrations/2026111938.sql
 var StripeLocalCurrencyCustomerSQL string
+
+// StripeRefundDisputeMitigationSQL adds account-level auto-mitigation policy toggles,
+// dispute original currency/amount columns, and dispute-period entitlement freeze tracking.
+//
+//go:embed migrations/2026111939.sql
+var StripeRefundDisputeMitigationSQL string

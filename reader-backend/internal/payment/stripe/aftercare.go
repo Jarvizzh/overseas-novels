@@ -72,10 +72,20 @@ func (c *Client) AftercareEvent(ctx context.Context, event Event) (*payment.Case
 		observation.Fact.Status = "observed"
 		observation.Fact.Reason = string(warning.FraudType)
 		observation.Fact.ObservedAt = time.Now().UTC()
+		chargeID := ""
 		if warning.Charge != nil {
-			observation.Fact.ReceiptRefs = []string{warning.Charge.ID}
+			chargeID = warning.Charge.ID
+			observation.Fact.ReceiptRefs = []string{chargeID}
 		}
-		return withEvidence(observation, struct{ Actionable bool }{warning.Actionable})
+		return withEvidence(observation, struct {
+			Actionable bool   `json:"Actionable"`
+			FraudType  string `json:"fraud_type,omitempty"`
+			ChargeID   string `json:"charge_id,omitempty"`
+		}{
+			Actionable: warning.Actionable,
+			FraudType:  string(warning.FraudType),
+			ChargeID:   chargeID,
+		})
 	case event.Type == EventChargeFailed || event.Type == EventChargeSucceeded || event.Type == EventPaymentIntentPaymentFailed:
 		signal, err := event.RiskSignal()
 		if errors.Is(err, ErrEventVersion) && (event.ObjectType == "charge" || event.Type == EventChargeFailed || event.Type == EventChargeSucceeded) {
@@ -145,16 +155,24 @@ func (c *Client) AftercareDispute(ctx context.Context, id, source, sourceRef str
 		return nil, errors.New("Stripe dispute identity mismatch")
 	}
 	status := string(dispute.Status)
+	category := ClassifyDisputeStatus(status)
 	fact := payment.CaseFact{Provider: payment.ProviderStripe, Account: ledgerAccount(c.scope), Kind: payment.CaseDispute,
 		ExternalID: id, ReceiptRefs: []string{dispute.Charge.ID}, Status: status, Stage: status, Reason: string(dispute.Reason),
 		Source: source, SourceRef: sourceRef, ObservedAt: observed, Open: true}
-	switch status {
-	case "won", "lost", "prevented", "warning_closed":
+	switch category {
+	case DisputeCategoryClosedWon, DisputeCategoryClosedLost, DisputeCategoryClosedOther:
 		fact.Open = false
 		fact.Outcome = status
 	}
+	originalCurrency := strings.ToUpper(strings.TrimSpace(string(dispute.Currency)))
+	if originalCurrency != "" && dispute.Amount >= 0 {
+		origAmount := dispute.Amount
+		fact.OriginalCurrency = originalCurrency
+		fact.OriginalAmountMinor = &origAmount
+	}
 	if dispute.Currency == stripego.CurrencyUSD {
-		fact.AmountMinor = &dispute.Amount
+		usdAmount := dispute.Amount
+		fact.AmountMinor = &usdAmount
 	}
 	if dispute.EvidenceDetails != nil && dispute.EvidenceDetails.DueBy > 0 {
 		due := time.Unix(dispute.EvidenceDetails.DueBy, 0)
@@ -179,5 +197,15 @@ func (c *Client) AftercareDispute(ctx context.Context, id, source, sourceRef str
 	return withEvidence(observation, struct {
 		Reason, NetworkReason string
 		ChargeRefundable      bool
-	}{string(dispute.Reason), dispute.NetworkReasonCode, dispute.IsChargeRefundable})
+		DisputeCategory       string `json:"dispute_category,omitempty"`
+		OriginalCurrency      string `json:"original_currency,omitempty"`
+		OriginalAmountMinor   *int64 `json:"original_amount_minor,omitempty"`
+	}{
+		Reason:              string(dispute.Reason),
+		NetworkReason:       dispute.NetworkReasonCode,
+		ChargeRefundable:    dispute.IsChargeRefundable,
+		DisputeCategory:     string(category),
+		OriginalCurrency:    fact.OriginalCurrency,
+		OriginalAmountMinor: fact.OriginalAmountMinor,
+	})
 }

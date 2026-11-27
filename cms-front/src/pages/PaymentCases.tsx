@@ -10,6 +10,7 @@ import { usePermission } from '../context/PermissionContext';
 import { apiRequest, paymentCaseOwnersPath, type PaymentCaseOwnerScope } from '../utils/api';
 import { copyTextToClipboard } from '../utils/clipboard';
 import {
+  formatCaseAmount,
   paymentError,
   paymentMoney,
   paymentParams,
@@ -39,6 +40,8 @@ type CaseRow = {
   work_due_at: string | null;
   escalated_at: string | null;
   amount_minor: string | null;
+  original_currency: string | null;
+  original_amount_minor: string | null;
   sales_mode: 'direct' | 'merchant_of_record' | null;
   receipt_refs: string[];
   order_ids: string[];
@@ -190,7 +193,7 @@ function CaseActionForm({
           案件 {detail.external_id}
           {target
             ? ` · 原收款 ${target.receipt} · 已确认本金损失 ${usd(target.loss_minor)}`
-            : ` · ${usd(detail.amount_minor)}`}
+            : ` · ${formatCaseAmount(detail)}`}
         </p>
         {action === 'approve' && <p>批准后会重新核验原收款和售后状态，再决定是否继续履约。</p>}
         {action === 'reject' && <p>确认后转交财务，并按案件状态生成退款或争议待办。</p>}
@@ -318,7 +321,11 @@ function CaseDetail({
           ` · ${responseHint}`}
       </p>
       <p>
-        渠道原因 {detail.reason || '未提供'} · 金额 {usd(detail.amount_minor)}
+        渠道原因 {detail.reason || '未提供'} · 争议原币金额 {formatCaseAmount(detail)}
+        {detail.original_currency &&
+          detail.original_currency.toUpperCase() !== 'USD' &&
+          detail.amount_minor != null &&
+          ` · USD 结算 ${usd(detail.amount_minor)}`}
       </p>
       <p>
         举证截止（UTC） {formatDate(detail.due_at)} · 处置期限 {formatDate(detail.work_due_at)} ·{' '}
@@ -841,7 +848,7 @@ export default function PaymentCases({ view }: { view: View }) {
                       </td>
                       <td>{row.owner || '未分派'}</td>
                       <td>{formatDate(row.due_at ?? row.work_due_at)}</td>
-                      <td className="text-right tabular-nums">{usd(row.amount_minor)}</td>
+                      <td className="text-right tabular-nums">{formatCaseAmount(row)}</td>
                       <td>
                         <button
                           type="button"

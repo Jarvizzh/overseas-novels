@@ -5,12 +5,16 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"reader-backend/internal/payment"
 )
 
-const RefundDisputeReviewNote = "Active dispute on original receipt"
+const (
+	RefundDisputeReviewNote = "Active dispute on original receipt"
+	stripeEFWStagePrefix    = "radar.early_fraud_warning."
+)
 
 type Store interface {
 	Begin(context.Context) (pgx.Tx, error)
@@ -45,19 +49,21 @@ func RecordTx(ctx context.Context, tx pgx.Tx, f payment.CaseFact) error {
 		f.ReceiptRefs = []string{}
 	}
 	err := tx.QueryRow(ctx, `
-		INSERT INTO payment_cases(account_id,kind,external_id,receipt_refs,provider_status,stage,reason,outcome,is_open,due_at,amount_minor,observed_at,order_ref)
-		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,NULLIF($13,''))
+		INSERT INTO payment_cases(account_id,kind,external_id,receipt_refs,provider_status,stage,reason,outcome,is_open,due_at,amount_minor,original_currency,original_amount_minor,observed_at,order_ref)
+		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NULLIF($12,''),$13,$14,NULLIF($15,''))
 		ON CONFLICT(account_id,kind,external_id) DO UPDATE SET
 			receipt_refs=CASE WHEN cardinality(EXCLUDED.receipt_refs)>0 AND EXCLUDED.observed_at>=payment_cases.observed_at
 			                  THEN EXCLUDED.receipt_refs ELSE payment_cases.receipt_refs END,
 			provider_status=EXCLUDED.provider_status,stage=EXCLUDED.stage,reason=EXCLUDED.reason,outcome=EXCLUDED.outcome,
 			is_open=EXCLUDED.is_open,due_at=EXCLUDED.due_at,amount_minor=EXCLUDED.amount_minor,
+			original_currency=COALESCE(EXCLUDED.original_currency,payment_cases.original_currency),
+			original_amount_minor=COALESCE(EXCLUDED.original_amount_minor,payment_cases.original_amount_minor),
 			order_ref=COALESCE(EXCLUDED.order_ref,payment_cases.order_ref),observed_at=EXCLUDED.observed_at,updated_at=clock_timestamp()
 		WHERE payment_cases.provider_status<>'ledger_confirmed' AND (EXCLUDED.observed_at>payment_cases.observed_at OR
 		    (EXCLUDED.observed_at=payment_cases.observed_at AND NOT EXCLUDED.is_open AND payment_cases.is_open) OR
             (EXCLUDED.observed_at=payment_cases.observed_at AND cardinality(payment_cases.receipt_refs)=0
                 AND cardinality(EXCLUDED.receipt_refs)>0))
-		RETURNING id`, accountID, f.Kind, f.ExternalID, f.ReceiptRefs, f.Status, f.Stage, f.Reason, f.Outcome, f.Open, f.DueAt, f.AmountMinor, f.ObservedAt, f.OrderRef).Scan(&caseID)
+		RETURNING id`, accountID, f.Kind, f.ExternalID, f.ReceiptRefs, f.Status, f.Stage, f.Reason, f.Outcome, f.Open, f.DueAt, f.AmountMinor, strings.ToUpper(strings.TrimSpace(f.OriginalCurrency)), f.OriginalAmountMinor, f.ObservedAt, f.OrderRef).Scan(&caseID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		err = tx.QueryRow(ctx, `SELECT id FROM payment_cases WHERE account_id=$1 AND kind=$2 AND external_id=$3`, accountID, f.Kind, f.ExternalID).Scan(&caseID)
 	}
@@ -94,6 +100,23 @@ func RecordTx(ctx context.Context, tx pgx.Tx, f payment.CaseFact) error {
 			FROM payment_aftercare_policies p
 			JOIN admins finance ON finance.id = p.finance_id AND public.admin_has_permission(finance.id, 'payments.disputes:write')
 			WHERE c.id = $1 AND c.account_id = p.account_id AND c.owner_id IS NULL`, caseID)
+		return err
+	}
+	if f.Kind == payment.CaseRiskSignal && strings.HasPrefix(f.Stage, stripeEFWStagePrefix) {
+		_, err = tx.Exec(ctx, `UPDATE payment_cases c
+			SET owner_id = COALESCE(c.owner_id, CASE
+				WHEN p.finance_id IS NOT NULL AND public.admin_has_permission(p.finance_id, 'payments.disputes:write')
+				THEN p.finance_id ELSE NULL END),
+			    work_state = CASE WHEN c.work_state = 'observed' THEN 'pending' ELSE c.work_state END,
+			    work_due_at = COALESCE(c.work_due_at, now())
+			FROM payment_aftercare_policies p
+			WHERE c.id = $1 AND c.account_id = p.account_id`, caseID)
+		if err != nil {
+			return err
+		}
+		_, err = tx.Exec(ctx, `INSERT INTO payment_case_reminders(case_id,due_at)
+			SELECT c.id,COALESCE(c.due_at,c.observed_at)
+			FROM payment_cases c WHERE c.id=$1 ON CONFLICT DO NOTHING`, caseID)
 	}
 
 	return err

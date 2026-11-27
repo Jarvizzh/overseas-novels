@@ -84,7 +84,7 @@ type Store struct {
 }
 
 func (s Store) CheckSchema(ctx context.Context) error {
-	const required = 2026111938
+	const required = 2026111939
 	var version int
 	if err := s.Pool.QueryRow(ctx, "SELECT max(version) FROM reader_schema_migrations").Scan(&version); err != nil {
 		return err

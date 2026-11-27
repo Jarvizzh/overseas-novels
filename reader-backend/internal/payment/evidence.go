@@ -41,14 +41,16 @@ const (
 )
 
 type RefundRequest struct {
-	Account     WebhookAccount
-	ReceiptType ReceiptType
-	ReceiptID   string
-	RefundID    string
-	RequestKey  string
-	AmountMinor int64
-	Currency    string
-	Send        bool
+	Account               WebhookAccount
+	ReceiptType           ReceiptType
+	ReceiptID             string
+	RefundID              string
+	RequestKey            string
+	AmountMinor           int64
+	Currency              string
+	Send                  bool
+	VerifyDisputes        bool
+	StopLossFullRemaining bool
 }
 
 type RefundResult struct {

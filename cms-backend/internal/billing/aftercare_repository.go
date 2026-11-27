@@ -10,6 +10,7 @@ import (
 const caseColumns = `c.id::text AS id,a.provider,a.environment,a.id::text AS account_id,c.kind,c.external_id,c.receipt_refs,
 	c.provider_status,c.stage,c.reason,c.outcome,c.is_open,c.due_at,c.work_due_at,c.work_state,c.escalated_at,c.updated_at,
 	c.owner_id,owner.username AS owner,c.amount_minor::text AS amount_minor,
+	c.original_currency,c.original_amount_minor::text AS original_amount_minor,
 	CASE WHEN a.provider='paypal' THEN 'direct' ELSE modes.mode END AS sales_mode,
 	EXISTS(SELECT 1 FROM payment_case_reminders r WHERE r.case_id=c.id AND r.due_at=c.due_at) AS reminder,
 	ARRAY(SELECT order_id FROM (

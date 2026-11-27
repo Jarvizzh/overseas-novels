@@ -69,7 +69,7 @@ func openPromoTestPool(t *testing.T) *pgxpool.Pool {
 		dbassets.PaymentCompletionSQL, dbassets.PaymentRecoverySQL, dbassets.PaymentReviewFixesSQL,
 		dbassets.PaymentCatalogAndChannelSQL, dbassets.PaymentVIPSwitchSQL, dbassets.PaymentTemplateCatalogFixesSQL,
 		dbassets.ConversionCenterReviewSQL, dbassets.ConversionBatchSQL, dbassets.ConversionThroughputRereviewSQL,
-		dbassets.ConversionCredentialHealthSQL, dbassets.RBACPermissionsSQL, dbassets.PromotionEnvironmentSQL, dbassets.StripeTaxLiabilityRelaxSQL,
+		dbassets.ConversionCredentialHealthSQL, dbassets.RBACPermissionsSQL, dbassets.PromotionEnvironmentSQL, dbassets.StripeTaxLiabilityRelaxSQL, dbassets.StripeRefundDisputeMitigationSQL,
 	} {
 		if _, err := pool.Exec(ctx, stmt); err != nil {
 			t.Fatal(err)

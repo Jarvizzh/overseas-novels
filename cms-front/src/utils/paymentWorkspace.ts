@@ -40,12 +40,7 @@ export function paymentScopeLabel(scope: PaymentScope) {
     .join(' · ');
 }
 
-export function paymentMoney(value?: string | number | null, currency = 'USD') {
-  if (value == null) return '—';
-  const amount = BigInt(value);
-  const absolute = amount < 0n ? -amount : amount;
-  return `${amount < 0n ? '−' : ''}${(absolute / 100n).toLocaleString('en-US')}.${String(absolute % 100n).padStart(2, '0')} ${currency}`;
-}
+export { currencyDecimals, formatCaseAmount, paymentMoney } from './paymentCurrency';
 
 export function paymentTime(value?: string | null) {
   return value ? new Date(value).toLocaleString('zh-CN', { hour12: false, timeZone: 'UTC' }) : '—';
