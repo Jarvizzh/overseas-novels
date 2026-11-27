@@ -29,15 +29,22 @@ export const STRIPE_MOR_SUPPORTED_COUNTRIES: readonly string[] = ALL_ISO2_COUNTR
   (code) => !MOR_RESTRICTED_SET.has(code),
 );
 
+// Default supported markets when creating a Stripe product binding: US, CA, GB, AU.
+export const DEFAULT_STRIPE_COUNTRIES: readonly string[] = ['US', 'CA', 'GB', 'AU'];
+
 const ALL_ISO2_KEY = ALL_ISO2_COUNTRIES.join(',');
 const MOR_ALL_KEY = STRIPE_MOR_SUPPORTED_COUNTRIES.join(',');
 
-export function getDefaultStripeCountries(salesMode: StripeSalesMode): string[] {
-  return salesMode === 'merchant_of_record' ? [...STRIPE_MOR_SUPPORTED_COUNTRIES] : [...ALL_ISO2_COUNTRIES];
+export function getDefaultStripeCountries(_salesMode?: StripeSalesMode): string[] {
+  return [...DEFAULT_STRIPE_COUNTRIES];
 }
 
-export function formatDefaultStripeCountriesInput(salesMode: StripeSalesMode): string {
+export function formatDefaultStripeCountriesInput(salesMode?: StripeSalesMode): string {
   return getDefaultStripeCountries(salesMode).join(', ');
+}
+
+export function formatAllStripeCountriesInput(salesMode: StripeSalesMode): string {
+  return (salesMode === 'merchant_of_record' ? STRIPE_MOR_SUPPORTED_COUNTRIES : ALL_ISO2_COUNTRIES).join(', ');
 }
 
 export function parseStripeCountriesInput(raw: string): string[] {
@@ -71,11 +78,11 @@ export function resolveCountriesOnSalesModeChange(
     return formatDefaultStripeCountriesInput(nextMode);
   }
   const preset = detectStripeCountriesPreset(parsed);
-  if (
-    (prevMode === 'direct' && preset === 'global') ||
-    (prevMode === 'merchant_of_record' && preset === 'mor_all')
-  ) {
-    return formatDefaultStripeCountriesInput(nextMode);
+  if (prevMode === 'direct' && preset === 'global' && nextMode === 'merchant_of_record') {
+    return formatAllStripeCountriesInput('merchant_of_record');
+  }
+  if (prevMode === 'merchant_of_record' && preset === 'mor_all' && nextMode === 'direct') {
+    return formatAllStripeCountriesInput('direct');
   }
   return currentRaw;
 }

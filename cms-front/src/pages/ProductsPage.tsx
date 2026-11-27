@@ -48,7 +48,9 @@ import {
 } from '../utils/productCatalogHelpers';
 import {
   ALL_ISO2_COUNTRIES,
+  DEFAULT_STRIPE_COUNTRIES,
   detectStripeCountriesPreset,
+  formatAllStripeCountriesInput,
   formatAllowedCountriesSummary,
   formatDefaultStripeCountriesInput,
   parseStripeCountriesInput,
@@ -1472,6 +1474,18 @@ export default function ProductsPage() {
                           </span>
                         </label>
                         <div className="inline-flex flex-wrap items-center gap-1.5">
+                          <button
+                            type="button"
+                            className="btn-detail text-[11px] px-2 py-0.5"
+                            onClick={() =>
+                              setStForm((prev) => ({
+                                ...prev,
+                                countries: formatDefaultStripeCountriesInput(prev.sales_mode),
+                              }))
+                            }
+                          >
+                            默认 ({DEFAULT_STRIPE_COUNTRIES.join('/')})
+                          </button>
                           {stForm.sales_mode === 'merchant_of_record' && (
                             <button
                               type="button"
@@ -1479,7 +1493,7 @@ export default function ProductsPage() {
                               onClick={() =>
                                 setStForm((prev) => ({
                                   ...prev,
-                                  countries: formatDefaultStripeCountriesInput('merchant_of_record'),
+                                  countries: formatAllStripeCountriesInput('merchant_of_record'),
                                 }))
                               }
                             >
@@ -1492,7 +1506,7 @@ export default function ProductsPage() {
                             onClick={() =>
                               setStForm((prev) => ({
                                 ...prev,
-                                countries: formatDefaultStripeCountriesInput('direct'),
+                                countries: formatAllStripeCountriesInput('direct'),
                               }))
                             }
                           >
@@ -1512,13 +1526,13 @@ export default function ProductsPage() {
                         rows={2}
                         required
                         className="input-field w-full font-mono-code text-xs uppercase resize-y"
-                        placeholder="US, CA, GB"
+                        placeholder="US, CA, GB, AU"
                         value={stForm.countries}
                         onChange={(e) => setStForm((prev) => ({ ...prev, countries: e.target.value }))}
                       />
                       {stForm.sales_mode === 'merchant_of_record' && (
                         <p className="text-[11px] text-[var(--cms-muted-fg)] m-0">
-                          MoR 模式默认填入 Stripe Managed Payments 官方支持的 {STRIPE_MOR_SUPPORTED_COUNTRIES.length} 个国家/地区（已排除受限地区：{STRIPE_MOR_RESTRICTED_COUNTRIES.join(', ')}）。
+                          默认填入美加英澳（{DEFAULT_STRIPE_COUNTRIES.join(', ')}）；MoR 官方支持共 {STRIPE_MOR_SUPPORTED_COUNTRIES.length} 个国家/地区（已排除受限地区：{STRIPE_MOR_RESTRICTED_COUNTRIES.join(', ')}）。
                         </p>
                       )}
                     </div>

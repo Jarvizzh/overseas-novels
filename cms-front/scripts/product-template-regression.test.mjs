@@ -188,32 +188,42 @@ test('TC-FE-05 (CMS) & F-12: Promotion URL never appends template_id and legacy 
   assert.equal(existsSync(new URL('../src/pages/StripeOfferSettings.tsx', import.meta.url)), false);
 });
 
-test('TC-FE-06: Stripe country presets default to global (direct) and official MoR supported countries', () => {
+test('TC-FE-06: Stripe country defaults to US/CA/GB/AU and presets cover global (direct) and official MoR supported countries', () => {
   const directDefault = stripeCountries.getDefaultStripeCountries('direct');
   const morDefault = stripeCountries.getDefaultStripeCountries('merchant_of_record');
-  assert.equal(directDefault.length, 249);
-  assert.equal(morDefault.length, 242);
-  assert.equal(stripeCountries.detectStripeCountriesPreset(directDefault), 'global');
-  assert.equal(stripeCountries.detectStripeCountriesPreset(morDefault), 'mor_all');
+  assert.deepEqual(directDefault, ['US', 'CA', 'GB', 'AU']);
+  assert.deepEqual(morDefault, ['US', 'CA', 'GB', 'AU']);
+  assert.equal(stripeCountries.formatDefaultStripeCountriesInput('direct'), 'US, CA, GB, AU');
+  assert.equal(stripeCountries.formatDefaultStripeCountriesInput('merchant_of_record'), 'US, CA, GB, AU');
+
+  const directAll = stripeCountries.ALL_ISO2_COUNTRIES;
+  const morAll = stripeCountries.STRIPE_MOR_SUPPORTED_COUNTRIES;
+  assert.equal(directAll.length, 249);
+  assert.equal(morAll.length, 242);
+  assert.equal(stripeCountries.detectStripeCountriesPreset(directAll), 'global');
+  assert.equal(stripeCountries.detectStripeCountriesPreset(morAll), 'mor_all');
   for (const restricted of ['CN', 'CU', 'IR', 'KP', 'RU', 'SH', 'SY']) {
-    assert.equal(directDefault.includes(restricted), true);
-    assert.equal(morDefault.includes(restricted), false);
+    assert.equal(directAll.includes(restricted), true);
+    assert.equal(morAll.includes(restricted), false);
   }
 
-  // Switching between direct and MoR auto-switches default presets while preserving custom subsets.
-  const directStr = stripeCountries.formatDefaultStripeCountriesInput('direct');
-  const switchedToMor = stripeCountries.resolveCountriesOnSalesModeChange(directStr, 'direct', 'merchant_of_record');
+  // Switching between direct and MoR preserves default/custom subsets while switching full-list presets safely.
+  const directAllStr = stripeCountries.formatAllStripeCountriesInput('direct');
+  const switchedToMor = stripeCountries.resolveCountriesOnSalesModeChange(directAllStr, 'direct', 'merchant_of_record');
   assert.equal(stripeCountries.detectStripeCountriesPreset(stripeCountries.parseStripeCountriesInput(switchedToMor)), 'mor_all');
 
   const switchedBackDirect = stripeCountries.resolveCountriesOnSalesModeChange(switchedToMor, 'merchant_of_record', 'direct');
   assert.equal(stripeCountries.detectStripeCountriesPreset(stripeCountries.parseStripeCountriesInput(switchedBackDirect)), 'global');
 
+  const preservedDefault = stripeCountries.resolveCountriesOnSalesModeChange('US, CA, GB, AU', 'direct', 'merchant_of_record');
+  assert.equal(preservedDefault, 'US, CA, GB, AU');
+
   const preservedCustom = stripeCountries.resolveCountriesOnSalesModeChange('US, CA', 'direct', 'merchant_of_record');
   assert.equal(preservedCustom, 'US, CA');
 
-  assert.equal(stripeCountries.formatAllowedCountriesSummary(directDefault), '全球（全部 249 个国家/地区）');
-  assert.equal(stripeCountries.formatAllowedCountriesSummary(morDefault), 'Stripe MoR 官方全量（242 个国家/地区）');
-  assert.equal(stripeCountries.formatAllowedCountriesSummary(['US', 'GB']), 'US, GB');
+  assert.equal(stripeCountries.formatAllowedCountriesSummary(directAll), '全球（全部 249 个国家/地区）');
+  assert.equal(stripeCountries.formatAllowedCountriesSummary(morAll), 'Stripe MoR 官方全量（242 个国家/地区）');
+  assert.equal(stripeCountries.formatAllowedCountriesSummary(['US', 'CA', 'GB', 'AU']), 'US, CA, GB, AU');
 });
 
 test('TC-FE-06: Channel webhook URL resolves CMS host to Reader H5 host and localhost to :8080', () => {
