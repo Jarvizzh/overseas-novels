@@ -95,7 +95,7 @@ func (r *dbBillingRepository) ListOrders(ctx context.Context, selectQuery string
 			&o.Coins, &o.BonusCoinsCredited, &o.PaymentMethod,
 			&o.Status, &o.UtmSource, &o.UtmCampaign, &o.PaidAt, &o.OrderType,
 			&o.PromotionLinkID, &o.NovelID, &o.CreatedAt, &o.UpdatedAt, &o.ReconciliationNote, &o.RefundStatus, &o.PaymentEnvironment,
-			&o.PaymentProvider, &o.PaymentAccountID,
+			&o.PaymentProvider, &o.PaymentAccountID, &o.SubscriptionCycle,
 		)
 		if err != nil {
 			return nil, err

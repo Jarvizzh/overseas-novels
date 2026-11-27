@@ -36,6 +36,7 @@ type Order struct {
 	UtmCampaign        string     `json:"utm_campaign"`
 	PaidAt             *time.Time `json:"paid_at"`
 	OrderType          string     `json:"order_type"`
+	SubscriptionCycle  string     `json:"subscription_cycle,omitempty"`
 	PromotionLinkID    *int64     `json:"promotion_link_id"`
 	NovelID            *int64     `json:"novel_id"`
 	CreatedAt          time.Time  `json:"created_at"`

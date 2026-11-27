@@ -152,7 +152,15 @@ func (s *billingService) ListOrders(ctx context.Context, page, pageSize int, sta
 			COALESCE((SELECT r.status FROM payment_refund_commands r WHERE r.order_id=recharge_orders.id ORDER BY r.created_at DESC LIMIT 1),''),
 			COALESCE(payment_order_environment(recharge_orders),''),
 			COALESCE(CASE WHEN receipt_scope.receipts=0 THEN payment_method ELSE receipt_scope.provider END,''),
-			COALESCE(receipt_scope.account_id,'')
+			COALESCE(receipt_scope.account_id,''),
+			CASE WHEN recharge_orders.order_type='subscription' THEN COALESCE(
+				NULLIF(recharge_orders.product_snapshot->>'vip_cycle', ''),
+				NULLIF(recharge_orders.product_snapshot->>'cycle', ''),
+				(SELECT NULLIF(p.vip_cycle, '') FROM products p WHERE p.id = recharge_orders.product_id),
+				(SELECT NULLIF(us.cycle, '') FROM user_subscriptions us WHERE us.subscription_id = NULLIF(recharge_orders.subscription_id, '') LIMIT 1),
+				(SELECT COALESCE(NULLIF(rs.subscription_cycle, ''), NULLIF(rs.vip_duration, '')) FROM recharge_slots rs WHERE rs.id = recharge_orders.recharge_slot_id LIMIT 1),
+				''
+			) ELSE '' END
 		FROM recharge_orders
 		CROSS JOIN LATERAL (
 			SELECT count(*) AS receipts,

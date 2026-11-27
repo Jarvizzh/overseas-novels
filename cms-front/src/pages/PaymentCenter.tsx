@@ -266,7 +266,10 @@ export function PaymentSubscriptions() {
                       <td>
                         <StatusDot tone={state?.tone ?? 'muted'} label={state?.label ?? item.status} />
                       </td>
-                      <td>{item.cycle || '—'}</td>
+                      <td>
+                        {({ day: '日', week: '周', month: '月', year: '年' } as Record<string, string>)[item.cycle] ??
+                          (item.cycle || '—')}
+                      </td>
                       <td>{paymentTime(item.paid_until)}</td>
                       <td>
                         {['stripe', 'paypal'].includes(item.provider) && (
@@ -296,7 +299,7 @@ export function PaymentSubscriptions() {
         onClose={() => setSelected(undefined)}
         variant="drawer"
         size="lg"
-        title={selected?.provider === 'paypal' ? 'PayPal VIP 账期' : 'Stripe VIP 账期'}
+        title={selected?.provider === 'paypal' ? 'PayPal 订阅账期' : 'Stripe 订阅账期'}
         subtitle={selected ? `订阅 #${selected.id}` : undefined}
       >
         {periodError && (

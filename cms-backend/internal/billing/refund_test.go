@@ -623,5 +623,45 @@ func TestPaymentCenterRefundAuthorizationIntegration(t *testing.T) {
 			t.Fatalf("refund records=%d audit=%d closed without send=%d: %v", refunds, audits, closedWithoutSend, err)
 		}
 	})
+	t.Run("subscription_cycle hydrates from snapshot, product, subscription, and slot", func(t *testing.T) {
+		exec(`INSERT INTO products(id,code,product_type,name,price_cents,currency,coins,bonus,vip_cycle,novel_scope_type)
+			VALUES(95601,'TEST_VIP_YEAR','vip','VIP Year',9999,'USD',0,0,'year','none')
+			ON CONFLICT (id) DO NOTHING`)
+		exec(`INSERT INTO recharge_templates(id,name,is_default) VALUES(95601,'Sub Cycle Template',false) ON CONFLICT (id) DO NOTHING`)
+		exec(`INSERT INTO recharge_slots(id,template_id,slot_index,product_id,type,price,price_cents,coins,bonus,subscription_cycle)
+			VALUES(95601,95601,1,95601,'subscription','$1.99',199,0,0,'day')
+			ON CONFLICT (id) DO NOTHING`)
+		exec(`INSERT INTO user_subscriptions(id,user_id,subscription_id,payment_method,status,cycle)
+			VALUES(95601,501,'I-CYCLE-95601','paypal','ACTIVE','week')`)
+		exec(`INSERT INTO recharge_orders(id,user_id,amount_cents,payment_method,status,order_type,product_snapshot)
+			VALUES(95611,501,499,'stripe','Paid','subscription','{"vip_cycle":"month"}')`)
+		exec(`INSERT INTO recharge_orders(id,user_id,amount_cents,payment_method,status,order_type,product_id,subscription_id)
+			VALUES(95612,501,9999,'stripe','Paid','subscription',95601,'')`)
+		exec(`INSERT INTO recharge_orders(id,user_id,amount_cents,payment_method,status,order_type,subscription_id)
+			VALUES(95613,501,299,'paypal','Paid','subscription','I-CYCLE-95601')`)
+		exec(`INSERT INTO recharge_orders(id,user_id,amount_cents,payment_method,status,order_type,recharge_slot_id,subscription_id)
+			VALUES(95614,501,199,'paypal','Paid','subscription',95601,'')`)
+		exec(`INSERT INTO recharge_orders(id,user_id,amount_cents,payment_method,status,order_type,recharge_slot_id)
+			VALUES(95615,501,199,'paypal','Paid','single',95601)`)
+
+		for _, tc := range []struct {
+			orderID   string
+			wantCycle string
+		}{
+			{"95611", "month"},
+			{"95612", "year"},
+			{"95613", "week"},
+			{"95614", "day"},
+			{"95615", ""},
+		} {
+			orders, total, err := s.ListOrders(ctx, 1, 10, "", "", "", "", "", "", tc.orderID, reconciliationScope{})
+			if err != nil || total != 1 || len(orders) != 1 {
+				t.Fatalf("ListOrders(%s) = %+v, total=%d, err=%v", tc.orderID, orders, total, err)
+			}
+			if orders[0].SubscriptionCycle != tc.wantCycle {
+				t.Fatalf("order %s SubscriptionCycle = %q, want %q", tc.orderID, orders[0].SubscriptionCycle, tc.wantCycle)
+			}
+		}
+	})
 
 }

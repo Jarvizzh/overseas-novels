@@ -35,7 +35,7 @@ const statusFilterOptions = [
 const orderTypeFilterOptions = [
   { value: '', label: '全部订单类型' },
   { value: 'single', label: '金币充值' },
-  { value: 'vip', label: 'VIP 订阅' },
+  { value: 'subscription', label: '订阅' },
   { value: 'whole_book', label: '整本购买' },
 ];
 
@@ -56,6 +56,7 @@ interface Order {
   utm_campaign: string;
   paid_at?: string;
   order_type?: string;
+  subscription_cycle?: string;
   promotion_link_id?: number | null;
   novel_id?: number | null;
   created_at: string;
@@ -92,10 +93,21 @@ function getOrderStatusMeta(status: string): {
   return { label: status, tone: 'muted' };
 }
 
-function getOrderTypeLabel(orderType?: string): string {
-  if (orderType === 'vip') return 'VIP 订阅';
+const subscriptionCycleLabels: Record<string, string> = {
+  day: '日',
+  week: '周',
+  month: '月',
+  year: '年',
+};
+
+function getOrderTypeLabel(orderType?: string, subscriptionCycle?: string): string {
+  if (orderType === 'subscription' || orderType === 'vip') {
+    const cycleLabel = subscriptionCycle ? subscriptionCycleLabels[subscriptionCycle] : '';
+    return cycleLabel ? `订阅（${cycleLabel}）` : '订阅';
+  }
   if (orderType === 'whole_book') return '整本购买';
-  return '金币充值';
+  if (!orderType || orderType === 'single') return '金币充值';
+  return orderType;
 }
 
 export default function OrdersTab() {
@@ -403,6 +415,15 @@ export default function OrdersTab() {
               icon={<SlidersHorizontal size={13} className="text-[var(--cms-muted-fg)]" aria-hidden="true" />}
               badgeCount={advFilterCount}
               panelClassName="w-80 p-4"
+              onOpen={() => {
+                setDateError('');
+                setDraft((prev) => ({
+                  ...prev,
+                  promotionLinkId: queryState.promotionLinkId,
+                  paidStart: queryState.paidStart,
+                  paidEnd: queryState.paidEnd,
+                }));
+              }}
             >
               {({ close }) => (
                 <form
@@ -622,7 +643,7 @@ export default function OrdersTab() {
                       </div>
                     </td>
                     <td className="text-[var(--cms-muted-fg)] whitespace-nowrap">
-                      {getOrderTypeLabel(o.order_type)}
+                      {getOrderTypeLabel(o.order_type, o.subscription_cycle)}
                     </td>
                     <td className="text-right tabular-nums text-[var(--cms-fg)] whitespace-nowrap">
                       {o.coins}
