@@ -2,6 +2,7 @@ package application
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"time"
 
@@ -17,21 +18,35 @@ const stripeCheckoutLease = time.Minute
 
 type stripePurchaseAttempt struct {
 	ID, IntentID, SessionID, ReturnURL, CancelURL, Status string
-	OrderID, AccountID                                    int64
+	OrderID, AccountID, UserID                            int64
+	Account                                               payment.WebhookAccount
 	Offer                                                 payment.SingleCheckoutOffer
+	FrozenParams                                          *payment.FrozenCheckoutParams
+	SettlementState                                       string
+	SettlementRetryUntil                                  *time.Time
 	CreatedAt                                             time.Time
 	LookupOnly                                            bool
 	MayCreate                                             bool
 }
 
-const stripeAttemptFields = `p.id::text,o.checkout_id::text,p.order_id,p.account_id,COALESCE(p.provider_order_id,''),
-	p.return_url,p.cancel_url,p.status,t.product_ref,t.price_ref,t.amount_minor,t.allowed_countries,COALESCE(t.expected_country,''),p.sales_mode,COALESCE(t.tax_liability_account,''),p.created_at,
+const stripeAttemptFields = `p.id::text,o.checkout_id::text,p.order_id,p.account_id,o.user_id,a.account_key,a.environment,COALESCE(p.provider_order_id,''),
+	p.return_url,p.cancel_url,p.status,t.product_ref,t.price_ref,t.amount_minor,t.allowed_countries,COALESCE(t.expected_country,''),p.sales_mode,COALESCE(t.tax_liability_account,''),
+	t.frozen_checkout_params,t.settlement_state,t.settlement_retry_until,p.created_at,
 	p.create_lookup_only OR COALESCE(p.retry_until<=now(),false)`
 
 func scanStripeAttempt(row pgx.Row) (stripePurchaseAttempt, error) {
 	var a stripePurchaseAttempt
-	err := row.Scan(&a.ID, &a.IntentID, &a.OrderID, &a.AccountID, &a.SessionID, &a.ReturnURL, &a.CancelURL, &a.Status,
-		&a.Offer.ProductID, &a.Offer.PriceID, &a.Offer.AmountMinor, &a.Offer.Countries, &a.Offer.ExpectedCountry, &a.Offer.SalesMode, &a.Offer.TaxLiabilityAccount, &a.CreatedAt, &a.LookupOnly)
+	var frozenRaw []byte
+	err := row.Scan(&a.ID, &a.IntentID, &a.OrderID, &a.AccountID, &a.UserID, &a.Account.AccountKey, &a.Account.Environment, &a.SessionID, &a.ReturnURL, &a.CancelURL, &a.Status,
+		&a.Offer.ProductID, &a.Offer.PriceID, &a.Offer.AmountMinor, &a.Offer.Countries, &a.Offer.ExpectedCountry, &a.Offer.SalesMode, &a.Offer.TaxLiabilityAccount,
+		&frozenRaw, &a.SettlementState, &a.SettlementRetryUntil, &a.CreatedAt, &a.LookupOnly)
+	if err == nil && len(frozenRaw) > 0 {
+		var frozen payment.FrozenCheckoutParams
+		if unmarshalErr := json.Unmarshal(frozenRaw, &frozen); unmarshalErr != nil {
+			return a, unmarshalErr
+		}
+		a.FrozenParams = &frozen
+	}
 	return a, err
 }
 
@@ -144,7 +159,7 @@ func (r *dbRepository) claimStripeAttempts(ctx context.Context, account payment.
 		 AND (p.status<>'creating' OR p.first_sent_at IS NOT NULL OR
 			($7 AND a.new_orders_enabled AND o.status='Pending' AND NOT `+wholeBookWriteBlocked("o", "$3")+`))
          AND (p.status IN ('creating','buyer_action','capturing') OR
-		      p.status='settled' AND (t.ledger_observed_at IS NULL OR (o.status IN ('Success','Paid') AND EXISTS (
+		      p.status='settled' AND (t.settlement_state='pending_settlement' OR t.ledger_observed_at IS NULL OR (o.status IN ('Success','Paid') AND EXISTS (
 				SELECT 1 FROM payment_fulfillment_funding f JOIN third_party_payment_orders receipt ON receipt.id=f.receipt_id
 				WHERE f.order_id=o.id AND f.principal_minor IS NULL AND receipt.account_id=p.account_id
 				AND receipt.external_order_id=p.provider_order_id)) OR (o.fulfilled_at IS NULL AND o.status='Paid' AND EXISTS (
@@ -159,7 +174,7 @@ func (r *dbRepository) claimStripeAttempts(ctx context.Context, account payment.
 		  next_create_at=now()+make_interval(secs=>$6::int)
 		FROM due WHERE p.id=due.id RETURNING p.*,due.allow_write
 	) SELECT `+stripeAttemptFields+` OR NOT p.allow_write FROM leased p JOIN recharge_orders o ON o.id=p.order_id
-		JOIN payment_stripe_checkout_terms t ON t.attempt_id=p.id`,
+		JOIN payment_stripe_checkout_terms t ON t.attempt_id=p.id JOIN payment_channel_accounts a ON a.id=p.account_id`,
 		account.AccountKey, account.Environment, conversion.Environment(), id, int(stripeCreateRetryWindow/time.Second), int(stripeCheckoutLease/time.Second), allowNew)
 	if err != nil {
 		return nil, err

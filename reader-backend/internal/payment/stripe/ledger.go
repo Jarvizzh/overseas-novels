@@ -50,16 +50,41 @@ func (c *Client) ledgerMovement(txn *BalanceTransaction) (payment.LedgerEvidence
 	if err != nil {
 		return payment.LedgerEvidence{}, err
 	}
+	const stripeFeeDetailWithheldTax = "withheld_tax"
+	var withheldTax int64
+	for _, detail := range txn.FeeDetails {
+		if detail == nil || detail.Type != stripeFeeDetailWithheldTax {
+			continue
+		}
+		if strings.ToUpper(string(detail.Currency)) == code && detail.Amount != 0 {
+			withheldTax += detail.Amount
+		}
+	}
+	amounts := map[payment.LedgerComponent]payment.LedgerMoney{
+		payment.LedgerGross: {Currency: code, Minor: txn.Amount},
+		payment.LedgerFee:   {Currency: code, Minor: fee},
+		payment.LedgerNet:   {Currency: code, Minor: txn.Net},
+	}
+	if withheldTax != 0 {
+		withheldMinor, err := payment.ExactMinorUnits(decimal.NewFromInt(withheldTax).Neg(), 0)
+		if err != nil {
+			return payment.LedgerEvidence{}, err
+		}
+		amounts[payment.LedgerWithheldTax] = payment.LedgerMoney{Currency: code, Minor: withheldMinor}
+		if txn.Fee >= withheldTax {
+			procFee, err := payment.ExactMinorUnits(decimal.NewFromInt(txn.Fee-withheldTax).Neg(), 0)
+			if err != nil {
+				return payment.LedgerEvidence{}, err
+			}
+			amounts[payment.LedgerProcessingFee] = payment.LedgerMoney{Currency: code, Minor: procFee}
+		}
+	}
 	entry := payment.LedgerEvidence{
 		Provider: payment.ProviderStripe, Account: ledgerAccount(c.scope), MovementKey: txn.ID,
 		Source: payment.LedgerStripeBalance, SourceRef: txn.ID, Payload: txn.raw,
 		Kind: stripeMovementKind(string(txn.ReportingCategory), txn.Amount), ProviderCode: string(txn.ReportingCategory),
 		Currency: code, OccurredAt: time.Unix(txn.Created, 0).UTC(),
-		Amounts: map[payment.LedgerComponent]payment.LedgerMoney{
-			payment.LedgerGross: {Currency: code, Minor: txn.Amount},
-			payment.LedgerFee:   {Currency: code, Minor: fee},
-			payment.LedgerNet:   {Currency: code, Minor: txn.Net},
-		},
+		Amounts: amounts,
 	}
 	if txn.Source != nil {
 		entry.References = stripeLedgerReferences(txn.Source.ID, "", "", "", "", "")

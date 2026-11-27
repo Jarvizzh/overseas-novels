@@ -217,9 +217,11 @@ func (c *Client) stripeVIPAllocation(ctx context.Context, id, customer string, i
 		return nil, nil
 	}
 	var chargeID, intentID string
+	var intent *stripego.PaymentIntent
 	if item.Payment.PaymentIntent != nil {
 		intentID = item.Payment.PaymentIntent.ID
-		intent, err := c.GetPaymentIntent(ctx, intentID)
+		var err error
+		intent, err = c.GetPaymentIntent(ctx, intentID)
 		if err != nil {
 			return nil, err
 		}
@@ -248,21 +250,21 @@ func (c *Client) stripeVIPAllocation(ctx context.Context, id, customer string, i
 	if item.StatusTransitions != nil && item.StatusTransitions.PaidAt > paidAt {
 		paidAt = item.StatusTransitions.PaidAt
 	}
-	receipt := payment.SingleChargeProof{ID: chargeID, IntentID: intentID, Currency: "USD", AmountMinor: charge.AmountCaptured,
-		RefundedMinor: charge.AmountRefunded, PaidAt: time.Unix(paidAt, 0).UTC(),
-		EligibleTerms: charge.AmountCaptured == *item.AmountPaid}
+	presentment, presentmentAmount, presentmentConflict := extractPresentment(nil, intent, charge)
+	receipt := payment.SingleChargeProof{ID: chargeID, IntentID: intentID, Currency: payment.CurrencyUSD, CustomerID: customer,
+		AmountMinor: charge.AmountCaptured, RefundedMinor: charge.AmountRefunded, PaidAt: time.Unix(paidAt, 0).UTC(),
+		PresentmentCurrency: presentment, PresentmentAmountMinor: presentmentAmount,
+		EligibleTerms: charge.AmountCaptured == *item.AmountPaid && !presentmentConflict}
 	if charge.BalanceTransaction != nil {
 		receipt.MovementID = charge.BalanceTransaction.ID
 	}
 	c.checkChargeReview(ctx, charge, &receipt)
 	receipt.Disputed = charge.Disputed
-	if charge.PresentmentDetails != nil {
-		receipt.PresentmentCurrency = strings.ToUpper(string(charge.PresentmentDetails.PresentmentCurrency))
-	}
 	receipt.Evidence, err = json.Marshal(struct {
 		Invoice, Allocation, Charge, PresentmentCurrency string
+		PresentmentAmountMinor                           *int64 `json:"PresentmentAmountMinor,omitempty"`
 		AllocatedMinor                                   int64
-	}{id, item.ID, chargeID, receipt.PresentmentCurrency, *item.AmountPaid})
+	}{id, item.ID, chargeID, receipt.PresentmentCurrency, receipt.PresentmentAmountMinor, *item.AmountPaid})
 	if err != nil {
 		return nil, err
 	}

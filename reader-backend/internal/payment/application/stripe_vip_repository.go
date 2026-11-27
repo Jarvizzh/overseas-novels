@@ -19,6 +19,7 @@ type stripeVIPIntent struct {
 	Account                                                                                          payment.WebhookAccount
 	SlotID, TemplateID                                                                               int
 	Offer                                                                                            payment.StripeVIPOffer
+	FrozenParams                                                                                     *payment.FrozenCheckoutParams
 	InvoiceScanCursor                                                                                string
 	LookupOnly                                                                                       bool
 	FirstSentAt                                                                                      *time.Time
@@ -27,15 +28,25 @@ type stripeVIPIntent struct {
 
 const stripeVIPFields = `v.id::text,v.status,v.user_id,v.account_id,v.slot_id,v.template_id,v.product_ref,v.price_ref,
 	v.amount_minor,v.cycle,v.sales_mode,v.allowed_countries,COALESCE(v.expected_country,''),COALESCE(v.tax_liability_account,''),
+	v.frozen_checkout_params,
 	v.return_url,v.cancel_url,v.return_path,COALESCE(v.checkout_ref,''),COALESCE(v.subscription_ref,''),
 	COALESCE(v.customer_ref,''),COALESCE(v.approval_url,''),COALESCE(v.invoice_scan_cursor,''),v.first_sent_at,
 	(v.create_lookup_only OR COALESCE(v.retry_until<=now(),false))`
 
 func scanStripeVIP(row pgx.Row) (stripeVIPIntent, error) {
 	var v stripeVIPIntent
+	var frozenRaw []byte
 	err := row.Scan(&v.ID, &v.Status, &v.UserID, &v.AccountID, &v.SlotID, &v.TemplateID, &v.Offer.ProductID, &v.Offer.PriceID,
-		&v.Offer.AmountMinor, &v.Offer.Cycle, &v.Offer.SalesMode, &v.Offer.Countries, &v.Offer.ExpectedCountry, &v.Offer.TaxLiabilityAccount, &v.ReturnURL,
+		&v.Offer.AmountMinor, &v.Offer.Cycle, &v.Offer.SalesMode, &v.Offer.Countries, &v.Offer.ExpectedCountry, &v.Offer.TaxLiabilityAccount,
+		&frozenRaw, &v.ReturnURL,
 		&v.CancelURL, &v.ReturnPath, &v.SessionID, &v.SubscriptionID, &v.CustomerID, &v.ApprovalURL, &v.InvoiceScanCursor, &v.FirstSentAt, &v.LookupOnly)
+	if err == nil && len(frozenRaw) > 0 {
+		var frozen payment.FrozenCheckoutParams
+		if unmarshalErr := json.Unmarshal(frozenRaw, &frozen); unmarshalErr != nil {
+			return v, unmarshalErr
+		}
+		v.FrozenParams = &frozen
+	}
 	return v, err
 }
 
@@ -196,7 +207,10 @@ func claimStripeVIP(ctx context.Context, account payment.WebhookAccount, id stri
 		WHERE a.provider='stripe' AND a.account_key=$1 AND a.environment=$2 AND v.checkout_environment=$3
 		  AND ($4='' OR v.id=NULLIF($4,'')::uuid) AND v.next_check_at<=now()
 		  AND v.status IN ('creating','buyer_action','bound')
-		  AND (v.cancelled_at IS NULL OR v.cancelled_at>now()-interval '7 days')
+		  AND (v.cancelled_at IS NULL OR v.cancelled_at>now()-interval '7 days' OR EXISTS (
+		      SELECT 1 FROM payment_stripe_invoice_periods p
+		      WHERE p.intent_id=v.id AND p.settlement_state='pending_settlement' AND NOT p.admitted
+		  ))
 		  AND (v.status<>'creating' OR v.first_sent_at IS NOT NULL
 		       OR v.checkout_ref IS NOT NULL OR ($6 AND a.new_subscriptions_enabled AND a.status='published' AND a.is_primary
 		          AND (v.product_id IS NULL OR EXISTS (`+stripeVIPBindingMatchSQL+` FOR SHARE OF b))
@@ -480,4 +494,43 @@ func advanceStripeVIPInvoiceScan(ctx context.Context, v stripeVIPIntent, next st
 	_, err := db.Pool(ctx).Exec(ctx, `UPDATE payment_stripe_subscription_intents SET invoice_scan_cursor=NULLIF($2,'')
 		WHERE id=$1 AND COALESCE(invoice_scan_cursor,'')=$3`, v.ID, next, v.InvoiceScanCursor)
 	return err
+}
+
+type stripeVIPPendingInvoice struct {
+	intentID        string
+	invoiceRef      string
+	subscriptionRef string
+}
+
+func claimStripeVIPPendingSettlementInvoices(ctx context.Context, account payment.WebhookAccount) ([]stripeVIPPendingInvoice, error) {
+	rows, err := db.Pool(ctx).Query(ctx, `WITH due AS (
+		SELECT p.account_id, p.invoice_ref, p.intent_id, v.subscription_ref
+		FROM payment_stripe_invoice_periods p
+		JOIN payment_stripe_subscription_intents v ON v.id = p.intent_id
+		JOIN payment_channel_accounts a ON a.id = p.account_id
+		WHERE a.provider = 'stripe' AND a.account_key = $1 AND a.environment = $2
+		  AND v.checkout_environment = $3
+		  AND p.settlement_state = 'pending_settlement'
+		  AND NOT p.admitted
+		  AND COALESCE(v.subscription_ref, '') <> ''
+		  AND COALESCE(p.settlement_next_check_at, now()) <= now()
+		ORDER BY p.settlement_next_check_at NULLS FIRST, p.invoice_ref
+		LIMIT 5 FOR UPDATE OF p SKIP LOCKED
+	), leased AS (
+		UPDATE payment_stripe_invoice_periods p
+		SET settlement_next_check_at = now() + make_interval(secs => $4::int),
+		    updated_at = now()
+		FROM due
+		WHERE p.account_id = due.account_id AND p.invoice_ref = due.invoice_ref
+		RETURNING due.intent_id::text, due.invoice_ref, due.subscription_ref
+	) SELECT intent_id, invoice_ref, subscription_ref FROM leased`,
+		account.AccountKey, account.Environment, conversion.Environment(), int(stripeSettlementPollInterval/time.Second))
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, func(row pgx.CollectableRow) (stripeVIPPendingInvoice, error) {
+		var item stripeVIPPendingInvoice
+		err := row.Scan(&item.intentID, &item.invoiceRef, &item.subscriptionRef)
+		return item, err
+	})
 }

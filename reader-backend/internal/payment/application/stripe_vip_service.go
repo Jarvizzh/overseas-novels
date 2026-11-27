@@ -204,8 +204,24 @@ func (s *service) syncStripeVIP(ctx context.Context, adapter payment.StripeVIPAd
 	var proof payment.StripeVIPCheckout
 	var err error
 	if sessionID == "" && v.MayCreate {
+		frozenParams := v.FrozenParams
+		if frozenParams == nil {
+			policy, err := loadStripeAccountCheckoutPolicy(ctx, db.Pool(ctx), v.AccountID)
+			if err != nil {
+				return err
+			}
+			customer, err := ensureStripeCustomer(ctx, adapter, v.UserID, v.AccountID, v.Account)
+			if err != nil {
+				return err
+			}
+			frozen, err := freezeVIPIntentParams(ctx, v.ID, buildFrozenCheckoutParams(v.Offer.SalesMode, stripeCheckoutModeSubscription, policy, customer))
+			if err != nil {
+				return err
+			}
+			frozenParams = &frozen
+		}
 		proof, err = adapter.CreateStripeVIPCheckout(ctx, payment.StripeVIPCheckoutRequest{
-			IntentID: v.ID, ReturnURL: v.ReturnURL, CancelURL: v.CancelURL, Offer: v.Offer,
+			IntentID: v.ID, ReturnURL: v.ReturnURL, CancelURL: v.CancelURL, Offer: v.Offer, Params: frozenParams,
 		})
 		if err != nil {
 			return recordStripeWriteFailure(ctx, err, `UPDATE payment_stripe_subscription_intents SET create_lookup_only=true
@@ -301,26 +317,12 @@ func (s *service) syncStripeVIPInvoice(ctx context.Context, adapter payment.Stri
 	if proof.ID != id || proof.Subscription.ID != subscription || proof.Subscription.IntentID != v.ID {
 		return ErrCheckoutUnavailable
 	}
-	var movements []payment.LedgerEvidence
+	verifications := make(map[string]stripeSettlementVerification, len(proof.Allocations))
 	for _, item := range proof.Allocations {
-		receipt := item.Receipt
-		if receipt.MovementID == "" {
-			continue
-		}
-		entry, err := adapter.GetLedgerMovement(ctx, receipt.MovementID)
-		if err != nil {
-			log.Printf("task=stripe_vip action=ledger invoice=%s error=%v", id, err)
-			continue
-		}
-		if entry.Currency == "USD" && entry.Kind == payment.MovementPayment &&
-			entry.Amounts[payment.LedgerGross].Minor == receipt.AmountMinor {
-			entry.References = append(entry.References,
-				payment.LedgerReference{Type: "stripe_charge", ID: receipt.ID},
-				payment.LedgerReference{Type: "stripe_invoice", ID: id})
-			movements = append(movements, entry)
-		}
+		verifications[item.Receipt.ID] = verifyStripeChargeSettlement(ctx, adapter, item.Receipt, "stripe_vip", id,
+			payment.LedgerReference{Type: "stripe_invoice", ID: id})
 	}
-	return settleStripeVIPInvoice(ctx, v, proof, movements)
+	return settleStripeVIPInvoiceWithVerification(ctx, v, proof, verifications)
 }
 
 func (s *service) reconcileStripeVIP(ctx context.Context) {
@@ -338,6 +340,23 @@ func (s *service) reconcileStripeVIP(ctx context.Context) {
 		cancel()
 		if err != nil {
 			log.Printf("task=stripe_vip action=cancel intent=%s error=%v", job.intentID, err)
+		}
+	}
+	pendingInvoices, err := claimStripeVIPPendingSettlementInvoices(ctx, adapter.AccountScope())
+	if err != nil {
+		log.Printf("task=stripe_vip action=claim_pending_settlement error=%v", err)
+	}
+	for _, item := range pendingInvoices {
+		request, cancel := context.WithTimeout(ctx, stripeVIPRequestTimeout)
+		v, findErr := findStripeVIPIntent(request, db.Pool(ctx), adapter.AccountScope(), item.intentID)
+		if findErr == nil {
+			err = s.syncStripeVIPInvoice(request, adapter, v, item.invoiceRef, item.subscriptionRef)
+		} else {
+			err = findErr
+		}
+		cancel()
+		if err != nil {
+			log.Printf("task=stripe_vip action=retry_settlement invoice=%s error=%v", item.invoiceRef, err)
 		}
 	}
 	due, err := claimStripeVIP(ctx, adapter.AccountScope(), "", !s.historicalStripe && stripeVIPCheckoutEnabled(ctx))

@@ -18,6 +18,24 @@ import (
 )
 
 func settleStripeVIPInvoice(ctx context.Context, v stripeVIPIntent, proof payment.StripeVIPInvoice, movements []payment.LedgerEvidence) error {
+	byCharge := make(map[string]*payment.LedgerEvidence, len(movements))
+	for i := range movements {
+		m := &movements[i]
+		for _, ref := range m.References {
+			if ref.Type == "stripe_charge" && ref.ID != "" {
+				byCharge[ref.ID] = m
+			}
+		}
+	}
+	verifications := make(map[string]stripeSettlementVerification, len(proof.Allocations))
+	for _, alloc := range proof.Allocations {
+		receipt := alloc.Receipt
+		verifications[receipt.ID] = settlementVerificationFromMovement(&receipt, byCharge[receipt.ID])
+	}
+	return settleStripeVIPInvoiceWithVerification(ctx, v, proof, verifications)
+}
+
+func settleStripeVIPInvoiceWithVerification(ctx context.Context, v stripeVIPIntent, proof payment.StripeVIPInvoice, verifications map[string]stripeSettlementVerification) error {
 	if proof.ID == "" || proof.Subscription.ID == "" || proof.Subscription.IntentID != v.ID || proof.DueMinor < 0 || proof.DueMinor > math.MaxInt32 {
 		return ErrCheckoutUnavailable
 	}
@@ -45,22 +63,71 @@ func settleStripeVIPInvoice(ctx context.Context, v stripeVIPIntent, proof paymen
 	if err := bindStripeVIPTx(ctx, tx, v, proof.Subscription); err != nil {
 		return err
 	}
-	funding, paidAt, note, err := recordStripeVIPAllocations(ctx, tx, v, proof, orderID)
+	funding, paidAt, note, err := recordStripeVIPAllocations(ctx, tx, v, proof, orderID, verifications)
 	if err != nil {
 		return err
 	}
-	for _, movement := range movements {
-		if _, err := ledger.RecordTx(ctx, tx, movement); err != nil {
-			return err
+	for _, alloc := range proof.Allocations {
+		if sv, ok := verifications[alloc.Receipt.ID]; ok && sv.Movement != nil {
+			if _, err := ledger.RecordTx(ctx, tx, *sv.Movement); err != nil {
+				return err
+			}
 		}
+	}
+	var existingRetryUntil *time.Time
+	err = tx.QueryRow(ctx, `SELECT settlement_retry_until FROM payment_stripe_invoice_periods
+		WHERE account_id=$1 AND invoice_ref=$2 FOR UPDATE`, v.AccountID, proof.ID).Scan(&existingRetryUntil)
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	settlementState := payment.SettlementStateNone
+	pendingSettlement := false
+	hasVerifiedMovement := false
+	var retryUntil, nextCheckAt, verifiedAt *time.Time
+	for _, alloc := range proof.Allocations {
+		sv := verifications[alloc.Receipt.ID]
+		switch sv.Outcome {
+		case settlementOutcomeCurrencyMismatch, settlementOutcomeAmountMismatch:
+			settlementState = payment.SettlementStateReview
+			if note == "" {
+				note = sv.Note
+			}
+		case settlementOutcomePending:
+			if settlementState != payment.SettlementStateReview {
+				if existingRetryUntil != nil && !existingRetryUntil.After(now) {
+					settlementState = payment.SettlementStateReview
+					if note == "" {
+						note = stripeNoteSettlementWindowExhausted
+					}
+				} else {
+					settlementState = payment.SettlementStatePending
+					pendingSettlement = true
+					if existingRetryUntil != nil {
+						retryUntil = existingRetryUntil
+					} else {
+						deadline := now.Add(stripeSettlementRetryWindow)
+						retryUntil = &deadline
+					}
+					next := now.Add(stripeSettlementPollInterval)
+					nextCheckAt = &next
+				}
+			}
+		case settlementOutcomeVerified:
+			hasVerifiedMovement = true
+		}
+	}
+	if settlementState == payment.SettlementStateNone && hasVerifiedMovement {
+		settlementState = payment.SettlementStateSettled
+		verifiedAt = &now
 	}
 	if !admitted {
 		note, err = stripeVIPAdmissionNote(ctx, tx, v, proof, orderID, funding, note)
 		if err != nil {
 			return err
 		}
-		admit := note == "" && proof.Status == "paid" && proof.RemainingMinor == 0 && !paidAt.IsZero()
-		if err := updateStripeVIPPeriod(ctx, tx, v, proof, orderID, note, paidAt, admit); err != nil {
+		admit := note == "" && !pendingSettlement && proof.Status == "paid" && proof.RemainingMinor == 0 && !paidAt.IsZero()
+		if err := updateStripeVIPPeriod(ctx, tx, v, proof, orderID, note, paidAt, admit, settlementState, retryUntil, nextCheckAt, verifiedAt); err != nil {
 			return err
 		}
 		if admit {
@@ -70,12 +137,29 @@ func settleStripeVIPInvoice(ctx context.Context, v stripeVIPIntent, proof paymen
 			if err := grantStripeVIPPeriod(ctx, tx, proof, orderID, paidAt); err != nil {
 				return err
 			}
-		} else if err := finalizeUnfulfilledStripeVIPRefund(ctx, tx, orderID); err != nil {
-			return err
+			if proof.Subscription.CustomerID != "" && v.Account.Environment != "" {
+				if _, err := upsertStripeCustomerTx(ctx, tx, v.UserID, v.AccountID, v.Account.Environment,
+					proof.Subscription.CustomerID, proof.Country, proof.Country != "" && proof.TaxVerified); err != nil {
+					return err
+				}
+			}
+		} else if !pendingSettlement {
+			if err := finalizeUnfulfilledStripeVIPRefund(ctx, tx, orderID); err != nil {
+				return err
+			}
 		}
-	} else if note == "" && proof.Status == "paid" && proof.RemainingMinor == 0 && stripeVIPPrincipal(v, proof) > 0 {
-		if err := recordStripeVIPFunding(ctx, tx, v, proof, orderID, funding, true); err != nil {
-			return err
+	} else {
+		if settlementState == payment.SettlementStateSettled {
+			if _, err := tx.Exec(ctx, `UPDATE payment_stripe_invoice_periods SET settlement_state=$3,
+				settlement_next_check_at=NULL,settlement_verified_at=COALESCE(settlement_verified_at,$4),updated_at=now()
+				WHERE account_id=$1 AND invoice_ref=$2`, v.AccountID, proof.ID, settlementState, verifiedAt); err != nil {
+				return err
+			}
+		}
+		if note == "" && proof.Status == "paid" && proof.RemainingMinor == 0 && stripeVIPPrincipal(v, proof) > 0 {
+			if err := recordStripeVIPFunding(ctx, tx, v, proof, orderID, funding, true); err != nil {
+				return err
+			}
 		}
 	}
 	return tx.Commit(ctx)
@@ -135,7 +219,7 @@ type stripeVIPFunding struct {
 	disputed                 bool
 }
 
-func recordStripeVIPAllocations(ctx context.Context, tx pgx.Tx, v stripeVIPIntent, proof payment.StripeVIPInvoice, orderID int64) ([]stripeVIPFunding, time.Time, string, error) {
+func recordStripeVIPAllocations(ctx context.Context, tx pgx.Tx, v stripeVIPIntent, proof payment.StripeVIPInvoice, orderID int64, verifications map[string]stripeSettlementVerification) ([]stripeVIPFunding, time.Time, string, error) {
 	note := proof.ReviewReason
 	var funding []stripeVIPFunding
 	var paidAt time.Time
@@ -147,7 +231,7 @@ func recordStripeVIPAllocations(ctx context.Context, tx pgx.Tx, v stripeVIPInten
 			continue
 		}
 		seen[receipt.ID] = true
-		entry, err := saveStripeVIPAllocation(ctx, tx, v, proof, orderID, allocation)
+		entry, err := saveStripeVIPAllocation(ctx, tx, v, proof, orderID, allocation, verifications[receipt.ID].Movement)
 		if errors.Is(err, pgx.ErrNoRows) {
 			note = "Stripe VIP allocation conflicts with existing collection evidence"
 			continue
@@ -158,9 +242,7 @@ func recordStripeVIPAllocations(ctx context.Context, tx pgx.Tx, v stripeVIPInten
 		if receipt.PaidAt.After(paidAt) {
 			paidAt = receipt.PaidAt
 		}
-		if receipt.PresentmentCurrency != "" && receipt.PresentmentCurrency != "USD" {
-			note = "Stripe buyer payment currency is outside the approved USD scope"
-		} else if receipt.ReviewUnconfirmed || !receipt.EligibleTerms {
+		if receipt.ReviewUnconfirmed || !receipt.EligibleTerms {
 			note = "Stripe VIP charge allocation or review needs verification"
 		}
 		funding = append(funding, entry)
@@ -169,26 +251,43 @@ func recordStripeVIPAllocations(ctx context.Context, tx pgx.Tx, v stripeVIPInten
 }
 
 func saveStripeVIPAllocation(ctx context.Context, tx pgx.Tx, v stripeVIPIntent, proof payment.StripeVIPInvoice,
-	orderID int64, allocation payment.StripeVIPAllocation) (stripeVIPFunding, error) {
+	orderID int64, allocation payment.StripeVIPAllocation, movement *payment.LedgerEvidence) (stripeVIPFunding, error) {
 	receipt := allocation.Receipt
-	if allocation.ID == "" || receipt.ID == "" || allocation.AmountMinor <= 0 || receipt.Currency != "USD" ||
+	if allocation.ID == "" || receipt.ID == "" || allocation.AmountMinor <= 0 || receipt.Currency != payment.CurrencyUSD ||
 		receipt.AmountMinor < allocation.AmountMinor || receipt.PaidAt.IsZero() {
 		return stripeVIPFunding{}, pgx.ErrNoRows
 	}
 	entry := stripeVIPFunding{allocatedMinor: allocation.AmountMinor, disputed: receipt.Disputed}
 	err := tx.QueryRow(ctx, `INSERT INTO third_party_payment_orders(order_id,payment_provider,external_order_id,capture_id,
-		payer_country,currency,gross_amount,status,raw_payload,account_id,object_type)
-		VALUES($1,'stripe',$2,$3,NULLIF($4,''),'USD',$5::bigint::numeric/100,'VERIFIED',$6,$7,'charge')
+		payer_country,currency,gross_amount,status,raw_payload,account_id,object_type,presentment_currency,presentment_amount_minor)
+		VALUES($1,'stripe',$2,$3,NULLIF($4,''),'USD',$5::bigint::numeric/100,'VERIFIED',$6,$7,'charge',NULLIF($8,''),$9)
 		ON CONFLICT(account_id,object_type,capture_id) WHERE account_id IS NOT NULL
-		DO UPDATE SET raw_payload=EXCLUDED.raw_payload WHERE third_party_payment_orders.order_id=EXCLUDED.order_id
+		DO UPDATE SET raw_payload=EXCLUDED.raw_payload,
+		    presentment_currency=COALESCE(EXCLUDED.presentment_currency,third_party_payment_orders.presentment_currency),
+		    presentment_amount_minor=COALESCE(EXCLUDED.presentment_amount_minor,third_party_payment_orders.presentment_amount_minor)
+		WHERE third_party_payment_orders.order_id=EXCLUDED.order_id
 		  AND third_party_payment_orders.gross_amount=EXCLUDED.gross_amount RETURNING id`,
-		orderID, proof.ID, receipt.ID, proof.Country, receipt.AmountMinor, receipt.Evidence, v.AccountID).Scan(&entry.receiptID)
+		orderID, proof.ID, receipt.ID, proof.Country, receipt.AmountMinor, receipt.Evidence, v.AccountID,
+		receipt.PresentmentCurrency, receipt.PresentmentAmountMinor).Scan(&entry.receiptID)
 	if err != nil {
 		return entry, err
 	}
+	cols := extractSettlementColumns(movement)
 	err = tx.QueryRow(ctx, `WITH allocation AS (
-		INSERT INTO payment_stripe_invoice_allocations(account_id,invoice_ref,allocation_ref,receipt_id,amount_minor)
-		VALUES($1,$2,$3,$4,$5) ON CONFLICT(account_id,allocation_ref) DO UPDATE SET allocation_ref=EXCLUDED.allocation_ref
+		INSERT INTO payment_stripe_invoice_allocations(account_id,invoice_ref,allocation_ref,receipt_id,amount_minor,
+			presentment_currency,presentment_amount_minor,settlement_movement_ref,settlement_currency,
+			settlement_gross_minor,settlement_fee_minor,settlement_withheld_tax_minor,settlement_net_minor,settlement_exchange_rate)
+		VALUES($1,$2,$3,$4,$5,NULLIF($7,''),$8,NULLIF($9,''),NULLIF($10,''),$11,$12,$13,$14,NULLIF($15,''))
+		ON CONFLICT(account_id,allocation_ref) DO UPDATE SET
+			presentment_currency=COALESCE(EXCLUDED.presentment_currency,payment_stripe_invoice_allocations.presentment_currency),
+			presentment_amount_minor=COALESCE(EXCLUDED.presentment_amount_minor,payment_stripe_invoice_allocations.presentment_amount_minor),
+			settlement_movement_ref=COALESCE(EXCLUDED.settlement_movement_ref,payment_stripe_invoice_allocations.settlement_movement_ref),
+			settlement_currency=COALESCE(EXCLUDED.settlement_currency,payment_stripe_invoice_allocations.settlement_currency),
+			settlement_gross_minor=COALESCE(EXCLUDED.settlement_gross_minor,payment_stripe_invoice_allocations.settlement_gross_minor),
+			settlement_fee_minor=COALESCE(EXCLUDED.settlement_fee_minor,payment_stripe_invoice_allocations.settlement_fee_minor),
+			settlement_withheld_tax_minor=COALESCE(EXCLUDED.settlement_withheld_tax_minor,payment_stripe_invoice_allocations.settlement_withheld_tax_minor),
+			settlement_net_minor=COALESCE(EXCLUDED.settlement_net_minor,payment_stripe_invoice_allocations.settlement_net_minor),
+			settlement_exchange_rate=COALESCE(EXCLUDED.settlement_exchange_rate,payment_stripe_invoice_allocations.settlement_exchange_rate)
 		WHERE payment_stripe_invoice_allocations.invoice_ref=EXCLUDED.invoice_ref
 		  AND payment_stripe_invoice_allocations.receipt_id=EXCLUDED.receipt_id
 		  AND payment_stripe_invoice_allocations.amount_minor=EXCLUDED.amount_minor
@@ -196,7 +295,9 @@ func saveStripeVIPAllocation(ctx context.Context, tx pgx.Tx, v stripeVIPIntent, 
 	)
 	SELECT GREATEST(0,$5::bigint-GREATEST($6::bigint,COALESCE((SELECT sum(amount_minor) FROM payment_stripe_refund_items WHERE receipt_id=$4),0))
 		-COALESCE((SELECT confirmed_loss_minor FROM payment_principal_loss_by_receipt WHERE receipt_id=$4),0))::bigint FROM allocation`,
-		v.AccountID, proof.ID, allocation.ID, entry.receiptID, allocation.AmountMinor, receipt.RefundedMinor).Scan(&entry.netMinor)
+		v.AccountID, proof.ID, allocation.ID, entry.receiptID, allocation.AmountMinor, receipt.RefundedMinor,
+		receipt.PresentmentCurrency, receipt.PresentmentAmountMinor,
+		cols.MovementRef, cols.Currency, cols.GrossMinor, cols.FeeMinor, cols.WithheldTax, cols.NetMinor, cols.ExchangeRate).Scan(&entry.netMinor)
 	if err == nil && receipt.RiskReview != nil {
 		err = aftercare.RecordTx(ctx, tx, *receipt.RiskReview)
 	}
@@ -331,7 +432,7 @@ func stripeVIPAdmissionNote(ctx context.Context, tx pgx.Tx, v stripeVIPIntent, p
 }
 
 func updateStripeVIPPeriod(ctx context.Context, tx pgx.Tx, v stripeVIPIntent, proof payment.StripeVIPInvoice,
-	orderID int64, note string, paidAt time.Time, admit bool) error {
+	orderID int64, note string, paidAt time.Time, admit bool, settlementState string, retryUntil, nextCheckAt, verifiedAt *time.Time) error {
 	var start, end, observedPayment *time.Time
 	if !proof.StartsAt.IsZero() && proof.EndsAt.After(proof.StartsAt) {
 		start, end = &proof.StartsAt, &proof.EndsAt
@@ -341,9 +442,12 @@ func updateStripeVIPPeriod(ctx context.Context, tx pgx.Tx, v stripeVIPIntent, pr
 	}
 	_, err := tx.Exec(ctx, `UPDATE payment_stripe_invoice_periods SET service_start=$3,service_end=$4,billed_minor=$5,billing_reason=$10,
 		country=NULLIF($6,''),observed_tax_liability_account=NULLIF($7,''),observed_customer_tax_status=NULLIF($11,''),review_reason=NULLIF($8,''),admitted=$9,
-		provider_status=$12,revises_invoice_ref=NULLIF($13,''),revision_verified=$14,updated_at=now()
+		provider_status=$12,revises_invoice_ref=NULLIF($13,''),revision_verified=$14,
+		settlement_state=$15,settlement_retry_until=COALESCE($16,settlement_retry_until),
+		settlement_next_check_at=$17,settlement_verified_at=COALESCE($18,settlement_verified_at),updated_at=now()
 		WHERE account_id=$1 AND invoice_ref=$2`, v.AccountID, proof.ID, start, end, proof.DueMinor, proof.Country, proof.TaxLiabilityAccount,
-		note, admit, proof.BillingReason, proof.CustomerTaxStatus, proof.Status, proof.RevisesInvoiceID, proof.RevisionVerified)
+		note, admit, proof.BillingReason, proof.CustomerTaxStatus, proof.Status, proof.RevisesInvoiceID, proof.RevisionVerified,
+		settlementState, retryUntil, nextCheckAt, verifiedAt)
 	if err != nil {
 		return err
 	}

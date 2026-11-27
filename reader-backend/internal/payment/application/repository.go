@@ -50,6 +50,7 @@ type Repository interface {
 	stripeOfferSlots(context.Context, payment.WebhookAccount, int64) ([]int, error)
 	stripeProductAvailable(context.Context, payment.WebhookAccount, int64) (bool, error)
 	applyStripeProof(context.Context, stripePurchaseAttempt, payment.SingleCheckoutProof, *payment.LedgerEvidence) error
+	applyStripeProofWithSettlement(context.Context, stripePurchaseAttempt, payment.SingleCheckoutProof, stripeSettlementVerification) error
 	finishPayPalAttempt(context.Context, *paypalCheckoutAttempt, string, string) error
 	matchPayPalAttempt(context.Context, string, payment.WebhookAccount) (bool, error)
 	leaseCheckoutCapture(context.Context, string) (bool, error)

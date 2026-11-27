@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	stripego "github.com/stripe/stripe-go/v87"
+	"reader-backend/internal/payment"
 )
 
 type SalesMode string
@@ -36,6 +37,18 @@ type CheckoutRequest struct {
 	AutomaticTax           bool
 	BillingAddressRequired bool
 	USDOnly                bool
+
+	// Explicit Adaptive Pricing toggle for Direct mode (default false / OFF).
+	// Ignored for MoR where Stripe controls Adaptive Pricing.
+	AdaptivePricingEnabled bool
+	// BillingAddressCollection overrides BillingAddressRequired when set ("required" or "auto").
+	BillingAddressCollection string
+	// Verified Stripe Customer ID to reuse for returning buyers.
+	CustomerID string
+	// Gates Stripe-supported saved payment method authorization controls (default false).
+	SavePaymentMethodEnabled bool
+	// Optional setup_future_usage ("on_session" or "off_session") for Direct one-time payments.
+	SetupFutureUsage string
 }
 
 func (c *Client) CreateCheckout(ctx context.Context, req CheckoutRequest) (*stripego.CheckoutSession, error) {
@@ -52,6 +65,12 @@ func (c *Client) CreateCheckout(ctx context.Context, req CheckoutRequest) (*stri
 	if !c.validReturnURL(req.SuccessURL) || !c.validReturnURL(req.CancelURL) {
 		return nil, errors.New("invalid Stripe checkout return URL")
 	}
+	if req.CustomerID != "" && !validID(req.CustomerID, "cus_") {
+		return nil, errors.New("invalid Stripe Customer ID")
+	}
+	if req.SavePaymentMethodEnabled && req.CustomerID == "" {
+		return nil, errors.New("saved payment method options require a verified Stripe Customer")
+	}
 	request := &stripego.CheckoutSessionCreateParams{
 		Params:            params,
 		Mode:              stripego.String(string(req.CheckoutMode)),
@@ -63,14 +82,23 @@ func (c *Client) CreateCheckout(ctx context.Context, req CheckoutRequest) (*stri
 			{Price: stripego.String(req.PriceID), Quantity: stripego.Int64(1)},
 		},
 	}
-	if req.BillingAddressRequired {
-		request.BillingAddressCollection = stripego.String("required")
+	if req.CustomerID != "" {
+		request.Customer = stripego.String(req.CustomerID)
+	}
+	switch req.BillingAddressCollection {
+	case "":
+		if req.BillingAddressRequired {
+			request.BillingAddressCollection = stripego.String(payment.BillingAddressCollectionRequired)
+		}
+	case payment.BillingAddressCollectionRequired, payment.BillingAddressCollectionAuto:
+		request.BillingAddressCollection = stripego.String(req.BillingAddressCollection)
+	default:
+		return nil, errors.New("invalid Stripe billing address collection mode")
 	}
 	switch req.SalesMode {
 	case Direct:
-		if req.USDOnly {
-			request.AdaptivePricing = &stripego.CheckoutSessionCreateAdaptivePricingParams{Enabled: stripego.Bool(false)}
-		}
+		adaptiveEnabled := req.AdaptivePricingEnabled && !req.USDOnly
+		request.AdaptivePricing = &stripego.CheckoutSessionCreateAdaptivePricingParams{Enabled: stripego.Bool(adaptiveEnabled)}
 		request.AutomaticTax = &stripego.CheckoutSessionCreateAutomaticTaxParams{Enabled: stripego.Bool(req.AutomaticTax)}
 	case MoR:
 		if req.AutomaticTax {
@@ -81,12 +109,25 @@ func (c *Client) CreateCheckout(ctx context.Context, req CheckoutRequest) (*stri
 		return nil, errors.New("invalid Stripe sales mode")
 	}
 
+	if req.SavePaymentMethodEnabled {
+		request.SavedPaymentMethodOptions = &stripego.CheckoutSessionCreateSavedPaymentMethodOptionsParams{
+			PaymentMethodSave: stripego.String(payment.SavedPaymentMethodEnabled),
+		}
+	}
+
 	// Propagate the durable reference so charge and billing events can be tied
 	// back to the attempt even if Session creation returned an ambiguous result.
 	metadata := map[string]string{singleAttemptMetadata: req.AttemptID}
 	request.Metadata = metadata
 	if req.CheckoutMode == OneTime {
-		request.PaymentIntentData = &stripego.CheckoutSessionCreatePaymentIntentDataParams{Metadata: metadata}
+		piData := &stripego.CheckoutSessionCreatePaymentIntentDataParams{Metadata: metadata}
+		if req.SavePaymentMethodEnabled && req.SalesMode == Direct && req.SetupFutureUsage != "" {
+			if req.SetupFutureUsage != payment.SetupFutureUsageOnSession && req.SetupFutureUsage != payment.SetupFutureUsageOffSession {
+				return nil, errors.New("invalid Stripe setup_future_usage value")
+			}
+			piData.SetupFutureUsage = stripego.String(req.SetupFutureUsage)
+		}
+		request.PaymentIntentData = piData
 	} else {
 		request.SubscriptionData = &stripego.CheckoutSessionCreateSubscriptionDataParams{Metadata: metadata}
 	}

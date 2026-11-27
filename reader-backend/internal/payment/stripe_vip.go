@@ -18,11 +18,12 @@ type StripeVIPOffer struct {
 type StripeVIPCheckoutRequest struct {
 	IntentID, ReturnURL, CancelURL string
 	Offer                          StripeVIPOffer
+	Params                         *FrozenCheckoutParams
 }
 
 type StripeVIPCheckout struct {
-	ID, IntentID, SubscriptionID, URL string
-	Expired, AwaitingBuyer            bool
+	ID, IntentID, SubscriptionID, CustomerID, URL string
+	Expired, AwaitingBuyer                        bool
 }
 
 type StripeVIPSubscription struct {

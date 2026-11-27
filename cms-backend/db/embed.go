@@ -199,3 +199,8 @@ var PromotionEnvironmentSQL string
 //
 //go:embed migrations/2026111937.sql
 var StripeTaxLiabilityRelaxSQL string
+
+// StripeLocalCurrencyCustomerSQL adds presentment evidence, USD settlement tracking, frozen checkout params, and verified Stripe customer mapping.
+//
+//go:embed migrations/2026111938.sql
+var StripeLocalCurrencyCustomerSQL string

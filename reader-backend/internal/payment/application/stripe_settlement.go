@@ -3,6 +3,7 @@ package application
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"reader-backend/internal/conversion"
@@ -14,6 +15,12 @@ import (
 
 func (r *dbRepository) applyStripeProof(ctx context.Context, a stripePurchaseAttempt, proof payment.SingleCheckoutProof,
 	movement *payment.LedgerEvidence) error {
+	return r.applyStripeProofWithSettlement(ctx, a, proof, settlementVerificationFromMovement(proof.Receipt, movement))
+}
+
+func (r *dbRepository) applyStripeProofWithSettlement(ctx context.Context, a stripePurchaseAttempt, proof payment.SingleCheckoutProof,
+	verification stripeSettlementVerification) error {
+	movement := verification.Movement
 	if proof.ID == "" || proof.AttemptID != a.ID || (a.SessionID != "" && a.SessionID != proof.ID) {
 		return ErrCheckoutUnavailable
 	}
@@ -115,6 +122,35 @@ func (r *dbRepository) applyStripeProof(ctx context.Context, a stripePurchaseAtt
 		}
 		duplicateBook = duplicateBook && !fulfilled
 	}
+	var existingRetryUntil *time.Time
+	err = tx.QueryRow(ctx, `SELECT settlement_retry_until FROM payment_stripe_checkout_terms WHERE attempt_id=$1 FOR UPDATE`, a.ID).Scan(&existingRetryUntil)
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	settlementState := payment.SettlementStateNone
+	pendingSettlement := false
+	var retryUntil *time.Time
+	switch verification.Outcome {
+	case settlementOutcomeVerified:
+		settlementState = payment.SettlementStateSettled
+	case settlementOutcomeCurrencyMismatch, settlementOutcomeAmountMismatch:
+		settlementState = payment.SettlementStateReview
+	case settlementOutcomePending:
+		if existingRetryUntil != nil && !existingRetryUntil.After(now) {
+			settlementState = payment.SettlementStateReview
+		} else {
+			settlementState = payment.SettlementStatePending
+			pendingSettlement = true
+			if existingRetryUntil != nil {
+				retryUntil = existingRetryUntil
+			} else {
+				deadline := now.Add(stripeSettlementRetryWindow)
+				retryUntil = &deadline
+			}
+		}
+	}
+
 	extra := differentAttempt || current == "closed" || state == "Refunded" || duplicateBook
 	var note *string
 	principal := receipt.PrincipalMinor
@@ -124,8 +160,10 @@ func (r *dbRepository) applyStripeProof(ctx context.Context, a stripePurchaseAtt
 	switch {
 	case extra:
 		note = checkoutNote("Stripe received a payment outside the active fulfillment attempt")
-	case receipt.PresentmentCurrency != "" && receipt.PresentmentCurrency != "USD":
-		note = checkoutNote("Stripe buyer payment currency is outside the approved USD scope")
+	case verification.Outcome == settlementOutcomeCurrencyMismatch || verification.Outcome == settlementOutcomeAmountMismatch:
+		note = checkoutNote(verification.Note)
+	case verification.Outcome == settlementOutcomePending && !pendingSettlement:
+		note = checkoutNote(stripeNoteSettlementWindowExhausted)
 	case !receipt.EligibleTerms:
 		note = checkoutNote("Stripe collected amount or line item differs from the checkout snapshot")
 	case principal <= 0 || principal > receipt.AmountMinor:
@@ -152,13 +190,16 @@ func (r *dbRepository) applyStripeProof(ctx context.Context, a stripePurchaseAtt
 
 	var receiptID int64
 	err = tx.QueryRow(ctx, `INSERT INTO third_party_payment_orders(order_id,payment_provider,external_order_id,capture_id,
-		payer_country,currency,gross_amount,status,raw_payload,account_id,object_type,reconciliation_note)
-		VALUES($1,'stripe',$2,$3,NULLIF($4,''),'USD',$5::bigint::numeric/100,'VERIFIED',$6,$7,'charge',$8)
+		payer_country,currency,gross_amount,status,raw_payload,account_id,object_type,reconciliation_note,presentment_currency,presentment_amount_minor)
+		VALUES($1,'stripe',$2,$3,NULLIF($4,''),'USD',$5::bigint::numeric/100,'VERIFIED',$6,$7,'charge',$8,NULLIF($9,''),$10)
 		ON CONFLICT(payment_provider,external_order_id,capture_id) DO UPDATE SET
-		    raw_payload=EXCLUDED.raw_payload,reconciliation_note=EXCLUDED.reconciliation_note
+		    raw_payload=EXCLUDED.raw_payload,reconciliation_note=EXCLUDED.reconciliation_note,
+		    presentment_currency=COALESCE(EXCLUDED.presentment_currency,third_party_payment_orders.presentment_currency),
+		    presentment_amount_minor=COALESCE(EXCLUDED.presentment_amount_minor,third_party_payment_orders.presentment_amount_minor)
 		WHERE third_party_payment_orders.order_id=EXCLUDED.order_id AND third_party_payment_orders.account_id=EXCLUDED.account_id
 		  AND third_party_payment_orders.gross_amount=EXCLUDED.gross_amount
-		RETURNING id`, a.OrderID, proof.ID, receipt.ID, receipt.Country, receipt.AmountMinor, receipt.Evidence, a.AccountID, note).Scan(&receiptID)
+		RETURNING id`, a.OrderID, proof.ID, receipt.ID, receipt.Country, receipt.AmountMinor, receipt.Evidence, a.AccountID, note,
+		receipt.PresentmentCurrency, receipt.PresentmentAmountMinor).Scan(&receiptID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrCheckoutUnavailable
 	}
@@ -187,16 +228,38 @@ func (r *dbRepository) applyStripeProof(ctx context.Context, a stripePurchaseAtt
 			return err
 		}
 	}
+	cols := extractSettlementColumns(movement)
 	_, err = tx.Exec(ctx, `UPDATE payment_stripe_checkout_terms SET observed_country=NULLIF($2,''),country_checked_at=now(),
 		observed_tax_liability_account=NULLIF($5,''),observed_customer_tax_status=NULLIF($6,''),
-		ledger_observed_at=CASE WHEN $4 THEN NULL WHEN $3 THEN COALESCE(ledger_observed_at,now()) ELSE ledger_observed_at END WHERE attempt_id=$1`,
-		a.ID, receipt.Country, movement != nil, receipt.ReviewUnconfirmed || dispute, receipt.TaxLiabilityAccount, receipt.CustomerTaxStatus)
+		presentment_currency=COALESCE(NULLIF($7,''),presentment_currency),
+		presentment_amount_minor=COALESCE($8,presentment_amount_minor),
+		settlement_state=$9,
+		settlement_retry_until=COALESCE($10,settlement_retry_until),
+		settlement_movement_ref=COALESCE(NULLIF($11,''),settlement_movement_ref),
+		settlement_currency=COALESCE(NULLIF($12,''),settlement_currency),
+		settlement_gross_minor=COALESCE($13,settlement_gross_minor),
+		settlement_fee_minor=COALESCE($14,settlement_fee_minor),
+		settlement_withheld_tax_minor=COALESCE($15,settlement_withheld_tax_minor),
+		settlement_net_minor=COALESCE($16,settlement_net_minor),
+		settlement_exchange_rate=COALESCE(NULLIF($17,''),settlement_exchange_rate),
+		ledger_observed_at=CASE WHEN $4 OR $9='pending_settlement' THEN NULL WHEN $3 THEN COALESCE(ledger_observed_at,now()) ELSE ledger_observed_at END
+		WHERE attempt_id=$1`,
+		a.ID, receipt.Country, movement != nil, receipt.ReviewUnconfirmed || dispute, receipt.TaxLiabilityAccount, receipt.CustomerTaxStatus,
+		receipt.PresentmentCurrency, receipt.PresentmentAmountMinor, settlementState, retryUntil,
+		cols.MovementRef, cols.Currency, cols.GrossMinor, cols.FeeMinor, cols.WithheldTax, cols.NetMinor, cols.ExchangeRate)
 	if err != nil {
 		return err
 	}
-	_, err = tx.Exec(ctx, `UPDATE payment_checkout_attempts SET provider_order_id=$2,status='settled',approval_url=NULL WHERE id=$1`, a.ID, proof.ID)
+	_, err = tx.Exec(ctx, `UPDATE payment_checkout_attempts SET provider_order_id=$2,status='settled',approval_url=NULL,
+		next_create_at=CASE WHEN $3 THEN now()+make_interval(secs=>$4::int) ELSE next_create_at END WHERE id=$1`,
+		a.ID, proof.ID, pendingSettlement, int(stripeSettlementPollInterval/time.Second))
 	if err != nil {
 		return err
+	}
+	if receipt.CustomerID != "" && note == nil && a.Account.Environment != "" {
+		if _, err := upsertStripeCustomerTx(ctx, tx, userID, a.AccountID, a.Account.Environment, receipt.CustomerID, receipt.Country, receipt.Country != "" && receipt.TaxVerified); err != nil {
+			return err
+		}
 	}
 	if fulfilled && !extra && receipt.EligibleTerms && principal > 0 && principal <= receipt.AmountMinor {
 		_, err := tx.Exec(ctx, `UPDATE payment_fulfillment_funding SET principal_minor=$3 WHERE order_id=$1 AND receipt_id=$2 AND principal_minor IS NULL`,
@@ -243,7 +306,7 @@ func (r *dbRepository) applyStripeProof(ctx context.Context, a stripePurchaseAtt
 	if err != nil {
 		return err
 	}
-	if note != nil {
+	if note != nil || pendingSettlement {
 		return tx.Commit(ctx)
 	}
 	hold, err := aftercare.EvaluateFulfillment(ctx, tx, a.OrderID, receiptID)

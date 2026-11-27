@@ -16,6 +16,84 @@ const singleAttemptMetadata = "payment_attempt_id"
 
 func (c *Client) AccountScope() payment.WebhookAccount { return ledgerAccount(c.scope) }
 
+func checkoutRequestFromFrozen(mode SalesMode, checkoutMode CheckoutMode, priceID, attemptID, successURL, cancelURL string, frozen *payment.FrozenCheckoutParams) CheckoutRequest {
+	req := CheckoutRequest{
+		SalesMode:                mode,
+		CheckoutMode:             checkoutMode,
+		PriceID:                  priceID,
+		AttemptID:                attemptID,
+		SuccessURL:               successURL,
+		CancelURL:                cancelURL,
+		IdempotencyKey:           attemptID,
+		BillingAddressCollection: payment.BillingAddressCollectionRequired,
+		AdaptivePricingEnabled:   false,
+	}
+	if frozen == nil {
+		return req
+	}
+	req.AdaptivePricingEnabled = frozen.AdaptivePricingEnabled
+	if frozen.BillingAddressCollection != "" {
+		req.BillingAddressCollection = frozen.BillingAddressCollection
+	}
+	req.CustomerID = frozen.CustomerID
+	req.SavePaymentMethodEnabled = frozen.SavePaymentMethodEnabled
+	req.SetupFutureUsage = frozen.SetupFutureUsage
+	return req
+}
+
+// extractPresentment extracts presentment currency and minor-unit amount from
+// CheckoutSession, PaymentIntent, and Charge presentment_details. It supports
+// zero-decimal currencies such as JPY and flags conflicts when multiple sources
+// disagree. Returns empty currency and nil amount when absent.
+func extractPresentment(session *stripego.CheckoutSession, intent *stripego.PaymentIntent, charge *stripego.Charge) (string, *int64, bool) {
+	type presentmentSource struct {
+		currency string
+		amount   int64
+	}
+	var sources []presentmentSource
+	if session != nil && session.PresentmentDetails != nil {
+		if code := strings.ToUpper(strings.TrimSpace(string(session.PresentmentDetails.PresentmentCurrency))); code != "" {
+			sources = append(sources, presentmentSource{currency: code, amount: session.PresentmentDetails.PresentmentAmount})
+		}
+	}
+	if intent != nil && intent.PresentmentDetails != nil {
+		if code := strings.ToUpper(strings.TrimSpace(string(intent.PresentmentDetails.PresentmentCurrency))); code != "" {
+			sources = append(sources, presentmentSource{currency: code, amount: intent.PresentmentDetails.PresentmentAmount})
+		}
+	}
+	if charge != nil && charge.PresentmentDetails != nil {
+		if code := strings.ToUpper(strings.TrimSpace(string(charge.PresentmentDetails.PresentmentCurrency))); code != "" {
+			sources = append(sources, presentmentSource{currency: code, amount: charge.PresentmentDetails.PresentmentAmount})
+		}
+	}
+	if len(sources) == 0 {
+		return "", nil, false
+	}
+	var resolvedCurrency string
+	var resolvedAmount *int64
+	for _, src := range sources {
+		if _, err := stripeBalanceScale(src.currency); err != nil {
+			return src.currency, nil, true
+		}
+		if resolvedCurrency == "" {
+			resolvedCurrency = src.currency
+		} else if resolvedCurrency != src.currency {
+			return resolvedCurrency, resolvedAmount, true
+		}
+		if src.amount > 0 {
+			amt := src.amount
+			if resolvedAmount == nil {
+				resolvedAmount = &amt
+			} else if *resolvedAmount != amt {
+				return resolvedCurrency, resolvedAmount, true
+			}
+		} else if src.amount < 0 {
+			return resolvedCurrency, nil, true
+		}
+	}
+	return resolvedCurrency, resolvedAmount, false
+}
+
 func (c *Client) CreateSingleCheckout(ctx context.Context, req payment.SingleCheckoutRequest) (payment.SingleCheckoutProof, error) {
 	price, err := c.GetPrice(ctx, req.Offer.PriceID)
 	if err != nil {
@@ -30,9 +108,7 @@ func (c *Client) CreateSingleCheckout(ctx context.Context, req payment.SingleChe
 	if err != nil {
 		return payment.SingleCheckoutProof{}, err
 	}
-	session, err := c.CreateCheckout(ctx, CheckoutRequest{SalesMode: mode, CheckoutMode: OneTime, PriceID: price.ID,
-		AttemptID: req.AttemptID, SuccessURL: req.SuccessURL, CancelURL: req.CancelURL,
-		IdempotencyKey: req.AttemptID, BillingAddressRequired: true, USDOnly: true})
+	session, err := c.CreateCheckout(ctx, checkoutRequestFromFrozen(mode, OneTime, price.ID, req.AttemptID, req.SuccessURL, req.CancelURL, req.Params))
 	if err != nil {
 		return payment.SingleCheckoutProof{}, err
 	}
@@ -49,6 +125,9 @@ func (c *Client) singleSessionProof(session *stripego.CheckoutSession, id, attem
 		return payment.SingleCheckoutProof{}, errors.New("Stripe Checkout does not match the attempt")
 	}
 	proof := payment.SingleCheckoutProof{ID: id, AttemptID: attempt}
+	if session.Customer != nil && validID(session.Customer.ID, "cus_") {
+		proof.CustomerID = session.Customer.ID
+	}
 	proof.Expired = session.Status == stripego.CheckoutSessionStatusExpired && session.PaymentStatus == stripego.CheckoutSessionPaymentStatusUnpaid
 	if session.Status == stripego.CheckoutSessionStatusOpen && session.PaymentStatus == stripego.CheckoutSessionPaymentStatusUnpaid {
 		target, err := url.Parse(session.URL)
@@ -120,7 +199,7 @@ func (c *Client) ReadSingleCheckout(ctx context.Context, id, attempt string, off
 	if err != nil {
 		return proof, err
 	}
-	var country, taxStatus, taxAccount, taxLiabilityType, taxCalcStatus, presentment string
+	var country, taxStatus, taxAccount, taxLiabilityType, taxCalcStatus string
 	if session.CustomerDetails != nil {
 		taxStatus = string(session.CustomerDetails.TaxExempt)
 		if session.CustomerDetails.Address != nil {
@@ -136,8 +215,13 @@ func (c *Client) ReadSingleCheckout(ctx context.Context, id, attempt string, off
 			}
 		}
 	}
-	if charge.PresentmentDetails != nil {
-		presentment = strings.ToUpper(string(charge.PresentmentDetails.PresentmentCurrency))
+	presentment, presentmentAmount, presentmentConflict := extractPresentment(session, intent, charge)
+	customerID := proof.CustomerID
+	if customerID == "" && intent.Customer != nil && validID(intent.Customer.ID, "cus_") {
+		customerID = intent.Customer.ID
+	}
+	if customerID == "" && charge.Customer != nil && validID(charge.Customer.ID, "cus_") {
+		customerID = charge.Customer.ID
 	}
 	managed := offer.SalesMode == payment.StripeSaleMoR
 	modeMatches := managed == (session.ManagedPayments != nil && session.ManagedPayments.Enabled) &&
@@ -156,19 +240,20 @@ func (c *Client) ReadSingleCheckout(ctx context.Context, id, attempt string, off
 		}
 	}
 	receipt := payment.SingleChargeProof{ID: charge.ID, IntentID: intent.ID, Currency: strings.ToUpper(string(charge.Currency)),
-		Country: country, AmountMinor: charge.AmountCaptured, RefundedMinor: charge.AmountRefunded, PrincipalMinor: principal,
+		CustomerID: customerID, Country: country, AmountMinor: charge.AmountCaptured, RefundedMinor: charge.AmountRefunded, PrincipalMinor: principal,
 		TaxLiabilityAccount: taxAccount, TaxLiabilityType: taxLiabilityType, AutomaticTaxStatus: taxCalcStatus,
-		CustomerTaxStatus: taxStatus, PresentmentCurrency: presentment, TaxVerified: taxMatches,
+		CustomerTaxStatus: taxStatus, PresentmentCurrency: presentment, PresentmentAmountMinor: presentmentAmount, TaxVerified: taxMatches,
 		PaidAt: time.Unix(charge.Created, 0).UTC(), EligibleTerms: matching && session.Currency == stripego.CurrencyUSD &&
 			session.AmountTotal == charge.AmountCaptured && (managed || charge.AmountCaptured == offer.AmountMinor) &&
-			modeMatches && (presentment == "" || presentment == "USD")}
+			modeMatches && !presentmentConflict}
 	if charge.BalanceTransaction != nil {
 		receipt.MovementID = charge.BalanceTransaction.ID
 	}
 	receipt.Evidence, err = json.Marshal(struct {
 		CheckoutID, IntentID, ChargeID, BillingCountry, TaxAccount, TaxLiabilityType, AutomaticTaxStatus, CustomerTaxStatus, PresentmentCurrency string
+		PresentmentAmountMinor                                                                                                                   *int64 `json:"PresentmentAmountMinor,omitempty"`
 		AmountMinor, RefundedMinor, PrincipalMinor                                                                                               int64
-	}{session.ID, intent.ID, charge.ID, country, taxAccount, taxLiabilityType, taxCalcStatus, taxStatus, presentment, receipt.AmountMinor, receipt.RefundedMinor, principal})
+	}{session.ID, intent.ID, charge.ID, country, taxAccount, taxLiabilityType, taxCalcStatus, taxStatus, presentment, presentmentAmount, receipt.AmountMinor, receipt.RefundedMinor, principal})
 	if err != nil {
 		return proof, err
 	}

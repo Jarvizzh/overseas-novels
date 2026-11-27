@@ -132,8 +132,24 @@ func (s *service) syncStripeAttempt(ctx context.Context, provider payment.Single
 		if !allowed {
 			return nil
 		}
+		frozenParams := a.FrozenParams
+		if frozenParams == nil {
+			policy, err := loadStripeAccountCheckoutPolicy(ctx, db.Pool(ctx), a.AccountID)
+			if err != nil {
+				return err
+			}
+			customer, err := ensureStripeCustomer(ctx, provider, a.UserID, a.AccountID, a.Account)
+			if err != nil {
+				return err
+			}
+			frozen, err := freezeSingleAttemptParams(ctx, a.ID, buildFrozenCheckoutParams(a.Offer.SalesMode, stripeCheckoutModeOneTime, policy, customer))
+			if err != nil {
+				return err
+			}
+			frozenParams = &frozen
+		}
 		proof, err := provider.CreateSingleCheckout(ctx, payment.SingleCheckoutRequest{
-			AttemptID: a.ID, SuccessURL: a.ReturnURL, CancelURL: a.CancelURL, Offer: a.Offer,
+			AttemptID: a.ID, SuccessURL: a.ReturnURL, CancelURL: a.CancelURL, Offer: a.Offer, Params: frozenParams,
 		})
 		if err != nil {
 			return recordStripeWriteFailure(ctx, err, `UPDATE payment_checkout_attempts SET create_lookup_only=true
@@ -167,20 +183,11 @@ func (s *service) syncStripeAttempt(ctx context.Context, provider payment.Single
 			}
 		}
 	}
-	var movement *payment.LedgerEvidence
-	if proof.Receipt != nil && proof.Receipt.Currency == "USD" && proof.Receipt.MovementID != "" {
-		entry, ledgerErr := provider.GetLedgerMovement(ctx, proof.Receipt.MovementID)
-		if ledgerErr == nil {
-			if entry.Currency == "USD" && entry.Kind == payment.MovementPayment &&
-				entry.Amounts[payment.LedgerGross].Minor == proof.Receipt.AmountMinor {
-				entry.References = append(entry.References, payment.LedgerReference{Type: "stripe_charge", ID: proof.Receipt.ID})
-				movement = &entry
-			}
-		} else {
-			log.Printf("task=stripe_checkout action=ledger attempt=%s error=%v", a.ID, ledgerErr)
-		}
+	var verification stripeSettlementVerification
+	if proof.Receipt != nil && proof.Receipt.Currency == payment.CurrencyUSD {
+		verification = verifyStripeChargeSettlement(ctx, provider, *proof.Receipt, "stripe_checkout", a.ID)
 	}
-	return s.repo.applyStripeProof(ctx, a, proof, movement)
+	return s.repo.applyStripeProofWithSettlement(ctx, a, proof, verification)
 }
 
 func (s *service) reconcileStripeCheckouts(ctx context.Context) {

@@ -26,8 +26,7 @@ func (c *Client) CreateStripeVIPCheckout(ctx context.Context, req payment.Stripe
 	if err != nil {
 		return payment.StripeVIPCheckout{}, err
 	}
-	session, err := c.CreateCheckout(ctx, CheckoutRequest{SalesMode: mode, CheckoutMode: Subscription, PriceID: price.ID, AttemptID: req.IntentID,
-		IdempotencyKey: req.IntentID, SuccessURL: req.ReturnURL, CancelURL: req.CancelURL, BillingAddressRequired: true, USDOnly: true})
+	session, err := c.CreateCheckout(ctx, checkoutRequestFromFrozen(mode, Subscription, price.ID, req.IntentID, req.ReturnURL, req.CancelURL, req.Params))
 	if err != nil {
 		return payment.StripeVIPCheckout{}, err
 	}
@@ -41,6 +40,9 @@ func (c *Client) vipCheckoutSnapshot(s *stripego.CheckoutSession, id, intent, mo
 		return payment.StripeVIPCheckout{}, errors.New("Stripe VIP Checkout does not match scope, mode or intent")
 	}
 	snapshot := payment.StripeVIPCheckout{ID: s.ID, IntentID: intent}
+	if s.Customer != nil && validID(s.Customer.ID, "cus_") {
+		snapshot.CustomerID = s.Customer.ID
+	}
 	if s.Status == stripego.CheckoutSessionStatusExpired && s.Subscription == nil {
 		snapshot.Expired = true
 	}
