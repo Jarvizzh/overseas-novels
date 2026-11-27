@@ -72,6 +72,11 @@ func (s *mockStripeState) serveHTTP(w http.ResponseWriter, req *http.Request) bo
 		_, _ = fmt.Fprintf(w, `{"id":%q}`, acctID)
 		return true
 
+	case req.Method == http.MethodGet && req.URL.Path == "/v1/webhook_endpoints":
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"error":{"type":"permission_error","code":"rak_insufficient_permissions"}}`))
+		return true
+
 	case req.Method == http.MethodPost && req.URL.Path == "/v1/products":
 		if err := req.ParseForm(); err != nil {
 			w.WriteHeader(http.StatusBadRequest)

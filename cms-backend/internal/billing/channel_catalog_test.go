@@ -412,6 +412,9 @@ func TestProductCatalogDualChannelGateAndTemplateDecoupling(t *testing.T) {
 			_, _ = w.Write([]byte(`{"id":"P-ANNUAL-9999","product_id":"PROD-PP-ANNUAL-01","status":"ACTIVE","billing_cycles":[{"tenure_type":"REGULAR","total_cycles":0,"frequency":{"interval_unit":"YEAR","interval_count":1},"pricing_scheme":{"fixed_price":{"value":"99.99","currency_code":"USD"}}}]}`))
 		case req.URL.Path == "/v1/account":
 			_, _ = w.Write([]byte(`{"id":"acct_StripeCat01"}`))
+		case req.Method == http.MethodGet && req.URL.Path == "/v1/webhook_endpoints":
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"error":{"type":"permission_error","code":"rak_insufficient_permissions"}}`))
 		case req.Method == http.MethodPost && req.URL.Path == "/v1/products":
 			if req.Header.Get("Idempotency-Key") == "" || req.ParseForm() != nil || req.PostForm.Get("name") == "" {
 				w.WriteHeader(http.StatusBadRequest)
