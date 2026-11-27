@@ -38,6 +38,7 @@ import {
   type VipCycle,
 } from '../utils/paymentCatalogApi';
 import {
+  defaultStripeMoRTaxCode,
   extractStripeCatalogTax,
   filterPublishedChannelAccounts,
   findBindingForAccount,
@@ -95,7 +96,6 @@ type PayPalBindForm = {
 type StripeBindForm = {
   account_id: string;
   sales_mode: StripeSalesMode;
-  tax_liability_account: string;
   tax_code: string;
   tax_behavior: 'exclusive' | 'inclusive';
   countries: string;
@@ -158,7 +158,7 @@ export default function ProductsPage() {
   const [bindingProduct, setBindingProduct] = useState<ProductView | null>(null);
   const [ppForm, setPpForm] = useState<PayPalBindForm>({ account_id: '', external_product_ref: '', external_price_ref: '', enabled: true, reason: '' });
   const [stForm, setStForm] = useState<StripeBindForm>({
-    account_id: '', sales_mode: 'direct', tax_liability_account: '', tax_code: 'txcd_10103001',
+    account_id: '', sales_mode: 'direct', tax_code: defaultStripeMoRTaxCode(),
     tax_behavior: 'exclusive', countries: formatDefaultStripeCountriesInput('direct'), release_evidence: '', market_policy: '', reprovision: false, enabled: true, reason: '',
   });
 
@@ -331,7 +331,7 @@ export default function ProductsPage() {
     const stAccountId = preferredSTAccountId || String(prod.stripe_binding?.account_id ?? stAccDefault?.id ?? '');
     const ppBinding = findBindingForAccount(prod, 'paypal', ppAccountId);
     const stBinding = findBindingForAccount(prod, 'stripe', stAccountId);
-    const { taxCode, taxBehavior } = extractStripeCatalogTax(stBinding?.validated_catalog);
+    const { taxCode, taxBehavior } = extractStripeCatalogTax(stBinding?.validated_catalog, prod.product_type);
 
     setPpForm({
       account_id: ppAccountId,
@@ -344,7 +344,6 @@ export default function ProductsPage() {
     setStForm({
       account_id: stAccountId,
       sales_mode: stSalesMode,
-      tax_liability_account: stBinding?.tax_liability_account ?? '',
       tax_code: taxCode,
       tax_behavior: taxBehavior,
       countries: stBinding?.allowed_countries?.length ? stBinding.allowed_countries.join(', ') : formatDefaultStripeCountriesInput(stSalesMode),
@@ -424,7 +423,6 @@ export default function ProductsPage() {
         environment: env,
         account_id: stForm.account_id ? Number(stForm.account_id) : undefined,
         sales_mode: stForm.sales_mode,
-        tax_liability_account: stForm.sales_mode === 'merchant_of_record' ? stForm.tax_liability_account.trim() : '',
         tax_code: stForm.sales_mode === 'merchant_of_record' ? stForm.tax_code.trim() : undefined,
         tax_behavior: stForm.sales_mode === 'merchant_of_record' ? stForm.tax_behavior : undefined,
         countries,
@@ -1343,12 +1341,11 @@ export default function ProductsPage() {
                     value={stForm.account_id}
                     onChange={(v) => {
                       const matched = findBindingForAccount(bindingProduct, 'stripe', v);
-                      const { taxCode, taxBehavior } = extractStripeCatalogTax(matched?.validated_catalog);
+                      const { taxCode, taxBehavior } = extractStripeCatalogTax(matched?.validated_catalog, bindingProduct?.product_type);
                       const nextSalesMode: StripeSalesMode = matched?.sales_mode ?? 'direct';
                       setStForm({
                         account_id: v,
                         sales_mode: nextSalesMode,
-                        tax_liability_account: matched?.tax_liability_account ?? '',
                         tax_code: taxCode,
                         tax_behavior: taxBehavior,
                         countries: matched?.allowed_countries?.length
@@ -1379,6 +1376,10 @@ export default function ProductsPage() {
                       setStForm((prev) => ({
                         ...prev,
                         sales_mode: nextMode,
+                        tax_code:
+                          nextMode === 'merchant_of_record' && !prev.tax_code.trim()
+                            ? defaultStripeMoRTaxCode(bindingProduct?.product_type)
+                            : prev.tax_code,
                         countries: resolveCountriesOnSalesModeChange(prev.countries, prev.sales_mode, nextMode),
                       }));
                     }}
@@ -1422,19 +1423,7 @@ export default function ProductsPage() {
               )}
 
               {stForm.sales_mode === 'merchant_of_record' && (
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                  <div>
-                    <label htmlFor={`${formId}-st-tax`} className="block text-xs font-medium text-[var(--cms-muted-fg)] mb-1">Tax Liability Account (acct_...) *</label>
-                    <input
-                      id={`${formId}-st-tax`}
-                      type="text"
-                      required
-                      className="input-field w-full font-mono-code"
-                      placeholder="acct_..."
-                      value={stForm.tax_liability_account}
-                      onChange={(e) => setStForm((prev) => ({ ...prev, tax_liability_account: e.target.value }))}
-                    />
-                  </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div>
                     <label htmlFor={`${formId}-st-taxcode`} className="block text-xs font-medium text-[var(--cms-muted-fg)] mb-1">Stripe Tax Code *</label>
                     <input
@@ -1442,7 +1431,7 @@ export default function ProductsPage() {
                       type="text"
                       required
                       className="input-field w-full font-mono-code"
-                      placeholder="txcd_10103001"
+                      placeholder={defaultStripeMoRTaxCode(bindingProduct?.product_type)}
                       value={stForm.tax_code}
                       onChange={(e) => setStForm((prev) => ({ ...prev, tax_code: e.target.value }))}
                     />

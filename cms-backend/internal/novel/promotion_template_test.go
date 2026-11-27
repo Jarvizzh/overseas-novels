@@ -69,7 +69,7 @@ func openPromoTestPool(t *testing.T) *pgxpool.Pool {
 		dbassets.PaymentCompletionSQL, dbassets.PaymentRecoverySQL, dbassets.PaymentReviewFixesSQL,
 		dbassets.PaymentCatalogAndChannelSQL, dbassets.PaymentVIPSwitchSQL, dbassets.PaymentTemplateCatalogFixesSQL,
 		dbassets.ConversionCenterReviewSQL, dbassets.ConversionBatchSQL, dbassets.ConversionThroughputRereviewSQL,
-		dbassets.ConversionCredentialHealthSQL, dbassets.RBACPermissionsSQL, dbassets.PromotionEnvironmentSQL,
+		dbassets.ConversionCredentialHealthSQL, dbassets.RBACPermissionsSQL, dbassets.PromotionEnvironmentSQL, dbassets.StripeTaxLiabilityRelaxSQL,
 	} {
 		if _, err := pool.Exec(ctx, stmt); err != nil {
 			t.Fatal(err)
@@ -252,7 +252,7 @@ func TestPromotionLinkRejectsSandboxTemplate(t *testing.T) {
 		"name": "Good Sbx Promo", "environment": "sandbox", "novel_id": novelID, "novel_title": "Promo Env Book",
 		"chapter_index": 1, "utm_source": "fb", "utm_campaign": "sbx_c1",
 		"generated_url": "https://reader.example.test/detail?novel_id=" + strconv.Itoa(novelID),
-		"fb_pixel_id": pixelID, "recharge_template_id": sbxTplID,
+		"fb_pixel_id":   pixelID, "recharge_template_id": sbxTplID,
 	})
 	if createSbxPromoOK.Code != http.StatusOK {
 		t.Fatalf("expected 200 when creating sandbox promotion link with sandbox template, got %d: %s", createSbxPromoOK.Code, createSbxPromoOK.Body.String())
@@ -269,7 +269,7 @@ func TestPromotionLinkRejectsSandboxTemplate(t *testing.T) {
 	updateSbxOmitEnvNullTpl := doReq(http.MethodPut, "/promotion-links/"+strconv.Itoa(createdSbx.ID), map[string]any{
 		"name": "Good Sbx Promo Edited", "chapter_index": 1, "utm_source": "fb", "utm_campaign": "sbx_c1",
 		"generated_url": "https://reader.example.test/detail?novel_id=" + strconv.Itoa(novelID),
-		"fb_pixel_id": pixelID, "recharge_template_id": nil,
+		"fb_pixel_id":   pixelID, "recharge_template_id": nil,
 	})
 	if updateSbxOmitEnvNullTpl.Code != http.StatusOK {
 		t.Fatalf("expected 200 updating sandbox promo without environment field, got %d: %s", updateSbxOmitEnvNullTpl.Code, updateSbxOmitEnvNullTpl.Body.String())
@@ -282,7 +282,7 @@ func TestPromotionLinkRejectsSandboxTemplate(t *testing.T) {
 	updateSbxOmitEnvLiveTpl := doReq(http.MethodPut, "/promotion-links/"+strconv.Itoa(createdSbx.ID), map[string]any{
 		"name": "Good Sbx Promo Bad Live Tpl", "chapter_index": 1, "utm_source": "fb", "utm_campaign": "sbx_c1",
 		"generated_url": "https://reader.example.test/detail?novel_id=" + strconv.Itoa(novelID),
-		"fb_pixel_id": pixelID, "recharge_template_id": liveTplID,
+		"fb_pixel_id":   pixelID, "recharge_template_id": liveTplID,
 	})
 	if updateSbxOmitEnvLiveTpl.Code != http.StatusConflict {
 		t.Fatalf("expected 409 attaching live template to sandbox promo when environment omitted, got %d: %s", updateSbxOmitEnvLiveTpl.Code, updateSbxOmitEnvLiveTpl.Body.String())
@@ -292,7 +292,7 @@ func TestPromotionLinkRejectsSandboxTemplate(t *testing.T) {
 		"name": "Bad Sbx Promo With Live Tpl", "environment": "sandbox", "novel_id": novelID, "novel_title": "Promo Env Book",
 		"chapter_index": 1, "utm_source": "fb", "utm_campaign": "sbx_c2",
 		"generated_url": "https://reader.example.test/detail?novel_id=" + strconv.Itoa(novelID),
-		"fb_pixel_id": pixelID, "recharge_template_id": liveTplID,
+		"fb_pixel_id":   pixelID, "recharge_template_id": liveTplID,
 	})
 	if createSbxPromoBadTpl.Code != http.StatusConflict {
 		t.Fatalf("expected 409 when creating sandbox promotion link with live template, got %d: %s", createSbxPromoBadTpl.Code, createSbxPromoBadTpl.Body.String())

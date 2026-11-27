@@ -120,7 +120,7 @@ func reserveStripeVIPTx(ctx context.Context, tx pgx.Tx, e *checkoutEvaluation, r
 	}
 	tag, err := tx.Exec(ctx, `INSERT INTO payment_stripe_subscription_intents
 		(id,user_id,account_id,checkout_environment,offer_version_id,product_id,product_snapshot,slot_id,template_id,product_ref,price_ref,amount_minor,cycle,
-		 sales_mode,allowed_countries,tax_liability_account,return_url,cancel_url,return_path,attribution,
+		 sales_mode,allowed_countries,return_url,cancel_url,return_path,attribution,
 		 validated_catalog,release_evidence,market_policy,expected_country,market_basis)
 		SELECT $1,$2,$3,$4,NULL,prod.id,
 		 jsonb_build_object(
@@ -131,7 +131,7 @@ func reserveStripeVIPTx(ctx context.Context, tx pgx.Tx, e *checkoutEvaluation, r
 			'badge',s.badge,'display_alias',s.display_alias
 		 ),
 		 s.id,s.template_id,b.external_product_ref,b.external_price_ref,prod.price_cents,prod.vip_cycle,
-		 b.sales_mode,b.allowed_countries,b.tax_liability_account,$6,$7,$8,$9::jsonb ||
+		 b.sales_mode,b.allowed_countries,$6,$7,$8,$9::jsonb ||
 		    jsonb_build_object('pixel_id',fp.pixel_id,'promotion_link_id',p.id,'novel_id',p.novel_id,'utm_source',u.utm_source,'utm_campaign',u.utm_campaign),
 		    b.validated_catalog,b.release_evidence,b.market_policy,expected.country,
 		    CASE WHEN expected.country IS NULL THEN 'stripe_confirmation_required' ELSE 'prior_verified_payment' END
@@ -185,7 +185,7 @@ const stripeVIPBindingMatchSQL = `
 	  AND b.provider='stripe' AND b.environment=a.environment
 	  AND b.enabled AND b.validation_status='verified'
 	  AND b.external_product_ref=v.product_ref AND b.external_price_ref=v.price_ref
-	  AND b.sales_mode=v.sales_mode AND b.tax_liability_account IS NOT DISTINCT FROM v.tax_liability_account
+	  AND b.sales_mode=v.sales_mode
 	  AND (v.expected_country IS NULL OR v.expected_country=ANY(b.allowed_countries))
 	  AND (b.environment='sandbox' OR (b.validated_catalog IS NOT NULL AND b.release_evidence IS NOT NULL AND b.market_policy IS NOT NULL))
 `

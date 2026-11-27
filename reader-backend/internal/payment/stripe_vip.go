@@ -39,7 +39,7 @@ type StripeVIPAllocation struct {
 
 type StripeVIPInvoice struct {
 	ID, Country, TaxLiabilityAccount, Currency, BillingReason string
-	CustomerTaxStatus                                         string
+	TaxLiabilityType, AutomaticTaxStatus, CustomerTaxStatus   string
 	TaxVerified                                               bool
 	Subscription                                              StripeVIPSubscription
 	Status                                                    string

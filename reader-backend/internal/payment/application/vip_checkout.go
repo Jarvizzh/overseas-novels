@@ -1005,12 +1005,12 @@ func reserveUnifiedStripeVIPIntentTx(
 			INSERT INTO payment_stripe_subscription_intents (
 				id, user_id, account_id, checkout_environment, offer_version_id, product_id, product_snapshot,
 				slot_id, template_id, product_ref, price_ref, amount_minor, cycle,
-				sales_mode, allowed_countries, tax_liability_account, return_url, cancel_url, return_path, attribution,
+				sales_mode, allowed_countries, return_url, cancel_url, return_path, attribution,
 				validated_catalog, release_evidence, market_policy, expected_country, market_basis
 			)
 			SELECT $1, $2, $3, $4, NULL, $5, $6::jsonb,
 			       $7, $8, b.external_product_ref, b.external_price_ref, $9, $10,
-			       b.sales_mode, b.allowed_countries, b.tax_liability_account, $11, $12, $13, $14::jsonb,
+			       b.sales_mode, b.allowed_countries, $11, $12, $13, $14::jsonb,
 			       b.validated_catalog, b.release_evidence, b.market_policy, expected.country,
 			       CASE WHEN expected.country IS NULL THEN 'stripe_confirmation_required' ELSE 'prior_verified_payment' END
 			FROM product_channel_bindings b

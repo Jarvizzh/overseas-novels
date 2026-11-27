@@ -120,15 +120,21 @@ func (c *Client) ReadSingleCheckout(ctx context.Context, id, attempt string, off
 	if err != nil {
 		return proof, err
 	}
-	var country, taxStatus, taxAccount, presentment string
+	var country, taxStatus, taxAccount, taxLiabilityType, taxCalcStatus, presentment string
 	if session.CustomerDetails != nil {
 		taxStatus = string(session.CustomerDetails.TaxExempt)
 		if session.CustomerDetails.Address != nil {
 			country = strings.ToUpper(session.CustomerDetails.Address.Country)
 		}
 	}
-	if session.AutomaticTax != nil && session.AutomaticTax.Liability != nil && session.AutomaticTax.Liability.Account != nil {
-		taxAccount = session.AutomaticTax.Liability.Account.ID
+	if session.AutomaticTax != nil {
+		taxCalcStatus = string(session.AutomaticTax.Status)
+		if session.AutomaticTax.Liability != nil {
+			taxLiabilityType = string(session.AutomaticTax.Liability.Type)
+			if session.AutomaticTax.Liability.Account != nil {
+				taxAccount = session.AutomaticTax.Liability.Account.ID
+			}
+		}
 	}
 	if charge.PresentmentDetails != nil {
 		presentment = strings.ToUpper(string(charge.PresentmentDetails.PresentmentCurrency))
@@ -136,8 +142,7 @@ func (c *Client) ReadSingleCheckout(ctx context.Context, id, attempt string, off
 	managed := offer.SalesMode == payment.StripeSaleMoR
 	modeMatches := managed == (session.ManagedPayments != nil && session.ManagedPayments.Enabled) &&
 		managed == (intent.ManagedPayments != nil && intent.ManagedPayments.Enabled)
-	taxMatches := !managed || (taxAccount != "" && taxAccount == offer.TaxLiabilityAccount && taxStatus != "" &&
-		session.AutomaticTax.Status == stripego.CheckoutSessionAutomaticTaxStatusComplete)
+	taxMatches := !managed || verifyManagedPaymentsTax(c.scope.AccountID, taxCalcStatus, taxLiabilityType, taxAccount, taxStatus)
 	var matching bool
 	var principal int64
 	if len(lines.Items) == 1 && !lines.HasMore {
@@ -152,7 +157,8 @@ func (c *Client) ReadSingleCheckout(ctx context.Context, id, attempt string, off
 	}
 	receipt := payment.SingleChargeProof{ID: charge.ID, IntentID: intent.ID, Currency: strings.ToUpper(string(charge.Currency)),
 		Country: country, AmountMinor: charge.AmountCaptured, RefundedMinor: charge.AmountRefunded, PrincipalMinor: principal,
-		TaxLiabilityAccount: taxAccount, CustomerTaxStatus: taxStatus, PresentmentCurrency: presentment, TaxVerified: taxMatches,
+		TaxLiabilityAccount: taxAccount, TaxLiabilityType: taxLiabilityType, AutomaticTaxStatus: taxCalcStatus,
+		CustomerTaxStatus: taxStatus, PresentmentCurrency: presentment, TaxVerified: taxMatches,
 		PaidAt: time.Unix(charge.Created, 0).UTC(), EligibleTerms: matching && session.Currency == stripego.CurrencyUSD &&
 			session.AmountTotal == charge.AmountCaptured && (managed || charge.AmountCaptured == offer.AmountMinor) &&
 			modeMatches && (presentment == "" || presentment == "USD")}
@@ -160,9 +166,9 @@ func (c *Client) ReadSingleCheckout(ctx context.Context, id, attempt string, off
 		receipt.MovementID = charge.BalanceTransaction.ID
 	}
 	receipt.Evidence, err = json.Marshal(struct {
-		CheckoutID, IntentID, ChargeID, BillingCountry, TaxAccount, CustomerTaxStatus, PresentmentCurrency string
-		AmountMinor, RefundedMinor, PrincipalMinor                                                         int64
-	}{session.ID, intent.ID, charge.ID, country, taxAccount, taxStatus, presentment, receipt.AmountMinor, receipt.RefundedMinor, principal})
+		CheckoutID, IntentID, ChargeID, BillingCountry, TaxAccount, TaxLiabilityType, AutomaticTaxStatus, CustomerTaxStatus, PresentmentCurrency string
+		AmountMinor, RefundedMinor, PrincipalMinor                                                                                               int64
+	}{session.ID, intent.ID, charge.ID, country, taxAccount, taxLiabilityType, taxCalcStatus, taxStatus, presentment, receipt.AmountMinor, receipt.RefundedMinor, principal})
 	if err != nil {
 		return proof, err
 	}
@@ -324,9 +330,6 @@ func (c *Client) publishedSalesMode(ctx context.Context, offer payment.SingleChe
 	case "", payment.StripeSaleDirect:
 		return Direct, nil
 	case payment.StripeSaleMoR:
-		if offer.TaxLiabilityAccount == "" {
-			return "", errors.New("Stripe Managed Payments requires an approved tax liability account")
-		}
 		product, err := c.GetProduct(ctx, offer.ProductID)
 		if err != nil {
 			return "", err

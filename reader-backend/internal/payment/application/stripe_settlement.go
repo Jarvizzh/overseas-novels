@@ -138,6 +138,7 @@ func (r *dbRepository) applyStripeProof(ctx context.Context, a stripePurchaseAtt
 	if note == nil && !fulfilled {
 		market := stripeMarketEvidence{Reference: receipt.ID, SalesMode: a.Offer.SalesMode, Country: receipt.Country,
 			ExpectedCountry: a.Offer.ExpectedCountry, TaxAccount: receipt.TaxLiabilityAccount,
+			TaxLiabilityType: receipt.TaxLiabilityType, AutomaticTaxStatus: receipt.AutomaticTaxStatus,
 			ExpectedTaxAccount: a.Offer.TaxLiabilityAccount, CustomerTaxStatus: receipt.CustomerTaxStatus, TaxVerified: receipt.TaxVerified,
 			AmountMinor: receipt.AmountMinor}
 		reason, err := stripeMarketReview(ctx, tx, a.OrderID, market, stripeMarketNote(a.Offer, market))

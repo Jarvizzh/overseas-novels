@@ -168,7 +168,6 @@ export interface BindStripeProductPayload {
   environment: PaymentEnvironment;
   account_id?: number;
   sales_mode: StripeSalesMode;
-  tax_liability_account?: string;
   tax_code?: string;
   tax_behavior?: 'exclusive' | 'inclusive';
   countries: string[];

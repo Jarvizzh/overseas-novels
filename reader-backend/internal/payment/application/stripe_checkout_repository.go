@@ -89,7 +89,7 @@ func reserveStripeAttemptTx(ctx context.Context, tx pgx.Tx, e *checkoutEvaluatio
 	var offer payment.SingleCheckoutOffer
 	var verifiedCatalog []byte
 	var releaseEvidence, marketPolicy, expectedCountry *string
-	err = tx.QueryRow(ctx, `SELECT b.external_product_ref,b.external_price_ref,p.price_cents,b.allowed_countries,b.sales_mode,COALESCE(b.tax_liability_account,''),
+	err = tx.QueryRow(ctx, `SELECT b.external_product_ref,b.external_price_ref,p.price_cents,b.allowed_countries,b.sales_mode,
 		b.validated_catalog,b.release_evidence,b.market_policy,expected.country
 		FROM product_channel_bindings b
 		JOIN products p ON p.id=b.product_id
@@ -101,7 +101,7 @@ func reserveStripeAttemptTx(ctx context.Context, tx pgx.Tx, e *checkoutEvaluatio
 		 AND ($4='sandbox' OR (b.validated_catalog IS NOT NULL AND b.release_evidence IS NOT NULL AND b.market_policy IS NOT NULL
 		   AND (expected.country IS NULL OR expected.country=ANY(b.allowed_countries))))
 		 AND p.product_type IN ('single','whole_book') AND p.price_cents=$3 FOR SHARE OF b,p`,
-		accountID, productID, expected, account.Environment, e.userID).Scan(&offer.ProductID, &offer.PriceID, &offer.AmountMinor, &offer.Countries, &offer.SalesMode, &offer.TaxLiabilityAccount, &verifiedCatalog, &releaseEvidence, &marketPolicy, &expectedCountry)
+		accountID, productID, expected, account.Environment, e.userID).Scan(&offer.ProductID, &offer.PriceID, &offer.AmountMinor, &offer.Countries, &offer.SalesMode, &verifiedCatalog, &releaseEvidence, &marketPolicy, &expectedCountry)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrCheckoutUnavailable
 	}
@@ -115,9 +115,9 @@ func reserveStripeAttemptTx(ctx context.Context, tx pgx.Tx, e *checkoutEvaluatio
 		return nil, err
 	}
 	_, err = tx.Exec(ctx, `INSERT INTO payment_stripe_checkout_terms(attempt_id,product_ref,price_ref,amount_minor,allowed_countries,
-		   tax_liability_account,validated_catalog,release_evidence,market_policy,expected_country,market_basis)
-		VALUES($1,$2,$3,$4,$5,NULLIF($6,''),$7::jsonb,$8,$9,$10::text,CASE WHEN $10::text IS NULL THEN 'stripe_confirmation_required' ELSE 'prior_verified_payment' END)`,
-		id, offer.ProductID, offer.PriceID, offer.AmountMinor, offer.Countries, offer.TaxLiabilityAccount, verifiedCatalog, releaseEvidence, marketPolicy, expectedCountry)
+		   validated_catalog,release_evidence,market_policy,expected_country,market_basis)
+		VALUES($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9::text,CASE WHEN $9::text IS NULL THEN 'stripe_confirmation_required' ELSE 'prior_verified_payment' END)`,
+		id, offer.ProductID, offer.PriceID, offer.AmountMinor, offer.Countries, verifiedCatalog, releaseEvidence, marketPolicy, expectedCountry)
 	if err != nil {
 		return nil, err
 	}

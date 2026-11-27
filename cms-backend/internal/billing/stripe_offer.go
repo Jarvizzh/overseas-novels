@@ -38,10 +38,6 @@ func (h *Handler) updateStripeOneTimeOffer(c *gin.Context) {
 	if input.SalesMode == "" {
 		input.SalesMode = stripeDirect
 	}
-	if !input.validTaxLiability() {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid Stripe sales mode or tax liability"})
-		return
-	}
 	slices.Sort(input.AllowedCountries)
 	input.AllowedCountries = slices.Compact(input.AllowedCountries)
 	err = saveStripeOneTimeOffer(c.Request.Context(), account, slot, c.GetString("admin_id"), input)
@@ -73,17 +69,17 @@ func saveStripeOneTimeOffer(ctx context.Context, account int64, slot int, actor 
 	_, err = tx.Exec(ctx, `WITH prior AS MATERIALIZED (
 		SELECT to_jsonb(p) AS data FROM payment_stripe_one_time_offers p WHERE account_id=$1 AND slot_id=$2
 	), saved AS (
-		INSERT INTO payment_stripe_one_time_offers(account_id,slot_id,product_ref,price_ref,amount_minor,allowed_countries,enabled,sales_mode,tax_liability_account,validated_catalog,release_evidence,market_policy)
-		VALUES($1,$2,$3,$4,$5,$6,$7,$10,NULLIF($11,''),$12::jsonb,NULLIF($13,''),NULLIF($14,''))
+		INSERT INTO payment_stripe_one_time_offers(account_id,slot_id,product_ref,price_ref,amount_minor,allowed_countries,enabled,sales_mode,validated_catalog,release_evidence,market_policy)
+		VALUES($1,$2,$3,$4,$5,$6,$7,$10,$11::jsonb,NULLIF($12,''),NULLIF($13,''))
 		ON CONFLICT(account_id,slot_id) DO UPDATE SET product_ref=EXCLUDED.product_ref,price_ref=EXCLUDED.price_ref,
 		    amount_minor=EXCLUDED.amount_minor,allowed_countries=EXCLUDED.allowed_countries,enabled=EXCLUDED.enabled,
-		    sales_mode=EXCLUDED.sales_mode,tax_liability_account=EXCLUDED.tax_liability_account,
+		    sales_mode=EXCLUDED.sales_mode,
 		    validated_catalog=EXCLUDED.validated_catalog,release_evidence=EXCLUDED.release_evidence,market_policy=EXCLUDED.market_policy
 		RETURNING *
 	) INSERT INTO admin_audit_logs(admin_id,action,target_id,before_data,after_data)
 	SELECT $8,'publish_stripe_single_offer',$1::bigint::text||'/'||$2::int::text,(SELECT data FROM prior),
 		to_jsonb(saved)||jsonb_build_object('reason',$9::text) FROM saved`, account, slot, input.ProductRef, input.PriceRef, amount,
-		input.AllowedCountries, *input.Enabled, actor, strings.TrimSpace(input.Reason), input.SalesMode, input.TaxLiabilityAccount, verified, strings.TrimSpace(input.ReleaseEvidence), strings.TrimSpace(input.MarketPolicy))
+		input.AllowedCountries, *input.Enabled, actor, strings.TrimSpace(input.Reason), input.SalesMode, verified, strings.TrimSpace(input.ReleaseEvidence), strings.TrimSpace(input.MarketPolicy))
 	if err != nil {
 		return err
 	}

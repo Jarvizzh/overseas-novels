@@ -11,6 +11,28 @@ import (
 	"reader-backend/internal/payment"
 )
 
+const (
+	stripeAutomaticTaxStatusComplete = "complete"
+	stripeTaxLiabilityTypeSelf       = "self"
+)
+
+// verifyManagedPaymentsTax validates Stripe Managed Payments tax evidence without
+// requiring a pre-configured tax liability account. An empty or changed liability
+// account alone does not fail verification, whereas missing/incomplete tax
+// calculation, missing customer tax status, or merchant self-liability does.
+func verifyManagedPaymentsTax(merchantAccountKey, automaticTaxStatus, liabilityType, liabilityAccount, customerTaxStatus string) bool {
+	if automaticTaxStatus != stripeAutomaticTaxStatusComplete || customerTaxStatus == "" {
+		return false
+	}
+	if liabilityType == stripeTaxLiabilityTypeSelf {
+		return false
+	}
+	if liabilityAccount != "" && merchantAccountKey != "" && liabilityAccount == merchantAccountKey {
+		return false
+	}
+	return true
+}
+
 func invoiceSubscription(invoice *stripego.Invoice) string {
 	if invoice.Parent == nil || invoice.Parent.SubscriptionDetails == nil || invoice.Parent.SubscriptionDetails.Subscription == nil {
 		return ""
@@ -71,11 +93,18 @@ func (c *Client) ReadStripeVIPInvoice(ctx context.Context, id string, offer paym
 	if invoice.CustomerAddress != nil {
 		proof.Country = strings.ToUpper(invoice.CustomerAddress.Country)
 	}
-	if invoice.AutomaticTax != nil && invoice.AutomaticTax.Liability != nil && invoice.AutomaticTax.Liability.Account != nil {
-		proof.TaxLiabilityAccount = invoice.AutomaticTax.Liability.Account.ID
-		proof.TaxVerified = proof.TaxLiabilityAccount != "" && proof.TaxLiabilityAccount == offer.TaxLiabilityAccount &&
-			proof.CustomerTaxStatus != "" && invoice.AutomaticTax.Status == "complete"
+	if invoice.AutomaticTax != nil {
+		proof.AutomaticTaxStatus = string(invoice.AutomaticTax.Status)
+		if invoice.AutomaticTax.Liability != nil {
+			proof.TaxLiabilityType = string(invoice.AutomaticTax.Liability.Type)
+			if invoice.AutomaticTax.Liability.Account != nil {
+				proof.TaxLiabilityAccount = invoice.AutomaticTax.Liability.Account.ID
+			}
+		}
 	}
+	proof.TaxVerified = offer.SalesMode != payment.StripeSaleMoR || verifyManagedPaymentsTax(
+		c.scope.AccountID, proof.AutomaticTaxStatus, proof.TaxLiabilityType, proof.TaxLiabilityAccount, proof.CustomerTaxStatus,
+	)
 	lines, err := c.ListInvoiceLines(ctx, id, PageOptions{Limit: 2})
 	if err != nil {
 		return proof, err

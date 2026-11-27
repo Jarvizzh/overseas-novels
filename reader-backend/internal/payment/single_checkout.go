@@ -31,16 +31,17 @@ type SingleCheckoutProof struct {
 }
 
 type SingleChargeProof struct {
-	ID, IntentID, Currency, Country                             string
-	AmountMinor, RefundedMinor, PrincipalMinor                  int64
-	PaidAt                                                      time.Time
-	EligibleTerms, TaxVerified                                  bool
-	TaxLiabilityAccount, CustomerTaxStatus, PresentmentCurrency string
-	Evidence                                                    json.RawMessage
-	MovementID                                                  string
-	RiskReview                                                  *CaseFact
-	ReviewUnconfirmed                                           bool
-	Disputed                                                    bool
+	ID, IntentID, Currency, Country                           string
+	AmountMinor, RefundedMinor, PrincipalMinor                int64
+	PaidAt                                                    time.Time
+	EligibleTerms, TaxVerified                                bool
+	TaxLiabilityAccount, TaxLiabilityType, AutomaticTaxStatus string
+	CustomerTaxStatus, PresentmentCurrency                    string
+	Evidence                                                  json.RawMessage
+	MovementID                                                string
+	RiskReview                                                *CaseFact
+	ReviewUnconfirmed                                         bool
+	Disputed                                                  bool
 }
 
 type SingleCheckoutNotice struct {

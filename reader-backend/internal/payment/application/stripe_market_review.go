@@ -18,6 +18,8 @@ type stripeMarketEvidence struct {
 	Country            string     `json:"country"`
 	ExpectedCountry    string     `json:"expected_country"`
 	TaxAccount         string     `json:"tax_account"`
+	TaxLiabilityType   string     `json:"tax_liability_type,omitempty"`
+	AutomaticTaxStatus string     `json:"automatic_tax_status,omitempty"`
 	ExpectedTaxAccount string     `json:"expected_tax_account"`
 	CustomerTaxStatus  string     `json:"customer_tax_status"`
 	TaxVerified        bool       `json:"tax_verified"`

@@ -38,7 +38,9 @@ const (
 	pubStatusPaused    = "paused"
 	pubStatusRetired   = "retired"
 
-	defaultStripeDigitalTaxCode = "txcd_10103001"
+	stripeMoRTaxCodeVIP       = "txcd_10302003"
+	stripeMoRTaxCodeWholeBook = "txcd_10000000"
+	stripeMoRTaxCodeSingle    = "txcd_10000000"
 )
 
 var (
@@ -1256,27 +1258,53 @@ func savePayPalBindingResultTx(
 }
 
 type bindStripeProductReq struct {
-	Environment         string   `json:"environment" binding:"required,oneof=sandbox live"`
-	AccountID           int64    `json:"account_id"`
-	ProductRef          string   `json:"product_ref" binding:"max=100"`
-	PriceRef            string   `json:"price_ref" binding:"max=100"`
-	SalesMode           string   `json:"sales_mode" binding:"omitempty,oneof=direct merchant_of_record"`
-	TaxLiabilityAccount string   `json:"tax_liability_account" binding:"max=100"`
-	TaxCode             string   `json:"tax_code" binding:"max=64"`
-	TaxBehavior         string   `json:"tax_behavior" binding:"omitempty,oneof=exclusive inclusive"`
-	AllowedCountries    []string `json:"countries" binding:"max=250"`
-	ReleaseEvidence     string   `json:"release_evidence" binding:"max=500"`
-	MarketPolicy        string   `json:"market_policy" binding:"max=500"`
-	Reprovision         bool     `json:"reprovision"`
-	Enabled             *bool    `json:"enabled"`
-	Reason              string   `json:"reason" binding:"max=500"`
+	Environment      string   `json:"environment" binding:"required,oneof=sandbox live"`
+	AccountID        int64    `json:"account_id"`
+	ProductRef       string   `json:"product_ref" binding:"max=100"`
+	PriceRef         string   `json:"price_ref" binding:"max=100"`
+	SalesMode        string   `json:"sales_mode" binding:"omitempty,oneof=direct merchant_of_record"`
+	TaxCode          string   `json:"tax_code" binding:"max=64"`
+	TaxBehavior      string   `json:"tax_behavior" binding:"omitempty,oneof=exclusive inclusive"`
+	AllowedCountries []string `json:"countries" binding:"max=250"`
+	ReleaseEvidence  string   `json:"release_evidence" binding:"max=500"`
+	MarketPolicy     string   `json:"market_policy" binding:"max=500"`
+	Reprovision      bool     `json:"reprovision"`
+	Enabled          *bool    `json:"enabled"`
+	Reason           string   `json:"reason" binding:"max=500"`
+}
+
+func defaultStripeMoRTaxCodeForProductType(productType string) (string, error) {
+	switch productType {
+	case productTypeVIP:
+		return stripeMoRTaxCodeVIP, nil
+	case productTypeWholeBook:
+		return stripeMoRTaxCodeWholeBook, nil
+	case productTypeSingle:
+		return stripeMoRTaxCodeSingle, nil
+	default:
+		return "", fmt.Errorf("unsupported product type %q for Stripe Managed Payments tax code", productType)
+	}
+}
+
+func resolveStripeBindingTaxCode(req *bindStripeProductReq, productType string) error {
+	if req.SalesMode != stripeManagedPayments {
+		return nil
+	}
+	if req.TaxCode != "" {
+		return nil
+	}
+	taxCode, err := defaultStripeMoRTaxCodeForProductType(productType)
+	if err != nil {
+		return err
+	}
+	req.TaxCode = taxCode
+	return nil
 }
 
 func normalizeStripeBindingReq(req *bindStripeProductReq) error {
 	if strings.TrimSpace(req.ProductRef) != "" || strings.TrimSpace(req.PriceRef) != "" {
 		return errors.New("Stripe binding only supports automatic provisioning; do not pass product_ref or price_ref")
 	}
-	req.TaxLiabilityAccount = strings.TrimSpace(req.TaxLiabilityAccount)
 	req.TaxCode = strings.TrimSpace(req.TaxCode)
 	req.TaxBehavior = strings.TrimSpace(req.TaxBehavior)
 	req.ReleaseEvidence = strings.TrimSpace(req.ReleaseEvidence)
@@ -1297,17 +1325,10 @@ func normalizeStripeBindingReq(req *bindStripeProductReq) error {
 	slices.Sort(req.AllowedCountries)
 	req.AllowedCountries = slices.Compact(req.AllowedCountries)
 
-	if (req.SalesMode == stripeDirect && req.TaxLiabilityAccount != "") ||
-		(req.SalesMode == stripeManagedPayments && !stripeAccountRef.MatchString(req.TaxLiabilityAccount)) {
-		return errors.New("tax_liability_account must be empty for direct mode or valid acct_* for merchant_of_record")
-	}
 	if req.TaxCode != "" && !stripeTaxCodePattern.MatchString(req.TaxCode) {
 		return errors.New("tax_code must match txcd_*")
 	}
 	if req.SalesMode == stripeManagedPayments {
-		if req.TaxCode == "" {
-			req.TaxCode = defaultStripeDigitalTaxCode
-		}
 		if req.TaxBehavior == "" {
 			req.TaxBehavior = "exclusive"
 		}
@@ -1357,6 +1378,10 @@ func (h *Handler) UpsertProductStripeBinding(c *gin.Context) {
 	}
 	if err != nil {
 		writeProductError(c, err)
+		return
+	}
+	if err := resolveStripeBindingTaxCode(&req, pType); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
@@ -1482,11 +1507,11 @@ func prepareStripeBindingWriteTx(
 	}
 	err = tx.QueryRow(ctx, `
 		INSERT INTO product_channel_bindings (
-			product_id, account_id, provider, environment, sales_mode, allowed_countries, tax_liability_account,
+			product_id, account_id, provider, environment, sales_mode, allowed_countries,
 			release_evidence, market_policy, validation_status, first_sent_at, created_by, updated_by
 		) VALUES (
-			$1, $2, 'stripe', $3, $4, $5, NULLIF($6, ''),
-			NULLIF($7, ''), NULLIF($8, ''), 'pending', now(), $9, $9
+			$1, $2, 'stripe', $3, $4, $5,
+			NULLIF($6, ''), NULLIF($7, ''), 'pending', now(), $8, $8
 		)
 		ON CONFLICT (product_id, account_id) DO UPDATE SET
 			first_sent_at = COALESCE(product_channel_bindings.first_sent_at, now()),
@@ -1494,7 +1519,7 @@ func prepareStripeBindingWriteTx(
 			updated_by = EXCLUDED.updated_by,
 			updated_at = now()
 		RETURNING request_key::text, catalog_revision, external_product_ref, external_price_ref`,
-		productID, accountID, req.Environment, req.SalesMode, req.AllowedCountries, req.TaxLiabilityAccount,
+		productID, accountID, req.Environment, req.SalesMode, req.AllowedCountries,
 		req.ReleaseEvidence, req.MarketPolicy, actor).Scan(&reqKey, &catalogRevision, &existingProd, &existingPrice)
 	if err != nil {
 		return "", 0, "", "", "", err
@@ -1587,18 +1612,17 @@ func saveStripeBindingResultTx(
 		    external_price_ref = $4,
 		    sales_mode = $5,
 		    allowed_countries = $6,
-		    tax_liability_account = NULLIF($7, ''),
-		    validated_catalog = $8::jsonb,
-		    release_evidence = NULLIF($9, ''),
-		    market_policy = NULLIF($10, ''),
-		    validation_status = $11,
-		    validation_error = NULLIF($12, ''),
-		    validated_at = $13,
-		    enabled = $14,
-		    updated_by = $15,
+		    validated_catalog = $7::jsonb,
+		    release_evidence = NULLIF($8, ''),
+		    market_policy = NULLIF($9, ''),
+		    validation_status = $10,
+		    validation_error = NULLIF($11, ''),
+		    validated_at = $12,
+		    enabled = $13,
+		    updated_by = $14,
 		    updated_at = now()
 		WHERE product_id = $1 AND account_id = $2`,
-		productID, accountID, prodRef, priceRef, req.SalesMode, req.AllowedCountries, req.TaxLiabilityAccount,
+		productID, accountID, prodRef, priceRef, req.SalesMode, req.AllowedCountries,
 		stringOrNilJSON(catalogBytes), req.ReleaseEvidence, req.MarketPolicy, valState, valErr, valAt, effectiveEnabled, actor)
 	if err != nil {
 		return err

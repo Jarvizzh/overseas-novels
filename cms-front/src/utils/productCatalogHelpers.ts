@@ -1,4 +1,20 @@
-import type { ChannelAccount, ChannelBindingView, PaymentEnvironment, PaymentProvider, ProductView } from './paymentCatalogApi';
+import type { ChannelAccount, ChannelBindingView, PaymentEnvironment, PaymentProvider, ProductType, ProductView } from './paymentCatalogApi';
+
+export const STRIPE_MOR_TAX_CODE_VIP = 'txcd_10302003';
+export const STRIPE_MOR_TAX_CODE_WHOLE_BOOK = 'txcd_10000000';
+export const STRIPE_MOR_TAX_CODE_SINGLE = 'txcd_10000000';
+
+export function defaultStripeMoRTaxCode(productType?: ProductType): string {
+  switch (productType) {
+    case 'vip':
+      return STRIPE_MOR_TAX_CODE_VIP;
+    case 'whole_book':
+      return STRIPE_MOR_TAX_CODE_WHOLE_BOOK;
+    case 'single':
+    default:
+      return STRIPE_MOR_TAX_CODE_SINGLE;
+  }
+}
 
 export function nextCopyCode(code: string): string {
   const match = code.match(/^(.*)_V(\d+)$/);
@@ -8,7 +24,10 @@ export function nextCopyCode(code: string): string {
   return `${base.slice(0, Math.max(1, 64 - suffix.length))}${suffix}`;
 }
 
-export function extractStripeCatalogTax(validatedCatalog?: Record<string, unknown>): {
+export function extractStripeCatalogTax(
+  validatedCatalog?: Record<string, unknown>,
+  productType?: ProductType,
+): {
   taxCode: string;
   taxBehavior: 'exclusive' | 'inclusive';
 } {
@@ -16,7 +35,10 @@ export function extractStripeCatalogTax(validatedCatalog?: Record<string, unknow
     validatedCatalog && typeof validatedCatalog.product === 'object' && validatedCatalog.product !== null
       ? (validatedCatalog.product as Record<string, unknown>)
       : undefined;
-  const taxCode = typeof product?.tax_code === 'string' && product.tax_code ? product.tax_code : 'txcd_10103001';
+  const taxCode =
+    typeof product?.tax_code === 'string' && product.tax_code
+      ? product.tax_code
+      : defaultStripeMoRTaxCode(productType);
   const taxBehavior: 'exclusive' | 'inclusive' = validatedCatalog?.tax_behavior === 'inclusive' ? 'inclusive' : 'exclusive';
   return { taxCode, taxBehavior };
 }

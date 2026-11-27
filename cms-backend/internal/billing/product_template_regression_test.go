@@ -268,14 +268,13 @@ func TestStripeBinding_UpdateTaxCodeAndBehaviorReprovisionsPrice(t *testing.T) {
 		t.Fatalf("sandbox direct bind failed (%d): %s", sbxRec1.Code, sbxRec1.Body.String())
 	}
 	st.mu.Lock()
-	st.products["prod_sbx_1"].TaxCode = "txcd_10000000"
+	st.products["prod_sbx_1"].TaxCode = "txcd_20030000"
 	st.mu.Unlock()
 
 	sbxRec2 := doJSON(t, r, http.MethodPut, fmt.Sprintf("/cms/products/%d/bindings/stripe", prodID), "cfg-super", map[string]any{
 		"environment": "sandbox", "sales_mode": "merchant_of_record",
-		"tax_liability_account": "acct_TaxLiability01",
-		"tax_code":              "txcd_10103001", "tax_behavior": "inclusive",
-		"countries": []string{"US"}, "reason": "sbx MoR upgrade",
+		"tax_behavior": "inclusive",
+		"countries":    []string{"US"}, "reason": "sbx MoR upgrade",
 	})
 	if sbxRec2.Code != http.StatusOK || !strings.Contains(sbxRec2.Body.String(), `"external_price_ref":"price_sbx_2"`) {
 		t.Fatalf("sandbox MoR upgrade expected price_sbx_2, got (%d): %s", sbxRec2.Code, sbxRec2.Body.String())
@@ -301,9 +300,9 @@ func TestStripeBinding_UpdateTaxCodeAndBehaviorReprovisionsPrice(t *testing.T) {
 		"release_evidence": "ticket-1", "market_policy": "US-standard", "reason": "live direct",
 	})
 
-	// Step 2: direct -> merchant_of_record (txcd_10103001, exclusive) -> updates product tax_code + creates p2
+	// Step 2: direct -> merchant_of_record (default single tax_code txcd_10000000, exclusive) -> updates product tax_code + creates p2
 	p2 := liveBind(map[string]any{
-		"environment": "live", "sales_mode": "merchant_of_record", "tax_liability_account": "acct_TaxLiability01", "tax_code": "txcd_10103001", "tax_behavior": "exclusive",
+		"environment": "live", "sales_mode": "merchant_of_record", "tax_behavior": "exclusive",
 		"countries": []string{"US"}, "release_evidence": "ticket-2", "market_policy": "US-MoR", "reason": "upgrade MoR",
 	})
 	if p2 == p1 {
@@ -312,7 +311,7 @@ func TestStripeBinding_UpdateTaxCodeAndBehaviorReprovisionsPrice(t *testing.T) {
 
 	// Step 3: switch tax_behavior exclusive -> inclusive -> creates p3 and updates validated_catalog
 	p3 := liveBind(map[string]any{
-		"environment": "live", "sales_mode": "merchant_of_record", "tax_liability_account": "acct_TaxLiability01", "tax_code": "txcd_10103001", "tax_behavior": "inclusive",
+		"environment": "live", "sales_mode": "merchant_of_record", "tax_behavior": "inclusive",
 		"countries": []string{"US"}, "release_evidence": "ticket-3", "market_policy": "US-MoR", "reason": "switch inclusive",
 	})
 	if p3 == p2 {
@@ -322,13 +321,13 @@ func TestStripeBinding_UpdateTaxCodeAndBehaviorReprovisionsPrice(t *testing.T) {
 	if err := db.DB.QueryRow(ctx, `
 		SELECT validated_catalog->>'id', validated_catalog->>'tax_behavior', validated_catalog->'product'->>'tax_code'
 		FROM product_channel_bindings WHERE product_id=$1 AND environment='live' AND provider='stripe'`, prodID).
-		Scan(&vcPriceID, &vcTaxBehavior, &vcTaxCode); err != nil || vcPriceID != p3 || vcTaxBehavior != "inclusive" || vcTaxCode != "txcd_10103001" {
+		Scan(&vcPriceID, &vcTaxBehavior, &vcTaxCode); err != nil || vcPriceID != p3 || vcTaxBehavior != "inclusive" || vcTaxCode != "txcd_10000000" {
 		t.Fatalf("step 3 validated_catalog mismatch: id=%s tb=%s tc=%s err=%v", vcPriceID, vcTaxBehavior, vcTaxCode, err)
 	}
 
-	// Step 4: switch tax_code -> txcd_10000000 (keep inclusive) -> updates Product tax_code & validated_catalog
+	// Step 4: switch tax_code -> txcd_10302003 (keep inclusive) -> updates Product tax_code & validated_catalog
 	p4TaxOnly := liveBind(map[string]any{
-		"environment": "live", "sales_mode": "merchant_of_record", "tax_liability_account": "acct_TaxLiability01", "tax_code": "txcd_10000000", "tax_behavior": "inclusive",
+		"environment": "live", "sales_mode": "merchant_of_record", "tax_code": "txcd_10302003", "tax_behavior": "inclusive",
 		"countries": []string{"US"}, "release_evidence": "ticket-4", "market_policy": "US-MoR", "reason": "update tax_code",
 	})
 	if p4TaxOnly != p3 {
@@ -337,13 +336,13 @@ func TestStripeBinding_UpdateTaxCodeAndBehaviorReprovisionsPrice(t *testing.T) {
 	if err := db.DB.QueryRow(ctx, `
 		SELECT validated_catalog->'product'->>'tax_code'
 		FROM product_channel_bindings WHERE product_id=$1 AND environment='live' AND provider='stripe'`, prodID).
-		Scan(&vcTaxCode); err != nil || vcTaxCode != "txcd_10000000" {
+		Scan(&vcTaxCode); err != nil || vcTaxCode != "txcd_10302003" {
 		t.Fatalf("step 4 validated_catalog tax_code=%q err=%v", vcTaxCode, err)
 	}
 
 	// Step 5: switch back to exclusive -> creates a NEW price p5 (no 24h idempotency key collision back to p2)
 	p5 := liveBind(map[string]any{
-		"environment": "live", "sales_mode": "merchant_of_record", "tax_liability_account": "acct_TaxLiability01", "tax_code": "txcd_10000000", "tax_behavior": "exclusive",
+		"environment": "live", "sales_mode": "merchant_of_record", "tax_code": "txcd_10302003", "tax_behavior": "exclusive",
 		"countries": []string{"US"}, "release_evidence": "ticket-5", "market_policy": "US-MoR", "reason": "back to exclusive",
 	})
 	if p5 == p2 || p5 == p3 {

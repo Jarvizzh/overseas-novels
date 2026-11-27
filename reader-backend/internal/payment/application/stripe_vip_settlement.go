@@ -301,7 +301,8 @@ func stripeVIPAdmissionNote(ctx context.Context, tx pgx.Tx, v stripeVIPIntent, p
 	}
 	slices.Sort(references)
 	evidence := stripeMarketEvidence{FundingReferences: references, PeriodStart: &proof.StartsAt, PeriodEnd: &proof.EndsAt, Reference: proof.ID, SalesMode: v.Offer.SalesMode, Country: proof.Country, ExpectedCountry: priorCountry,
-		TaxAccount: proof.TaxLiabilityAccount, ExpectedTaxAccount: v.Offer.TaxLiabilityAccount, CustomerTaxStatus: proof.CustomerTaxStatus,
+		TaxAccount: proof.TaxLiabilityAccount, TaxLiabilityType: proof.TaxLiabilityType, AutomaticTaxStatus: proof.AutomaticTaxStatus,
+		ExpectedTaxAccount: v.Offer.TaxLiabilityAccount, CustomerTaxStatus: proof.CustomerTaxStatus,
 		TaxVerified: proof.TaxVerified, AmountMinor: proof.DueMinor}
 	if reason, err := stripeMarketReview(ctx, tx, orderID, evidence, stripeMarketNote(v.Offer.SingleCheckoutOffer, evidence)); err != nil || reason != "" {
 		return reason, err

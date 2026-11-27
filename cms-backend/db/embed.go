@@ -194,3 +194,8 @@ var RBACPermissionsSQL string
 //
 //go:embed migrations/2026111936.sql
 var PromotionEnvironmentSQL string
+
+// StripeTaxLiabilityRelaxSQL drops fixed tax_liability_account CHECK constraints while preserving historical columns.
+//
+//go:embed migrations/2026111937.sql
+var StripeTaxLiabilityRelaxSQL string

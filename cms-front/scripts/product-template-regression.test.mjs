@@ -27,8 +27,24 @@ test('TC-FE-01: ProductsPage Stripe MoR echo, published-only accounts, and per-a
     id: 'price_inclusive_1',
     tax_behavior: 'inclusive',
     product: { id: 'prod_1', tax_code: 'txcd_20030000' },
-  });
+  }, 'vip');
   assert.deepEqual(echoed, { taxCode: 'txcd_20030000', taxBehavior: 'inclusive' });
+
+  assert.equal(prodHelpers.defaultStripeMoRTaxCode('vip'), 'txcd_10302003');
+  assert.equal(prodHelpers.defaultStripeMoRTaxCode('whole_book'), 'txcd_10000000');
+  assert.equal(prodHelpers.defaultStripeMoRTaxCode('single'), 'txcd_10000000');
+  assert.deepEqual(prodHelpers.extractStripeCatalogTax(undefined, 'vip'), {
+    taxCode: 'txcd_10302003',
+    taxBehavior: 'exclusive',
+  });
+  assert.deepEqual(prodHelpers.extractStripeCatalogTax(undefined, 'whole_book'), {
+    taxCode: 'txcd_10000000',
+    taxBehavior: 'exclusive',
+  });
+  assert.deepEqual(prodHelpers.extractStripeCatalogTax(undefined, 'single'), {
+    taxCode: 'txcd_10000000',
+    taxBehavior: 'exclusive',
+  });
 
   const accounts = [
     { id: 1, provider: 'stripe', environment: 'live', status: 'draft' },

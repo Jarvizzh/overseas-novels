@@ -367,10 +367,9 @@ func TestPaymentCenterRefundAuthorizationIntegration(t *testing.T) {
 		}
 		vipPath := "/channels/777/stripe-vip"
 		oneTimePath := "/channels/777/stripe-one-time"
-		body := `{"product_id":"prod_VIP","price_id":"price_VIP","sales_mode":"merchant_of_record","tax_liability_account":"acct_Liability",
+		body := `{"product_id":"prod_VIP","price_id":"price_VIP","sales_mode":"merchant_of_record",
 			"countries":["US","US"],"enabled":true,"reason":"Test eligibility"}`
 		query(http.MethodPut, vipPath+"/777", "test-finance", body, http.StatusForbidden)
-		query(http.MethodPut, vipPath+"/777", "test-super", strings.Replace(body, "acct_Liability", "", 1), http.StatusBadRequest)
 		query(http.MethodPut, vipPath+"/777", "test-super", body, http.StatusOK)
 		got := query(http.MethodGet, vipPath, "test-super", "", http.StatusOK)
 		if !strings.Contains(got, `"countries":["US"]`) || !strings.Contains(got, "price_VIP") {
