@@ -67,7 +67,7 @@ func TestCMSPricingEndpointsPreserveInheritFreeAndExplicit(t *testing.T) {
 	path := fmt.Sprintf("/novels/%d", created.ID)
 	request("POST", "/novels", payload("-1"), http.StatusBadRequest)
 	request("PUT", path, payload("-1"), http.StatusBadRequest)
-	if _, err := s.BulkImportChapters(ctx, created.ID, []byte("Chapter 1: Intro\n"+strings.Repeat("x", 1000)), "single_txt", ""); err != nil {
+	if _, err := s.BulkImportChapters(ctx, created.ID, []byte("Chapter 1: Intro\n"+strings.TrimSpace(strings.Repeat("word ", 1000))), "single_txt", ""); err != nil {
 		t.Fatal(err)
 	}
 	check := func(cost *int, effective int) {

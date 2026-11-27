@@ -32,9 +32,22 @@ var buildVersion = "dev"
 func main() {
 	migrate := flag.Bool("migrate", false, "apply pending database migrations and exit")
 	backfill := flag.Bool("backfill-chapter-previews", false, "generate missing historical OSS chapter previews and exit")
+	backfillWords := flag.Bool("backfill-word-counts", false, "recalculate historical chapter word counts and prices using word-based counting and exit")
+	dryRun := flag.Bool("dry-run", false, "preview changes without writing (used with -backfill-word-counts)")
+	novelID := flag.Int64("novel-id", 0, "optional novel ID filter (used with -backfill-word-counts)")
 	flag.Parse()
-	if *migrate && *backfill {
-		log.Fatal("run migration and preview backfill separately")
+	modeCount := 0
+	if *migrate {
+		modeCount++
+	}
+	if *backfill {
+		modeCount++
+	}
+	if *backfillWords {
+		modeCount++
+	}
+	if modeCount > 1 {
+		log.Fatal("run migration, preview backfill, and word-count backfill separately")
 	}
 	// 1. Load config
 	config.LoadConfig()
@@ -64,6 +77,26 @@ func main() {
 			return
 		}
 		if err := ossStore.BackfillChapterPreviews(ctx, db.DB); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
+
+	if *backfillWords {
+		if !*dryRun {
+			redis.InitRedis()
+			defer redis.CloseRedis()
+		}
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		store, err := storage.NewContentStorage(config.AppConfig, db.DB)
+		if err != nil {
+			log.Fatal(err)
+		}
+		if _, err := novel.BackfillWordCounts(ctx, db.DB, store, novel.WordCountBackfillOptions{
+			DryRun:  *dryRun,
+			NovelID: *novelID,
+		}); err != nil {
 			log.Fatal(err)
 		}
 		return

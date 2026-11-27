@@ -208,7 +208,7 @@ func TestPublicationIsAtomicAcrossStorageAndCatalog(t *testing.T) {
 		t.Fatalf("expect one publication and one rejected version, got %v, %v", err1, err2)
 	}
 	got, err := service.GetChapterDetail(ctx, 1, 0)
-	if err != nil || got.ID != original.ID || got.WordCount != countCharacters(got.Content) || got.ContentHash != chapterDigest(got.Content) || got.ObjectKey == original.ObjectKey {
+	if err != nil || got.ID != original.ID || got.WordCount != countWords(got.Content) || got.ContentHash != chapterDigest(got.Content) || got.ObjectKey == original.ObjectKey {
 		t.Fatalf("published metadata mismatch: %+v %v", got, err)
 	}
 	published, err := repo.GetNovel(ctx, 1)

@@ -681,11 +681,11 @@ func TestPublishLifecycleSoftDeleteAndListFilter(t *testing.T) {
 
 	// Adding chapter updates novel word_count and allows publishing
 	ch, err := svc.CreateChapter(ctx, created.ID, 0, "Chapter 1", "Hello world")
-	if err != nil || ch.WordCount != 10 {
+	if err != nil || ch.WordCount != 2 {
 		t.Fatalf("CreateChapter failed: ch=%+v err=%v", ch, err)
 	}
-	if repo.novels[created.ID].WordCount != 10 {
-		t.Fatalf("expected word_count=10 synced, got %d", repo.novels[created.ID].WordCount)
+	if repo.novels[created.ID].WordCount != 2 {
+		t.Fatalf("expected word_count=2 synced, got %d", repo.novels[created.ID].WordCount)
 	}
 
 	pub, err := svc.UpdatePublishStatus(ctx, created.ID, "published")
@@ -1336,5 +1336,58 @@ func TestListNovelsSortOptions(t *testing.T) {
 		if !strings.Contains(repo.lastListSelectQuery, tc.wantOrder) {
 			t.Fatalf("sort=%q expected query to contain %q, got %s", tc.sort, tc.wantOrder, repo.lastListSelectQuery)
 		}
+	}
+}
+
+func TestCountWords(t *testing.T) {
+	cases := []struct {
+		name string
+		text string
+		want int
+	}{
+		{name: "empty", text: "", want: 0},
+		{name: "whitespace_and_punctuation_only", text: " \n\t\u3000 --- ... *** ", want: 0},
+		{name: "simple_english", text: "Hello, world!", want: 2},
+		{name: "contractions_and_possessives", text: "Daisy's fiancé didn’t come.", want: 4},
+		{name: "hyphenated_words", text: "twenty-fifth billion-dollar state-of-the-art", want: 3},
+		{name: "em_dash_and_double_hyphen", text: "inheritance—the empire--was active", want: 5},
+		{name: "quoted_words", text: "'quoted' \"hello\"", want: 2},
+		{name: "numbers_with_separators", text: "He paid 1,000.50 dollars at 3.14.", want: 6},
+		{name: "cjk_and_mixed", text: "Hello 世界！中文测试", want: 7},
+	}
+	for _, tc := range cases {
+		if got := countWords(tc.text); got != tc.want {
+			t.Errorf("%s: countWords(%q) = %d, want %d", tc.name, tc.text, got, tc.want)
+		}
+	}
+}
+
+func TestChapterPricingUsesWordCount(t *testing.T) {
+	repo := newFakeNovelRepo()
+	cost := 500
+	repo.novels[1] = &Novel{
+		ID:                   1,
+		Title:                "English Novel",
+		Author:               "Author",
+		CoverURL:             "oss://covers/2026/11/abc.png",
+		Status:               "Ongoing",
+		PublishStatus:        "draft",
+		CoinCostPerThousand:  &cost,
+		StartPayChapterIndex: 1,
+	}
+	svc := NewNovelService(repo, nil, fakeCoverStore{})
+
+	// 200 words (each "hello" is 5 chars, so 1000 chars total, but only 200 words).
+	// At 500 coins per 1000 words, price must be 100 (not 500).
+	content := strings.TrimSpace(strings.Repeat("hello ", 200))
+	ch, err := svc.CreateChapter(context.Background(), 1, 0, "Chapter 1", content)
+	if err != nil {
+		t.Fatalf("CreateChapter failed: %v", err)
+	}
+	if ch.WordCount != 200 {
+		t.Fatalf("expected WordCount=200, got %d", ch.WordCount)
+	}
+	if !ch.IsPaid || ch.Price != 100 {
+		t.Fatalf("expected IsPaid=true Price=100, got IsPaid=%v Price=%d", ch.IsPaid, ch.Price)
 	}
 }

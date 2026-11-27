@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/google/uuid"
@@ -623,7 +624,7 @@ func (s *novelService) importNovelAtomically(ctx context.Context, item BatchImpo
 	chapters := make([]Chapter, 0, len(parsedChapters))
 	totalWords := 0
 	for _, parsed := range parsedChapters {
-		words := countCharacters(parsed.Content)
+		words := countWords(parsed.Content)
 		totalWords += words
 		chapters = append(chapters, Chapter{
 			ID:           uuid.NewString(),
@@ -1033,7 +1034,7 @@ func (s *novelService) publishChapter(ctx context.Context, ch *Chapter, update b
 		}}
 	}
 	ch.ContentHash = chapterDigest(ch.Content)
-	ch.WordCount = countCharacters(ch.Content)
+	ch.WordCount = countWords(ch.Content)
 	staged := []Chapter{*ch}
 	if err := s.stageChapters(ctx, staged, previous); err != nil {
 		return err
@@ -1277,7 +1278,7 @@ func (s *novelService) BulkImportChapters(ctx context.Context, novelID int64, zi
 	chapters := make([]Chapter, 0, len(parsedChapters))
 	totalWords := 0
 	for _, item := range parsedChapters {
-		words := countCharacters(item.Content)
+		words := countWords(item.Content)
 		totalWords += words
 		chapters = append(chapters, Chapter{
 			NovelID: novelID, ChapterIndex: item.Index, Title: item.Title,
@@ -1569,13 +1570,42 @@ func (s *novelService) ListFBPixels(ctx context.Context) ([]FBPixel, error) {
 	return s.repo.ListFBPixels(ctx)
 }
 
-func countCharacters(s string) int {
+func isCJKWordRune(r rune) bool {
+	return unicode.Is(unicode.Han, r) || unicode.Is(unicode.Hiragana, r) || unicode.Is(unicode.Katakana, r)
+}
+
+func isWordRune(r rune) bool {
+	return unicode.IsLetter(r) || unicode.IsDigit(r)
+}
+
+func isWordJoiner(r rune) bool {
+	return r == '\'' || r == '\u2019' || r == '-'
+}
+
+func countWords(s string) int {
+	runes := []rune(s)
 	count := 0
-	for _, r := range s {
-		if r == ' ' || r == '\n' || r == '\r' || r == '\t' || r == '\u3000' {
+	inWord := false
+	for i, r := range runes {
+		if isCJKWordRune(r) {
+			count++
+			inWord = false
 			continue
 		}
-		count++
+		if isWordRune(r) {
+			if !inWord {
+				count++
+				inWord = true
+			}
+			continue
+		}
+		if inWord && isWordJoiner(r) && i+1 < len(runes) && isWordRune(runes[i+1]) && !isCJKWordRune(runes[i+1]) {
+			continue
+		}
+		if inWord && (r == '.' || r == ',') && i > 0 && unicode.IsDigit(runes[i-1]) && i+1 < len(runes) && unicode.IsDigit(runes[i+1]) {
+			continue
+		}
+		inWord = false
 	}
 	return count
 }
