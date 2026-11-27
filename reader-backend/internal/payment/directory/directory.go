@@ -5,12 +5,15 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net/http"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"reader-backend/internal/config"
 	"reader-backend/internal/conversion"
 	"reader-backend/internal/credentials"
 	"reader-backend/internal/payment"
@@ -18,7 +21,25 @@ import (
 	"reader-backend/internal/payment/stripe"
 )
 
-const queryTimeout = 3 * time.Second
+const (
+	queryTimeout = 3 * time.Second
+
+	credRefDBEncrypted = "db:encrypted"
+
+	statusPublished = "published"
+	statusDisabled  = "disabled"
+	statusVerified  = "verified"
+
+	credPurposeAPIKey                = "api_key"
+	credPurposeWebhookSecret         = "webhook_secret"
+	credPurposePreviousWebhookSecret = "previous_webhook_secret"
+	credPurposePayoutAPIKey          = "payout_api_key"
+	credPurposeLedgerAPIKey          = "ledger_api_key"
+	credPurposeReportAPIKey          = "report_api_key"
+	credPurposeFilesAPIKey           = "files_api_key"
+	credPurposeEventsAPIKey          = "events_api_key"
+	credPurposeAftercareAPIKey       = "aftercare_api_key"
+)
 
 type cacheKey struct {
 	accountID int64
@@ -41,8 +62,9 @@ type accountRow struct {
 // Directory resolves live and historical payment channel clients from Postgres
 // without restarting Reader when credentials are published or rotated in CMS.
 type Directory struct {
-	pool           *pgxpool.Pool
-	staticAdapters payment.Adapters
+	pool             *pgxpool.Pool
+	staticAdapters   payment.Adapters
+	stripeHTTPClient *http.Client
 
 	mu    sync.RWMutex
 	cache map[cacheKey]payment.Adapter
@@ -53,6 +75,17 @@ func New(pool *pgxpool.Pool, static payment.Adapters) *Directory {
 		pool:           pool,
 		staticAdapters: static,
 		cache:          make(map[cacheKey]payment.Adapter),
+	}
+}
+
+// WithStripeHTTPClient returns a Directory configured with a custom HTTP client
+// for Stripe account verification and API requests (primarily for tests).
+func (d *Directory) WithStripeHTTPClient(client *http.Client) *Directory {
+	return &Directory{
+		pool:             d.pool,
+		staticAdapters:   d.staticAdapters,
+		stripeHTTPClient: client,
+		cache:            make(map[cacheKey]payment.Adapter),
 	}
 }
 
@@ -81,7 +114,7 @@ func (d *Directory) PrimaryAdapter(provider string) (payment.Adapter, bool) {
 	}
 	adapter, err := d.adapterForRow(ctx, row)
 	if err != nil {
-		log.Printf("channel directory primary resolve failed provider=%s account=%d: %v", provider, row.id, err)
+		log.Printf("channel directory primary resolve failed provider=%s account=%d: %s", provider, row.id, stripe.RedactSecrets(err.Error()))
 		return nil, false
 	}
 	return adapter, true
@@ -283,11 +316,222 @@ func buildEncryptedAdapter(row accountRow, secrets map[string]string) (payment.A
 		}
 		return stripe.NewConfiguredClient(stripe.Config{
 			Scope:                 stripe.Scope{AccountID: row.accountKey, Environment: env},
-			APIKey:                secrets["api_key"],
-			WebhookSecret:         secrets["webhook_secret"],
-			PreviousWebhookSecret: secrets["previous_webhook_secret"],
+			APIKey:                secrets[credPurposeAPIKey],
+			WebhookSecret:         secrets[credPurposeWebhookSecret],
+			PreviousWebhookSecret: secrets[credPurposePreviousWebhookSecret],
 		})
 	default:
 		return nil, fmt.Errorf("unsupported provider %q", row.provider)
+	}
+}
+
+// ResolveStripeClient resolves a verified Stripe client for a specific merchant account,
+// environment, and explicit purpose. Dynamic CMS accounts ("db:encrypted") only use
+// encrypted database credentials; legacy static channels retain env-var fallback.
+func (d *Directory) ResolveStripeClient(ctx context.Context, scope payment.WebhookAccount, purpose stripe.Purpose) (*stripe.Client, error) {
+	stripeScope := stripe.Scope{AccountID: strings.TrimSpace(scope.AccountKey), Environment: stripe.Environment(strings.TrimSpace(scope.Environment))}
+	if purpose == "" {
+		purpose = stripe.PurposeAccount
+	}
+	if stripeScope.AccountID == "" {
+		return nil, &stripe.CredentialError{
+			Environment: stripeScope.Environment,
+			Purpose:     purpose,
+			Reason:      stripe.ReasonAccountMismatch,
+			Retryable:   false,
+			Detail:      "Stripe account key is required",
+		}
+	}
+	if stripeScope.Environment != stripe.Sandbox && stripeScope.Environment != stripe.Live {
+		return nil, &stripe.CredentialError{
+			AccountID:   stripeScope.AccountID,
+			Environment: stripeScope.Environment,
+			Purpose:     purpose,
+			Reason:      stripe.ReasonEnvironmentMismatch,
+			Retryable:   false,
+			Detail:      "Stripe environment must be sandbox or live",
+		}
+	}
+	if d == nil || d.pool == nil {
+		return d.resolveStaticStripeClient(ctx, stripeScope, purpose)
+	}
+
+	var row accountRow
+	err := d.pool.QueryRow(ctx, `
+		SELECT id, provider, environment, account_key, merchant_id, credentials_ref, status, is_primary, active_version
+		FROM payment_channel_accounts
+		WHERE provider = $1 AND account_key = $2 AND environment = $3
+		LIMIT 1`, payment.ProviderStripe, stripeScope.AccountID, string(stripeScope.Environment)).
+		Scan(&row.id, &row.provider, &row.environment, &row.accountKey, &row.merchantID, &row.credentialsRef, &row.status, &row.isPrimary, &row.activeVersion)
+	if errors.Is(err, pgx.ErrNoRows) {
+		var otherEnv string
+		otherErr := d.pool.QueryRow(ctx, `
+			SELECT environment
+			FROM payment_channel_accounts
+			WHERE provider = $1 AND account_key = $2
+			LIMIT 1`, payment.ProviderStripe, stripeScope.AccountID).Scan(&otherEnv)
+		if otherErr == nil && otherEnv != "" {
+			return nil, &stripe.CredentialError{
+				AccountID:   stripeScope.AccountID,
+				Environment: stripeScope.Environment,
+				Purpose:     purpose,
+				Reason:      stripe.ReasonEnvironmentMismatch,
+				Retryable:   true,
+				Detail:      fmt.Sprintf("Stripe account is registered for %s, not %s", otherEnv, stripeScope.Environment),
+			}
+		}
+		if _, configured := config.FindPaymentAccount(payment.ProviderStripe, stripeScope.AccountID, string(stripeScope.Environment)); configured {
+			return d.resolveStaticStripeClient(ctx, stripeScope, purpose)
+		}
+		return nil, &stripe.CredentialError{
+			AccountID:   stripeScope.AccountID,
+			Environment: stripeScope.Environment,
+			Purpose:     purpose,
+			Reason:      stripe.ReasonAccountNotFound,
+			Retryable:   true,
+			Detail:      "Stripe channel account is not registered",
+		}
+	}
+	if err != nil {
+		return nil, &stripe.CredentialError{
+			AccountID:   stripeScope.AccountID,
+			Environment: stripeScope.Environment,
+			Purpose:     purpose,
+			Reason:      stripe.ReasonUpstreamUnavailable,
+			Retryable:   true,
+			Detail:      "failed to query Stripe channel account",
+			Err:         err,
+		}
+	}
+
+	if row.status != statusPublished && row.status != statusDisabled && row.status != statusVerified {
+		return nil, &stripe.CredentialError{
+			AccountID:   stripeScope.AccountID,
+			Environment: stripeScope.Environment,
+			Purpose:     purpose,
+			Reason:      stripe.ReasonAccountNotReady,
+			Retryable:   true,
+			Detail:      fmt.Sprintf("Stripe channel account status %q is not verified or published", row.status),
+		}
+	}
+
+	if row.credentialsRef != credRefDBEncrypted {
+		return d.resolveStaticStripeClient(ctx, stripeScope, purpose)
+	}
+
+	secrets, _, err := d.loadEncryptedSecrets(ctx, row.id, row.activeVersion)
+	if err != nil {
+		return nil, &stripe.CredentialError{
+			AccountID:   stripeScope.AccountID,
+			Environment: stripeScope.Environment,
+			Purpose:     purpose,
+			Reason:      stripe.ReasonCredentialDecrypt,
+			Retryable:   true,
+			Detail:      "failed to decrypt Stripe channel credentials",
+			Err:         err,
+		}
+	}
+	apiKey := selectStripeAPIKey(secrets, purpose)
+	if apiKey == "" {
+		return nil, &stripe.CredentialError{
+			AccountID:   stripeScope.AccountID,
+			Environment: stripeScope.Environment,
+			Purpose:     purpose,
+			Reason:      stripe.ReasonCredentialMissing,
+			Retryable:   true,
+			Detail:      "Stripe channel account has no active encrypted API key",
+		}
+	}
+	client, err := stripe.NewClient(ctx, stripe.Config{
+		Scope:                 stripeScope,
+		APIKey:                apiKey,
+		WebhookSecret:         secrets[credPurposeWebhookSecret],
+		PreviousWebhookSecret: secrets[credPurposePreviousWebhookSecret],
+		HTTPClient:            d.stripeHTTPClient,
+	})
+	if err != nil {
+		return nil, stripe.ClassifyPurposeError(stripeScope, purpose, err)
+	}
+	return client, nil
+}
+
+// VerifyStripePurpose resolves the Stripe client for scope and purpose, then
+// validates both account ownership and the minimal API permission for purpose.
+func (d *Directory) VerifyStripePurpose(ctx context.Context, scope payment.WebhookAccount, purpose stripe.Purpose) error {
+	client, err := d.ResolveStripeClient(ctx, scope, purpose)
+	if err != nil {
+		return err
+	}
+	return client.VerifyPurpose(ctx, purpose)
+}
+
+func (d *Directory) resolveStaticStripeClient(ctx context.Context, stripeScope stripe.Scope, purpose stripe.Purpose) (*stripe.Client, error) {
+	apiKey := staticStripeAPIKey(stripeScope, purpose)
+	if apiKey != "" {
+		var httpClient *http.Client
+		if d != nil {
+			httpClient = d.stripeHTTPClient
+		}
+		client, err := stripe.NewClient(ctx, stripe.Config{
+			Scope:      stripeScope,
+			APIKey:     apiKey,
+			HTTPClient: httpClient,
+		})
+		if err != nil {
+			return nil, stripe.ClassifyPurposeError(stripeScope, purpose, err)
+		}
+		return client, nil
+	}
+	if d != nil {
+		scope := payment.WebhookAccount{AccountKey: stripeScope.AccountID, Environment: string(stripeScope.Environment)}
+		if adapter, ok := payment.AccountCapability[*stripe.Client](d.staticAdapters, payment.ProviderStripe, scope); ok && adapter != nil {
+			if err := adapter.VerifyAccount(ctx); err != nil {
+				return nil, stripe.ClassifyPurposeError(stripeScope, purpose, err)
+			}
+			return adapter, nil
+		}
+	}
+	return nil, &stripe.CredentialError{
+		AccountID:   stripeScope.AccountID,
+		Environment: stripeScope.Environment,
+		Purpose:     purpose,
+		Reason:      stripe.ReasonCredentialMissing,
+		Retryable:   true,
+		Detail:      "legacy static Stripe API key is not configured",
+	}
+}
+
+func selectStripeAPIKey(secrets map[string]string, purpose stripe.Purpose) string {
+	var candidates []string
+	switch purpose {
+	case stripe.PurposePayout:
+		candidates = []string{credPurposePayoutAPIKey, credPurposeLedgerAPIKey, credPurposeAPIKey}
+	case stripe.PurposeBalanceTransactions:
+		candidates = []string{credPurposeLedgerAPIKey, credPurposeAPIKey}
+	case stripe.PurposeReportRun:
+		candidates = []string{credPurposeReportAPIKey, credPurposeLedgerAPIKey, credPurposeAPIKey}
+	case stripe.PurposeFiles:
+		candidates = []string{credPurposeFilesAPIKey, credPurposeReportAPIKey, credPurposeLedgerAPIKey, credPurposeAPIKey}
+	case stripe.PurposeEvents:
+		candidates = []string{credPurposeEventsAPIKey, credPurposeAftercareAPIKey, credPurposeAPIKey}
+	case stripe.PurposeAftercare:
+		candidates = []string{credPurposeAftercareAPIKey, credPurposeAPIKey}
+	default:
+		candidates = []string{credPurposeAPIKey}
+	}
+	for _, key := range candidates {
+		if val := strings.TrimSpace(secrets[key]); val != "" {
+			return val
+		}
+	}
+	return ""
+}
+
+func staticStripeAPIKey(scope stripe.Scope, purpose stripe.Purpose) string {
+	switch purpose {
+	case stripe.PurposeAftercare, stripe.PurposeEvents:
+		return strings.TrimSpace(config.StripeAftercareAPIKey(scope.AccountID, string(scope.Environment)))
+	default:
+		return strings.TrimSpace(config.StripeLedgerAPIKey(scope.AccountID, string(scope.Environment)))
 	}
 }

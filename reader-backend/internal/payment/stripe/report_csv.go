@@ -74,8 +74,34 @@ func (c *Client) OpenReportCSV(ctx context.Context, runID string) (*ReportCSV, e
 		return nil, fmt.Errorf("download Stripe report: %w", err)
 	}
 	if response.StatusCode != http.StatusOK {
+		reqID := response.Header.Get("Request-Id")
 		_ = response.Body.Close()
-		return nil, fmt.Errorf("download Stripe report: HTTP %d", response.StatusCode)
+		switch response.StatusCode {
+		case http.StatusUnauthorized:
+			return nil, &CredentialError{
+				AccountID:   c.scope.AccountID,
+				Environment: c.scope.Environment,
+				Purpose:     PurposeFiles,
+				Reason:      ReasonAuthenticationFailed,
+				HTTPStatus:  response.StatusCode,
+				RequestID:   reqID,
+				Retryable:   true,
+				Detail:      "Stripe Files download authentication failed",
+			}
+		case http.StatusForbidden:
+			return nil, &CredentialError{
+				AccountID:   c.scope.AccountID,
+				Environment: c.scope.Environment,
+				Purpose:     PurposeFiles,
+				Reason:      ReasonPermissionDenied,
+				HTTPStatus:  response.StatusCode,
+				RequestID:   reqID,
+				Retryable:   true,
+				Detail:      "Stripe API key lacks files permission to download report CSV",
+			}
+		default:
+			return nil, fmt.Errorf("download Stripe report: HTTP %d", response.StatusCode)
+		}
 	}
 
 	// Strip a UTF-8 BOM before CSV parsing. A quoted first header is valid.

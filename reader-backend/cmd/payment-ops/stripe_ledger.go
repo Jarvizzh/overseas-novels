@@ -13,6 +13,7 @@ import (
 	"reader-backend/internal/config"
 	"reader-backend/internal/db"
 	"reader-backend/internal/payment"
+	"reader-backend/internal/payment/directory"
 	"reader-backend/internal/payment/ledger"
 	"reader-backend/internal/payment/settlement"
 	"reader-backend/internal/payment/stripe"
@@ -38,13 +39,18 @@ func runStripeLedger(account, environment, id, reason string, apply bool) error 
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), stripeLedgerRunTimeout)
 	defer cancel()
-	client, err := stripe.NewClient(ctx, stripe.Config{Scope: scope, APIKey: config.StripeLedgerAPIKey(scope.AccountID, string(scope.Environment))})
-	if err != nil {
-		return err
-	}
 	config.LoadConfig()
 	db.InitDB()
 	defer db.CloseDB()
+	purpose := stripe.PurposeBalanceTransactions
+	if object == "frr" {
+		purpose = stripe.PurposeReportRun
+	}
+	dir := directory.New(db.DB, payment.NewAdapters())
+	client, err := dir.ResolveStripeClient(ctx, payment.WebhookAccount{AccountKey: scope.AccountID, Environment: string(scope.Environment)}, purpose)
+	if err != nil {
+		return err
+	}
 	if object == "frr" {
 		operator, err := user.Current()
 		if err != nil {

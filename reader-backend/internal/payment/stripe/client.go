@@ -40,6 +40,7 @@ type Config struct {
 	APIKey                string
 	WebhookSecret         string
 	PreviousWebhookSecret string
+	HTTPClient            *http.Client
 }
 
 type Client struct {
@@ -51,14 +52,24 @@ type Client struct {
 	reportHTTP            *http.Client
 }
 
+const defaultStripeHTTPTimeout = 15 * time.Second
+
 // NewClient checks that the credential belongs to the configured merchant account.
 func NewClient(ctx context.Context, cfg Config) (*Client, error) {
-	return newClient(ctx, cfg, &http.Client{Timeout: 15 * time.Second})
+	httpClient := cfg.HTTPClient
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: defaultStripeHTTPTimeout}
+	}
+	return newClient(ctx, cfg, httpClient)
 }
 
 // NewConfiguredClient initializes a dynamic DB-verified Stripe client without a blocking remote round-trip.
 func NewConfiguredClient(cfg Config) (*Client, error) {
-	return initClient(context.Background(), cfg, &http.Client{Timeout: 15 * time.Second}, false)
+	httpClient := cfg.HTTPClient
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: defaultStripeHTTPTimeout}
+	}
+	return initClient(context.Background(), cfg, httpClient, false)
 }
 
 func newClient(ctx context.Context, cfg Config, httpClient *http.Client) (*Client, error) {
@@ -67,7 +78,14 @@ func newClient(ctx context.Context, cfg Config, httpClient *http.Client) (*Clien
 
 func initClient(ctx context.Context, cfg Config, httpClient *http.Client, verifyRemote bool) (*Client, error) {
 	if !validID(cfg.AccountID, "acct_") {
-		return nil, errors.New("invalid Stripe account ID")
+		return nil, &CredentialError{
+			AccountID:   cfg.AccountID,
+			Environment: cfg.Environment,
+			Purpose:     PurposeAccount,
+			Reason:      ReasonAccountMismatch,
+			Retryable:   false,
+			Detail:      "invalid Stripe account ID",
+		}
 	}
 
 	var keyMode string
@@ -77,10 +95,24 @@ func initClient(ctx context.Context, cfg Config, httpClient *http.Client, verify
 	case Live:
 		keyMode = "live_"
 	default:
-		return nil, errors.New("invalid Stripe environment")
+		return nil, &CredentialError{
+			AccountID:   cfg.AccountID,
+			Environment: cfg.Environment,
+			Purpose:     PurposeAccount,
+			Reason:      ReasonEnvironmentMismatch,
+			Retryable:   false,
+			Detail:      "invalid Stripe environment",
+		}
 	}
 	if !validID(cfg.APIKey, "sk_"+keyMode) && !validID(cfg.APIKey, "rk_"+keyMode) {
-		return nil, errors.New("Stripe API key does not match the configured environment")
+		return nil, &CredentialError{
+			AccountID:   cfg.AccountID,
+			Environment: cfg.Environment,
+			Purpose:     PurposeAccount,
+			Reason:      ReasonEnvironmentMismatch,
+			Retryable:   true,
+			Detail:      "Stripe API key does not match the configured environment",
+		}
 	}
 	if cfg.WebhookSecret != "" && !validID(cfg.WebhookSecret, "whsec_") {
 		return nil, errors.New("invalid Stripe webhook secret")
@@ -95,15 +127,6 @@ func initClient(ctx context.Context, cfg Config, httpClient *http.Client, verify
 		LeveledLogger:     &stripego.LeveledLogger{Level: stripego.LevelNull},
 	})
 	api := stripego.NewClient(cfg.APIKey, stripego.WithBackends(backend))
-	if verifyRemote {
-		account, err := api.V1Accounts.Retrieve(ctx, nil)
-		if err != nil {
-			return nil, classify(err)
-		}
-		if account.ID != cfg.AccountID {
-			return nil, errors.New("Stripe API key belongs to a different account")
-		}
-	}
 	reportHTTP := &http.Client{
 		Transport: httpClient.Transport,
 		Timeout:   2 * time.Minute,
@@ -111,11 +134,17 @@ func initClient(ctx context.Context, cfg Config, httpClient *http.Client, verify
 			return http.ErrUseLastResponse
 		},
 	}
-	return &Client{
+	client := &Client{
 		api: api, scope: cfg.Scope, webhookSecret: cfg.WebhookSecret,
 		previousWebhookSecret: cfg.PreviousWebhookSecret,
 		apiKey:                cfg.APIKey, reportHTTP: reportHTTP,
-	}, nil
+	}
+	if verifyRemote {
+		if err := client.VerifyAccount(ctx); err != nil {
+			return nil, err
+		}
+	}
+	return client, nil
 }
 
 func (c *Client) Scope() Scope     { return c.scope }

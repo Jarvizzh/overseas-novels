@@ -11,7 +11,11 @@ func (c *Client) GetDispute(ctx context.Context, id string) (*stripego.Dispute, 
 	if !validID(id, "dp_") && !validID(id, "du_") {
 		return nil, errors.New("invalid Stripe Dispute ID")
 	}
-	return apiResult(c.api.V1Disputes.Retrieve(ctx, id, nil))
+	dispute, err := apiResult(c.api.V1Disputes.Retrieve(ctx, id, nil))
+	if err != nil {
+		return nil, ClassifyPurposeError(c.scope, PurposeAftercare, err)
+	}
+	return dispute, nil
 }
 
 func (c *Client) ListDisputes(ctx context.Context, created TimeRange, page PageOptions) (Page[*stripego.Dispute], error) {
@@ -23,5 +27,9 @@ func (c *Client) ListDisputes(ctx context.Context, created TimeRange, page PageO
 	if err != nil {
 		return Page[*stripego.Dispute]{}, err
 	}
-	return listPage(c.api.V1Disputes.List(ctx, &stripego.DisputeListParams{ListParams: params, CreatedRange: window}))
+	res, err := listPage(c.api.V1Disputes.List(ctx, &stripego.DisputeListParams{ListParams: params, CreatedRange: window}))
+	if err != nil {
+		return Page[*stripego.Dispute]{}, ClassifyPurposeError(c.scope, PurposeAftercare, err)
+	}
+	return res, nil
 }

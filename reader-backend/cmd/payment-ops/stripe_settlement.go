@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"time"
 
-	"reader-backend/internal/config"
+	"reader-backend/internal/db"
+	"reader-backend/internal/payment"
+	"reader-backend/internal/payment/directory"
 	"reader-backend/internal/payment/settlement"
 	"reader-backend/internal/payment/stripe"
 )
@@ -21,8 +23,8 @@ func parseStripeWindow(from, through string) (time.Time, time.Time, error) {
 }
 
 func (c settlementCommand) syncStripePayouts(ctx context.Context, repo *settlement.Repository, audit settlement.Audit) error {
-	scope := stripe.Scope{AccountID: c.account, Environment: stripe.Environment(c.environment)}
-	client, err := stripe.NewClient(ctx, stripe.Config{Scope: scope, APIKey: config.StripeLedgerAPIKey(scope.AccountID, string(scope.Environment))})
+	dir := directory.New(db.DB, payment.NewAdapters())
+	client, err := dir.ResolveStripeClient(ctx, payment.WebhookAccount{AccountKey: c.account, Environment: c.environment}, stripe.PurposePayout)
 	if err != nil {
 		return err
 	}

@@ -10,8 +10,11 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"reader-backend/internal/payment"
+	"reader-backend/internal/payment/directory"
 	"reader-backend/internal/payment/ledger"
+	"reader-backend/internal/payment/stripe"
 )
 
 const (
@@ -62,10 +65,44 @@ type settlementDatabase interface {
 	QueryRow(context.Context, string, ...any) pgx.Row
 }
 
-type Repository struct{ pool settlementDatabase }
+// StripeClientResolver resolves a verified Stripe client for a merchant account,
+// environment, and explicit purpose.
+type StripeClientResolver interface {
+	ResolveStripeClient(ctx context.Context, scope payment.WebhookAccount, purpose stripe.Purpose) (*stripe.Client, error)
+}
+
+type Repository struct {
+	pool           settlementDatabase
+	stripeResolver StripeClientResolver
+}
 
 func NewRepository(pool settlementDatabase) *Repository {
 	return &Repository{pool: pool}
+}
+
+// WithStripeResolver returns a shallow copy of Repository using the provided
+// Stripe credential resolver (such as the shared dynamic payment directory).
+func (r *Repository) WithStripeResolver(resolver StripeClientResolver) *Repository {
+	copied := *r
+	copied.stripeResolver = resolver
+	return &copied
+}
+
+func (r *Repository) resolveStripeClient(ctx context.Context, scope payment.WebhookAccount, purpose stripe.Purpose) (*stripe.Client, error) {
+	if r.stripeResolver != nil {
+		return r.stripeResolver.ResolveStripeClient(ctx, scope, purpose)
+	}
+	if pool, ok := r.pool.(*pgxpool.Pool); ok && pool != nil {
+		return directory.New(pool, payment.NewAdapters()).ResolveStripeClient(ctx, scope, purpose)
+	}
+	return nil, &stripe.CredentialError{
+		AccountID:   scope.AccountKey,
+		Environment: stripe.Environment(scope.Environment),
+		Purpose:     purpose,
+		Reason:      stripe.ReasonCredentialMissing,
+		Retryable:   true,
+		Detail:      "Stripe credential directory is unavailable",
+	}
 }
 
 // Import records a verified report atomically. read supplies local or already

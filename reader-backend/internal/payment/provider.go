@@ -156,6 +156,11 @@ func (a Adapters) WithDynamicSource(source DynamicSource) Adapters {
 	return a
 }
 
+// DynamicSource returns the attached DB-backed dynamic adapter directory if configured.
+func (a Adapters) DynamicSource() DynamicSource {
+	return a.dynamic
+}
+
 // TokenResolver returns the dynamic webhook token resolver if configured.
 func (a Adapters) TokenResolver() (WebhookTokenResolver, bool) {
 	resolver, ok := a.dynamic.(WebhookTokenResolver)

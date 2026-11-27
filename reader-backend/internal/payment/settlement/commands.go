@@ -10,7 +10,6 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-	"reader-backend/internal/config"
 	"reader-backend/internal/payment"
 	"reader-backend/internal/payment/paypal/credentialstore"
 	"reader-backend/internal/payment/stripe"
@@ -67,7 +66,7 @@ func (r *Repository) ExecuteNextCommand(ctx context.Context, environment string)
 	var body []byte
 	status, note := "succeeded", ""
 	if issue != nil {
-		status, note = "failed", issue.Error()
+		status, note = "failed", stripe.RedactSecrets(issue.Error())
 	} else if body, err = json.Marshal(result); err != nil {
 		return true, err
 	}
@@ -127,8 +126,11 @@ func (r *Repository) executeSettlementCommand(ctx context.Context, job settlemen
 		if job.provider != payment.ProviderStripe {
 			return nil, errors.New("Stripe settlement account does not match the command")
 		}
-		client, err := stripe.NewClient(ctx, stripe.Config{Scope: stripe.Scope{AccountID: job.account.AccountKey, Environment: stripe.Environment(job.account.Environment)},
-			APIKey: config.StripeLedgerAPIKey(job.account.AccountKey, job.account.Environment)})
+		purpose := stripe.PurposePayout
+		if job.kind == "stripe_report" {
+			purpose = stripe.PurposeReportRun
+		}
+		client, err := r.resolveStripeClient(ctx, job.account, purpose)
 		if err != nil {
 			return nil, err
 		}

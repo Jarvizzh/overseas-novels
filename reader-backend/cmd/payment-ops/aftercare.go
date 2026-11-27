@@ -13,12 +13,17 @@ import (
 	"reader-backend/internal/db"
 	"reader-backend/internal/payment"
 	"reader-backend/internal/payment/aftercare"
+	"reader-backend/internal/payment/directory"
 	"reader-backend/internal/payment/paypal"
 	"reader-backend/internal/payment/paypal/credentialstore"
 	"reader-backend/internal/payment/stripe"
 )
 
 const aftercareMaxPages = 100
+
+type stripeClientResolver interface {
+	ResolveStripeClient(ctx context.Context, scope payment.WebhookAccount, purpose stripe.Purpose) (*stripe.Client, error)
+}
 
 func runAftercare(provider, account, environment, id, from, through, reason string, apply bool) error {
 	if (provider != "paypal" && provider != "stripe") || (environment != "live" && environment != "sandbox") || strings.TrimSpace(account) == "" {
@@ -76,8 +81,16 @@ func runAftercare(provider, account, environment, id, from, through, reason stri
 		}
 		return backfillPayPalCases(ctx, client, repo, start, end)
 	}
-	client, err := stripe.NewClient(ctx, stripe.Config{Scope: stripe.Scope{AccountID: account, Environment: stripe.Environment(environment)},
-		APIKey: config.StripeAftercareAPIKey(account, environment)})
+	dir := directory.New(db.DB, payment.NewAdapters())
+	return runStripeAftercare(ctx, dir, repo, account, environment, id, start, end)
+}
+
+func runStripeAftercare(ctx context.Context, resolver stripeClientResolver, repo *aftercare.Repository, account, environment, id string, start, end time.Time) error {
+	purpose := stripe.PurposeAftercare
+	if id != "" && !strings.HasPrefix(id, "dp_") && !strings.HasPrefix(id, "du_") {
+		purpose = stripe.PurposeEvents
+	}
+	client, err := resolver.ResolveStripeClient(ctx, payment.WebhookAccount{AccountKey: account, Environment: environment}, purpose)
 	if err != nil {
 		return err
 	}

@@ -22,7 +22,7 @@ func (c *Client) GetEvent(ctx context.Context, id string) (Event, error) {
 	}
 	result, err := apiResult(c.api.V1Events.Retrieve(ctx, id, nil))
 	if err != nil {
-		return Event{}, err
+		return Event{}, ClassifyPurposeError(c.scope, PurposeEvents, err)
 	}
 	if result.ID != id {
 		return Event{}, errors.New("unexpected Stripe event ID")
@@ -54,7 +54,7 @@ func (c *Client) ListEvents(ctx context.Context, query EventQuery) (Page[Event],
 		Types: stripego.StringSlice(query.Types), DeliverySuccess: query.DeliverySuccess,
 	}))
 	if err != nil {
-		return Page[Event]{}, err
+		return Page[Event]{}, ClassifyPurposeError(c.scope, PurposeEvents, err)
 	}
 	items := make([]Event, 0, len(list.Items))
 	for _, result := range list.Items {

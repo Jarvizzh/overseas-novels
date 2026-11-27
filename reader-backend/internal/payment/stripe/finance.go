@@ -40,7 +40,7 @@ func (c *Client) GetBalanceTransaction(ctx context.Context, id string) (*Balance
 	}
 	txn, err := c.api.V1BalanceTransactions.Retrieve(ctx, id, nil)
 	if err != nil {
-		return nil, classify(err)
+		return nil, ClassifyPurposeError(c.scope, PurposeBalanceTransactions, classify(err))
 	}
 	var fields balanceTransactionFields
 	if err := json.Unmarshal(txn.LastResponse.RawJSON, &fields); err != nil {
@@ -80,7 +80,7 @@ func (c *Client) ListBalanceTransactions(ctx context.Context, query BalanceTrans
 	list := c.api.V1BalanceTransactions.List(ctx, request)
 	decoded, err := listPage(list)
 	if err != nil {
-		return Page[BalanceTransaction]{}, err
+		return Page[BalanceTransaction]{}, ClassifyPurposeError(c.scope, PurposeBalanceTransactions, err)
 	}
 	fields, err := rawPageFields[*stripego.BalanceTransaction, balanceTransactionFields](list)
 	if err != nil {
@@ -100,7 +100,11 @@ func (c *Client) GetPayout(ctx context.Context, id string) (*stripego.Payout, er
 	if !validID(id, "po_") {
 		return nil, errors.New("invalid Stripe Payout ID")
 	}
-	return apiResult(c.api.V1Payouts.Retrieve(ctx, id, nil))
+	payout, err := apiResult(c.api.V1Payouts.Retrieve(ctx, id, nil))
+	if err != nil {
+		return nil, ClassifyPurposeError(c.scope, PurposePayout, err)
+	}
+	return payout, nil
 }
 
 func (c *Client) ListPayouts(ctx context.Context, created TimeRange, page PageOptions) (Page[*stripego.Payout], error) {
@@ -112,7 +116,11 @@ func (c *Client) ListPayouts(ctx context.Context, created TimeRange, page PageOp
 	if err != nil {
 		return Page[*stripego.Payout]{}, err
 	}
-	return listPage(c.api.V1Payouts.List(ctx, &stripego.PayoutListParams{ListParams: params, CreatedRange: window}))
+	res, err := listPage(c.api.V1Payouts.List(ctx, &stripego.PayoutListParams{ListParams: params, CreatedRange: window}))
+	if err != nil {
+		return Page[*stripego.Payout]{}, ClassifyPurposeError(c.scope, PurposePayout, err)
+	}
+	return res, nil
 }
 
 type ReportRequest struct {
@@ -150,28 +158,43 @@ func (c *Client) CreateReportRun(ctx context.Context, req ReportRequest) (*strip
 	if err != nil {
 		return nil, err
 	}
-	return apiResult(c.api.V1ReportingReportRuns.Create(ctx, &stripego.ReportingReportRunCreateParams{
+	run, err := apiResult(c.api.V1ReportingReportRuns.Create(ctx, &stripego.ReportingReportRunCreateParams{
 		Params: params, ReportType: stripego.String(req.Type), Parameters: report,
 	}))
+	if err != nil {
+		return nil, ClassifyPurposeError(c.scope, PurposeReportRun, err)
+	}
+	return run, nil
 }
 
 func (c *Client) GetReportType(ctx context.Context, id string) (*stripego.ReportingReportType, error) {
 	if !validToken(strings.ReplaceAll(id, ".", "_")) {
 		return nil, errors.New("invalid Stripe report type")
 	}
-	return apiResult(c.api.V1ReportingReportTypes.Retrieve(ctx, id, nil))
+	rt, err := apiResult(c.api.V1ReportingReportTypes.Retrieve(ctx, id, nil))
+	if err != nil {
+		return nil, ClassifyPurposeError(c.scope, PurposeReportRun, err)
+	}
+	return rt, nil
 }
 
 func (c *Client) ListReportTypes(ctx context.Context) ([]*stripego.ReportingReportType, error) {
 	list, err := listPage(c.api.V1ReportingReportTypes.List(ctx, nil))
-	return list.Items, err
+	if err != nil {
+		return nil, ClassifyPurposeError(c.scope, PurposeReportRun, err)
+	}
+	return list.Items, nil
 }
 
 func (c *Client) GetReportRun(ctx context.Context, id string) (*stripego.ReportingReportRun, error) {
 	if !validID(id, "frr_") {
 		return nil, errors.New("invalid Stripe ReportRun ID")
 	}
-	return apiResult(c.api.V1ReportingReportRuns.Retrieve(ctx, id, nil))
+	run, err := apiResult(c.api.V1ReportingReportRuns.Retrieve(ctx, id, nil))
+	if err != nil {
+		return nil, ClassifyPurposeError(c.scope, PurposeReportRun, err)
+	}
+	return run, nil
 }
 
 func (c *Client) ListReportRuns(ctx context.Context, created TimeRange, page PageOptions) (Page[*stripego.ReportingReportRun], error) {
@@ -183,8 +206,12 @@ func (c *Client) ListReportRuns(ctx context.Context, created TimeRange, page Pag
 	if err != nil {
 		return Page[*stripego.ReportingReportRun]{}, err
 	}
-	return listPage(c.api.V1ReportingReportRuns.List(ctx, &stripego.ReportingReportRunListParams{
+	res, err := listPage(c.api.V1ReportingReportRuns.List(ctx, &stripego.ReportingReportRunListParams{
 		ListParams:   params,
 		CreatedRange: window,
 	}))
+	if err != nil {
+		return Page[*stripego.ReportingReportRun]{}, ClassifyPurposeError(c.scope, PurposeReportRun, err)
+	}
+	return res, nil
 }

@@ -8,7 +8,6 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-	"reader-backend/internal/config"
 	"reader-backend/internal/payment"
 	"reader-backend/internal/payment/ledger"
 	"reader-backend/internal/payment/paypal"
@@ -38,7 +37,7 @@ func (r *Repository) SyncNextLedgerPage(ctx context.Context, environment string)
 	}
 	note := ""
 	if problem != nil {
-		note = problem.Error()
+		note = stripe.RedactSecrets(problem.Error())
 	}
 	_, err = r.pool.Exec(ctx, `UPDATE payment_ledger_sync_settings SET lease_token=NULL,lease_until=NULL,
 		last_error=NULLIF(left($4,800),''),
@@ -106,8 +105,7 @@ func (r *Repository) syncLedgerPage(ctx context.Context, job automaticLedgerPage
 		}
 		return "", nil
 	case payment.ProviderStripe:
-		client, err := stripe.NewClient(ctx, stripe.Config{Scope: stripe.Scope{AccountID: job.account.AccountKey, Environment: stripe.Environment(job.account.Environment)},
-			APIKey: config.StripeLedgerAPIKey(job.account.AccountKey, job.account.Environment)})
+		client, err := r.resolveStripeClient(ctx, job.account, stripe.PurposePayout)
 		if err != nil {
 			return "", err
 		}

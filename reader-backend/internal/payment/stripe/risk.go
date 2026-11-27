@@ -12,14 +12,22 @@ func (c *Client) GetReview(ctx context.Context, id string) (*stripego.Review, er
 	if !validID(id, "prv_") {
 		return nil, errors.New("invalid Stripe Review ID")
 	}
-	return apiResult(c.api.V1Reviews.Retrieve(ctx, id, nil))
+	review, err := apiResult(c.api.V1Reviews.Retrieve(ctx, id, nil))
+	if err != nil {
+		return nil, ClassifyPurposeError(c.scope, PurposeAftercare, err)
+	}
+	return review, nil
 }
 
 func (c *Client) GetEarlyFraudWarning(ctx context.Context, id string) (*stripego.RadarEarlyFraudWarning, error) {
 	if !validID(id, "issfr_") {
 		return nil, errors.New("invalid Stripe early fraud warning ID")
 	}
-	return apiResult(c.api.V1RadarEarlyFraudWarnings.Retrieve(ctx, id, nil))
+	warning, err := apiResult(c.api.V1RadarEarlyFraudWarnings.Retrieve(ctx, id, nil))
+	if err != nil {
+		return nil, ClassifyPurposeError(c.scope, PurposeAftercare, err)
+	}
+	return warning, nil
 }
 
 func (c *Client) ListEarlyFraudWarnings(ctx context.Context, chargeID string, page PageOptions) (Page[*stripego.RadarEarlyFraudWarning], error) {
