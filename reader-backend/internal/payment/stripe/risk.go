@@ -91,7 +91,7 @@ func (c *Client) GetChargeRisk(ctx context.Context, chargeID string) (ChargeRisk
 	if err != nil {
 		return ChargeRisk{}, err
 	}
-	if charge.ID != chargeID {
+	if charge.ID != chargeID || charge.Livemode != (c.scope.Environment == Live) {
 		return ChargeRisk{}, errors.New("unexpected Stripe risk charge")
 	}
 	return chargeRisk(charge, charge.LastResponse.RawJSON)

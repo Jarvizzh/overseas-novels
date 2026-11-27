@@ -19,14 +19,32 @@ func (s *service) ProcessSubscriptionWebhook(ctx context.Context, providerName s
 		providerName = payment.ProviderPayPal
 	}
 	if providerName == payment.ProviderStripe {
+		sig := providerHeader(headers, "Stripe-Signature")
+		for _, verifier := range payment.AccountCapabilities[stripeWebhookVerifier](s.adapters, providerName) {
+			scope := verifier.AccountScope()
+			if !paymentEnvironmentMatches(scope) {
+				continue
+			}
+			event, err := verifier.VerifyWebhook(payload, sig)
+			if err == nil && stripeAccountScope(event.Scope) == scope {
+				if err := enqueueStripeEvent(ctx, event, payload); err != nil {
+					return err
+				}
+				notifyWorker(s.stripeEventsWake)
+				return nil
+			}
+		}
 		for _, checkout := range payment.AccountCapabilities[interface {
 			AccountScope() payment.WebhookAccount
 			VerifySingleCheckoutEvent([]byte, string) (*payment.SingleCheckoutNotice, error)
 		}](s.adapters, providerName) {
+			if _, ok := checkout.(stripeWebhookVerifier); ok {
+				continue
+			}
 			if !paymentEnvironmentMatches(checkout.AccountScope()) {
 				continue
 			}
-			notice, err := checkout.VerifySingleCheckoutEvent(payload, providerHeader(headers, "Stripe-Signature"))
+			notice, err := checkout.VerifySingleCheckoutEvent(payload, sig)
 			if err == nil && (notice == nil || notice.Account == checkout.AccountScope()) {
 				if err := queueStripeNotice(ctx, notice, payload); err != nil {
 					return err
@@ -76,6 +94,21 @@ func (s *service) ProcessChannelWebhook(ctx context.Context, token string, paylo
 	}
 	switch providerName {
 	case payment.ProviderStripe:
+		sig := providerHeader(headers, "Stripe-Signature")
+		if verifier, ok := adapter.(stripeWebhookVerifier); ok {
+			event, err := verifier.VerifyWebhook(payload, sig)
+			if err != nil {
+				return err
+			}
+			if stripeAccountScope(event.Scope) != scope {
+				return errors.New("Stripe channel webhook account mismatch")
+			}
+			if err := enqueueStripeEvent(ctx, event, payload); err != nil {
+				return err
+			}
+			notifyWorker(s.stripeEventsWake)
+			return nil
+		}
 		checkout, ok := adapter.(interface {
 			AccountScope() payment.WebhookAccount
 			VerifySingleCheckoutEvent([]byte, string) (*payment.SingleCheckoutNotice, error)
@@ -83,7 +116,7 @@ func (s *service) ProcessChannelWebhook(ctx context.Context, token string, paylo
 		if !ok {
 			return ErrCheckoutUnavailable
 		}
-		notice, err := checkout.VerifySingleCheckoutEvent(payload, providerHeader(headers, "Stripe-Signature"))
+		notice, err := checkout.VerifySingleCheckoutEvent(payload, sig)
 		if err != nil {
 			return err
 		}

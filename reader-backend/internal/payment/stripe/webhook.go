@@ -39,20 +39,19 @@ func (c *Client) VerifyWebhook(body []byte, signature string) (VerifiedEvent, er
 	if c.webhookSecret == "" && c.previousWebhookSecret == "" {
 		return VerifiedEvent{}, errors.New("Stripe webhook signing secret is unconfigured")
 	}
+	opts := webhook.ConstructEventOptions{
+		IgnoreAPIVersionMismatch: true,
+	}
 	var event stripego.Event
 	var err error
 	if c.webhookSecret != "" {
-		event, err = webhook.ConstructEvent(body, signature, c.webhookSecret)
+		event, err = webhook.ConstructEventWithOptions(body, signature, c.webhookSecret, opts)
 	}
 	if (err != nil || c.webhookSecret == "") && c.previousWebhookSecret != "" && c.previousWebhookSecret != c.webhookSecret {
-		event, err = webhook.ConstructEvent(body, signature, c.previousWebhookSecret)
+		event, err = webhook.ConstructEventWithOptions(body, signature, c.previousWebhookSecret, opts)
 	}
 	if err != nil {
 		return VerifiedEvent{}, errors.New("invalid Stripe webhook signature or payload")
-	}
-	// The SDK permits compatible versions in the same release family.
-	if event.APIVersion != APIVersion {
-		return VerifiedEvent{}, ErrEventVersion
 	}
 	return c.eventSnapshot(&event, EventFromWebhook)
 }

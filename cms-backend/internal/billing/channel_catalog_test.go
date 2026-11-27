@@ -167,6 +167,9 @@ func TestChannelLifecycleEncryptionValidationAndPrimarySwitch(t *testing.T) {
 			} else {
 				_, _ = w.Write([]byte(`{"id":"acct_StripeTest01"}`))
 			}
+		case req.URL.Path == "/v1/webhook_endpoints":
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"error":{"type":"permission_error","code":"rak_insufficient_permissions"}}`))
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}

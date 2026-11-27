@@ -15,7 +15,6 @@ import (
 	"reader-backend/internal/db"
 	"reader-backend/internal/payment"
 	"reader-backend/internal/payment/aftercare"
-	"reader-backend/internal/payment/settlement"
 )
 
 const stripeCheckoutInterval = 15 * time.Second
@@ -197,25 +196,7 @@ func (s *service) reconcileStripeCheckouts(ctx context.Context) {
 	}
 	for _, job := range jobs {
 		request, cancel := context.WithTimeout(ctx, 45*time.Second)
-		var err error
-		switch {
-		case len(job.aftercare) != 0:
-			err = s.processQueuedStripeAftercare(request, job.aftercare)
-		case !paymentEnvironmentMatches(account):
-			err = ErrCheckoutPaused
-		case job.refundID != "":
-			err = s.syncStripeRefundNotice(request, account, job.refundID)
-		case job.settlementReference != "":
-			err = settlement.NewRepository(db.Pool(request)).ScheduleStripeNotice(request, account, job.eventID, job.settlementReference)
-		case job.vipIntentID != "" || job.invoiceID != "" || job.subscriptionID != "":
-			err = s.handleStripeVIPNotice(request, job)
-		default:
-			attempt, loadErr := loadStripeAttempt(request, db.Pool(request), account, job.attemptID)
-			err = loadErr
-			if err == nil {
-				err = s.syncStripeAttempt(request, provider, attempt, job.sessionID)
-			}
-		}
+		err := s.dispatchStripeInboxJob(request, provider, account, job)
 		cancel()
 		if errors.Is(err, pgx.ErrNoRows) {
 			err = nil
@@ -287,6 +268,7 @@ type stripeNoticeJob struct {
 	vipIntentID, invoiceID, subscriptionID string
 	aftercare                              json.RawMessage
 	eventID, settlementReference           string
+	envelope                               *stripeInboxEnvelope
 }
 
 func claimStripeNotices(ctx context.Context, account payment.WebhookAccount) ([]stripeNoticeJob, error) {
@@ -298,16 +280,28 @@ func claimStripeNotices(ctx context.Context, account payment.WebhookAccount) ([]
 	) UPDATE payment_event_inbox i SET attempts=i.attempts+1,next_attempt_at=now()+interval '10 minutes'
 		FROM due WHERE i.id=due.id RETURNING i.id,i.attempts,COALESCE(i.event->>'attempt_id',''),COALESCE(i.event->>'session_id',''),COALESCE(i.event->>'refund_id',''),
 			COALESCE(i.event->>'vip_intent_id',''),COALESCE(i.event->>'invoice_id',''),COALESCE(i.event->>'subscription_id',''),i.event->'aftercare',
-			i.event_id,COALESCE(i.event->>'settlement_ref','')`,
+			i.event_id,COALESCE(i.event->>'settlement_ref',''),
+			CASE WHEN (i.event->>'envelope_version') IS NOT NULL THEN i.event ELSE NULL END`,
 		account.AccountKey, account.Environment)
 	if err != nil {
 		return nil, err
 	}
 	return pgx.CollectRows(rows, func(row pgx.CollectableRow) (stripeNoticeJob, error) {
 		var item stripeNoticeJob
+		var rawEnvelope json.RawMessage
 		err := row.Scan(&item.id, &item.lease, &item.attemptID, &item.sessionID, &item.refundID, &item.vipIntentID,
-			&item.invoiceID, &item.subscriptionID, &item.aftercare, &item.eventID, &item.settlementReference)
-		return item, err
+			&item.invoiceID, &item.subscriptionID, &item.aftercare, &item.eventID, &item.settlementReference, &rawEnvelope)
+		if err != nil {
+			return item, err
+		}
+		if len(rawEnvelope) > 0 {
+			var env stripeInboxEnvelope
+			if err := json.Unmarshal(rawEnvelope, &env); err != nil {
+				return item, err
+			}
+			item.envelope = &env
+		}
+		return item, nil
 	})
 }
 

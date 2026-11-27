@@ -76,9 +76,9 @@ func (c *Client) AftercareEvent(ctx context.Context, event Event) (*payment.Case
 			observation.Fact.ReceiptRefs = []string{warning.Charge.ID}
 		}
 		return withEvidence(observation, struct{ Actionable bool }{warning.Actionable})
-	case event.Type == "charge.failed" || event.Type == "charge.succeeded" || event.Type == "payment_intent.payment_failed":
+	case event.Type == EventChargeFailed || event.Type == EventChargeSucceeded || event.Type == EventPaymentIntentPaymentFailed:
 		signal, err := event.RiskSignal()
-		if errors.Is(err, ErrEventVersion) && event.ObjectType == "charge" {
+		if errors.Is(err, ErrEventVersion) && (event.ObjectType == "charge" || event.Type == EventChargeFailed || event.Type == EventChargeSucceeded) {
 			risk, fetchErr := c.GetChargeRisk(ctx, event.ObjectID)
 			if fetchErr != nil {
 				return nil, fetchErr
@@ -86,10 +86,13 @@ func (c *Client) AftercareEvent(ctx context.Context, event Event) (*payment.Case
 			signal.Charge = &risk
 			err = nil
 		}
-		if errors.Is(err, ErrEventVersion) && event.ObjectType == "payment_intent" {
+		if errors.Is(err, ErrEventVersion) && (event.ObjectType == "payment_intent" || event.Type == EventPaymentIntentPaymentFailed) {
 			intent, fetchErr := c.GetPaymentIntent(ctx, event.ObjectID)
 			if fetchErr != nil {
 				return nil, fetchErr
+			}
+			if intent.ID != event.ObjectID || intent.Livemode != (c.scope.Environment == Live) {
+				return nil, fmt.Errorf("%w: payment intent %s", ErrEventResourceMismatch, event.ObjectID)
 			}
 			signal.Failure = PaymentIntentFailure(intent)
 			err = nil

@@ -242,47 +242,68 @@ func TestBalanceTransactionKeepsRateAndRefundSource(t *testing.T) {
 }
 
 func TestVerifyWebhookChecksRawBytesVersionAndScope(t *testing.T) {
-	client := fixtureClient(t, nil)
+	cfg := testConfig
+	cfg.PreviousWebhookSecret = "whsec_previous_rotation"
+	client, err := newClient(context.Background(), cfg, &http.Client{Transport: roundTripper(func(req *http.Request) (*http.Response, error) {
+		if req.Method == http.MethodGet && req.URL.Path == "/v1/account" {
+			return stripeResponse(200, `{"id":"acct_merchant","object":"account"}`)
+		}
+		t.Fatalf("unexpected Stripe request %s %s", req.Method, req.URL.Path)
+		return nil, nil
+	})})
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, tc := range []struct {
 		name        string
 		version     string
 		account     string
+		secret      string
 		live, stale bool
 		tamper      bool
+		wantAccept  bool
 	}{
-		{name: "direct event", version: APIVersion},
-		{name: "account event", version: APIVersion, account: "acct_merchant"},
-		{name: "wrong account", version: APIVersion, account: "acct_other"},
-		{name: "wrong environment", version: APIVersion, live: true},
-		{name: "wrong exact version", version: "2026-11-19.endive"},
-		{name: "expired signature", version: APIVersion, stale: true},
-		{name: "changed bytes", version: APIVersion, tamper: true},
+		{name: "matching version direct event", version: APIVersion, wantAccept: true},
+		{name: "matching version account event", version: APIVersion, account: "acct_merchant", wantAccept: true},
+		{name: "same-family different version", version: "2026-11-19.endive", wantAccept: true},
+		{name: "historical older version basil", version: "2025-03-31.basil", wantAccept: true},
+		{name: "historical older version legacy", version: "2024-06-20", wantAccept: true},
+		{name: "dual-secret previous signing secret", version: "2025-03-31.basil", secret: cfg.PreviousWebhookSecret, wantAccept: true},
+		{name: "wrong account", version: APIVersion, account: "acct_other", wantAccept: false},
+		{name: "wrong environment", version: APIVersion, live: true, wantAccept: false},
+		{name: "expired signature", version: APIVersion, stale: true, wantAccept: false},
+		{name: "changed bytes", version: APIVersion, tamper: true, wantAccept: false},
+		{name: "unknown signing secret", version: APIVersion, secret: "whsec_wrong", wantAccept: false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			now := time.Now()
 			body := []byte(fmt.Sprintf(
-				`{"id":"evt_test","type":"charge.succeeded","object":"event","created":%d,"api_version":%q,"account":%q,"livemode":%t,"data":{"object":{"id":"ch_original"}}}`,
+				`{"id":"evt_test","type":"charge.succeeded","object":"event","created":%d,"api_version":%q,"account":%q,"livemode":%t,"data":{"object":{"id":"ch_original","object":"charge"}}}`,
 				now.Unix(), tc.version, tc.account, tc.live))
 			signingTime := now
 			if tc.stale {
 				signingTime = now.Add(-10 * time.Minute)
 			}
+			secret := tc.secret
+			if secret == "" {
+				secret = cfg.WebhookSecret
+			}
 			signed := webhook.GenerateTestSignedPayload(&webhook.UnsignedPayload{
-				Payload: body, Secret: testConfig.WebhookSecret, Timestamp: signingTime,
+				Payload: body, Secret: secret, Timestamp: signingTime,
 			})
 			if tc.tamper {
 				body = append(body, ' ')
 			}
 			event, err := client.VerifyWebhook(body, signed.Header)
-			switch tc.name {
-			case "direct event", "account event":
-				if err != nil || event.Scope != testConfig.Scope || event.ID != "evt_test" ||
-					event.Type != stripego.EventTypeChargeSucceeded || event.ObjectID != "ch_original" {
+			if tc.wantAccept {
+				if err != nil || event.Scope != cfg.Scope || event.ID != "evt_test" ||
+					event.Type != stripego.EventTypeChargeSucceeded || event.ObjectID != "ch_original" ||
+					event.APIVersion != tc.version {
 					t.Fatalf("invalid parsed event: %+v, error %v", event, err)
 				}
-			default:
+			} else {
 				if err == nil {
-					t.Fatal("invalid signed event accepted")
+					t.Fatalf("invalid signed event accepted: %+v", event)
 				}
 			}
 		})

@@ -162,10 +162,24 @@ func (s *service) recoverStripeEventWindow(ctx context.Context) {
 	if err != nil {
 		return
 	}
-	s.retryRecoveredEvents(ctx, payment.ProviderStripe, adapter.AccountScope(), func(ctx context.Context, raw json.RawMessage) (error, error) {
-		var event stripe.Event
-		if err := json.Unmarshal(raw, &event); err != nil {
-			return err, nil
+	account := adapter.AccountScope()
+	_, usesUniversalDispatch := adapter.(stripeWebhookResolver)
+	enqueueRecovered := func(ctx context.Context, event stripe.Event, raw []byte) (review, transient error) {
+		if usesUniversalDispatch {
+			if event.IncompleteSnapshot {
+				return errors.New("incomplete Stripe event snapshot"), nil
+			}
+			if stripeAccountScope(event.Scope) != account {
+				return stripe.ErrEventScopeMismatch, nil
+			}
+			if !stripe.IsHandledEventType(event.Type) {
+				return nil, nil
+			}
+			if err := enqueueStripeEvent(ctx, event, raw); err != nil {
+				return nil, err
+			}
+			notifyWorker(s.stripeEventsWake)
+			return nil, nil
 		}
 		notice, err := adapter.PaymentNotice(event)
 		if err != nil {
@@ -176,8 +190,15 @@ func (s *service) recoverStripeEventWindow(ctx context.Context) {
 		}
 		notifyWorker(s.stripeEventsWake)
 		return nil, nil
+	}
+	s.retryRecoveredEvents(ctx, payment.ProviderStripe, account, func(ctx context.Context, raw json.RawMessage) (error, error) {
+		var event stripe.Event
+		if err := json.Unmarshal(raw, &event); err != nil {
+			return err, nil
+		}
+		return enqueueRecovered(ctx, event, raw)
 	})
-	s.recoverPaymentEventWindow(ctx, payment.ProviderStripe, adapter.AccountScope(), func(ctx context.Context, w paymentEventWindowLease) (string, error) {
+	s.recoverPaymentEventWindow(ctx, payment.ProviderStripe, account, func(ctx context.Context, w paymentEventWindowLease) (string, error) {
 		if time.Since(w.start) >= 30*24*time.Hour {
 			return "", errors.New("Stripe event window exceeds retention; recover from transaction resources")
 		}
@@ -191,17 +212,16 @@ func (s *service) recoverStripeEventWindow(ctx context.Context) {
 			if err != nil {
 				return "", err
 			}
-			notice, review := adapter.PaymentNotice(event)
+			review, transient := enqueueRecovered(ctx, event, body)
+			if transient != nil {
+				return "", transient
+			}
 			if review != nil {
 				if err := saveUnprocessedPaymentEvent(ctx, w.accountID, event.ID, body, review); err != nil {
 					return "", err
 				}
 				continue
 			}
-			if err := queueStripeNotice(ctx, notice, body); err != nil {
-				return "", err
-			}
-			notifyWorker(s.stripeEventsWake)
 		}
 		if !page.HasMore {
 			return "", nil

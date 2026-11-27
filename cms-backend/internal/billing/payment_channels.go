@@ -58,14 +58,21 @@ var (
 )
 
 type channelValidationResult struct {
-	ProviderOK     bool   `json:"provider_ok"`
-	IdentityOK     bool   `json:"identity_ok"`
-	WebhookOK      bool   `json:"webhook_ok"`
-	Environment    string `json:"environment"`
-	AccountIDMatch string `json:"account_id_match,omitempty"`
-	WebhookURL     string `json:"webhook_url,omitempty"`
-	CheckedAt      string `json:"checked_at"`
-	Error          string `json:"error,omitempty"`
+	ProviderOK                bool     `json:"provider_ok"`
+	IdentityOK                bool     `json:"identity_ok"`
+	WebhookOK                 bool     `json:"webhook_ok"`
+	WebhookEndpointStatus     string   `json:"webhook_endpoint_status,omitempty"`
+	WebhookEndpointID         string   `json:"webhook_endpoint_id,omitempty"`
+	WebhookAPIVersion         string   `json:"webhook_api_version,omitempty"`
+	WebhookAPIVersionMatches  *bool    `json:"webhook_api_version_matches,omitempty"`
+	WebhookMissingEvents      []string `json:"webhook_missing_events,omitempty"`
+	WebhookEndpointNote       string   `json:"webhook_endpoint_note,omitempty"`
+	WebhookRotationDualSecret bool     `json:"webhook_rotation_dual_secret,omitempty"`
+	Environment               string   `json:"environment"`
+	AccountIDMatch            string   `json:"account_id_match,omitempty"`
+	WebhookURL                string   `json:"webhook_url,omitempty"`
+	CheckedAt                 string   `json:"checked_at"`
+	Error                     string   `json:"error,omitempty"`
 }
 
 type PayPalChannelCreds struct {
@@ -684,13 +691,13 @@ func (h *Handler) ValidatePaymentChannel(c *gin.Context) {
 		return
 	}
 
-	var provider, environment, accountKey, credRef string
+	var provider, environment, accountKey, credRef, webhookToken string
 	var pendingVer int
 	err = db.DB.QueryRow(ctx, `
-		SELECT provider, environment, account_key, credentials_ref, pending_version
+		SELECT provider, environment, account_key, credentials_ref, pending_version, COALESCE(webhook_token::text, '')
 		FROM payment_channel_accounts
 		WHERE id = $1`,
-		id).Scan(&provider, &environment, &accountKey, &credRef, &pendingVer)
+		id).Scan(&provider, &environment, &accountKey, &credRef, &pendingVer, &webhookToken)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeChannelError(c, errChannelNotFound)
 		return
@@ -705,10 +712,11 @@ func (h *Handler) ValidatePaymentChannel(c *gin.Context) {
 	var checkErr error
 	if provider == "stripe" {
 		apiKey, _, _, _, kErr := loadChannelStripeKey(ctx, id, pendingVer)
-		var webhookSecret string
+		var webhookSecret, previousWebhookSecret string
 		if credRef == credRefDBEncrypted {
 			if sec, _, dErr := loadDecryptedCredentials(ctx, db.DB, id, pendingVer); dErr == nil {
 				webhookSecret = sec["webhook_secret"]
+				previousWebhookSecret = sec["previous_webhook_secret"]
 			}
 		} else {
 			webhookSecret = os.Getenv("STRIPE_WEBHOOK_SECRET")
@@ -716,7 +724,7 @@ func (h *Handler) ValidatePaymentChannel(c *gin.Context) {
 		if kErr != nil {
 			checkErr = kErr
 		} else {
-			summary, checkErr = verifyStripeChannelRemote(ctx, accountKey, environment, apiKey, webhookSecret)
+			summary, checkErr = verifyStripeChannelRemote(ctx, accountKey, environment, apiKey, webhookSecret, webhookToken, previousWebhookSecret)
 		}
 	} else {
 		creds, _, pErr := loadChannelPayPalCreds(ctx, id, pendingVer)
@@ -1153,7 +1161,7 @@ func validateStripeSecretFormat(environment, apiKey, webhookSecret string) error
 	return nil
 }
 
-func verifyStripeChannelRemote(ctx context.Context, accountKey, environment, apiKey, webhookSecret string) (channelValidationResult, error) {
+func verifyStripeChannelRemote(ctx context.Context, accountKey, environment, apiKey, webhookSecret, webhookToken, previousWebhookSecret string) (channelValidationResult, error) {
 	res := channelValidationResult{Environment: environment}
 	if err := validateStripeSecretFormat(environment, apiKey, webhookSecret); err != nil {
 		return res, err
@@ -1161,7 +1169,6 @@ func verifyStripeChannelRemote(ctx context.Context, accountKey, environment, api
 	if webhookSecret == "" {
 		return res, errors.New("Stripe webhook_secret is required before publishing")
 	}
-	res.WebhookOK = true
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, stripeAPIBaseURL+"/v1/account", nil)
 	if err != nil {
@@ -1189,6 +1196,9 @@ func verifyStripeChannelRemote(ctx context.Context, accountKey, environment, api
 	res.ProviderOK = true
 	res.IdentityOK = true
 	res.AccountIDMatch = acct.ID
+	if err := verifyStripeWebhookEndpoints(ctx, environment, apiKey, webhookToken, previousWebhookSecret, &res); err != nil {
+		return res, err
+	}
 	return res, nil
 }
 
