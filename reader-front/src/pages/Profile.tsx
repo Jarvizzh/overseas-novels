@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, useId } from 'react';
-import { ChevronRight, Sun, Moon, Monitor, Crown, X, AlertCircle, Pencil } from 'lucide-react';
+import { ChevronRight, Sun, Moon, Monitor, X, AlertCircle, Pencil } from 'lucide-react';
+import { vipCycleLabel } from '../utils/rechargeCatalogHelpers';
 import { useToast } from '../context/toastStore';
 import { GoldCoin } from '../components/GoldCoin';
 import { api } from '../utils/api';
@@ -305,22 +306,7 @@ export const Profile: React.FC<ProfileProps> = ({
     return e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom;
   };
 
-  const paidThroughDate = subscription?.paid_through || subscription?.current_period_end;
-  const vipSummary = subscription?.normalized_status === 'cancel_pending'
-    ? paidThroughDate
-      ? `Cancel Pending · Through ${new Date(paidThroughDate).toLocaleDateString()}`
-      : 'Cancellation Pending'
-    : subscription?.normalized_status === 'canceled_with_paid_period'
-      ? paidThroughDate
-        ? `Auto-Renew Off · Through ${new Date(paidThroughDate).toLocaleDateString()}`
-        : 'Auto-Renew Off'
-      : subscription?.normalized_status === 'renewal_failed'
-        ? 'Renewal Payment Issue'
-        : isVip
-          ? paidThroughDate
-            ? `Subscription Active · Until ${new Date(paidThroughDate).toLocaleDateString()}`
-            : 'Subscription Active'
-          : 'Manage Subscription';
+  const subscriptionSummary = isVip ? vipCycleLabel(subscription?.cycle) : 'Inactive';
 
   return (
     <div className="scroll-container animate-fade-in">
@@ -444,17 +430,6 @@ export const Profile: React.FC<ProfileProps> = ({
                 </button>
               )}
 
-              <button type="button" className="settings-item" onClick={() => onNavigate('subscription')}>
-                <span style={{ display: 'inline-flex', alignItems: 'center', gap: '8px' }}>
-                  <Crown size={16} strokeWidth={1.8} style={{ color: 'var(--accent-color)' }} aria-hidden="true" />
-                  <span>My Subscription</span>
-                </span>
-                <span className="settings-item-value" style={{ color: isVip ? 'var(--accent-text)' : 'var(--text-tertiary)', fontWeight: isVip ? 600 : 400 }}>
-                  <span>{vipSummary}</span>
-                  <ChevronRight size={15} strokeWidth={1.8} aria-hidden="true" />
-                </span>
-              </button>
-
               <div className="settings-item settings-item-static settings-item-wrap">
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
                   <span>Appearance</span>
@@ -515,6 +490,17 @@ export const Profile: React.FC<ProfileProps> = ({
                 <span>Recently Read</span>
                 <span className="settings-item-value">
                   <span>{recentBookCount} {recentBookCount === 1 ? 'book' : 'books'}</span>
+                  <ChevronRight size={15} strokeWidth={1.8} aria-hidden="true" />
+                </span>
+              </button>
+
+              <button type="button" className="settings-item" onClick={() => onNavigate('subscription')}>
+                <span>My Subscription</span>
+                <span
+                  className="settings-item-value"
+                  style={{ color: isVip ? 'var(--accent-text)' : 'var(--text-tertiary)', fontWeight: isVip ? 600 : 400 }}
+                >
+                  <span>{subscriptionSummary}</span>
                   <ChevronRight size={15} strokeWidth={1.8} aria-hidden="true" />
                 </span>
               </button>
