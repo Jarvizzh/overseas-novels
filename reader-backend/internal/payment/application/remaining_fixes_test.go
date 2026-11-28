@@ -211,7 +211,6 @@ func TestLegacyRestorationNeverEnrollsPaymentEvents(t *testing.T) {
   UPDATE recharge_orders SET reconciliation_note='reviewed' WHERE id=100`); err != nil {
 		t.Fatal(err)
 	}
-	testdb.ApplyBaseSchema(t, p)
 	var enabled bool
 	if err := p.QueryRow(ctx, `SELECT payment_events_enabled FROM recharge_orders WHERE id=100`).Scan(&enabled); err != nil || enabled {
 		t.Fatal("legacy order implicitly enrolled", err)

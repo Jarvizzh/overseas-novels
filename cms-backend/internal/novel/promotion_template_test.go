@@ -56,20 +56,7 @@ func openPromoTestPool(t *testing.T) *pgxpool.Pool {
 		pool.Close()
 	})
 	for _, stmt := range []string{
-		dbassets.SchemaSQL,
-		dbassets.ChapterPublicationSQL, dbassets.ReaderPerformanceSQL, dbassets.ReaderQueueAndShelfSQL,
-		dbassets.ConversionReportingSQL, dbassets.ReaderConversionSQL, dbassets.LegacyConversionSQL,
-		dbassets.ConversionReconciliationSQL, dbassets.ConversionOperationsSQL, dbassets.ConversionReviewSQL,
-		dbassets.SinanConversionSQL, dbassets.SinanReviewSQL, dbassets.SinanRecheckSQL,
-		dbassets.PaymentPolicySQL, dbassets.ReaderPaymentPolicySQL, dbassets.SinanPaymentPolicySQL,
-		dbassets.ReaderPaymentReviewSQL, dbassets.ReaderPaymentRecoverySQL, dbassets.ReaderSubscriptionEvidenceSQL,
-		dbassets.PaymentDomainFoundationSQL, dbassets.PaymentCheckoutSQL, dbassets.VIPOfferVersionsSQL,
-		dbassets.PaymentLedgerSQL, dbassets.PaymentSettlementSQL, dbassets.PaymentCheckoutDecisionsSQL,
-		dbassets.PaymentAftercareSQL, dbassets.StripeOneTimeCheckoutSQL, dbassets.StripeVIPCheckoutSQL,
-		dbassets.PaymentCompletionSQL, dbassets.PaymentRecoverySQL, dbassets.PaymentReviewFixesSQL,
-		dbassets.PaymentCatalogAndChannelSQL, dbassets.PaymentVIPSwitchSQL, dbassets.PaymentTemplateCatalogFixesSQL,
-		dbassets.ConversionCenterReviewSQL, dbassets.ConversionBatchSQL, dbassets.ConversionThroughputRereviewSQL,
-		dbassets.ConversionCredentialHealthSQL, dbassets.RBACPermissionsSQL, dbassets.PromotionEnvironmentSQL, dbassets.StripeTaxLiabilityRelaxSQL, dbassets.StripeLocalCurrencyCustomerSQL, dbassets.StripeRefundDisputeMitigationSQL, dbassets.StripeRadarAndEventRecoverySQL, dbassets.StripeReportScheduleSQL, dbassets.ProductDraftMutationSQL,
+		dbassets.SchemaSQL, dbassets.InitialDataSQL,
 	} {
 		if _, err := pool.Exec(ctx, stmt); err != nil {
 			t.Fatal(err)

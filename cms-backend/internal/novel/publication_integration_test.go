@@ -5,57 +5,25 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-	dbassets "star-novel-cms/db"
 	"star-novel-cms/internal/db"
 	"star-novel-cms/internal/storage"
+	"star-novel-cms/internal/testdb"
 )
 
 func publicationDB(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	dsn := os.Getenv("STAR_NOVEL_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("requires disposable PostgreSQL")
-	}
-	ctx := context.Background()
-	admin, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	schema := "publication_" + strings.ReplaceAll(uuid.NewString(), "-", "")
-	if _, err := admin.Exec(ctx, "CREATE SCHEMA "+schema); err != nil {
-		admin.Close()
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		_, _ = admin.Exec(ctx, "DROP SCHEMA "+schema+" CASCADE")
-		admin.Close()
-	})
-	cfg, err := pgxpool.ParseConfig(dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	cfg.ConnConfig.RuntimeParams["search_path"] = schema + ",public"
-	pool, err := pgxpool.NewWithConfig(ctx, cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
+	pool := testdb.Initialized(t)
+	previous := db.DB
 	db.DB = pool
-	t.Cleanup(func() { db.DB = nil; pool.Close() })
-	for _, sql := range []string{dbassets.SchemaSQL, dbassets.ChapterPublicationSQL, dbassets.ReaderPerformanceSQL} {
-		if _, err := pool.Exec(ctx, sql); err != nil {
-			t.Fatal(err)
-		}
-	}
+	t.Cleanup(func() { db.DB = previous })
 	return pool
 }
 

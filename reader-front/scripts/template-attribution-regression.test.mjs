@@ -153,4 +153,11 @@ test('Case 1 helpers format North American plan names, equivalent prices, and bo
   assert.equal(rechargeHelpers.resolveInitialCarouselIndex(subPacks, 999), 1);
   assert.equal(rechargeHelpers.resolveInitialCarouselIndex(subPacks, null), 1);
   assert.equal(rechargeHelpers.resolveInitialCarouselIndex([], null), 0);
+
+  assert.equal(rechargeHelpers.formatValidListPrice(2699, 1999, '$26.99'), '$26.99');
+  assert.equal(rechargeHelpers.formatValidListPrice(2699, 1999), '$26.99');
+  assert.equal(rechargeHelpers.formatValidListPrice(1999, 1999, '$19.99'), '');
+  assert.equal(rechargeHelpers.formatValidListPrice(1499, 1999, '$14.99'), '');
+  assert.equal(rechargeHelpers.formatValidListPrice(0, 1999, '$0.00'), '');
+  assert.equal(rechargeHelpers.formatValidListPrice(undefined, 1999), '');
 });

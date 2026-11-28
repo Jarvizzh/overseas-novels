@@ -52,20 +52,29 @@ func openTestBillingPool(t *testing.T, dsn string) *pgxpool.Pool {
 	}
 	t.Cleanup(pool.Close)
 	for _, stmt := range []string{
-		dbassets.SchemaSQL,
-		dbassets.ChapterPublicationSQL, dbassets.ReaderPerformanceSQL, dbassets.ReaderQueueAndShelfSQL,
-		dbassets.ConversionReportingSQL, dbassets.ReaderConversionSQL, dbassets.LegacyConversionSQL,
-		dbassets.ConversionReconciliationSQL, dbassets.ConversionOperationsSQL, dbassets.ConversionReviewSQL,
-		dbassets.SinanConversionSQL, dbassets.SinanReviewSQL, dbassets.SinanRecheckSQL,
-		dbassets.PaymentPolicySQL, dbassets.ReaderPaymentPolicySQL, dbassets.SinanPaymentPolicySQL,
-		dbassets.ReaderPaymentReviewSQL, dbassets.ReaderPaymentRecoverySQL, dbassets.ReaderSubscriptionEvidenceSQL,
-		dbassets.PaymentDomainFoundationSQL, dbassets.PaymentCheckoutSQL, dbassets.VIPOfferVersionsSQL,
-		dbassets.PaymentLedgerSQL, dbassets.PaymentSettlementSQL, dbassets.PaymentCheckoutDecisionsSQL,
-		dbassets.PaymentAftercareSQL, dbassets.StripeOneTimeCheckoutSQL, dbassets.StripeVIPCheckoutSQL,
-		dbassets.PaymentCompletionSQL, dbassets.PaymentRecoverySQL, dbassets.PaymentReviewFixesSQL,
-		dbassets.PaymentCatalogAndChannelSQL, dbassets.PaymentVIPSwitchSQL, dbassets.PaymentTemplateCatalogFixesSQL,
-		dbassets.ConversionCenterReviewSQL, dbassets.ConversionBatchSQL, dbassets.ConversionThroughputRereviewSQL,
-		dbassets.ConversionCredentialHealthSQL, dbassets.RBACPermissionsSQL, dbassets.PromotionEnvironmentSQL, dbassets.StripeTaxLiabilityRelaxSQL, dbassets.StripeLocalCurrencyCustomerSQL, dbassets.StripeRefundDisputeMitigationSQL, dbassets.StripeRadarAndEventRecoverySQL, dbassets.StripeReportScheduleSQL, dbassets.ProductDraftMutationSQL,
+		dbassets.SchemaSQL, dbassets.InitialDataSQL,
+		// Catalog fixtures for billing tests.
+		`INSERT INTO products (code, product_type, name, description, price_cents, currency, coins, bonus, vip_cycle, novel_scope_type, novel_scope_ids
+) VALUES
+    ('COIN_STARTER_499', 'single', 'Starter Coins Pack', '499 Coins + 50 Bonus Coins', 499, 'USD', 499, 50, NULL, 'none', '{}'),
+    ('COIN_POPULAR_999', 'single', 'Reader Choice Coins Pack', '999 Coins + 150 Bonus Coins', 999, 'USD', 999, 150, NULL, 'none', '{}'),
+    ('COIN_VALUE_1999', 'single', 'Value Bundle Coins Pack', '1999 Coins + 400 Bonus Coins', 1999, 'USD', 1999, 400, NULL, 'none', '{}'),
+    ('WHOLE_BOOK_999', 'whole_book', 'Full Book Unlock Pass', 'Permanent full access to the selected novel', 999, 'USD', 0, 0, NULL, 'all_published', '{}'),
+    ('VIP_DAY_99', 'vip', 'VIP Daily Pass', 'Unlimited reading across all titles for 24 hours, renews daily', 99, 'USD', 0, 0, 'day', 'none', '{}'),
+    ('VIP_WEEK_499', 'vip', 'VIP Weekly Pass', 'Unlimited reading across all titles for 7 days, renews weekly', 499, 'USD', 0, 0, 'week', 'none', '{}'),
+    ('VIP_MONTH_1499', 'vip', 'VIP Monthly Pass', 'Unlimited reading across all titles for 30 days, renews monthly', 1499, 'USD', 0, 0, 'month', 'none', '{}'),
+    ('VIP_YEAR_9999', 'vip', 'VIP Annual Pass', 'Unlimited reading across all titles for 365 days, renews annually', 9999, 'USD', 0, 0, 'year', 'none', '{}')
+ON CONFLICT (code) DO NOTHING;
+
+INSERT INTO product_publications (product_id, environment, status)
+SELECT p.id, env.environment, 'draft'
+FROM products p
+CROSS JOIN (VALUES ('sandbox'), ('live')) AS env(environment)
+WHERE p.code IN (
+    'COIN_STARTER_499', 'COIN_POPULAR_999', 'COIN_VALUE_1999',
+    'WHOLE_BOOK_999', 'VIP_DAY_99', 'VIP_WEEK_499', 'VIP_MONTH_1499', 'VIP_YEAR_9999'
+)
+ON CONFLICT (product_id, environment) DO NOTHING;`,
 	} {
 		if _, err := pool.Exec(ctx, stmt); err != nil {
 			t.Fatal(err)

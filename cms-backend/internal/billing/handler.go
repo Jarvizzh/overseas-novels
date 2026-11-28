@@ -296,11 +296,12 @@ func (h *Handler) ListRechargeTemplates(c *gin.Context) {
 }
 
 type SlotReq struct {
-	SlotIndex     int    `json:"slot_index" binding:"gte=1,lte=8"`
-	ProductID     int64  `json:"product_id" binding:"gt=0"`
-	Badge         string `json:"badge" binding:"max=32"`
-	IsHighlighted bool   `json:"is_highlighted"`
-	DisplayAlias  string `json:"display_alias" binding:"max=64"`
+	SlotIndex      int    `json:"slot_index" binding:"gte=1,lte=8"`
+	ProductID      int64  `json:"product_id" binding:"gt=0"`
+	Badge          string `json:"badge" binding:"max=32"`
+	IsHighlighted  bool   `json:"is_highlighted"`
+	DisplayAlias   string `json:"display_alias" binding:"max=64"`
+	ListPriceCents int    `json:"list_price_cents" binding:"gte=0,lte=100000000"`
 
 	// Explicit commercial override fields are forbidden in templates (CAT-03).
 	Type              *string `json:"type"`
@@ -336,11 +337,12 @@ func buildTemplateSlots(reqs []SlotReq) ([]RechargeSlot, bool) {
 			return nil, true
 		}
 		slots[i] = RechargeSlot{
-			SlotIndex:     s.SlotIndex,
-			ProductID:     s.ProductID,
-			Badge:         s.Badge,
-			IsHighlighted: s.IsHighlighted,
-			DisplayAlias:  s.DisplayAlias,
+			SlotIndex:      s.SlotIndex,
+			ProductID:      s.ProductID,
+			Badge:          s.Badge,
+			IsHighlighted:  s.IsHighlighted,
+			DisplayAlias:   s.DisplayAlias,
+			ListPriceCents: s.ListPriceCents,
 		}
 	}
 	return slots, false

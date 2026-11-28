@@ -80,6 +80,7 @@ export const RechargeCheckoutPanel: React.FC<RechargeCheckoutPanelProps> = ({
 }) => {
   const { showToast } = useToast();
   const [selectedPack, setSelectedPack] = useState<number | null>(null);
+  const [selectedProvider, setSelectedProvider] = useState<PaymentProvider>('paypal');
   const [isProcessing, setIsProcessing] = useState(false);
   const [activeCheckoutProvider, setActiveCheckoutProvider] = useState<PaymentProvider>('paypal');
   const selectedPackRef = useRef<number | null>(null);
@@ -288,7 +289,8 @@ export const RechargeCheckoutPanel: React.FC<RechargeCheckoutPanelProps> = ({
 
   useEffect(() => {
     if (loadingTemplates || offersNovelId !== novelId) return;
-    if (subscriptionPacks.length <= 1 || autoRotatePaused || isProcessing) return;
+    const hasSelectedSubscription = selectedPack !== null && subscriptionPacks.some((pack) => pack.id === selectedPack);
+    if (subscriptionPacks.length <= 1 || autoRotatePaused || isProcessing || hasSelectedSubscription) return;
     if (typeof window !== 'undefined' && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) {
       return;
     }
@@ -302,7 +304,7 @@ export const RechargeCheckoutPanel: React.FC<RechargeCheckoutPanelProps> = ({
     }, 3000);
 
     return () => window.clearInterval(intervalId);
-  }, [loadingTemplates, offersNovelId, novelId, subscriptionPacks.length, autoRotatePaused, isProcessing, scrollCarouselTo]);
+  }, [loadingTemplates, offersNovelId, novelId, subscriptionPacks, selectedPack, autoRotatePaused, isProcessing, scrollCarouselTo]);
 
   const startUnifiedPurchase = async (
     tSlot: RechargeSlotItem,
@@ -479,19 +481,38 @@ export const RechargeCheckoutPanel: React.FC<RechargeCheckoutPanelProps> = ({
       ? paymentMethods.stripe_vip || paymentMethods.stripe_vip_slots.includes(selectedSlot.id)
       : paymentMethods.stripe_single || paymentMethods.stripe_slots.includes(selectedSlot.id)),
   );
+  const anyPayPalAvailable = selectedSlot
+    ? selectedPayPalAvailable
+    : paymentMethods.paypal_single || paymentMethods.paypal_vip;
+  const anyStripeAvailable = selectedSlot
+    ? selectedStripeAvailable
+    : paymentMethods.stripe_single || paymentMethods.stripe_vip;
+  const effectiveProvider: PaymentProvider =
+    selectedProvider === 'paypal'
+      ? anyPayPalAvailable
+        ? 'paypal'
+        : anyStripeAvailable
+          ? 'stripe'
+          : 'paypal'
+      : anyStripeAvailable
+        ? 'stripe'
+        : anyPayPalAvailable
+          ? 'paypal'
+          : 'stripe';
+
+  useEffect(() => {
+    if (selectedProvider === 'paypal' && !anyPayPalAvailable && anyStripeAvailable) {
+      setSelectedProvider('stripe');
+    } else if (selectedProvider === 'stripe' && !anyStripeAvailable && anyPayPalAvailable) {
+      setSelectedProvider('paypal');
+    }
+  }, [selectedProvider, anyPayPalAvailable, anyStripeAvailable]);
 
   const cardLabel = 'Card';
-  const selectedSummaryTitle = !selectedSlot
-    ? ''
-    : selectedSubscriptionPack
-      ? selectedSubscriptionPack.name
-      : selectedSlot.type === 'whole_book'
-        ? selectedSlot.display_alias || selectedSlot.name || 'Unlock Entire Novel'
-        : `${selectedSlot.coins.toLocaleString()} Coins${selectedSlot.bonus > 0 ? ` (+${selectedSlot.bonus} bonus)` : ''}`;
   const selectedSummaryPrice = !selectedSlot
     ? ''
     : selectedSubscriptionPack
-      ? `${selectedSubscriptionPack.price}/${selectedSubscriptionPack.cycle}`
+      ? selectedSubscriptionPack.price
       : selectedSlot.price;
   const selectedSummaryHint = !selectedSlot
     ? ''
@@ -499,7 +520,7 @@ export const RechargeCheckoutPanel: React.FC<RechargeCheckoutPanelProps> = ({
       ? `Auto-renews at ${selectedSubscriptionPack.price}/${selectedSubscriptionPack.cycle} · Cancel anytime`
       : selectedSlot.type === 'whole_book'
         ? 'One-time unlock · Forever access'
-        : 'Instant delivery · Coins never expire';
+        : `Instant delivery · ${(selectedSlot.coins + selectedSlot.bonus).toLocaleString()} total coins never expire`;
 
   if (isOffersLoading) {
     return (
@@ -528,180 +549,163 @@ export const RechargeCheckoutPanel: React.FC<RechargeCheckoutPanelProps> = ({
   return (
     <>
       <div className={`recharge-panel-stack${embedded ? ' is-embedded' : ''}`}>
-        {/* Unlimited Reading Full-Width Carousel */}
+        {/* 1. Top Payment Method Selector Pills (PayPal / Card) */}
+        {(subscriptionPacks.length > 0 || coinPacks.length > 0) && (anyPayPalAvailable || anyStripeAvailable) && (
+          <div className="provider-selector" role="radiogroup" aria-label="Payment method">
+            <button
+              type="button"
+              role="radio"
+              aria-checked={effectiveProvider === 'paypal'}
+              disabled={!anyPayPalAvailable || isProcessing}
+              className={`provider-pill${effectiveProvider === 'paypal' ? ' is-active' : ''}`}
+              onClick={() => setSelectedProvider('paypal')}
+            >
+              <svg width="17" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true" style={{ flexShrink: 0 }}>
+                <defs>
+                  <clipPath id={paypalClipId}>
+                    <path d="M5.8 1.5h7.4c4.2 0 6.4 2 5.6 6-.7 3.6-3.4 5.5-7.4 5.5H8.5l-1.1 7.2H3.0L5.8 1.5Z" />
+                  </clipPath>
+                </defs>
+                <path
+                  className="recharge-paypal-back"
+                  d="M5.8 1.5h7.4c4.2 0 6.4 2 5.6 6-.7 3.6-3.4 5.5-7.4 5.5H8.5l-1.1 7.2H3.0L5.8 1.5Z"
+                />
+                <path
+                  className="recharge-paypal-front"
+                  d="M8.5 5.2h6.3c3.9 0 5.9 1.9 5.2 5.5-.7 3.3-3.1 5.1-6.8 5.1h-2.5l-1.1 6.7H5.9L8.5 5.2Z"
+                />
+                <path
+                  className="recharge-paypal-overlap"
+                  clipPath={`url(#${paypalClipId})`}
+                  d="M8.5 5.2h6.3c3.9 0 5.9 1.9 5.2 5.5-.7 3.3-3.1 5.1-6.8 5.1h-2.5l-1.1 6.7H5.9L8.5 5.2Z"
+                />
+              </svg>
+              <span className="provider-pill-paypal-wordmark">
+                <span className="checkout-pp-pay">Pay</span>
+                <span className="checkout-pp-pal">Pal</span>
+              </span>
+            </button>
+
+            <button
+              type="button"
+              role="radio"
+              aria-checked={effectiveProvider === 'stripe'}
+              disabled={!anyStripeAvailable || isProcessing}
+              className={`provider-pill${effectiveProvider === 'stripe' ? ' is-active' : ''}`}
+              onClick={() => setSelectedProvider('stripe')}
+            >
+              <CreditCard size={17} strokeWidth={2} aria-hidden="true" style={{ flexShrink: 0 }} />
+              <span>{cardLabel}</span>
+            </button>
+          </div>
+        )}
+
+        {/* 2. Compact Unlimited Reading Carousel Banner */}
         {subscriptionPacks.length > 0 && (
-          <section style={{ display: 'flex', flexDirection: 'column', gap: '10px' }} aria-label="Unlimited Reading plans">
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px' }}>
-              <h3 className="hot-tags-title" style={{ margin: 0 }}>Unlimited Reading</h3>
+          <section className="vip-banner-section" aria-label="Unlimited Reading plans">
+            <div
+              className={`vip-banner-shell${subscriptionPacks[activeSlideIndex]?.id === selectedPack ? ' is-selected' : ''}`}
+            >
+              <div
+                ref={carouselRef}
+                className="vip-carousel-track"
+                aria-live="off"
+                onFocus={() => setAutoRotatePaused(true)}
+                onPointerDown={() => {
+                  programmaticScrollUntilRef.current = 0;
+                  setAutoRotatePaused(true);
+                }}
+                onTouchStart={() => {
+                  programmaticScrollUntilRef.current = 0;
+                  setAutoRotatePaused(true);
+                }}
+                onWheel={() => {
+                  programmaticScrollUntilRef.current = 0;
+                  setAutoRotatePaused(true);
+                }}
+                onScroll={(e) => {
+                  if (Date.now() < programmaticScrollUntilRef.current) return;
+                  const track = e.currentTarget;
+                  if (track.clientWidth <= 0) return;
+                  const nextIndex = Math.max(
+                    0,
+                    Math.min(subscriptionPacks.length - 1, Math.round(track.scrollLeft / track.clientWidth)),
+                  );
+                  if (nextIndex !== activeSlideIndexRef.current) {
+                    activeSlideIndexRef.current = nextIndex;
+                    setActiveSlideIndex(nextIndex);
+                    if (selectedSubscription && subscriptionPacks[nextIndex]) {
+                      userManuallySelectedRef.current = true;
+                      setSelectedPack(subscriptionPacks[nextIndex].id);
+                    }
+                  }
+                }}
+              >
+                {subscriptionPacks.map((pack) => {
+                  const isSelected = selectedPack === pack.id;
+                  const eqPrice = formatSubscriptionEquivalent(pack.priceCents, pack.cycle);
+                  return (
+                    <div key={pack.id} className="vip-carousel-slide">
+                      <button
+                        type="button"
+                        onClick={() => handleSelectPack(pack.id)}
+                        aria-pressed={isSelected}
+                        className="vip-banner-card"
+                      >
+                        {pack.badge && <span className="vip-banner-ribbon">{pack.badge}</span>}
+                        <div className={`vip-banner-body${pack.badge ? ' has-ribbon' : ''}`}>
+                          <div className="vip-banner-left">
+                            <div className="vip-banner-icon" aria-hidden="true">
+                              <Crown size={19} strokeWidth={1.9} />
+                            </div>
+                            <div className="vip-banner-copy">
+                              <div className="vip-banner-title-row">
+                                <span className="vip-banner-name">{pack.name}</span>
+                                {eqPrice && <span className="vip-banner-eq tabular-nums">{eqPrice.replace(/^≈\s*/, '')}</span>}
+                              </div>
+                              <span className="vip-banner-desc">{pack.desc}</span>
+                            </div>
+                          </div>
+                          <div className="vip-banner-right">
+                            <span className="vip-banner-price-pill tabular-nums">{pack.price}</span>
+                            {pack.listPrice && (
+                              <span className="vip-banner-list-price tabular-nums">{pack.listPrice}</span>
+                            )}
+                          </div>
+                        </div>
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+
               {subscriptionPacks.length > 1 && (
-                <button
-                  type="button"
-                  className="vip-carousel-status-btn tabular-nums"
-                  onClick={() => setAutoRotatePaused((prev) => !prev)}
-                  aria-label={autoRotatePaused ? 'Resume plan auto-rotation' : 'Pause plan auto-rotation'}
-                >
-                  {autoRotatePaused ? '' : 'Auto · '}
-                  {Math.min(activeSlideIndex + 1, subscriptionPacks.length)}/{subscriptionPacks.length}
-                </button>
+                <div className="vip-carousel-dots" role="group" aria-label="Membership plan slides">
+                  {subscriptionPacks.map((pack, idx) => (
+                    <button
+                      key={pack.id}
+                      type="button"
+                      aria-pressed={activeSlideIndex === idx}
+                      aria-label={`View ${pack.name}`}
+                      className={`vip-carousel-dot${activeSlideIndex === idx ? ' is-active' : ''}`}
+                      onClick={() => {
+                        setAutoRotatePaused(true);
+                        activeSlideIndexRef.current = idx;
+                        setActiveSlideIndex(idx);
+                        scrollCarouselTo(idx, 'smooth');
+                        handleSelectPack(pack.id);
+                      }}
+                    />
+                  ))}
+                </div>
               )}
             </div>
-
-            <div
-              ref={carouselRef}
-              className="vip-carousel-track"
-              aria-live="off"
-              onFocus={() => setAutoRotatePaused(true)}
-              onPointerDown={() => {
-                programmaticScrollUntilRef.current = 0;
-                setAutoRotatePaused(true);
-              }}
-              onTouchStart={() => {
-                programmaticScrollUntilRef.current = 0;
-                setAutoRotatePaused(true);
-              }}
-              onWheel={() => {
-                programmaticScrollUntilRef.current = 0;
-                setAutoRotatePaused(true);
-              }}
-              onScroll={(e) => {
-                if (Date.now() < programmaticScrollUntilRef.current) return;
-                const track = e.currentTarget;
-                if (track.clientWidth <= 0) return;
-                const nextIndex = Math.max(
-                  0,
-                  Math.min(subscriptionPacks.length - 1, Math.round(track.scrollLeft / track.clientWidth)),
-                );
-                if (nextIndex !== activeSlideIndexRef.current) {
-                  activeSlideIndexRef.current = nextIndex;
-                  setActiveSlideIndex(nextIndex);
-                }
-              }}
-            >
-              {subscriptionPacks.map((pack) => {
-                const isSelected = selectedPack === pack.id;
-                const eqPrice = formatSubscriptionEquivalent(pack.priceCents, pack.cycle);
-                return (
-                  <div key={pack.id} className="vip-carousel-slide">
-                    <button
-                      type="button"
-                      onClick={() => handleSelectPack(pack.id)}
-                      aria-pressed={isSelected}
-                      className={`vip-carousel-card${isSelected ? ' is-selected' : ''}`}
-                    >
-                      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '10px' }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0 }}>
-                          <Crown
-                            size={18}
-                            strokeWidth={1.9}
-                            style={{ color: isSelected ? '#E2BB6B' : 'var(--accent-color)', flexShrink: 0 }}
-                            aria-hidden="true"
-                          />
-                          <span
-                            style={{
-                              fontFamily: 'var(--font-display)',
-                              fontSize: '1.0625rem',
-                              fontWeight: 600,
-                              overflow: 'hidden',
-                              textOverflow: 'ellipsis',
-                              whiteSpace: 'nowrap',
-                            }}
-                          >
-                            {pack.name}
-                          </span>
-                        </div>
-                        {pack.badge && (
-                          <span
-                            style={{
-                              fontSize: '0.625rem',
-                              backgroundColor: isSelected ? 'rgba(226, 187, 107, 0.24)' : 'var(--accent-light)',
-                              color: isSelected ? '#E2BB6B' : 'var(--accent-text)',
-                              border: isSelected ? '1px solid rgba(226, 187, 107, 0.42)' : 'none',
-                              fontWeight: 700,
-                              padding: '2px 8px',
-                              borderRadius: '999px',
-                              whiteSpace: 'nowrap',
-                              flexShrink: 0,
-                            }}
-                          >
-                            {pack.badge}
-                          </span>
-                        )}
-                      </div>
-
-                      <span
-                        style={{
-                          display: 'block',
-                          fontSize: '0.75rem',
-                          color: isSelected ? 'rgba(250, 248, 245, 0.76)' : 'var(--text-secondary)',
-                          lineHeight: 1.45,
-                        }}
-                      >
-                        {pack.desc}
-                      </span>
-
-                      <div
-                        style={{
-                          display: 'flex',
-                          alignItems: 'baseline',
-                          justifyContent: 'space-between',
-                          gap: '12px',
-                          paddingTop: '10px',
-                          borderTop: isSelected
-                            ? '1px solid rgba(255, 255, 255, 0.14)'
-                            : '1px solid var(--border-color)',
-                        }}
-                      >
-                        <span
-                          className="tabular-nums"
-                          style={{
-                            fontSize: '0.75rem',
-                            fontWeight: 600,
-                            color: isSelected ? '#E2BB6B' : 'var(--accent-text)',
-                          }}
-                        >
-                          {eqPrice || 'Cancel anytime'}
-                        </span>
-                        <span className="tabular-nums" style={{ fontSize: '1.125rem', fontWeight: 700 }}>
-                          {pack.price}
-                          <span style={{ fontSize: '0.75rem', fontWeight: 400, opacity: 0.72 }}>/{pack.cycle}</span>
-                        </span>
-                      </div>
-                    </button>
-                  </div>
-                );
-              })}
-            </div>
-
-            {subscriptionPacks.length > 1 && (
-              <div className="vip-carousel-dots" role="group" aria-label="Membership plan slides">
-                {subscriptionPacks.map((pack, idx) => (
-                  <button
-                    key={pack.id}
-                    type="button"
-                    aria-pressed={activeSlideIndex === idx}
-                    aria-label={`View ${pack.name}`}
-                    className={`vip-carousel-dot${activeSlideIndex === idx ? ' is-active' : ''}`}
-                    onClick={() => {
-                      setAutoRotatePaused(true);
-                      activeSlideIndexRef.current = idx;
-                      setActiveSlideIndex(idx);
-                      scrollCarouselTo(idx, 'smooth');
-                    }}
-                  />
-                ))}
-              </div>
-            )}
           </section>
         )}
 
-        {/* Coin Packs Grid */}
+        {/* 3. Compact 2x2 Coin Packs Grid */}
         {coinPacks.length > 0 && (
-          <section style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
-              <h3 className="hot-tags-title" style={{ margin: 0 }}>Single Purchases</h3>
-              <span style={{ fontSize: '0.6875rem', color: 'var(--text-tertiary)' }}>Never expire</span>
-            </div>
-
+          <section className="coin-packs-section" aria-label="Coin packages">
             <div className="coin-packs-grid">
               {coinPacks.map((pack) => {
                 const isSelected = selectedPack === pack.id;
@@ -713,10 +717,11 @@ export const RechargeCheckoutPanel: React.FC<RechargeCheckoutPanelProps> = ({
                     key={pack.id}
                     onClick={() => handleSelectPack(pack.id)}
                     aria-pressed={isSelected}
-                    className={`recharge-coin-card${isSelected ? ' is-selected' : ''}${isWholeBook ? ' coin-pack-whole-book' : ''}`}
+                    className={`recharge-coin-card${isSelected ? ' is-selected' : ''}${isWholeBook ? ' coin-pack-whole-book' : ''}${pack.badge ? ' has-tag' : ''}`}
                   >
+                    {pack.badge && <span className="recharge-coin-tag">{pack.badge}</span>}
                     {isWholeBook ? (
-                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px' }}>
+                      <div className="recharge-whole-book-body">
                         <div style={{ minWidth: 0 }}>
                           <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                             <BookOpen size={15} strokeWidth={1.9} style={{ color: 'var(--accent-color)', flexShrink: 0 }} aria-hidden="true" />
@@ -724,72 +729,28 @@ export const RechargeCheckoutPanel: React.FC<RechargeCheckoutPanelProps> = ({
                               {pack.name || 'Unlock Entire Novel'}
                             </span>
                           </div>
-                          <span
-                            style={{
-                              fontSize: '0.6875rem',
-                              color: 'var(--text-tertiary)',
-                              display: 'block',
-                              marginTop: '3px',
-                              overflow: 'hidden',
-                              textOverflow: 'ellipsis',
-                              whiteSpace: 'nowrap',
-                            }}
-                          >
+                          <span className="recharge-whole-book-sub">
                             {novelTitle ? `${novelTitle} · Forever access` : 'One-time unlock · Forever access'}
                           </span>
                         </div>
-                        <span className="tabular-nums" style={{ fontSize: '0.9375rem', fontWeight: 700, color: 'var(--text-primary)', flexShrink: 0 }}>
-                          {pack.price}
-                        </span>
+                        <div className="recharge-whole-book-prices tabular-nums">
+                          <span className="recharge-coin-price">{pack.price}</span>
+                          {pack.listPrice && <span className="recharge-list-price">{pack.listPrice}</span>}
+                        </div>
                       </div>
                     ) : (
                       <>
-                        <div>
-                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '6px' }}>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', minWidth: 0 }}>
-                              <GoldCoin size={15} />
-                              <span className="tabular-nums" style={{ fontSize: '1.0625rem', fontWeight: 700, color: 'var(--text-primary)' }}>
-                                {pack.coins.toLocaleString()}
-                              </span>
-                            </div>
-                            {bonusPct && (
-                              <span
-                                className="tabular-nums"
-                                style={{
-                                  backgroundColor: 'var(--accent-light)',
-                                  color: 'var(--accent-text)',
-                                  fontSize: '0.625rem',
-                                  fontWeight: 700,
-                                  padding: '2px 7px',
-                                  borderRadius: '999px',
-                                  flexShrink: 0,
-                                }}
-                              >
-                                {bonusPct}
-                              </span>
-                            )}
-                          </div>
-                          <span className="tabular-nums" style={{ fontSize: '0.6875rem', color: 'var(--text-tertiary)', display: 'block', marginTop: '3px' }}>
-                            {pack.bonus > 0 ? `+${pack.bonus.toLocaleString()} bonus` : pack.name || 'Coin Top-up'}
-                          </span>
+                        <div className="recharge-coin-top">
+                          <GoldCoin size={16} />
+                          <span className="recharge-coin-amount tabular-nums">{pack.coins.toLocaleString()}</span>
+                          {pack.bonus > 0 && (
+                            <span className="recharge-coin-bonus tabular-nums">+{pack.bonus.toLocaleString()}</span>
+                          )}
+                          {bonusPct && <span className="recharge-coin-pct tabular-nums">{bonusPct}</span>}
                         </div>
-
-                        <div
-                          style={{
-                            display: 'flex',
-                            alignItems: 'baseline',
-                            justifyContent: 'space-between',
-                            gap: '8px',
-                            paddingTop: '8px',
-                            borderTop: '1px solid var(--border-color)',
-                          }}
-                        >
-                          <span className="tabular-nums" style={{ fontSize: '0.6875rem', color: 'var(--text-tertiary)' }}>
-                            {pack.total.toLocaleString()} total
-                          </span>
-                          <span className="tabular-nums" style={{ fontSize: '0.9375rem', fontWeight: 700, color: 'var(--text-primary)' }}>
-                            {pack.price}
-                          </span>
+                        <div className="recharge-coin-footer tabular-nums">
+                          <span className="recharge-coin-price">{pack.price}</span>
+                          {pack.listPrice && <span className="recharge-list-price">{pack.listPrice}</span>}
                         </div>
                       </>
                     )}
@@ -817,77 +778,29 @@ export const RechargeCheckoutPanel: React.FC<RechargeCheckoutPanelProps> = ({
           </div>
         )}
 
-        {/* Payment Method Checkout Actions (directly below SKUs) */}
+        {/* 4. Single Full-Width Primary CTA (directly below SKUs) */}
         {selectedSlot ? (
-          <section className="recharge-checkout-section" aria-label="Payment methods">
-            <div className="recharge-checkout-summary">
-              <div style={{ minWidth: 0 }}>
-                <div className="recharge-checkout-summary-title">{selectedSummaryTitle}</div>
-                <div className="recharge-checkout-summary-hint">{selectedSummaryHint}</div>
-              </div>
-              <span className="recharge-checkout-summary-price tabular-nums">{selectedSummaryPrice}</span>
-            </div>
-
+          <section className="recharge-checkout-section" aria-label="Checkout">
             {selectedPayPalAvailable || selectedStripeAvailable ? (
-              <div
-                className="recharge-checkout-actions"
-                style={{
-                  gridTemplateColumns:
-                    selectedPayPalAvailable && selectedStripeAvailable ? 'repeat(2, minmax(0, 1fr))' : '1fr',
-                }}
-              >
-                {selectedPayPalAvailable && (
-                  <button
-                    type="button"
-                    className="recharge-pay-btn recharge-pay-btn--paypal"
-                    onClick={() => void handlePurchase('paypal')}
-                    disabled={isProcessing}
-                  >
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true" style={{ flexShrink: 0 }}>
-                      <defs>
-                        <clipPath id={paypalClipId}>
-                          <path d="M5.8 1.5h7.4c4.2 0 6.4 2 5.6 6-.7 3.6-3.4 5.5-7.4 5.5H8.5l-1.1 7.2H3.0L5.8 1.5Z" />
-                        </clipPath>
-                      </defs>
-                      <path
-                        className="recharge-paypal-back"
-                        d="M5.8 1.5h7.4c4.2 0 6.4 2 5.6 6-.7 3.6-3.4 5.5-7.4 5.5H8.5l-1.1 7.2H3.0L5.8 1.5Z"
-                      />
-                      <path
-                        className="recharge-paypal-front"
-                        d="M8.5 5.2h6.3c3.9 0 5.9 1.9 5.2 5.5-.7 3.3-3.1 5.1-6.8 5.1h-2.5l-1.1 6.7H5.9L8.5 5.2Z"
-                      />
-                      <path
-                        className="recharge-paypal-overlap"
-                        clipPath={`url(#${paypalClipId})`}
-                        d="M8.5 5.2h6.3c3.9 0 5.9 1.9 5.2 5.5-.7 3.3-3.1 5.1-6.8 5.1h-2.5l-1.1 6.7H5.9L8.5 5.2Z"
-                      />
-                    </svg>
-                    <span className="recharge-btn-label">{isProcessing && activeCheckoutProvider === 'paypal' ? 'Connecting...' : 'PayPal'}</span>
-                  </button>
-                )}
-
-                {selectedStripeAvailable && (
-                  <button
-                    type="button"
-                    className="recharge-pay-btn recharge-pay-btn--card"
-                    disabled={isProcessing}
-                    onClick={() => void handlePurchase('stripe')}
-                  >
-                    <CreditCard size={17} strokeWidth={2} aria-hidden="true" style={{ flexShrink: 0 }} />
-                    <span className="recharge-btn-label">{isProcessing && activeCheckoutProvider === 'stripe' ? 'Connecting...' : cardLabel}</span>
-                    {!isProcessing && (
-                      <span className="recharge-card-brands" aria-hidden="true">
-                        <span className="recharge-brand-visa">VISA</span>
-                        <span className="recharge-brand-mc">
-                          <span className="recharge-brand-mc-left" />
-                          <span className="recharge-brand-mc-right" />
-                        </span>
-                      </span>
-                    )}
-                  </button>
-                )}
-              </div>
+              <>
+                <button
+                  type="button"
+                  className="recharge-pay-now-btn"
+                  onClick={() => void handlePurchase(effectiveProvider)}
+                  disabled={isProcessing}
+                >
+                  <span className="tabular-nums">
+                    {isProcessing ? 'Connecting...' : `Pay Now · ${selectedSummaryPrice}`}
+                  </span>
+                </button>
+                <div className="recharge-pay-trust">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+                    <rect x="3" y="11" width="18" height="11" rx="2" />
+                    <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+                  </svg>
+                  <span>{selectedSummaryHint}</span>
+                </div>
+              </>
             ) : (
               <p role="status" style={{ textAlign: 'center', fontSize: '0.8125rem', color: 'var(--text-secondary)', margin: 0 }}>
                 No payment channel is currently active for the selected item.

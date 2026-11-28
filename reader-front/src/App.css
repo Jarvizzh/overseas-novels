@@ -2032,16 +2032,6 @@
   --hero-text: #F4F1EA;
 }
 
-.reader-theme-night .reader-paywall-recharge .recharge-coin-card.is-selected {
-  background-color: rgba(212, 174, 104, 0.12);
-}
-
-.reader-theme-night .reader-paywall-recharge .recharge-pay-btn--paypal {
-  background-color: #FAF8F5;
-  color: #003087;
-  border-color: rgba(255, 255, 255, 0.24);
-}
-
 .reader-paywall-recharge .coin-packs-grid {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
@@ -2049,11 +2039,11 @@
 .recharge-panel-stack {
   display: flex;
   flex-direction: column;
-  gap: 20px;
+  gap: 14px;
 }
 
 .recharge-panel-stack.is-embedded {
-  gap: 16px;
+  gap: 12px;
 }
 
 /* Sidebar Drawer (Table of Contents) */
@@ -2265,21 +2255,64 @@
   flex-shrink: 0;
 }
 
-.vip-carousel-status-btn {
-  border: none;
-  background: transparent;
-  padding: 2px 4px;
-  color: var(--accent-text);
-  font-size: 0.75rem;
-  font-weight: 600;
+/* Top Payment Method Selector Pills */
+.provider-selector {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.provider-pill {
+  min-height: 44px;
+  border-radius: 999px;
+  border: 1.5px solid transparent;
+  background-color: var(--bg-tertiary);
+  color: var(--text-primary);
+  font-size: 0.875rem;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 0 14px;
   cursor: pointer;
+  transition: var(--transition-fast);
+}
+
+.provider-pill.is-active {
+  background-color: var(--accent-light);
+  border-color: var(--accent-color);
+  box-shadow: 0 2px 10px rgba(154, 113, 50, 0.1);
+}
+
+.provider-pill:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.provider-pill-paypal-wordmark {
+  font-style: italic;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+}
+
+/* Compact VIP Carousel Banner (StarNovel Warm Gold) */
+.vip-banner-shell {
+  border-radius: 16px;
+  background: linear-gradient(135deg, #FFFBF3 0%, #F7EFE0 100%);
+  border: 1.5px solid var(--border-color);
+  overflow: hidden;
+  transition: border-color 0.18s ease, box-shadow 0.18s ease;
+}
+
+.vip-banner-shell.is-selected {
+  border-color: var(--accent-color);
+  box-shadow: 0 0 0 1px var(--accent-color), 0 8px 20px rgba(154, 113, 50, 0.12);
 }
 
 .vip-carousel-track {
   display: flex;
   gap: 0;
-  padding-block: 3px;
-  margin-block: -3px;
   overflow-x: auto;
   scroll-snap-type: x mandatory;
   scrollbar-width: none;
@@ -2297,39 +2330,138 @@
   scroll-snap-stop: always;
 }
 
-.vip-carousel-card {
+.vip-banner-card {
   width: 100%;
   text-align: left;
+  border: none;
+  background: transparent;
+  color: var(--text-primary);
+  padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  background-color: var(--bg-secondary);
-  color: var(--text-primary);
-  border-radius: 16px;
-  padding: 15px 16px;
-  border: 1px solid var(--border-color);
   cursor: pointer;
-  transition: var(--transition-fast);
 }
 
-.vip-carousel-card.is-selected {
-  background-color: var(--hero-bg);
-  color: var(--hero-text);
-  border: 1.5px solid #D4AE68;
+.vip-banner-ribbon {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 12px 4px 10px;
+  border-bottom-right-radius: 12px;
+  background: linear-gradient(90deg, #B5853B 0%, #8C6120 100%);
+  color: #FFFFFF;
+  font-size: 0.6875rem;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  line-height: 1.2;
+}
+
+.vip-banner-body {
+  padding: 12px 14px 10px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.vip-banner-body.has-ribbon {
+  padding-top: 8px;
+}
+
+.vip-banner-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  flex: 1;
+}
+
+.vip-banner-icon {
+  width: 38px;
+  height: 38px;
+  border-radius: 12px;
+  background-color: var(--accent-light);
+  color: var(--accent-text);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.vip-banner-copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.vip-banner-title-row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.vip-banner-name {
+  font-family: var(--font-display);
+  font-size: 0.9375rem;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.vip-banner-eq {
+  font-size: 0.8125rem;
+  font-weight: 700;
+  color: var(--accent-text);
+}
+
+.vip-banner-desc {
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  line-height: 1.35;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 1;
+  -webkit-box-orient: vertical;
+}
+
+.vip-banner-right {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.vip-banner-price-pill {
+  padding: 6px 14px;
+  border-radius: 999px;
+  background-color: var(--accent-color);
+  color: #FFFFFF;
+  font-size: 0.9375rem;
+  font-weight: 800;
+  line-height: 1.1;
+}
+
+.vip-banner-list-price {
+  font-size: 0.6875rem;
+  color: var(--text-tertiary);
+  text-decoration: line-through;
+  margin-top: 3px;
 }
 
 .vip-carousel-dots {
   display: flex;
   justify-content: center;
   align-items: center;
-  gap: 6px;
-  margin-top: 2px;
+  gap: 5px;
+  padding: 0 0 9px;
 }
 
 .vip-carousel-dot {
   border: none;
   padding: 0;
-  height: 6px;
+  height: 5px;
   width: 6px;
   border-radius: 999px;
   background-color: var(--border-strong);
@@ -2338,7 +2470,7 @@
 }
 
 .vip-carousel-dot.is-active {
-  width: 18px;
+  width: 16px;
   background-color: var(--accent-color);
 }
 
@@ -2356,178 +2488,279 @@
 }
 
 .recharge-coin-card {
+  position: relative;
   background-color: var(--bg-secondary);
   color: var(--text-primary);
   border-radius: 14px;
-  padding: 12px;
-  border: 1px solid var(--border-color);
+  padding: 0;
+  border: 1.5px solid var(--border-color);
+  overflow: hidden;
   cursor: pointer;
   display: flex;
   flex-direction: column;
   align-items: stretch;
   justify-content: space-between;
-  gap: 8px;
   text-align: left;
   transition: var(--transition-fast);
 }
 
 .recharge-coin-card.is-selected {
-  background-color: rgba(154, 113, 50, 0.06);
-  border: 1.5px solid var(--accent-color);
-  box-shadow: 0 0 0 1px var(--accent-color);
+  border-color: var(--accent-color);
+  box-shadow: 0 0 0 1px var(--accent-color), 0 6px 16px rgba(154, 113, 50, 0.1);
 }
 
-:root[data-user-theme="dark"] .recharge-coin-card.is-selected {
-  background-color: rgba(212, 174, 104, 0.1);
+.recharge-coin-tag {
+  position: absolute;
+  top: 0;
+  left: 0;
+  background: linear-gradient(90deg, #B5853B 0%, #8C6120 100%);
+  color: #FFFFFF;
+  font-size: 0.625rem;
+  font-weight: 700;
+  padding: 2px 9px 3px;
+  border-bottom-right-radius: 10px;
+  line-height: 1.2;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root:not([data-user-theme="light"]) .recharge-coin-card.is-selected {
-    background-color: rgba(212, 174, 104, 0.1);
-  }
+.recharge-coin-top {
+  padding: 16px 8px 13px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  flex-wrap: wrap;
+  min-height: 54px;
+}
+
+.recharge-coin-card.has-tag .recharge-coin-top {
+  padding-top: 22px;
+}
+
+.recharge-coin-amount {
+  font-size: 1rem;
+  font-weight: 800;
+  color: var(--text-primary);
+  letter-spacing: -0.02em;
+}
+
+.recharge-coin-bonus {
+  font-size: 0.8125rem;
+  font-weight: 700;
+  color: var(--text-secondary);
+}
+
+.recharge-coin-pct {
+  font-size: 0.625rem;
+  font-weight: 700;
+  color: var(--accent-text);
+  border: 1px solid var(--accent-color);
+  background-color: var(--accent-light);
+  border-radius: 999px;
+  padding: 1px 5px;
+  line-height: 1.25;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.recharge-coin-footer {
+  background-color: #F4EFE6;
+  padding: 6px 8px;
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 6px;
+  transition: background-color 0.16s ease;
+}
+
+.recharge-coin-card.is-selected .recharge-coin-footer {
+  background-color: #EFE5D3;
+}
+
+.recharge-coin-price {
+  font-size: 0.875rem;
+  font-weight: 800;
+  color: var(--text-primary);
+}
+
+.recharge-coin-card.is-selected .recharge-coin-price {
+  color: var(--accent-text);
+}
+
+.recharge-list-price {
+  font-size: 0.6875rem;
+  color: var(--text-tertiary);
+  text-decoration: line-through;
+}
+
+.recharge-whole-book-body {
+  padding: 12px 14px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.recharge-whole-book-sub {
+  font-size: 0.6875rem;
+  color: var(--text-tertiary);
+  display: block;
+  margin-top: 3px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.recharge-whole-book-prices {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  flex-shrink: 0;
 }
 
 .coin-pack-whole-book {
   grid-column: 1 / -1;
 }
 
-/* Recharge Inline Checkout Actions */
+/* Single Primary Full-Width Pay CTA */
 .recharge-checkout-section {
   display: flex;
   flex-direction: column;
   gap: 8px;
-}
-
-.recharge-checkout-summary {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 12px;
-  padding-inline: 2px;
-}
-
-.recharge-checkout-summary-title {
-  font-size: 0.8125rem;
-  font-weight: 600;
-  color: var(--text-primary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.recharge-checkout-summary-hint {
-  font-size: 0.6875rem;
-  color: var(--text-tertiary);
   margin-top: 2px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
-.recharge-checkout-summary-price {
-  font-size: 0.9375rem;
-  font-weight: 700;
-  color: var(--text-primary);
-  flex-shrink: 0;
-}
-
-.recharge-checkout-actions {
-  display: grid;
-  gap: 10px;
-}
-
-.recharge-pay-btn {
+.recharge-pay-now-btn {
   width: 100%;
-  min-width: 0;
-  min-block-size: 46px;
-  padding: 10px 14px;
-  border-radius: 999px;
-  font-size: 0.9375rem;
+  min-height: 48px;
+  border-radius: 14px;
+  border: none;
+  background: linear-gradient(135deg, #25211D 0%, #141210 100%);
+  color: #FAF8F5;
+  font-size: 1rem;
   font-weight: 700;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 7px;
-  white-space: nowrap;
-  overflow: hidden;
+  gap: 8px;
   cursor: pointer;
+  box-shadow: 0 8px 20px rgba(24, 22, 20, 0.2);
   transition: var(--transition-fast);
 }
 
-.recharge-pay-btn--paypal {
-  background-color: #FFFFFF;
-  color: #003087;
-  border: 1px solid rgba(0, 48, 135, 0.22);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+.recharge-pay-now-btn:hover:not(:disabled) {
+  filter: brightness(1.06);
 }
 
-.recharge-pay-btn--card {
-  background-color: var(--cta-bg);
-  color: var(--cta-text);
-  border: 1px solid transparent;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.14);
-}
-
-.recharge-card-brands {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  margin-left: 2px;
-  flex-shrink: 0;
-}
-
-.recharge-brand-visa {
-  display: inline-block;
-  padding: 1px 3px;
-  border-radius: 2px;
-  background-color: #1A1F71;
-  color: #FFFFFF;
-  font-size: 0.5rem;
-  line-height: 1.1;
-  font-weight: 800;
-  letter-spacing: 0.02em;
-}
-
-.recharge-brand-mc {
-  display: inline-flex;
-  align-items: center;
-}
-
-.recharge-brand-mc-left,
-.recharge-brand-mc-right {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  display: inline-block;
-}
-
-.recharge-brand-mc-left {
-  background-color: #EB001B;
-}
-
-.recharge-brand-mc-right {
-  background-color: #F79E1B;
-  margin-left: -3px;
-  opacity: 0.92;
-}
-
-.recharge-btn-label {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  min-width: 0;
-}
-
-.recharge-pay-btn:hover:not(:disabled) {
-  filter: brightness(0.96);
-}
-
-.recharge-pay-btn:active:not(:disabled) {
+.recharge-pay-now-btn:active:not(:disabled) {
   transform: scale(0.985);
 }
 
-.recharge-pay-btn:disabled {
+.recharge-pay-now-btn:disabled {
   opacity: 0.55;
   cursor: not-allowed;
+}
+
+.recharge-pay-trust {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  text-align: center;
+  font-size: 0.75rem;
+  color: var(--text-tertiary);
+}
+
+/* Dark Mode & Night Reader overrides for Warm Gold Payment Module */
+:root[data-user-theme="dark"] .vip-banner-shell,
+.reader-theme-night .vip-banner-shell {
+  background: linear-gradient(135deg, #25221C 0%, #1C1A17 100%);
+}
+
+:root[data-user-theme="dark"] .vip-banner-ribbon,
+:root[data-user-theme="dark"] .vip-banner-price-pill,
+:root[data-user-theme="dark"] .recharge-coin-tag,
+.reader-theme-night .vip-banner-ribbon,
+.reader-theme-night .vip-banner-price-pill,
+.reader-theme-night .recharge-coin-tag {
+  color: #141413;
+}
+
+:root[data-user-theme="dark"] .vip-banner-ribbon,
+:root[data-user-theme="dark"] .recharge-coin-tag,
+.reader-theme-night .vip-banner-ribbon,
+.reader-theme-night .recharge-coin-tag {
+  background: linear-gradient(90deg, #D4AE68 0%, #A9803B 100%);
+}
+
+:root[data-user-theme="dark"] .recharge-coin-footer,
+.reader-theme-night .recharge-coin-footer {
+  background-color: #272522;
+}
+
+:root[data-user-theme="dark"] .recharge-coin-card.is-selected .recharge-coin-footer,
+.reader-theme-night .recharge-coin-card.is-selected .recharge-coin-footer {
+  background-color: rgba(212, 174, 104, 0.2);
+}
+
+:root[data-user-theme="dark"] .recharge-pay-now-btn,
+.reader-theme-night .recharge-pay-now-btn {
+  background: linear-gradient(135deg, #E2BB6B 0%, #C49744 100%);
+  color: #141413;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.36);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-user-theme="light"]) .vip-banner-shell {
+    background: linear-gradient(135deg, #25221C 0%, #1C1A17 100%);
+  }
+  :root:not([data-user-theme="light"]) .vip-banner-ribbon,
+  :root:not([data-user-theme="light"]) .vip-banner-price-pill,
+  :root:not([data-user-theme="light"]) .recharge-coin-tag {
+    color: #141413;
+  }
+  :root:not([data-user-theme="light"]) .vip-banner-ribbon,
+  :root:not([data-user-theme="light"]) .recharge-coin-tag {
+    background: linear-gradient(90deg, #D4AE68 0%, #A9803B 100%);
+  }
+  :root:not([data-user-theme="light"]) .recharge-coin-footer {
+    background-color: #272522;
+  }
+  :root:not([data-user-theme="light"]) .recharge-coin-card.is-selected .recharge-coin-footer {
+    background-color: rgba(212, 174, 104, 0.2);
+  }
+  :root:not([data-user-theme="light"]) .recharge-pay-now-btn {
+    background: linear-gradient(135deg, #E2BB6B 0%, #C49744 100%);
+    color: #141413;
+    box-shadow: 0 8px 20px rgba(0, 0, 0, 0.36);
+  }
+}
+
+/* Protect light reader themes (paper / sepia / forest / mint) from system dark mode */
+:root .reader-container:not(.reader-theme-night) .vip-banner-shell {
+  background: linear-gradient(135deg, #FFFBF3 0%, #F7EFE0 100%);
+}
+
+:root .reader-container:not(.reader-theme-night) .vip-banner-ribbon,
+:root .reader-container:not(.reader-theme-night) .recharge-coin-tag {
+  background: linear-gradient(90deg, #B5853B 0%, #8C6120 100%);
+  color: #FFFFFF;
+}
+
+:root .reader-container:not(.reader-theme-night) .vip-banner-price-pill {
+  color: #FFFFFF;
+}
+
+:root .reader-container:not(.reader-theme-night) .recharge-coin-footer {
+  background-color: #F4EFE6;
+}
+
+:root .reader-container:not(.reader-theme-night) .recharge-coin-card.is-selected .recharge-coin-footer {
+  background-color: #EFE5D3;
+}
+
+:root .reader-container:not(.reader-theme-night) .recharge-pay-now-btn {
+  background: linear-gradient(135deg, #25211D 0%, #141210 100%);
+  color: #FAF8F5;
 }
 
 .recharge-paypal-back {
@@ -2540,28 +2773,6 @@
 
 .recharge-paypal-overlap {
   fill: #001C64;
-}
-
-:root[data-user-theme="dark"] .recharge-pay-btn--paypal {
-  background-color: #FAF8F5;
-  color: #003087;
-  border-color: rgba(255, 255, 255, 0.24);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root:not([data-user-theme="light"]) .recharge-pay-btn--paypal {
-    background-color: #FAF8F5;
-    color: #003087;
-    border-color: rgba(255, 255, 255, 0.24);
-  }
-}
-
-@media (max-width: 360px) {
-  .recharge-pay-btn {
-    padding: 10px 10px;
-    font-size: 0.875rem;
-    gap: 5px;
-  }
 }
 
 /* Form Input Standard (>= 16px on mobile to prevent Safari auto-zoom) */
@@ -2992,16 +3203,6 @@
 }
 
 /* Keep light reader themes consistent even when app/OS theme is dark */
-:root .reader-container:not(.reader-theme-night) .recharge-coin-card.is-selected {
-  background-color: rgba(154, 113, 50, 0.06);
-}
-
-:root .reader-container:not(.reader-theme-night) .recharge-pay-btn--paypal {
-  background-color: #FFFFFF;
-  color: #003087;
-  border-color: rgba(0, 48, 135, 0.22);
-}
-
 :root .reader-container:not(.reader-theme-night) .checkout-transition-card--paypal {
   background: radial-gradient(120% 65% at 50% 0%, rgba(204, 232, 255, 0.94) 0%, #FFFFFF 58%);
   border-color: rgba(255, 255, 255, 0.85);

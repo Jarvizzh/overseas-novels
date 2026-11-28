@@ -8,8 +8,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"os"
-	"strings"
 	"testing"
 	"time"
 
@@ -28,15 +26,6 @@ func TestPublicationAuditMatchesCommittedScope(t *testing.T) {
 		INSERT INTO promotion_links(id,novel_id,novel_title,generated_url)
 		VALUES (13,1,'fixture','https://reader.example/13'),(14,1,'fixture','https://reader.example/14');
 	`)
-	indexes, err := os.ReadFile("../../../cms-backend/db/conversion_query_indexes.sql")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, statement := range strings.Split(string(indexes), ";") {
-		if strings.TrimSpace(statement) != "" {
-			mustExec(t, ctx, owner, statement)
-		}
-	}
 	_, api := restrictedPolicyPools(t, ctx, owner)
 	handler := NewHandler(Repository{Pool: api, Environment: "test"}, "service-fixture")
 	call := func(method, path, actor string, body []byte, want int) *httptest.ResponseRecorder {

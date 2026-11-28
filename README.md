@@ -98,7 +98,7 @@ graph TD
 star-novel/
 ├── reader-backend/                      # 读者端 Go 后端服务 (Port 8080)
 │   ├── cmd/server/                      # 读者端入口与依赖注入
-│   ├── db/                              # 数据库 Schema 初始化脚本与种子数据
+│   ├── db/                              # 完整表结构、索引与系统初始数据
 │   └── internal/                        # 读者端核心业务包
 │       ├── auth/                        # 鉴权与游客登录 (含 IP Rate Limit)
 │       ├── config/                      # 全局配置加载与强校验
@@ -117,7 +117,7 @@ star-novel/
 │       ├── auth/                        # 管理员鉴权、JWT 与 RBAC 权限
 │       ├── billing/                     # 充值模版配置、6 卡位价格与订单退款划扣
 │       ├── config/                      # 配置加载与 config.Get() 导出
-│       ├── db/                          # pgxpool 连接池、表结构 Migration 与 Seed
+│       ├── db/                          # pgxpool 连接池与 Schema 版本检查
 │       ├── domain/                      # 主域名与营销子域名调控
 │       ├── novel/                       # 小说/章节管理、按字数计费与 ZIP/TXT 导入
 │       ├── redis/                       # Redis 缓存客户端
@@ -150,7 +150,7 @@ docker-compose up -d
 
 ### 6.3 启动后端 API 服务 (Backend Services)
 
-数据库启动后，进入 `cms-backend` 运行 `go run ./cmd/server -migrate` 初始化或升级数据库。两个 API 服务启动时会校验 Schema 版本。
+数据库启动后，进入 `cms-backend` 运行 `go run ./cmd/server -migrate`。空库需设置 `CMS_BOOTSTRAP_ADMIN_PASSWORD`，首次迁移创建系统配置和内置角色，书籍、商品和充值模板由运营录入。CMS、Reader 和 Conversion 启动时均校验 Schema 版本。
 
 #### 启动读者端后端服务 (Port 8080)：
 ```bash

@@ -2,7 +2,6 @@ import React from 'react';
 import { ChevronLeft, Bookmark, List } from 'lucide-react';
 
 export type ReaderFontFamily = 'serif' | 'sans';
-export type ReaderLineHeight = 'compact' | 'standard' | 'relaxed';
 
 interface ReaderSettingsProps {
   visible: boolean;
@@ -10,8 +9,6 @@ interface ReaderSettingsProps {
   onFontSizeChange: (size: number) => void;
   fontFamily: ReaderFontFamily;
   onFontFamilyChange: (family: ReaderFontFamily) => void;
-  lineHeight: ReaderLineHeight;
-  onLineHeightChange: (lh: ReaderLineHeight) => void;
   theme: string;
   onThemeChange: (theme: string) => void;
   onOpenDrawer: () => void;
@@ -27,8 +24,6 @@ export const ReaderSettings: React.FC<ReaderSettingsProps> = ({
   onFontSizeChange,
   fontFamily,
   onFontFamilyChange,
-  lineHeight,
-  onLineHeightChange,
   theme,
   onThemeChange,
   onOpenDrawer,
@@ -146,30 +141,6 @@ export const ReaderSettings: React.FC<ReaderSettingsProps> = ({
                   A+
                 </button>
               </div>
-            </div>
-          </div>
-
-          {/* Line Spacing */}
-          <div className="hud-section">
-            <span className="hud-label">Spacing</span>
-            <div className="hud-segmented" role="group" aria-label="Line spacing">
-              {(
-                [
-                  { id: 'compact', label: 'Compact' },
-                  { id: 'standard', label: 'Standard' },
-                  { id: 'relaxed', label: 'Relaxed' },
-                ] as const
-              ).map((opt) => (
-                <button
-                  key={opt.id}
-                  type="button"
-                  className={`hud-seg-btn ${lineHeight === opt.id ? 'active' : ''}`}
-                  onClick={() => onLineHeightChange(opt.id)}
-                  aria-pressed={lineHeight === opt.id}
-                >
-                  {opt.label}
-                </button>
-              ))}
             </div>
           </div>
         </div>

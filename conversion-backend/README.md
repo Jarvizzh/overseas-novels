@@ -1,6 +1,6 @@
 # Star Novel 转化服务
 
-转化服务消费 Reader 事务 Outbox，创建统一事件与各 Pixel 投递任务。迁移由 CMS 的 `-migrate` 入口管理，启动时要求 schema `2026111942`。应用架构、实施顺序与验收标准见 [统一转化回传架构升级与开发文档](../docs/conversion-reporting-architecture.md)。
+转化服务消费 Reader 事务 Outbox，创建统一事件与各 Pixel 投递任务。迁移由 CMS 的 `-migrate` 入口管理，启动时要求 schema `2026112802`。应用架构、实施顺序与验收标准见 [统一转化回传架构升级与开发文档](../docs/conversion-reporting-architecture.md)。
 
 从本目录运行 `go run ./cmd/conversion`。配置如下。
 
@@ -69,7 +69,7 @@ go vet ./...
 使用独立测试数据库与 `CONVERSION_ENVIRONMENT=test`。先升级 schema 并执行基础角色授权。使用迁移所有者向两种独立服务账号执行模拟链路授权。
 
 ```bash
-psql -X -f cms-backend/db/conversion_sinan_mock_grants.sql \
+psql -X -f cms-backend/ops/conversion_sinan_mock_grants.sql \
   -v callback_role=sn_conversion_callback -v partner_worker_role=sn_conversion_partner_worker
 ```
 
@@ -126,13 +126,13 @@ psql -X -f cms-backend/db/conversion_sinan_mock_grants.sql \
 | `CONVERSION_DB_MAX_CONNS` | `8` | API、Collector、Callback 和分销回告各自的连接池上限 |
 | `CONVERSION_META_BATCH_SIZE` | `1` | 每次 Meta 请求的成员上限，允许 1–100 |
 
-使用独立数据库角色的环境升级至 1934 后，按部署流程重新应用 `cms-backend/db/conversion_role_grants.sql`。Reader 接入的空事件白名单会跳过所有事件。迁移保留已有审计记录的空白名单，对无配置审计的旧 Reader 接入保留历史四事件默认行为。上线前核对有审计记录但白名单仍为空的旧账户。
+使用独立数据库角色的环境升级至 1934 后，按部署流程重新应用 `cms-backend/ops/conversion_role_grants.sql`。Reader 接入的空事件白名单会跳过所有事件。迁移保留已有审计记录的空白名单，对无配置审计的旧 Reader 接入保留历史四事件默认行为。上线前核对有审计记录但白名单仍为空的旧账户。
 
 Collector 每 30 秒采样，首次采样成功前标为等待，最后一次成功采样达到 90 秒时标为过期。明确限流和定稿失败按 Pixel 统计最近 15 分钟。
 
 Reader Outbox 与分销 Inbox 各自连续消费。满批或在 3 秒单轮预算内取得进展后耗尽预算，会马上启动下一轮。空队列从 50 ms 退避到 250 ms，空闲发送器最多每 250 ms 探测一次。归一化数据库错误按 100 ms 至 5 秒退避。每条归一化消息仍独立提交。
 
-吞吐诊断可通过私网 `GET /internal/conversion/throughput?minutes=15&source=starnovel&pixel_id=123456` 或 CMS 同名代理读取。时间窗为 1–60 分钟，来源和 Pixel 均可省略。入口按来源和源事件类型聚合。投递及尝试按来源、统一事件名和 Pixel 聚合。Pixel 筛选仅影响投递和尝试，入口计数按源消息计算。时间数组依次为 P50、P95、P99，单位为毫秒。空样本返回 null。已生成的目标包含进入阻塞等状态的目标，就绪数单独计算。尝试统计使用数据库发送边界；HTTP 开始时间还可用隔离模拟服务器采集。使用此诊断前，按部署流程在事务外应用 `cms-backend/db/conversion_query_indexes.sql`。
+吞吐诊断可通过私网 `GET /internal/conversion/throughput?minutes=15&source=starnovel&pixel_id=123456` 或 CMS 同名代理读取。时间窗为 1–60 分钟，来源和 Pixel 均可省略。入口按来源和源事件类型聚合。投递及尝试按来源、统一事件名和 Pixel 聚合。Pixel 筛选仅影响投递和尝试，入口计数按源消息计算。时间数组依次为 P50、P95、P99，单位为毫秒。空样本返回 null。已生成的目标包含进入阻塞等状态的目标，就绪数单独计算。尝试统计使用数据库发送边界；HTTP 开始时间还可用隔离模拟服务器采集。查询索引由 CMS 迁移统一安装。
 
 隔离采样命令在 `conversion-backend` 下运行。它测量 1,000 笔已提交付款的归一化，以及 20 次单笔冷流量从付款提交到本机模拟 Meta 收到 HTTP 的延迟。
 

@@ -294,7 +294,7 @@ func TestPaymentPolicyAPIAndConcurrentDecisions(t *testing.T) {
 
 func restrictedPolicyPools(t *testing.T, ctx context.Context, owner *pgxpool.Pool) (*pgxpool.Pool, *pgxpool.Pool) {
 	t.Helper()
-	raw, err := os.ReadFile("../../../cms-backend/db/conversion_role_grants.sql")
+	raw, err := os.ReadFile("../../../cms-backend/ops/conversion_role_grants.sql")
 	if err != nil {
 		t.Fatal(err)
 	}

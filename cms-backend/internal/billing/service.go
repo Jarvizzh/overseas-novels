@@ -221,7 +221,7 @@ func validateTemplateSlotsTx(ctx context.Context, tx pgx.Tx, env string, slots [
 		s := &slots[i]
 		s.Badge = strings.TrimSpace(s.Badge)
 		s.DisplayAlias = strings.TrimSpace(s.DisplayAlias)
-		if s.SlotIndex < 1 || s.SlotIndex > 8 || s.ProductID <= 0 || len(s.Badge) > 32 || len(s.DisplayAlias) > 64 {
+		if s.SlotIndex < 1 || s.SlotIndex > 8 || s.ProductID <= 0 || len(s.Badge) > 32 || len(s.DisplayAlias) > 64 || s.ListPriceCents < 0 || s.ListPriceCents > 100000000 {
 			return ErrTemplateSlotInvalid
 		}
 		if seenIdx[s.SlotIndex] || seenProd[s.ProductID] {
@@ -233,7 +233,7 @@ func validateTemplateSlotsTx(ctx context.Context, tx pgx.Tx, env string, slots [
 	}
 
 	rows, err := tx.Query(ctx, `
-		SELECT p.id, p.code,
+		SELECT p.id, p.code, p.price_cents,
 		       COALESCE(pub.status, '') = 'published' AS env_published,
 		       EXISTS (
 		           SELECT 1 FROM product_channel_bindings bp
@@ -264,15 +264,18 @@ func validateTemplateSlotsTx(ctx context.Context, tx pgx.Tx, env string, slots [
 	defer rows.Close()
 
 	found := 0
+	productPrices := make(map[int64]int, len(productIDs))
 	var problems []string
 	for rows.Next() {
 		var pid int64
 		var code string
+		var priceCents int
 		var published, ppReady, stReady bool
-		if err := rows.Scan(&pid, &code, &published, &ppReady, &stReady); err != nil {
+		if err := rows.Scan(&pid, &code, &priceCents, &published, &ppReady, &stReady); err != nil {
 			return err
 		}
 		found++
+		productPrices[pid] = priceCents
 		if !published {
 			problems = append(problems, fmt.Sprintf("%s(#%d) is not published in %s", code, pid, env))
 		} else if !ppReady || !stReady {
@@ -294,6 +297,11 @@ func validateTemplateSlotsTx(ctx context.Context, tx pgx.Tx, env string, slots [
 	}
 	if len(problems) > 0 {
 		return fmt.Errorf("%w: %s", ErrTemplateProductNotPublished, strings.Join(problems, "; "))
+	}
+	for _, s := range slots {
+		if s.ListPriceCents > 0 && s.ListPriceCents <= productPrices[s.ProductID] {
+			return fmt.Errorf("%w: slot %d list_price_cents (%d) must be greater than product price_cents (%d)", ErrTemplateSlotInvalid, s.SlotIndex, s.ListPriceCents, productPrices[s.ProductID])
+		}
 	}
 	return nil
 }
@@ -338,7 +346,7 @@ func (s *billingService) CreateRechargeTemplate(ctx context.Context, adminID str
 	}
 
 	for _, slot := range slots {
-		err = s.repo.CreateRechargeSlotTx(ctx, tx, templateID, slot.SlotIndex, slot.ProductID, slot.Badge, slot.IsHighlighted, slot.DisplayAlias)
+		err = s.repo.CreateRechargeSlotTx(ctx, tx, templateID, slot.SlotIndex, slot.ProductID, slot.Badge, slot.IsHighlighted, slot.DisplayAlias, slot.ListPriceCents)
 		if err != nil {
 			return 0, err
 		}

@@ -14,7 +14,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -46,10 +45,10 @@ type fixture struct {
 
 func newFixture(t *testing.T) fixture {
 	t.Helper()
-	return newFixtureFrom(t, "2026111926", nil)
+	return newFixtureWithData(t, nil)
 }
 
-func newFixtureFrom(t *testing.T, schemaVersion string, beforeUpgrade func(fixture)) fixture {
+func newFixtureWithData(t *testing.T, initialize func(fixture)) fixture {
 	t.Helper()
 	dsn := os.Getenv("STAR_NOVEL_TEST_DATABASE_URL")
 	if dsn == "" {
@@ -73,20 +72,8 @@ func newFixtureFrom(t *testing.T, schemaVersion string, beforeUpgrade func(fixtu
 		t.Fatal(err)
 	}
 	t.Cleanup(owner.Close)
-	execSQLFile(t, ctx, owner, "schema.sql", nil)
-	migrations, err := filepath.Glob("../../../../cms-backend/db/migrations/*.sql")
-	if err != nil || len(migrations) == 0 {
-		t.Fatalf("CMS migrations: %v", err)
-	}
-	versions := make([]string, 0, len(migrations))
-	for _, migration := range migrations {
-		versions = append(versions, strings.TrimSuffix(filepath.Base(migration), ".sql"))
-	}
-	for _, version := range versions {
-		if version <= schemaVersion {
-			execSQLFile(t, ctx, owner, "migrations/"+version+".sql", nil)
-		}
-	}
+	execSQLFile(t, ctx, owner, "cms-backend/db/schema.sql", nil)
+	execSQLFile(t, ctx, owner, "cms-backend/db/migrations/2026112801.sql", nil)
 	keys, err := credentials.Parse(fmt.Sprintf(`{"fixture":%q}`, base64.StdEncoding.EncodeToString(make([]byte, 32))))
 	if err != nil {
 		t.Fatal(err)
@@ -114,13 +101,8 @@ func newFixtureFrom(t *testing.T, schemaVersion string, beforeUpgrade func(fixtu
 		INSERT INTO conversion.integration_destinations(integration_id,destination_id,environment,default_route)
 		SELECT 1,id,environment,true FROM conversion.destinations`)
 	f := fixture{ctx: ctx, owner: owner, keys: keys, public: public, occurred: time.Now().Add(-time.Minute).Unix()}
-	if beforeUpgrade != nil {
-		beforeUpgrade(f)
-	}
-	for _, version := range versions {
-		if version > schemaVersion {
-			execSQLFile(t, ctx, owner, "migrations/"+version+".sql", nil)
-		}
+	if initialize != nil {
+		initialize(f)
 	}
 	oldRoles := []string{"reader", "cms", "worker", "api", "collector", "retention"}
 	newRoles := []string{"callback", "partner_worker"}
@@ -131,8 +113,8 @@ func newFixtureFrom(t *testing.T, schemaVersion string, beforeUpgrade func(fixtu
 		exec(t, ctx, owner, "CREATE ROLE "+role+" NOLOGIN")
 		t.Cleanup(func() { exec(t, context.Background(), owner, "DROP OWNED BY "+role+"; DROP ROLE "+role) })
 	}
-	execSQLFile(t, ctx, owner, "conversion_role_grants.sql", roles)
-	execSQLFile(t, ctx, owner, "conversion_sinan_mock_grants.sql", roles)
+	execSQLFile(t, ctx, owner, "cms-backend/ops/conversion_role_grants.sql", roles)
+	execSQLFile(t, ctx, owner, "cms-backend/ops/conversion_sinan_mock_grants.sql", roles)
 	rolePool := func(kind string) *pgxpool.Pool {
 		config := owner.Config()
 		config.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
@@ -155,7 +137,7 @@ func newFixtureFrom(t *testing.T, schemaVersion string, beforeUpgrade func(fixtu
 
 func execSQLFile(t *testing.T, ctx context.Context, pool *pgxpool.Pool, name string, roles map[string]string) {
 	t.Helper()
-	raw, err := os.ReadFile("../../../../cms-backend/db/" + name)
+	raw, err := os.ReadFile("../../../../" + name)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -657,7 +639,7 @@ func TestCallbackReplayAcrossDigestVersions(t *testing.T) {
 	for _, version := range []string{"2026111907", "2026111908"} {
 		t.Run(version, func(t *testing.T) {
 			var digest [sha256.Size]byte
-			f := newFixtureFrom(t, version, func(f fixture) {
+			f := newFixtureWithData(t, func(f fixture) {
 				canonical := fmt.Sprintf(`{"app_id":"1","pixel_id":"123","order_id":"1001","device_id":"1002",`+
 					`"event_id":"pre-upgrade","event_time":%d,"recharge_type":1,"amount":10,"currency":"USD"`, f.occurred)
 				// 1907 ignored the partner network keys. 1908 included them

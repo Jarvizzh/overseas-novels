@@ -30,7 +30,7 @@ type BillingRepository interface {
 
 	ClearDefaultTemplatesTx(ctx context.Context, tx pgx.Tx) error
 	CreateRechargeTemplateTx(ctx context.Context, tx pgx.Tx, name, environment string, isDefault bool) (int, error)
-	CreateRechargeSlotTx(ctx context.Context, tx pgx.Tx, templateID, index int, productID int64, badge string, isHighlighted bool, displayAlias string) error
+	CreateRechargeSlotTx(ctx context.Context, tx pgx.Tx, templateID, index int, productID int64, badge string, isHighlighted bool, displayAlias string, listPriceCents int) error
 
 	UpdateRechargeTemplateTx(ctx context.Context, tx pgx.Tx, id int, name, environment string, isDefault bool) (int64, error)
 	SetDefaultTemplateOnlyTx(ctx context.Context, tx pgx.Tx, id int) (int64, error)
@@ -228,7 +228,7 @@ func (r *dbBillingRepository) ListRechargeTemplates(ctx context.Context) ([]Rech
 
 func (r *dbBillingRepository) GetRechargeSlots(ctx context.Context, templateID int) ([]RechargeSlot, error) {
 	rows, err := db.DB.Query(ctx, `
-		SELECT s.id, s.template_id, s.slot_index, s.product_id, s.badge, s.is_highlighted, s.display_alias,
+		SELECT s.id, s.template_id, s.slot_index, s.product_id, s.badge, s.is_highlighted, s.display_alias, s.list_price_cents,
 		       p.code, p.product_type,
 		       CASE WHEN p.product_type = 'vip' THEN 'subscription' ELSE p.product_type END,
 		       p.name, p.description, p.coins, p.bonus, COALESCE(p.vip_cycle, ''),
@@ -252,7 +252,7 @@ func (r *dbBillingRepository) GetRechargeSlots(ctx context.Context, templateID i
 	for rows.Next() {
 		var s RechargeSlot
 		err := rows.Scan(
-			&s.ID, &s.TemplateID, &s.SlotIndex, &s.ProductID, &s.Badge, &s.IsHighlighted, &s.DisplayAlias,
+			&s.ID, &s.TemplateID, &s.SlotIndex, &s.ProductID, &s.Badge, &s.IsHighlighted, &s.DisplayAlias, &s.ListPriceCents,
 			&s.ProductCode, &s.ProductType, &s.Type,
 			&s.Name, &s.Description, &s.Coins, &s.Bonus, &s.SubscriptionCycle,
 			&s.PriceCents, &s.NovelScopeType, &s.NovelScopeIDs, &s.PublishedEnvs,
@@ -261,6 +261,9 @@ func (r *dbBillingRepository) GetRechargeSlots(ctx context.Context, templateID i
 			return nil, err
 		}
 		s.Price = formatUSDCents(s.PriceCents)
+		if s.ListPriceCents > s.PriceCents {
+			s.ListPrice = formatUSDCents(s.ListPriceCents)
+		}
 		if s.ProductType == productTypeVIP {
 			s.VipDuration = s.SubscriptionCycle
 			s.VipName = s.Name
@@ -289,11 +292,11 @@ func (r *dbBillingRepository) CreateRechargeTemplateTx(ctx context.Context, tx p
 	return templateID, err
 }
 
-func (r *dbBillingRepository) CreateRechargeSlotTx(ctx context.Context, tx pgx.Tx, templateID, index int, productID int64, badge string, isHighlighted bool, displayAlias string) error {
+func (r *dbBillingRepository) CreateRechargeSlotTx(ctx context.Context, tx pgx.Tx, templateID, index int, productID int64, badge string, isHighlighted bool, displayAlias string, listPriceCents int) error {
 	_, err := tx.Exec(ctx, `
-		INSERT INTO recharge_slots (template_id, slot_index, product_id, badge, is_highlighted, display_alias)
-		VALUES ($1, $2, $3, $4, $5, $6)`,
-		templateID, index, productID, badge, isHighlighted, displayAlias)
+		INSERT INTO recharge_slots (template_id, slot_index, product_id, badge, is_highlighted, display_alias, list_price_cents)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+		templateID, index, productID, badge, isHighlighted, displayAlias, listPriceCents)
 	return err
 }
 
@@ -373,15 +376,15 @@ func (r *dbBillingRepository) SyncRechargeSlotsTx(ctx context.Context, tx pgx.Tx
 		for _, item := range keepSlots {
 			if _, err := tx.Exec(ctx, `
 				UPDATE recharge_slots
-				SET slot_index = $2, badge = $3, is_highlighted = $4, display_alias = $5
-				WHERE id = $1 AND template_id = $6`,
-				item.id, item.slot.SlotIndex, item.slot.Badge, item.slot.IsHighlighted, item.slot.DisplayAlias, templateID); err != nil {
+				SET slot_index = $2, badge = $3, is_highlighted = $4, display_alias = $5, list_price_cents = $6
+				WHERE id = $1 AND template_id = $7`,
+				item.id, item.slot.SlotIndex, item.slot.Badge, item.slot.IsHighlighted, item.slot.DisplayAlias, item.slot.ListPriceCents, templateID); err != nil {
 				return err
 			}
 		}
 	}
 	for _, s := range addSlots {
-		if err := r.CreateRechargeSlotTx(ctx, tx, templateID, s.SlotIndex, s.ProductID, s.Badge, s.IsHighlighted, s.DisplayAlias); err != nil {
+		if err := r.CreateRechargeSlotTx(ctx, tx, templateID, s.SlotIndex, s.ProductID, s.Badge, s.IsHighlighted, s.DisplayAlias, s.ListPriceCents); err != nil {
 			return err
 		}
 	}

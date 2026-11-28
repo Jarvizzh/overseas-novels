@@ -57,54 +57,7 @@ func InitDB(migrate bool) {
 	}
 }
 
-const (
-	baselineSchemaVersion             int64 = 2026111701
-	chapterSchemaVersion              int64 = 2026111702
-	readerPerformanceVersion          int64 = 2026111703
-	readerQueueVersion                int64 = 2026111704
-	conversionSchemaVersion           int64 = 2026111901
-	readerConversionVersion           int64 = 2026111902
-	legacyConversionVersion           int64 = 2026111903
-	conversionReconcileVersion        int64 = 2026111904
-	conversionOperationsVersion       int64 = 2026111905
-	conversionReviewVersion           int64 = 2026111906
-	sinanConversionVersion            int64 = 2026111907
-	sinanReviewVersion                int64 = 2026111908
-	sinanRecheckVersion               int64 = 2026111909
-	paymentPolicyVersion              int64 = 2026111910
-	readerPaymentPolicyVersion        int64 = 2026111911
-	sinanPaymentPolicyVersion         int64 = 2026111912
-	readerPaymentReviewVersion        int64 = 2026111913
-	readerPaymentRecoveryVersion      int64 = 2026111914
-	readerSubscriptionEvidenceVersion int64 = 2026111915
-	paymentDomainFoundationVersion    int64 = 2026111916
-	paymentCheckoutVersion            int64 = 2026111917
-	vipOfferVersionsVersion           int64 = 2026111918
-	paymentLedgerVersion              int64 = 2026111919
-	paymentSettlementVersion          int64 = 2026111920
-	paymentCheckoutDecisionsVersion   int64 = 2026111921
-	paymentAftercareVersion           int64 = 2026111922
-	stripeOneTimeCheckoutVersion      int64 = 2026111923
-	stripeVIPCheckoutVersion          int64 = 2026111924
-	paymentCompletionVersion          int64 = 2026111925
-	paymentRecoveryVersion            int64 = 2026111926
-	paymentReviewFixesVersion         int64 = 2026111927
-	paymentCatalogAndChannelVersion   int64 = 2026111928
-	paymentVIPSwitchVersion           int64 = 2026111929
-	paymentTemplateCatalogVersion     int64 = 2026111930
-	conversionCenterReviewVersion     int64 = 2026111931
-	conversionBatchVersion            int64 = 2026111932
-	conversionRereviewVersion         int64 = 2026111933
-	conversionCredentialHealthVersion int64 = 2026111934
-	rbacPermissionsVersion            int64 = 2026111935
-	promotionEnvironmentVersion       int64 = 2026111936
-	stripeTaxLiabilityRelaxVersion    int64 = 2026111937
-	stripeLocalCurrencyVersion        int64 = 2026111938
-	stripeRefundDisputeVersion        int64 = 2026111939
-	stripeRadarEventRecoveryVersion   int64 = 2026111940
-	stripeReportScheduleVersion       int64 = 2026111941
-	RequiredSchemaVersion             int64 = 2026111942
-)
+const RequiredSchemaVersion int64 = 2026112802
 
 // BootstrapAdminConfig holds environment-injected credentials for initializing
 // the first super admin on an empty database during `-migrate`.
@@ -148,6 +101,9 @@ func autoMigrateInternal(ctx context.Context, pool *pgxpool.Pool, bootstrap *Boo
 	if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock(2026111701)"); err != nil {
 		return err
 	}
+	if _, err := tx.Exec(ctx, "SET LOCAL search_path = public, pg_temp"); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(ctx, "SET LOCAL lock_timeout = '3s'"); err != nil {
 		return err
 	}
@@ -165,248 +121,109 @@ func autoMigrateInternal(ctx context.Context, pool *pgxpool.Pool, bootstrap *Boo
 		}
 	}
 
-	if version == RequiredSchemaVersion {
-		if bootstrap != nil {
-			if err := ensureBootstrapSuperAdmin(ctx, tx, *bootstrap); err != nil {
-				return err
-			}
+	switch {
+	case ledger == nil:
+		if _, err := tx.Exec(ctx, dbassets.SchemaSQL); err != nil {
+			return fmt.Errorf("create schema: %w", err)
 		}
-		return tx.Commit(ctx)
-	}
-	if version < baselineSchemaVersion {
-		if err := applyBaseline(ctx, tx); err != nil {
+		if _, err := tx.Exec(ctx, dbassets.InitialDataSQL); err != nil {
+			return fmt.Errorf("initialize database: %w", err)
+		}
+	case version == 2026111942:
+		if err := checkLegacyQueryIndexes(ctx, tx); err != nil {
 			return err
 		}
-	}
-	if version < chapterSchemaVersion {
-		if _, err := tx.Exec(ctx, dbassets.ChapterPublicationSQL); err != nil {
-			return fmt.Errorf("schema migration %d: %w", chapterSchemaVersion, err)
+		if err := applyMigration2026112802(ctx, tx); err != nil {
+			return err
 		}
-	}
-	if version < readerPerformanceVersion {
-		if _, err := tx.Exec(ctx, dbassets.ReaderPerformanceSQL); err != nil {
-			return fmt.Errorf("schema migration %d: %w", readerPerformanceVersion, err)
+		if _, err := tx.Exec(ctx, "INSERT INTO reader_schema_migrations(version) VALUES(2026112801), ($1) ON CONFLICT (version) DO NOTHING", RequiredSchemaVersion); err != nil {
+			return err
 		}
-	}
-	if version < readerQueueVersion {
-		if _, err := tx.Exec(ctx, dbassets.ReaderQueueAndShelfSQL); err != nil {
-			return fmt.Errorf("schema migration %d: %w", readerQueueVersion, err)
+	case version == 2026112801:
+		if err := applyMigration2026112802(ctx, tx); err != nil {
+			return err
 		}
-	}
-	if version < conversionSchemaVersion {
-		if _, err := tx.Exec(ctx, dbassets.ConversionReportingSQL); err != nil {
-			return fmt.Errorf("schema migration %d: %w", conversionSchemaVersion, err)
+		if _, err := tx.Exec(ctx, "INSERT INTO reader_schema_migrations(version) VALUES($1) ON CONFLICT (version) DO NOTHING", RequiredSchemaVersion); err != nil {
+			return err
 		}
+	case version != RequiredSchemaVersion:
+		return fmt.Errorf("schema %d must first be upgraded to 2026111942 with the previous CMS release", version)
 	}
-	if version < readerConversionVersion {
-		if _, err := tx.Exec(ctx, dbassets.ReaderConversionSQL); err != nil {
-			return fmt.Errorf("schema migration %d: %w", readerConversionVersion, err)
-		}
-	}
-	if version < legacyConversionVersion {
-		if _, err := tx.Exec(ctx, dbassets.LegacyConversionSQL); err != nil {
-			return fmt.Errorf("schema migration %d: %w", legacyConversionVersion, err)
-		}
-	}
-	if version < conversionReconcileVersion {
-		if _, err := tx.Exec(ctx, dbassets.ConversionReconciliationSQL); err != nil {
-			return fmt.Errorf("schema migration %d: %w", conversionReconcileVersion, err)
-		}
-	}
-	if version < conversionOperationsVersion {
-		if _, err := tx.Exec(ctx, dbassets.ConversionOperationsSQL); err != nil {
-			return fmt.Errorf("schema migration %d: %w", conversionOperationsVersion, err)
-		}
-	}
-	if version < conversionReviewVersion {
-		if _, err := tx.Exec(ctx, dbassets.ConversionReviewSQL); err != nil {
-			return fmt.Errorf("schema migration %d: %w", conversionReviewVersion, err)
-		}
-	}
-	if version < sinanConversionVersion {
-		if _, err := tx.Exec(ctx, dbassets.SinanConversionSQL); err != nil {
-			return fmt.Errorf("schema migration %d: %w", sinanConversionVersion, err)
-		}
-	}
-	if version < sinanReviewVersion {
-		if _, err := tx.Exec(ctx, dbassets.SinanReviewSQL); err != nil {
-			return fmt.Errorf("schema migration %d: %w", sinanReviewVersion, err)
-		}
-	}
-	if version < sinanRecheckVersion {
-		if _, err := tx.Exec(ctx, dbassets.SinanRecheckSQL); err != nil {
-			return fmt.Errorf("schema migration %d: %w", sinanRecheckVersion, err)
-		}
-	}
-	if version < paymentPolicyVersion {
-		if _, err := tx.Exec(ctx, dbassets.PaymentPolicySQL); err != nil {
-			return fmt.Errorf("schema migration %d: %w", paymentPolicyVersion, err)
-		}
-	}
-	if version < readerPaymentPolicyVersion {
-		if _, err := tx.Exec(ctx, dbassets.ReaderPaymentPolicySQL); err != nil {
-			return fmt.Errorf("schema migration %d: %w", readerPaymentPolicyVersion, err)
-		}
-	}
-	if version < sinanPaymentPolicyVersion {
-		if _, err := tx.Exec(ctx, dbassets.SinanPaymentPolicySQL); err != nil {
-			return fmt.Errorf("schema migration %d: %w", sinanPaymentPolicyVersion, err)
-		}
-	}
-	if version < readerPaymentReviewVersion {
-		if _, err := tx.Exec(ctx, dbassets.ReaderPaymentReviewSQL); err != nil {
-			return fmt.Errorf("schema migration %d: %w", readerPaymentReviewVersion, err)
-		}
-	}
-	if version < readerPaymentRecoveryVersion {
-		if _, err := tx.Exec(ctx, dbassets.ReaderPaymentRecoverySQL); err != nil {
-			return fmt.Errorf("schema migration %d: %w", readerPaymentRecoveryVersion, err)
-		}
-	}
-	if version < readerSubscriptionEvidenceVersion {
-		if _, err := tx.Exec(ctx, dbassets.ReaderSubscriptionEvidenceSQL); err != nil {
-			return fmt.Errorf("schema migration %d: %w", readerSubscriptionEvidenceVersion, err)
-		}
-	}
-	if version < paymentDomainFoundationVersion {
-		if _, err := tx.Exec(ctx, dbassets.PaymentDomainFoundationSQL); err != nil {
-			return fmt.Errorf("schema migration %d: %w", paymentDomainFoundationVersion, err)
-		}
-	}
-	if version < paymentCheckoutVersion {
-		if _, err := tx.Exec(ctx, dbassets.PaymentCheckoutSQL); err != nil {
-			return fmt.Errorf("schema migration %d: %w", paymentCheckoutVersion, err)
-		}
-	}
-	if version < vipOfferVersionsVersion {
-		if _, err := tx.Exec(ctx, dbassets.VIPOfferVersionsSQL); err != nil {
-			return fmt.Errorf("schema migration %d: %w", vipOfferVersionsVersion, err)
-		}
-	}
-	if version < paymentLedgerVersion {
-		if _, err := tx.Exec(ctx, dbassets.PaymentLedgerSQL); err != nil {
-			return fmt.Errorf("schema migration %d: %w", paymentLedgerVersion, err)
-		}
-	}
-	if version < paymentSettlementVersion {
-		if _, err := tx.Exec(ctx, dbassets.PaymentSettlementSQL); err != nil {
-			return fmt.Errorf("schema migration %d: %w", paymentSettlementVersion, err)
-		}
-	}
-	if version < paymentCheckoutDecisionsVersion {
-		if _, err := tx.Exec(ctx, dbassets.PaymentCheckoutDecisionsSQL); err != nil {
-			return fmt.Errorf("schema migration %d: %w", paymentCheckoutDecisionsVersion, err)
-		}
-	}
-	if version < paymentAftercareVersion {
-		if _, err := tx.Exec(ctx, dbassets.PaymentAftercareSQL); err != nil {
-			return fmt.Errorf("schema migration %d: %w", paymentAftercareVersion, err)
-		}
-	}
-	if version < stripeOneTimeCheckoutVersion {
-		if _, err := tx.Exec(ctx, dbassets.StripeOneTimeCheckoutSQL); err != nil {
-			return fmt.Errorf("schema migration %d: %w", stripeOneTimeCheckoutVersion, err)
-		}
-	}
-	if version < stripeVIPCheckoutVersion {
-		if _, err := tx.Exec(ctx, dbassets.StripeVIPCheckoutSQL); err != nil {
-			return fmt.Errorf("schema migration %d: %w", stripeVIPCheckoutVersion, err)
-		}
-	}
-	if version < paymentCompletionVersion {
-		if _, err := tx.Exec(ctx, dbassets.PaymentCompletionSQL); err != nil {
-			return fmt.Errorf("schema migration %d: %w", paymentCompletionVersion, err)
-		}
-	}
-	if version < paymentRecoveryVersion {
-		if _, err := tx.Exec(ctx, dbassets.PaymentRecoverySQL); err != nil {
-			return fmt.Errorf("schema migration %d: %w", paymentRecoveryVersion, err)
-		}
-	}
-	if version < paymentReviewFixesVersion {
-		if _, err := tx.Exec(ctx, dbassets.PaymentReviewFixesSQL); err != nil {
-			return fmt.Errorf("schema migration %d: %w", paymentReviewFixesVersion, err)
-		}
-	}
-	if version < paymentCatalogAndChannelVersion {
-		if _, err := tx.Exec(ctx, dbassets.PaymentCatalogAndChannelSQL); err != nil {
-			return fmt.Errorf("schema migration %d: %w", paymentCatalogAndChannelVersion, err)
-		}
-	}
-	if version < paymentVIPSwitchVersion {
-		if _, err := tx.Exec(ctx, dbassets.PaymentVIPSwitchSQL); err != nil {
-			return fmt.Errorf("schema migration %d: %w", paymentVIPSwitchVersion, err)
-		}
-	}
-	if version < paymentTemplateCatalogVersion {
-		if _, err := tx.Exec(ctx, dbassets.PaymentTemplateCatalogFixesSQL); err != nil {
-			return fmt.Errorf("schema migration %d: %w", paymentTemplateCatalogVersion, err)
-		}
-	}
-	if version < conversionCenterReviewVersion {
-		if _, err := tx.Exec(ctx, dbassets.ConversionCenterReviewSQL); err != nil {
-			return fmt.Errorf("schema migration %d: %w", conversionCenterReviewVersion, err)
-		}
-	}
-	if version < conversionBatchVersion {
-		if _, err := tx.Exec(ctx, dbassets.ConversionBatchSQL); err != nil {
-			return fmt.Errorf("schema migration %d: %w", conversionBatchVersion, err)
-		}
-	}
-	if version < conversionRereviewVersion {
-		if _, err := tx.Exec(ctx, dbassets.ConversionThroughputRereviewSQL); err != nil {
-			return fmt.Errorf("schema migration %d: %w", conversionRereviewVersion, err)
-		}
-	}
-	if version < conversionCredentialHealthVersion {
-		if _, err := tx.Exec(ctx, dbassets.ConversionCredentialHealthSQL); err != nil {
-			return fmt.Errorf("schema migration %d: %w", conversionCredentialHealthVersion, err)
-		}
-	}
-	if version < rbacPermissionsVersion {
-		if _, err := tx.Exec(ctx, dbassets.RBACPermissionsSQL); err != nil {
-			return fmt.Errorf("schema migration %d: %w", rbacPermissionsVersion, err)
-		}
-	}
-	if version < promotionEnvironmentVersion {
-		if _, err := tx.Exec(ctx, dbassets.PromotionEnvironmentSQL); err != nil {
-			return fmt.Errorf("schema migration %d: %w", promotionEnvironmentVersion, err)
-		}
-	}
-	if version < stripeTaxLiabilityRelaxVersion {
-		if _, err := tx.Exec(ctx, dbassets.StripeTaxLiabilityRelaxSQL); err != nil {
-			return fmt.Errorf("schema migration %d: %w", stripeTaxLiabilityRelaxVersion, err)
-		}
-	}
-	if version < stripeLocalCurrencyVersion {
-		if _, err := tx.Exec(ctx, dbassets.StripeLocalCurrencyCustomerSQL); err != nil {
-			return fmt.Errorf("schema migration %d: %w", stripeLocalCurrencyVersion, err)
-		}
-	}
-	if version < stripeRefundDisputeVersion {
-		if _, err := tx.Exec(ctx, dbassets.StripeRefundDisputeMitigationSQL); err != nil {
-			return fmt.Errorf("schema migration %d: %w", stripeRefundDisputeVersion, err)
-		}
-	}
-	if version < stripeRadarEventRecoveryVersion {
-		if _, err := tx.Exec(ctx, dbassets.StripeRadarAndEventRecoverySQL); err != nil {
-			return fmt.Errorf("schema migration %d: %w", stripeRadarEventRecoveryVersion, err)
-		}
-	}
-	if version < stripeReportScheduleVersion {
-		if _, err := tx.Exec(ctx, dbassets.StripeReportScheduleSQL); err != nil {
-			return fmt.Errorf("schema migration %d: %w", stripeReportScheduleVersion, err)
-		}
-	}
-	if _, err := tx.Exec(ctx, dbassets.ProductDraftMutationSQL); err != nil {
-		return fmt.Errorf("schema migration %d: %w", RequiredSchemaVersion, err)
-	}
+
 	if bootstrap != nil {
 		if err := ensureBootstrapSuperAdmin(ctx, tx, *bootstrap); err != nil {
 			return err
 		}
 	}
 	return tx.Commit(ctx)
+}
+
+// The 1942 release shipped these indexes separately. Check the catalogs without
+// issuing DDL against business tables during an upgrade.
+func checkLegacyQueryIndexes(ctx context.Context, tx pgx.Tx) error {
+	var issues string
+	err := tx.QueryRow(ctx, `
+ SELECT coalesce(string_agg(name || CASE WHEN i.indexrelid IS NULL THEN ' (missing)' ELSE ' (invalid)' END, ', ' ORDER BY name), '')
+ FROM unnest(ARRAY[
+        'public.idx_orders_subscription_period',
+        'public.idx_whole_book_entitlement_v2',
+        'public.idx_transactions_user_feed',
+        'public.idx_novels_reader_popular',
+        'public.idx_novels_reader_latest',
+        'public.idx_payment_outbox_pending',
+        'public.idx_reader_sessions_user',
+        'public.idx_paypal_order_recent_pending',
+        'public.idx_paypal_order_retained_claim',
+        'public.idx_paypal_cancel_claim',
+        'public.idx_paypal_subscription_continuous',
+        'public.idx_paypal_subscription_recent',
+        'public.idx_outbox_unattributed_oldest',
+        'public.idx_payment_order_attention',
+        'public.idx_reader_shelf_activity',
+        'public.idx_promotion_links_utm',
+        'public.idx_reader_paid_vip_expiry',
+        'public.recharge_orders_conversion_fulfilled_at',
+        'public.conversion_outbox_retention',
+        'public.conversion_repair_fact_retention',
+        'conversion.conversion_event_retention',
+        'conversion.conversion_inbox_retention',
+        'conversion.conversion_events_rule_fact_missing',
+        'conversion.conversion_audit_policy_publication',
+        'public.conversion_outbox_throughput_created',
+        'public.conversion_outbox_throughput_consumed',
+        'conversion.conversion_inbox_throughput_received',
+        'conversion.conversion_deliveries_throughput_created',
+        'conversion.conversion_deliveries_throughput_finalized',
+        'conversion.conversion_attempts_throughput_sending'
+ ]) AS expected(name)
+ LEFT JOIN pg_index i ON i.indexrelid = to_regclass(name)
+ WHERE i.indisvalid IS DISTINCT FROM TRUE`).Scan(&issues)
+	if err != nil {
+		return fmt.Errorf("check baseline query indexes: %w", err)
+	}
+	if issues != "" {
+		return fmt.Errorf("baseline query indexes require repair before migration: %s", issues)
+	}
+	return nil
+}
+
+func applyMigration2026112802(ctx context.Context, tx pgx.Tx) error {
+	const ddl = `
+ALTER TABLE public.recharge_slots
+	ADD COLUMN IF NOT EXISTS list_price_cents integer NOT NULL DEFAULT 0;
+DO $$
+BEGIN
+	IF NOT EXISTS (
+		SELECT 1 FROM pg_constraint WHERE conname = 'recharge_slots_list_price_cents_check'
+	) THEN
+		ALTER TABLE public.recharge_slots
+			ADD CONSTRAINT recharge_slots_list_price_cents_check CHECK (list_price_cents >= 0);
+	END IF;
+END $$;`
+	if _, err := tx.Exec(ctx, ddl); err != nil {
+		return fmt.Errorf("apply 2026112802 list_price_cents migration: %w", err)
+	}
+	return nil
 }
 
 func ensureBootstrapSuperAdmin(ctx context.Context, tx pgx.Tx, cfg BootstrapAdminConfig) error {
@@ -488,93 +305,15 @@ func ensureBootstrapSuperAdmin(ctx context.Context, tx pgx.Tx, cfg BootstrapAdmi
 	return nil
 }
 
-func applyBaseline(ctx context.Context, tx pgx.Tx) error {
-	log.Println("Running safe database auto-migration...")
-
-	// 1. Execute full schema DDL (Idempotent table and index creation)
-	if dbassets.SchemaSQL != "" {
-		_, err := tx.Exec(ctx, dbassets.SchemaSQL)
-		if err != nil {
-			return fmt.Errorf("schema migration: %w", err)
-		} else {
-			log.Println("Database schema checked/migrated successfully")
-		}
-	}
-
-	// 2. Seed initial data if tables are empty (configs, domains, templates, novels)
-	var configCount int
-	err := tx.QueryRow(ctx, "SELECT COUNT(*) FROM system_configs").Scan(&configCount)
-	if err != nil {
-		return fmt.Errorf("read system_configs: %w", err)
-	}
-	if configCount == 0 {
-		log.Println("Database is newly initialized. Seeding initial configs, templates, and sample novels...")
-		if dbassets.SeedSQL != "" {
-			_, err = tx.Exec(ctx, dbassets.SeedSQL)
-			if err != nil {
-				return fmt.Errorf("seed: %w", err)
-			} else {
-				log.Println("Initial seed data inserted successfully")
-			}
-		}
-	} else {
-		// Ensure system configs are present (idempotent); super admin is never hardcoded.
-		_, err = tx.Exec(ctx, `
-			INSERT INTO system_configs (key, value) VALUES ('global_coin_cost_per_thousand', '500') ON CONFLICT (key) DO NOTHING;
-			INSERT INTO system_configs (key, value) VALUES ('global_start_pay_chapter_index', '3') ON CONFLICT (key) DO NOTHING;
-		`)
-		if err != nil {
-			return fmt.Errorf("ensure defaults: %w", err)
-		}
-	}
-
-	// 3. Ensure all primary-key sequences are at least as high as MAX(id)
-	//    (prevents SQLSTATE 23505 after explicit-ID seed inserts or imports).
-	if err := syncSequences(ctx, tx); err != nil {
-		return err
-	}
-	return nil
-}
-
 type sequenceSpec struct {
 	table   string
 	column  string
 	seqName string
 }
 
-var managedSequences = []sequenceSpec{
-	{table: "novels", column: "id", seqName: "novels_id_seq"},
-	{table: "recharge_orders", column: "id", seqName: "recharge_orders_id_seq"},
-	{table: "admin_audit_logs", column: "id"},
-	{table: "users", column: "id"},
-	{table: "bookshelves", column: "id"},
-	{table: "unlock_records", column: "id"},
-	{table: "recharge_templates", column: "id"},
-	{table: "recharge_slots", column: "id"},
-	{table: "payment_provider_plans", column: "id"},
-	{table: "system_domains", column: "id"},
-	{table: "fb_pixels", column: "id"},
-	{table: "promotion_links", column: "id"},
-	{table: "user_subscriptions", column: "id"},
-	{table: "recommendations", column: "id"},
-	{table: "gift_codes", column: "id"},
-	{table: "gift_code_redemptions", column: "id"},
-	{table: "feedback", column: "id"},
-	{table: "third_party_payment_orders", column: "id"},
-}
-
 type migrationDB interface {
 	QueryRow(context.Context, string, ...any) pgx.Row
 	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
-}
-
-func syncSequences(ctx context.Context, pool migrationDB) error {
-	for _, spec := range managedSequences {
-		if err := syncOneSequence(ctx, pool, spec); err != nil {
-			return fmt.Errorf("sequence %s.%s: %w", spec.table, spec.column, err)
-		}
-	}
-	return nil
 }
 
 // SyncSequence advances the backing PostgreSQL sequence for table.column when it lags behind MAX(column).

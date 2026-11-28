@@ -189,6 +189,8 @@ export interface TemplateSlotDTO {
   badge: string;
   is_highlighted: boolean;
   display_alias: string;
+  list_price_cents?: number;
+  list_price?: string;
   product_code?: string;
   product_type?: ProductType;
   type?: 'single' | 'whole_book' | 'subscription';
@@ -223,6 +225,7 @@ export interface TemplateSlotWriteItem {
   badge: string;
   is_highlighted: boolean;
   display_alias: string;
+  list_price_cents?: number;
 }
 
 export const PRODUCT_TYPE_LABELS: Record<ProductType, string> = {

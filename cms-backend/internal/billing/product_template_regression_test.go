@@ -756,12 +756,12 @@ func TestUpdateTemplate_PreservesSlotIDsAndDefaultInvariant(t *testing.T) {
 	}
 	before := loadSlotIDsByProd()
 
-	// Swap slots 1 and 2 + update badge/name
+	// Swap slots 1 and 2 + update badge/name/list_price_cents
 	if rec := doJSON(t, r, http.MethodPut, fmt.Sprintf("/cms/recharge-templates/%d", tplID), "cfg-finance", map[string]any{
 		"name": "Sole Default Renamed", "environment": "live", "is_default": true,
 		"slots": []map[string]any{
-			{"slot_index": 1, "product_id": pids[1], "badge": "PROMOTED"},
-			{"slot_index": 2, "product_id": pids[0], "badge": "SWAPPED"},
+			{"slot_index": 1, "product_id": pids[1], "badge": "PROMOTED", "list_price_cents": 2999},
+			{"slot_index": 2, "product_id": pids[0], "badge": "SWAPPED", "list_price_cents": 0},
 			{"slot_index": 3, "product_id": pids[2]},
 			{"slot_index": 4, "product_id": pids[3]},
 		},
@@ -773,6 +773,23 @@ func TestUpdateTemplate_PreservesSlotIDsAndDefaultInvariant(t *testing.T) {
 		if before[pid] == 0 || before[pid] != after[pid] {
 			t.Fatalf("slot.id changed for product %d: before=%d after=%d", pid, before[pid], after[pid])
 		}
+	}
+	var savedListPrice int
+	if err := db.DB.QueryRow(ctx, `SELECT list_price_cents FROM recharge_slots WHERE template_id=$1 AND product_id=$2`, tplID, pids[1]).Scan(&savedListPrice); err != nil || savedListPrice != 2999 {
+		t.Fatalf("expected saved list_price_cents=2999, got %d (err=%v)", savedListPrice, err)
+	}
+
+	// Reject list_price_cents <= product price_cents
+	if rec := doJSON(t, r, http.MethodPut, fmt.Sprintf("/cms/recharge-templates/%d", tplID), "cfg-finance", map[string]any{
+		"name": "Sole Default Renamed", "environment": "live", "is_default": true,
+		"slots": []map[string]any{
+			{"slot_index": 1, "product_id": pids[1], "list_price_cents": 100},
+			{"slot_index": 2, "product_id": pids[0]},
+			{"slot_index": 3, "product_id": pids[2]},
+			{"slot_index": 4, "product_id": pids[3]},
+		},
+	}); rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 when list_price_cents <= price_cents, got %d: %s", rec.Code, rec.Body.String())
 	}
 
 	// Attempt to unset is_default on sole default template -> 409 and stays default

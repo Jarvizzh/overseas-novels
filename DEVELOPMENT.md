@@ -23,11 +23,11 @@
 
 ```text
 star-novel/
+├── cms-backend/db/
+│   ├── schema.sql             # 完整 PostgreSQL 结构与索引
+│   └── migrations/2026112801.sql  # 系统初始数据及版本记录
 ├── backend/                   # Go 读者端后端工程 (端口 8080)
 │   ├── cmd/server/main.go     # 主入口与服务实例化、依赖注入装配
-│   ├── db/
-│   │   ├── schema.sql         # 数据库全量表定义与重置 SQL (包含核心表)
-│   │   └── seed.sql           # 高保真小说内容与内置配置数据种子
 │   └── internal/              # 读者端业务层 (全部实现规范三层分层)
 │       ├── auth/              # 用户鉴权 (handler.go, service.go, repository.go)
 │       ├── config/            # 配置中心
@@ -145,4 +145,4 @@ cd cms-front
 npm run dev
 ```
 * **访问链接**：`http://localhost:5174/`
-* **默认测试管理员**：在登录界面点击 "Seed Default Admin (admin/admin123)" 一键注册管理员，或自行在后台注册后，以用户名 `admin` / 密码 `password` (或 `admin123`) 登录系统管理用户档案。
+* **首个管理员**：空库通过 CMS 的 `-migrate` 和 `CMS_BOOTSTRAP_ADMIN_PASSWORD` 创建，详见 [部署说明](DEPLOYMENT_SOP.md)。

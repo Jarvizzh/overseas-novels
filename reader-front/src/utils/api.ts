@@ -595,6 +595,8 @@ export const api = {
         stripe_ready?: boolean;
         price: string;
         price_cents: number;
+        list_price?: string;
+        list_price_cents?: number;
       }>;
     }>(`/wallet/recharge/templates${novelId ? `?${new URLSearchParams({ novel_id: String(novelId) })}` : ''}`, {
       signal,

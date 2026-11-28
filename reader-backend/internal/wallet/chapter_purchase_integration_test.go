@@ -92,7 +92,7 @@ func TestChapterPurchaseLocksPublicationAndUsesStableIdentity(t *testing.T) {
 	// Re-pricing the publisher's global settings must invalidate the quote even
 	// when the chapter version itself did not change.
 	exec(`UPDATE novels SET coin_cost_per_thousand=NULL WHERE id=1;
-		INSERT INTO system_configs(key,value) VALUES('global_coin_cost_per_thousand','300')`)
+		UPDATE system_configs SET value='300' WHERE key='global_coin_cost_per_thousand'`)
 	version, err = nr.GetContentVersion(ctx, 1)
 	if err != nil {
 		t.Fatal(err)

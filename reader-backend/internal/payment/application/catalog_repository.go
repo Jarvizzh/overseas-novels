@@ -71,7 +71,7 @@ const sellableCatalogSlotColumns = `
 	SELECT s.id, s.template_id, s.slot_index, p.id, p.code, p.product_type,
 	       CASE WHEN p.product_type = 'vip' THEN 'subscription' ELSE p.product_type END,
 	       p.name, p.description, p.coins, p.bonus,
-	       COALESCE(p.vip_cycle, ''), p.currency, p.price_cents,
+	       COALESCE(p.vip_cycle, ''), p.currency, p.price_cents, s.list_price_cents,
 	       s.badge, s.is_highlighted, s.display_alias,
 	       p.novel_scope_type, p.novel_scope_ids
 	FROM recharge_slots s
@@ -110,7 +110,7 @@ func scanHydratedSlot(row pgx.Row) (model.RechargeSlot, error) {
 	err := row.Scan(
 		&s.ID, &s.TemplateID, &s.SlotIndex, &s.ProductID, &s.ProductCode, &s.ProductType, &s.Type,
 		&s.Name, &s.Description, &s.Coins, &s.Bonus,
-		&s.SubscriptionCycle, &s.Currency, &s.PriceCents,
+		&s.SubscriptionCycle, &s.Currency, &s.PriceCents, &s.ListPriceCents,
 		&s.Badge, &s.IsHighlighted, &s.DisplayAlias,
 		&s.NovelScopeType, &s.NovelScopeIDs,
 	)
@@ -118,6 +118,12 @@ func scanHydratedSlot(row pgx.Row) (model.RechargeSlot, error) {
 		return model.RechargeSlot{}, err
 	}
 	s.Price = formatUSDPrice(s.PriceCents)
+	if s.ListPriceCents > s.PriceCents {
+		s.ListPrice = formatUSDPrice(s.ListPriceCents)
+	} else {
+		s.ListPriceCents = 0
+		s.ListPrice = ""
+	}
 	s.PayPalReady = true
 	s.StripeReady = true
 	if s.ProductType == "vip" {

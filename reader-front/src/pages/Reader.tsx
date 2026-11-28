@@ -4,7 +4,7 @@ import { ChevronLeft, ChevronRight, List, Lock, BookOpen, Sparkles } from 'lucid
 import { useToast } from '../context/toastStore';
 import { api, ApiError } from '../utils/api';
 import type { Novel, Chapter, ChapterContentResponse } from '../utils/api';
-import { ReaderSettings, type ReaderFontFamily, type ReaderLineHeight } from '../components/ReaderSettings';
+import { ReaderSettings, type ReaderFontFamily } from '../components/ReaderSettings';
 import { Drawer } from '../components/Drawer';
 import { GoldCoin } from '../components/GoldCoin';
 import { RechargeCheckoutPanel } from '../components/RechargeCheckoutPanel';
@@ -60,11 +60,7 @@ function splitParagraphs(content: string): string[] {
     .filter(Boolean);
 }
 
-const LINE_HEIGHT_MAP: Record<ReaderLineHeight, number> = {
-  compact: 1.5,
-  standard: 1.68,
-  relaxed: 1.85,
-};
+const STANDARD_LINE_HEIGHT = 1.68;
 
 export const Reader: React.FC<ReaderProps> = ({
   userId,
@@ -168,11 +164,6 @@ export const Reader: React.FC<ReaderProps> = ({
     const saved = readerStorage.getItem('reader-font-family');
     return saved === 'sans' ? 'sans' : 'serif';
   });
-  const [lineHeight, setLineHeight] = useState<ReaderLineHeight>(() => {
-    const saved = readerStorage.getItem('reader-line-height');
-    if (saved === 'compact' || saved === 'relaxed') return saved;
-    return 'standard';
-  });
 
   const handleFontSizeChange = (newSize: number) => {
     setFontSize(newSize);
@@ -187,11 +178,6 @@ export const Reader: React.FC<ReaderProps> = ({
   const handleFontFamilyChange = (family: ReaderFontFamily) => {
     setFontFamily(family);
     readerStorage.setItem('reader-font-family', family);
-  };
-
-  const handleLineHeightChange = (lh: ReaderLineHeight) => {
-    setLineHeight(lh);
-    readerStorage.setItem('reader-line-height', lh);
   };
 
   const [showSettings, setShowSettings] = useState(false);
@@ -627,8 +613,6 @@ export const Reader: React.FC<ReaderProps> = ({
         onFontSizeChange={handleFontSizeChange}
         fontFamily={fontFamily}
         onFontFamilyChange={handleFontFamilyChange}
-        lineHeight={lineHeight}
-        onLineHeightChange={handleLineHeightChange}
         theme={theme}
         onThemeChange={handleThemeChange}
         onOpenDrawer={() => setShowTOC(true)}
@@ -692,7 +676,7 @@ export const Reader: React.FC<ReaderProps> = ({
         style={{
           fontFamily: fontFamily === 'sans' ? 'var(--font-sans)' : 'var(--font-serif)',
           fontSize: `${fontSize}px`,
-          lineHeight: LINE_HEIGHT_MAP[lineHeight],
+          lineHeight: STANDARD_LINE_HEIGHT,
         }}
       >
         {loading ? (
@@ -755,7 +739,7 @@ export const Reader: React.FC<ReaderProps> = ({
                       </div>
                     </div>
 
-                    {userCoins > 0 && userCoins >= chapterPrice && (
+                    {userCoins > 0 && userCoins >= chapterPrice ? (
                       <div className="reader-unlock-action-group">
                         <button
                           type="button"
@@ -777,60 +761,62 @@ export const Reader: React.FC<ReaderProps> = ({
                           <span>Auto-unlock next chapters</span>
                         </label>
                       </div>
+                    ) : (
+                      <div className="reader-paywall-recharge">
+                        <RechargeCheckoutPanel
+                          embedded
+                          authReady={authReady}
+                          userId={userId}
+                          novelId={novelId}
+                          novelTitle={novel.title}
+                          returnPathOverride={`/content?novel_id=${novelId}&chapter_index=${currentChIndex + 1}`}
+                          onRefreshStatus={onRefreshWallet}
+                          onIntentTracked={(intentId) =>
+                            onNavigate(`/recharge?purchase=${encodeURIComponent(intentId)}`)
+                          }
+                        />
+                      </div>
                     )}
-
-                    <div className="reader-paywall-recharge">
-                      <RechargeCheckoutPanel
-                        embedded
-                        authReady={authReady}
-                        userId={userId}
-                        novelId={novelId}
-                        novelTitle={novel.title}
-                        returnPathOverride={`/content?novel_id=${novelId}&chapter_index=${currentChIndex + 1}`}
-                        onRefreshStatus={onRefreshWallet}
-                        onIntentTracked={(intentId) =>
-                          onNavigate(`/recharge?purchase=${encodeURIComponent(intentId)}`)
-                        }
-                      />
-                    </div>
                   </>
                 )}
               </section>
             )}
 
-            <div className="reader-bottom-nav-row" onClick={(e) => e.stopPropagation()}>
-              <button
-                type="button"
-                className="reader-chapter-nav-btn"
-                disabled={currentChIndex <= 0}
-                onClick={() => handleChapterSelect(currentChIndex - 1)}
-                aria-label="Previous chapter"
-              >
-                <ChevronLeft size={16} strokeWidth={2} aria-hidden="true" />
-                <span>Previous</span>
-              </button>
+            {!isLocked && (
+              <div className="reader-bottom-nav-row" onClick={(e) => e.stopPropagation()}>
+                <button
+                  type="button"
+                  className="reader-chapter-nav-btn"
+                  disabled={currentChIndex <= 0}
+                  onClick={() => handleChapterSelect(currentChIndex - 1)}
+                  aria-label="Previous chapter"
+                >
+                  <ChevronLeft size={16} strokeWidth={2} aria-hidden="true" />
+                  <span>Previous</span>
+                </button>
 
-              <button
-                type="button"
-                className="reader-chapter-nav-btn reader-toc-nav-btn"
-                onClick={() => setShowTOC(true)}
-                aria-label="Table of Contents"
-              >
-                <List size={16} strokeWidth={1.9} aria-hidden="true" />
-                <span>Contents</span>
-              </button>
+                <button
+                  type="button"
+                  className="reader-chapter-nav-btn reader-toc-nav-btn"
+                  onClick={() => setShowTOC(true)}
+                  aria-label="Table of Contents"
+                >
+                  <List size={16} strokeWidth={1.9} aria-hidden="true" />
+                  <span>Contents</span>
+                </button>
 
-              <button
-                type="button"
-                className="reader-chapter-nav-btn primary"
-                disabled={chapters.length > 0 && currentChIndex >= chapters.length - 1}
-                onClick={() => handleChapterSelect(currentChIndex + 1)}
-                aria-label="Next chapter"
-              >
-                <span>Next</span>
-                <ChevronRight size={16} strokeWidth={2} aria-hidden="true" />
-              </button>
-            </div>
+                <button
+                  type="button"
+                  className="reader-chapter-nav-btn primary"
+                  disabled={chapters.length > 0 && currentChIndex >= chapters.length - 1}
+                  onClick={() => handleChapterSelect(currentChIndex + 1)}
+                  aria-label="Next chapter"
+                >
+                  <span>Next</span>
+                  <ChevronRight size={16} strokeWidth={2} aria-hidden="true" />
+                </button>
+              </div>
+            )}
           </article>
         )}
       </div>

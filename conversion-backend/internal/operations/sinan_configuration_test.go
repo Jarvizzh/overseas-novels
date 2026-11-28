@@ -113,7 +113,7 @@ func TestConfigurationAuditQueryAndRestrictedRole(t *testing.T) {
 		VALUES('starnovel','reader','test','v1',true),('sinan','partner-a','test','sinan-mock-v1',false);
 	`)
 
-	rawGrants, err := os.ReadFile("../../../cms-backend/db/conversion_role_grants.sql")
+	rawGrants, err := os.ReadFile("../../../cms-backend/ops/conversion_role_grants.sql")
 	if err != nil {
 		t.Fatal(err)
 	}

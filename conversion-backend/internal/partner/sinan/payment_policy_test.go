@@ -185,16 +185,16 @@ func TestSinanPaymentDedupAndRouteRecoveryUnderConcurrentWorkers(t *testing.T) {
 		JOIN conversion.partner_reports r ON r.original_delivery_id=d.id WHERE e.source_event_id='invalid-amount'`)
 }
 
-func TestSinanPaymentMigrationPreservesHistoricIdentity(t *testing.T) {
-	f := newFixtureFrom(t, "2026111911", func(f fixture) {
+func TestSinanPaymentPreservesHistoricIdentity(t *testing.T) {
+	f := newFixtureWithData(t, func(f fixture) {
 		exec(t, f.ctx, f.owner, `
 			INSERT INTO conversion.events(integration_id,environment,source_event_type,source_event_id,event_name,source_order_id,
-			    attribution_state,occurred_at,received_at,amount,currency,order_type,partner_fields)
-			VALUES(1,'test','recharge-paid','historical-event','Purchase','demo_order_0001','matched',now(),now(),10,'USD','1',
+			    payment_app_scope,attribution_state,occurred_at,received_at,amount,currency,order_type,partner_fields)
+			VALUES(1,'test','recharge-paid','historical-event','Purchase','demo_order_0001','1','matched',now(),now(),10,'USD','1',
 			       '{"app_id":"1","pixel_id":"123"}');
-			INSERT INTO conversion.inbox(integration_id,source_event_type,source_event_id,source_order_id,payload_digest,state)
-			VALUES(1,'recharge-paid','historical-event','demo_order_0001','fixture','consumed'),
-			      (1,'recharge-paid','historical-event','demo_order_0001','conflicting-fixture','quarantined');
+			INSERT INTO conversion.inbox(integration_id,source_event_type,source_event_id,source_order_id,source_app_id,payload_digest,state)
+			VALUES(1,'recharge-paid','historical-event','demo_order_0001','1','fixture','consumed'),
+			      (1,'recharge-paid','historical-event','demo_order_0001',NULL,'conflicting-fixture','quarantined');
 		`)
 	})
 	f.check(t, "1", "SELECT source_app_id FROM conversion.inbox WHERE source_event_id='historical-event' AND state='consumed'")

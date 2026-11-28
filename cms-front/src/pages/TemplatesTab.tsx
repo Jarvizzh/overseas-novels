@@ -47,7 +47,18 @@ type SlotDraft = {
   badge: string;
   is_highlighted: boolean;
   display_alias: string;
+  list_price_input: string;
 };
+
+function parseOptionalUSDCents(raw: string): { cents: number; valid: boolean } {
+  const trimmed = raw.trim();
+  if (!trimmed) return { cents: 0, valid: true };
+  if (!/^\d+(\.\d{1,2})?$/.test(trimmed)) return { cents: 0, valid: false };
+  const [dollars, frac = ''] = trimmed.split('.');
+  const cents = Number(dollars) * 100 + Number(frac.padEnd(2, '0'));
+  if (!Number.isSafeInteger(cents) || cents <= 0 || cents > 100_000_000) return { cents: 0, valid: false };
+  return { cents, valid: true };
+}
 
 let draftSeq = 1;
 function nextDraftUid(): string {
@@ -182,6 +193,7 @@ export default function TemplatesTab() {
           badge: s.badge || '',
           is_highlighted: Boolean(s.is_highlighted),
           display_alias: s.display_alias || '',
+          list_price_input: s.list_price_cents && s.list_price_cents > 0 ? (s.list_price_cents / 100).toFixed(2) : '',
         })),
       );
       return;
@@ -200,6 +212,7 @@ export default function TemplatesTab() {
             badge: s.badge || '',
             is_highlighted: Boolean(s.is_highlighted),
             display_alias: s.display_alias || '',
+            list_price_input: s.list_price_cents && s.list_price_cents > 0 ? (s.list_price_cents / 100).toFixed(2) : '',
           })),
         );
         return;
@@ -314,6 +327,7 @@ export default function TemplatesTab() {
         badge: '',
         is_highlighted: false,
         display_alias: '',
+        list_price_input: '',
       },
     ]);
   };
@@ -348,10 +362,18 @@ export default function TemplatesTab() {
       if (!productsLoading && !eligibleProductMap.has(pid)) {
         return `第 ${i + 1} 个槽位商品 #${pid} 未在 ${tplEnv} 环境下架或未满足双渠道就绪`;
       }
+      const parsedList = parseOptionalUSDCents(drafts[i].list_price_input);
+      if (!parsedList.valid) {
+        return `第 ${i + 1} 个槽位的划线原价格式无效（请输入正数金额，最多两位小数）`;
+      }
+      const boundProduct = productMap.get(pid);
+      if (parsedList.cents > 0 && boundProduct && parsedList.cents <= boundProduct.price_cents) {
+        return `第 ${i + 1} 个槽位的划线原价（${formatUSD(parsedList.cents)}）必须大于商品现价（${formatUSD(boundProduct.price_cents)}）`;
+      }
       seen.add(pid);
     }
     return '';
-  }, [tplName, drafts, productsLoading, eligibleProductMap, tplEnv]);
+  }, [tplName, drafts, productsLoading, eligibleProductMap, productMap, tplEnv]);
 
   const handleSaveTemplate = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -369,6 +391,7 @@ export default function TemplatesTab() {
         badge: d.badge.trim(),
         is_highlighted: d.is_highlighted,
         display_alias: d.display_alias.trim(),
+        list_price_cents: parseOptionalUSDCents(d.list_price_input).cents,
       }));
       if (editTemplateId !== null) {
         await templatesApi.update(editTemplateId, { name: tplName.trim(), environment: tplEnv, is_default: tplIsDefault, slots });
@@ -393,6 +416,7 @@ export default function TemplatesTab() {
         code: p.code,
         type: p.product_type,
         price: p.price || formatUSD(p.price_cents),
+        priceCents: p.price_cents,
         coins: p.coins,
         bonus: p.bonus,
         vipCycle: p.vip_cycle,
@@ -408,6 +432,7 @@ export default function TemplatesTab() {
         code: fb.product_code || `#${productId}`,
         type: pType,
         price: fb.price || '$0.00',
+        priceCents: fb.price_cents || 0,
         coins: fb.coins || 0,
         bonus: fb.bonus || 0,
         vipCycle: (fb.subscription_cycle || fb.vip_duration || '') as VipCycle | '',
@@ -628,7 +653,7 @@ export default function TemplatesTab() {
                         />
                       </div>
 
-                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 items-end">
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 items-end">
                         <div>
                           <label htmlFor={`${formId}-alias-${idx}`} className="block text-xs text-[var(--cms-muted-fg)] mb-1">展示别名（非商业，可选）</label>
                           <input
@@ -648,9 +673,23 @@ export default function TemplatesTab() {
                             type="text"
                             maxLength={32}
                             className="input-field w-full text-xs"
-                            placeholder="例如：Popular / Save 45%"
+                            placeholder="例如：Popular / 25% OFF"
                             value={draft.badge}
                             onChange={(e) => updateDraft(draft.uid, { badge: e.target.value })}
+                          />
+                        </div>
+                        <div>
+                          <label htmlFor={`${formId}-list-price-${idx}`} className="block text-xs text-[var(--cms-muted-fg)] mb-1">
+                            划线原价 USD（纯展示，需大于现价）
+                          </label>
+                          <input
+                            id={`${formId}-list-price-${idx}`}
+                            type="text"
+                            inputMode="decimal"
+                            className="input-field w-full text-xs tabular-nums"
+                            placeholder={summary ? `须 > ${summary.price}，留空不显示` : '例如：26.99'}
+                            value={draft.list_price_input}
+                            onChange={(e) => updateDraft(draft.uid, { list_price_input: e.target.value })}
                           />
                         </div>
                         <label className="flex items-center gap-2 text-xs cursor-pointer pb-2">
@@ -725,7 +764,16 @@ export default function TemplatesTab() {
                           {summary?.type === 'whole_book' && <BookOpen size={12} className="text-indigo-500 shrink-0" aria-hidden="true" />}
                           <span className="truncate">{d.display_alias || summary?.name || `槽位 #${idx + 1}`}</span>
                         </div>
-                        <div className="text-base font-bold tabular-nums mt-1">{summary?.price ?? '—'}</div>
+                        <div className="flex items-baseline gap-1.5 mt-1 tabular-nums">
+                          <span className="text-base font-bold">{summary?.price ?? '—'}</span>
+                          {(() => {
+                            const parsed = parseOptionalUSDCents(d.list_price_input);
+                            if (parsed.valid && summary && parsed.cents > summary.priceCents) {
+                              return <span className="text-xs line-through opacity-55">{formatUSD(parsed.cents)}</span>;
+                            }
+                            return null;
+                          })()}
+                        </div>
                         {summary?.type === 'single' && (
                           <div className="text-[11px] opacity-75 tabular-nums">
                             {summary.coins} Coins{summary.bonus > 0 ? ` + ${summary.bonus}` : ''}

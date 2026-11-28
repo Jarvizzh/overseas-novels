@@ -39,7 +39,28 @@ export type RechargeSlotItem = {
   stripe_ready?: boolean;
   price: string;
   price_cents: number;
+  list_price?: string;
+  list_price_cents?: number;
 };
+
+export function formatValidListPrice(
+  listPriceCents?: number,
+  priceCents?: number,
+  listPrice?: string,
+): string {
+  if (
+    typeof listPriceCents !== 'number' ||
+    !Number.isFinite(listPriceCents) ||
+    typeof priceCents !== 'number' ||
+    !Number.isFinite(priceCents) ||
+    listPriceCents <= priceCents ||
+    listPriceCents <= 0
+  ) {
+    return '';
+  }
+  const trimmed = typeof listPrice === 'string' ? listPrice.trim() : '';
+  return trimmed || `$${(listPriceCents / 100).toFixed(2)}`;
+}
 
 export function vipCycleLabel(cycle?: string): string {
   switch ((cycle || '').toLowerCase()) {
@@ -103,6 +124,8 @@ export function buildSubscriptionPacks(slots: RechargeSlotItem[]) {
         isHighlighted: Boolean(s.is_highlighted),
         price: s.price,
         priceCents: s.price_cents,
+        listPrice: formatValidListPrice(s.list_price_cents, s.price_cents, s.list_price),
+        listPriceCents: s.list_price_cents && s.list_price_cents > s.price_cents ? s.list_price_cents : 0,
         desc: s.description || s.vip_desc || 'Unlimited reading across all titles. Auto-renews, cancel anytime.',
         cycle,
         type: s.type,
@@ -122,6 +145,8 @@ export function buildCoinPacks(slots: RechargeSlotItem[], novelId?: number) {
         bonus,
         price: s.price,
         priceCents: s.price_cents,
+        listPrice: formatValidListPrice(s.list_price_cents, s.price_cents, s.list_price),
+        listPriceCents: s.list_price_cents && s.list_price_cents > s.price_cents ? s.list_price_cents : 0,
         total: s.coins + bonus,
         name: s.display_alias || s.name || s.vip_name || '',
         badge: s.badge || '',

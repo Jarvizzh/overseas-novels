@@ -1,8 +1,8 @@
 # STAR NOVEL 生产部署 SOP
 
-适用于 Reader H5、CMS、支付域和回传中心的首次部署及协调升级。当前发布线要求 CMS、Reader 和 Conversion 使用同一数据库版本 **`2026111935`**。发下一版时，以该次发布提交中的三个 schema 检查和 CMS 内嵌迁移为准。回传首发批量上限为 **1**。
+适用于 Reader H5、CMS、支付域和回传中心的首次部署及协调升级。当前发布线要求 CMS、Reader 和 Conversion 使用同一数据库版本 **`2026112802`**。发下一版时，以该次发布提交中的三个 schema 检查和 CMS 内嵌迁移为准。回传首发批量上限为 **1**。
 
-**发布顺序**　同一提交打包、核对存量管理员 → 网关进入维护并停旧写入及发送 → CMS 单次迁移 → 补并发索引和授权 → Redis、Conversion API、CMS 及新版 CMS 前端 → 验证 RBAC、核对支付账户和回传路由 → Collector、Conversion Worker（暂停发送）、Reader → 发布 H5 和验证 Webhook → 恢复业务并回补维护窗口事件 → 单独启用 Meta 发送。
+**发布顺序**　同一提交打包、核对存量管理员 → 网关进入维护并停旧写入及发送 → CMS 单次迁移 → 按需应用角色授权 → Redis、Conversion API、CMS 及新版 CMS 前端 → 验证 RBAC、核对支付账户和回传路由 → Collector、Conversion Worker（暂停发送）、Reader → 发布 H5 和验证 Webhook → 恢复业务并回补维护窗口事件 → 单独启用 Meta 发送。
 
 ## 1. 拓扑与网络
 
@@ -52,7 +52,7 @@ python3 deploy/linux/prepare-config.py --check
 (cd reader-front && npm ci && npm run build)
 ```
 
-后端归档为 `deploy/dist/star-novel-linux-amd64.tar.gz`，同目录有 `.tar.gz.sha256`。归档含 CMS、Reader、Conversion 和 Conversion Ops 二进制、Compose、配置生成器及配套 SQL。两个 `dist/` 独立发布。归档含生产配置和密钥，只通过受控渠道传输。若从早于 `2026111704` 的库升级或全新建库，同时从该提交携带 [Reader 并发索引脚本](cms-backend/db/reader_query_indexes.sql)。需要支付运维 CLI 时按 [4.3](#43-维护窗口事件补查与财务操作) 一并构建并校验。
+后端归档为 `deploy/dist/star-novel-linux-amd64.tar.gz`，同目录有 `.tar.gz.sha256`。归档含 CMS、Reader、Conversion 和 Conversion Ops 二进制、Compose、配置生成器及配套 SQL。两个 `dist/` 独立发布。归档含生产配置和密钥，只通过受控渠道传输。需要支付运维 CLI 时按 [4.3](#43-维护窗口事件补查与财务操作) 一并构建并校验。
 
 服务器先校验归档和文件，再合并线上环境参数。部署目录使用 `/www/star-novel-server/releases/<release>`，`current` 在验收后更新。以下命令从存放归档及校验文件的受控目录执行。
 
@@ -115,7 +115,7 @@ PGSERVICE=star_novel_release psql -X -v ON_ERROR_STOP=1 \
   -c 'SELECT role, status, count(*) FROM public.admins GROUP BY role, status ORDER BY role, status;'
 ```
 
-`2026111935` 只按旧 `admins.role` 与新角色代码的精确匹配回填，随后要求 `admins.role_id` 非空。旧 `SuperAdmin` 等未匹配值会阻断迁移，旧普通 `Admin` 还可能被映射成新版超管。发现上述情况须暂停发布，由业务负责人逐账号确认角色映射和降权边界，并在生产副本上演练经评审的迁移方案。首次超管引导发生在这一步之后，无法处理旧角色映射失败。 [RBAC 迁移 SQL](cms-backend/db/migrations/2026111935.sql)
+`2026111935` 只按旧 `admins.role` 与新角色代码的精确匹配回填，随后要求 `admins.role_id` 非空。旧 `SuperAdmin` 等未匹配值会阻断迁移，旧普通 `Admin` 还可能被映射成新版超管。发现上述情况须暂停发布，由业务负责人逐账号确认角色映射和降权边界，并在生产副本上演练经评审的迁移方案。首次超管引导发生在这一步之后，无法处理旧角色映射失败。 [RBAC 迁移 SQL](https://github.com/Jarvizzh/overseas-novels/blob/a540d96/cms-backend/db/migrations/2026111935.sql)
 
 ## 3. 维护窗口与数据库切换
 
@@ -137,16 +137,14 @@ unset CMS_BOOTSTRAP_ADMIN_PASSWORD CMS_BOOTSTRAP_ADMIN_USERNAME CMS_BOOTSTRAP_AD
 
 引导配置缺失或无效会使此次迁移事务失败。已存在启用态超管时，重跑迁移会保留其原密码。
 
-4. 用预先配置的 libpq 服务名或受控凭据连接同一个库，核对账本并运行独立索引脚本。以下示例使用 `PGSERVICE=star_novel_release`，需先将该服务名指向本次 RDS 目标。
+4. 用预先配置的 libpq 服务名或受控凭据连接同一个库，核对迁移账本。以下示例使用 `PGSERVICE=star_novel_release`，需先将该服务名指向本次 RDS 目标。
 
 ```bash
 PGSERVICE=star_novel_release psql -X -v ON_ERROR_STOP=1 \
   -c 'SELECT max(version) FROM reader_schema_migrations;'
-PGSERVICE=star_novel_release psql -X -v ON_ERROR_STOP=1 \
-  -f migrations/conversion_query_indexes.sql
 ```
 
-   当前应返回 `2026111935`。并发索引脚本使用自动提交。核对脚本中的索引均存在且 `pg_index.indisvalid=true`；失败留下的无效索引需由 DBA 按实际定义处理后再重跑，脚本的 `IF NOT EXISTS` 会跳过同名对象。新库或未应用阅读性能索引的旧库，按同样方式执行随包准备的 `reader_query_indexes.sql`。独立数据库角色环境迁移后应用 [角色授权脚本](cms-backend/db/conversion_role_grants.sql)；生产统一使用具备相应对象权限的 `star_novel` 时无需拆分角色。使用 OSS 正文且存在历史预览缺口时，执行 `dc run --rm --no-deps cms -backfill-chapter-previews` 并核对结果。
+   当前应返回 `2026112802`。空库创建完整结构并初始化系统数据；现行 `2026111942` 库先检查 30 个查询索引，全部有效后继续升级。若报告 missing，取 schema.sql 中对应定义，在事务外使用 CREATE INDEX CONCURRENTLY 补建；若报告 invalid，先修复该索引。随后重跑 CMS -migrate。更早的库先使用 `a540d96` 的迁移入口升到 `2026111942`。独立数据库角色环境迁移后应用 [角色授权脚本](cms-backend/ops/conversion_role_grants.sql)；生产统一使用具备相应对象权限的 `star_novel` 时无需拆分角色。使用 OSS 正文且存在历史预览缺口时，执行 `dc run --rm --no-deps cms -backfill-chapter-previews` 并核对结果。
 
 5. 核对存量订单、协议、收款、回调游标和权益。环境或原账户缺少依据的记录留在支付中心待核对；历史整本权益按原商品和小说证据核验。回传按现场记录判定是否需要历史接管。确认旧服务从未对 Meta 上报时直接部署新链路；如已有历史发送证据，先保持新发送暂停，再按原业务键、事件 ID 和发送证据检查接管范围。 [历史队列接管](conversion-backend/README.md#历史队列接管)
 
@@ -162,7 +160,7 @@ Conversion API 在 Compose 中没有 HTTP 健康检查。旧版 CMS、Reader 和
 
 - 通过 `/api/v1/admin/auth/me` 核对超管身份、角色和权限，在「账号管理」检查启用态超管名单与迁移前批准的名单一致。首次引导时核对 `bootstrap_super_admin` 审计。超管可管理角色及账号，普通管理员直调相关写接口须返回 `403`。
 - 用最小权限账号验证页面、菜单和 API 一致。仅有 `ads.conversions:read` 的账号可通过 CMS 查询回传概要和吞吐，直调投递重排返回 `403`。在隔离环境验证授权写入后撤权，同一登录会话再次调用写接口时须被拒绝；停用账号或角色后受保护接口须返回 `401`。回传详情或写入异常时同时检查 CMS 代理鉴权和 Conversion 的数据库权限函数。
-- 若部署使用独立数据库角色，迁移后由迁移所有者重跑新版 [角色授权脚本](cms-backend/db/conversion_role_grants.sql)。用实际运行账号验证 CMS 角色增改与序列权限、Conversion API 的写权限函数、Reader 支付后台的操作人检查，以及超管专属的回传保留期清理权限。实际写入与清理演练使用隔离环境。统一账号部署按第 3 节核对对象权限。
+- 若部署使用独立数据库角色，迁移后由迁移所有者重跑新版 [角色授权脚本](cms-backend/ops/conversion_role_grants.sql)。用实际运行账号验证 CMS 角色增改与序列权限、Conversion API 的写权限函数、Reader 支付后台的操作人检查，以及超管专属的回传保留期清理权限。实际写入与清理演练使用隔离环境。统一账号部署按第 3 节核对对象权限。
 
 ## 4. 配置业务并启动 Reader
 

@@ -121,6 +121,8 @@ type RechargeSlot struct {
 	Price             string  `json:"price" db:"price"`
 	Currency          string  `json:"currency,omitempty" db:"currency"`
 	PriceCents        int     `json:"price_cents" db:"price_cents"`
+	ListPrice         string  `json:"list_price,omitempty" db:"-"`
+	ListPriceCents    int     `json:"list_price_cents,omitempty" db:"list_price_cents"`
 	Badge             string  `json:"badge" db:"badge"`
 	IsHighlighted     bool    `json:"is_highlighted" db:"is_highlighted"`
 	DisplayAlias      string  `json:"display_alias" db:"display_alias"`

@@ -48,9 +48,11 @@ type RechargeSlot struct {
 	TemplateID    int    `json:"template_id"`
 	SlotIndex     int    `json:"slot_index"` // 1 to 8
 	ProductID     int64  `json:"product_id"`
-	Badge         string `json:"badge"`
-	IsHighlighted bool   `json:"is_highlighted"`
-	DisplayAlias  string `json:"display_alias"`
+	Badge          string `json:"badge"`
+	IsHighlighted  bool   `json:"is_highlighted"`
+	DisplayAlias   string `json:"display_alias"`
+	ListPriceCents int    `json:"list_price_cents"`
+	ListPrice      string `json:"list_price,omitempty"`
 
 	// Hydrated read-only product attributes (authoritative source: products table)
 	ProductCode       string   `json:"product_code,omitempty"`
