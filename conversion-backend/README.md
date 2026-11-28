@@ -146,7 +146,7 @@ CONVERSION_THROUGHPUT_SAMPLE=1 CONVERSION_THROUGHPUT_COLD_SAMPLES=20 \
 
 ### 配置与批量切换
 
-线上配置入口为 `deploy/linux/config.yaml` 的 `conversion` 段。运行 `deploy/linux/prepare-config.py` 后，Compose 按 `worker_instances` 启动 Worker，默认两个副本，各自使用 16 个连接。Reader 与 Partner Inbox 各配置 2 个消费者，合计预算上限 4。生产的分销 Inbox 要在正式契约和鉴权接通后注册消费者。测试环境使用 `config.test.yaml` 中的隔离司南适配器，生成的 Worker 实例文件带各自的心跳标识：
+线上配置入口为 `deploy/linux/config.yaml` 的 `conversion` 段。运行 `deploy/linux/prepare-config.py` 后，Compose 按 `worker_instances` 启动 Worker，默认一个副本，使用 16 个连接。Reader 与 Partner Inbox 各配置 2 个消费者，合计预算上限 4。生产的分销 Inbox 要在正式契约和鉴权接通后注册消费者。测试环境使用 `config.test.yaml` 中的隔离司南适配器，生成的 Worker 实例文件带各自的心跳标识：
 
 ```sh
 python3 deploy/linux/prepare-config.py --config conversion-backend/config.test.yaml \

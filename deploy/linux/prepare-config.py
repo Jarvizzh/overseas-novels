@@ -226,7 +226,7 @@ def main():
         private_port = address_port('private_addr', private_addr)
         address_port('callback_addr', callback_addr, loopback_only=True)
         host_port = integer('private_host_port', private_port, 65535)
-        workers = integer('worker_instances', 2, 32)
+        workers = integer('worker_instances', 1, 32)
         pool = integer('worker_db_max_conns', 16, 128)
         other_pool = integer('db_max_conns', 8, 128)
         global_limit = integer('meta_global_limit', 5, 100)

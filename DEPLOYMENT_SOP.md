@@ -75,7 +75,7 @@ chmod 600 config.yaml
 | --- | --- |
 | `environment`、`private_url`、`private_token`、`private_addr`、`private_host_port` | 环境为 `production`，Reader、CMS、回传进程、接入和 Pixel 一致。CMS 与 API 共用私网 Token。容器内监听与 Compose 端口匹配。 |
 | `credential_key_version`、`credential_keys_json` | API 使用当前版本写入凭据，Worker 使用共同的密钥环解密。值为版本到 32 字节 Base64 密钥的 JSON 映射。 |
-| `worker_instances`、`db_max_conns`、`worker_db_max_conns` | 首发按 2 个 Worker、每个 16 连接。API 和 Collector 各 8，回传合计上限 48。另计 CMS 的 15、每个 Reader 前台 21 与支付后台 4，以及 RDS 运维和迁移预留。 |
+| `worker_instances`、`db_max_conns`、`worker_db_max_conns` | 按 1 个 Worker、16 连接部署（`worker_instances: 1`）。API 和 Collector 各 8，回传合计上限 32。另计 CMS 的 15、每个 Reader 前台 21 与支付后台 4，以及 RDS 运维和迁移预留。 |
 | `reader_normalizers`、`inbox_normalizers`、`normalizer_limit` | 每个 Worker 规划 Reader 2、Partner Inbox 2，总预算 4。当前生产只注册 Reader 消费者。已启用消费者合计应落在预算内，预算不超过 Worker 连接池的一半。 |
 | `normalize_batch`、`worker_poll_interval`、`worker_queue_probe_interval` | 每个消费者每轮 20 条，心跳及扫描间隔 15s，空闲探测 250ms。 |
 | `meta_enabled`、`meta_graph_version`、`meta_batch_size` | 上线验收前关闭发送；使用发布配置指定的 Graph 版本。首发 `1`，后续按灰度结果调整。 |
@@ -193,7 +193,7 @@ dc ps
 curl -fsS http://127.0.0.1:8080/healthz
 ```
 
-3. 检查 Reader 支付日志和 CMS 订单、订阅、退款页。在回传中心核对两个 Worker 副本的 `normalize`、`meta` 心跳，以及 Collector 最近采样时间、积压和告警。首轮应看到 Meta 暂停，采样与归一化持续更新。也可在同一库执行以下只读检查。
+3. 检查 Reader 支付日志和 CMS 订单、订阅、退款页。在回传中心核对 Worker 副本的 `normalize`、`meta` 心跳，以及 Collector 最近采样时间、积压和告警。首轮应看到 Meta 暂停，采样与归一化持续更新。也可在同一库执行以下只读检查。
 
 ```bash
 PGSERVICE=star_novel_release psql -X -v ON_ERROR_STOP=1 <<'SQL'
@@ -228,7 +228,7 @@ dc run --rm --no-deps --entrypoint /app/bin/payment-ops \
 1. 按线上宝塔站点盘点实际域名与根目录。Linux 部署说明中的现有站点包括 `cms.starsfic.com`、`starsfic.com`、`h5.starsfic.com` 和 `www.starnovel.top`。H5 使用同源 `/api/v1`，CMS 使用同源 `/api/v1/admin`。分开上传两个 `dist/` 至版本目录并切换站点根目录，保留上一版产物。若现网使用固定根目录，先上传新版带哈希的资源，再切换 HTML，保留上一版 HTML 引用的资源。
 2. HTTPS 网关应把 CMS 的 `/api/v1/admin/` 转到 `127.0.0.1:8081`，H5 的 `/api/v1/` 转到 `127.0.0.1:8080` 或实际 Reader 内网 upstream，保留 URI 和代理头。SPA 采用 `try_files $uri $uri/ /index.html;`，入口 HTML 禁用强缓存，API、带签名的支付回调及动态响应不走 CDN 缓存。支付写请求保持原幂等路径，网关不配置非幂等请求自动切换重试。改动网关时先执行 `nginx -t`，通过后再重载。
 3. 从受控入口验收后端和两个前端。先恢复支付 Webhook 并检查回补进度，再按账户恢复已验收的新结账和新订阅入口。正式环境按本次批准的账户、市场和销售模式开放。存量续费、售后和对账按原账户处理。
-4. 先关 Meta 发送验证 Reader 事件的原始时间、稳定事件 ID、Outbox 消费、归一化和 Pixel 路由。用指定 Pixel 办理首轮发送验收后，在生产 `config.yaml` 设 `conversion.meta_enabled: true`，保持 `conversion.meta_batch_size: 1`。需要单副本首轮观察时，先把 `worker_instances` 设为 1，验收后恢复到 2。只重建 Conversion Worker。
+4. 先关 Meta 发送验证 Reader 事件的原始时间、稳定事件 ID、Outbox 消费、归一化和 Pixel 路由。用指定 Pixel 办理首轮发送验收后，在生产 `config.yaml` 设 `conversion.meta_enabled: true`，保持 `conversion.meta_batch_size: 1`、`worker_instances: 1`。只重建 Conversion Worker。
 
 ```bash
 python3 prepare-config.py --check
