@@ -318,8 +318,8 @@ export const Profile: React.FC<ProfileProps> = ({
         ? 'Renewal Payment Issue'
         : isVip
           ? paidThroughDate
-            ? `VIP Active · Until ${new Date(paidThroughDate).toLocaleDateString()}`
-            : 'VIP Unlimited Active'
+            ? `Subscription Active · Until ${new Date(paidThroughDate).toLocaleDateString()}`
+            : 'Subscription Active'
           : 'Manage Subscription';
 
   return (
@@ -447,7 +447,7 @@ export const Profile: React.FC<ProfileProps> = ({
               <button type="button" className="settings-item" onClick={() => onNavigate('subscription')}>
                 <span style={{ display: 'inline-flex', alignItems: 'center', gap: '8px' }}>
                   <Crown size={16} strokeWidth={1.8} style={{ color: 'var(--accent-color)' }} aria-hidden="true" />
-                  <span>My Membership &amp; Subscription</span>
+                  <span>My Subscription</span>
                 </span>
                 <span className="settings-item-value" style={{ color: isVip ? 'var(--accent-text)' : 'var(--text-tertiary)', fontWeight: isVip ? 600 : 400 }}>
                   <span>{vipSummary}</span>
@@ -689,7 +689,7 @@ export const Profile: React.FC<ProfileProps> = ({
 
         <p style={{ fontSize: '0.75rem', color: 'var(--text-tertiary)', marginBottom: '16px', lineHeight: 1.5 }}>
           {authMode === 'signup'
-            ? 'Bind an email to protect your coins, VIP pass, and reading library across devices.'
+            ? 'Bind an email to protect your coins, subscription, and reading library across devices.'
             : 'Sign in to restore your existing StarNovel account and library.'}
         </p>
 

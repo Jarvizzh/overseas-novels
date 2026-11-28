@@ -8,11 +8,15 @@ import {
   buildCoinPacks,
   buildSubscriptionPacks,
   calcCoinBonusPercent,
+  clearLastCheckoutSelection,
   formatSubscriptionEquivalent,
   purchaseRequestStorageKey,
+  readLastCheckoutSelection,
   readingReturnPath,
   resolveInitialCarouselIndex,
+  sanitizeSubscriptionCopy,
   saveCheckoutOrigin,
+  saveLastCheckoutSelection,
   type PaymentProvider,
   type RechargeSlotItem,
 } from '../utils/rechargeCatalogHelpers';
@@ -80,8 +84,11 @@ export const RechargeCheckoutPanel: React.FC<RechargeCheckoutPanelProps> = ({
   onLoadingChange,
 }) => {
   const { showToast } = useToast();
+  const initialSavedSelectionRef = useRef(readLastCheckoutSelection());
   const [selectedPack, setSelectedPack] = useState<number | null>(null);
-  const [selectedProvider, setSelectedProvider] = useState<PaymentProvider>('paypal');
+  const [selectedProvider, setSelectedProvider] = useState<PaymentProvider>(
+    () => initialSavedSelectionRef.current?.provider ?? 'paypal',
+  );
   const [isProcessing, setIsProcessing] = useState(false);
   const [activeCheckoutProvider, setActiveCheckoutProvider] = useState<PaymentProvider>('paypal');
   const selectedPackRef = useRef<number | null>(null);
@@ -198,13 +205,50 @@ export const RechargeCheckoutPanel: React.FC<RechargeCheckoutPanelProps> = ({
     }
   }, [returnedLookupState, returnedPendingIntent]);
 
+  const scrollCarouselTo = useCallback((index: number, behavior: ScrollBehavior = 'smooth') => {
+    const track = carouselRef.current;
+    if (!track || track.clientWidth <= 0) return;
+    programmaticScrollUntilRef.current = behavior === 'smooth' ? Date.now() + 600 : 0;
+    track.scrollTo({ left: index * track.clientWidth, behavior });
+  }, []);
+
   useEffect(() => {
     if (loadingTemplates || offersNovelId !== novelId) return;
+    const subPacks = buildSubscriptionPacks(slots);
     const visibleIds = new Set([
-      ...buildSubscriptionPacks(slots).map((pack) => pack.id),
+      ...subPacks.map((pack) => pack.id),
       ...buildCoinPacks(slots, novelId).map((pack) => pack.id),
     ]);
     const visibleSlots = slots.filter((slot) => visibleIds.has(slot.id));
+
+    const savedSelection = initialSavedSelectionRef.current;
+    if (savedSelection && !userManuallySelectedRef.current && returnedLookupState !== 'loading') {
+      initialSavedSelectionRef.current = null;
+      clearLastCheckoutSelection();
+      const matchedSaved = visibleSlots.find(
+        (slot) =>
+          slot.id === savedSelection.slotId &&
+          (!savedSelection.productId || !slot.product_id || slot.product_id === savedSelection.productId),
+      );
+      if (matchedSaved) {
+        userManuallySelectedRef.current = true;
+        setAutoRotatePaused(true);
+        if (matchedSaved.id !== selectedPackRef.current) {
+          setSelectedPack(matchedSaved.id);
+        }
+        const subIdx = subPacks.findIndex((pack) => pack.id === matchedSaved.id);
+        if (subIdx >= 0) {
+          hasAlignedInitialSlideRef.current = true;
+          activeSlideIndexRef.current = subIdx;
+          setActiveSlideIndex(subIdx);
+          requestAnimationFrame(() => {
+            scrollCarouselTo(subIdx, 'auto');
+          });
+        }
+        return;
+      }
+    }
+
     const { selectedSlotId, staleReturnedIntent } = resolveRechargeSelection({
       visibleSlots,
       currentSelected: selectedPackRef.current,
@@ -226,7 +270,7 @@ export const RechargeCheckoutPanel: React.FC<RechargeCheckoutPanelProps> = ({
         'error',
       );
     }
-  }, [slots, offersNovelId, novelId, loadingTemplates, returnedPendingIntent, returnedLookupState]);
+  }, [slots, offersNovelId, novelId, loadingTemplates, returnedPendingIntent, returnedLookupState, scrollCarouselTo]);
 
   const handleSelectPack = (packId: number) => {
     userManuallySelectedRef.current = true;
@@ -238,13 +282,6 @@ export const RechargeCheckoutPanel: React.FC<RechargeCheckoutPanelProps> = ({
   const coinPacks = buildCoinPacks(slots, novelId);
   const subscriptionPacksRef = useRef(subscriptionPacks);
   subscriptionPacksRef.current = subscriptionPacks;
-
-  const scrollCarouselTo = useCallback((index: number, behavior: ScrollBehavior = 'smooth') => {
-    const track = carouselRef.current;
-    if (!track || track.clientWidth <= 0) return;
-    programmaticScrollUntilRef.current = behavior === 'smooth' ? Date.now() + 600 : 0;
-    track.scrollTo({ left: index * track.clientWidth, behavior });
-  }, []);
 
   useEffect(() => {
     hasAlignedInitialSlideRef.current = false;
@@ -390,6 +427,11 @@ export const RechargeCheckoutPanel: React.FC<RechargeCheckoutPanelProps> = ({
         saveCheckoutOrigin(intent.intent_id, {
           source: embedded ? 'reader' : 'recharge',
           path: embedded ? returnPath : '/recharge',
+        });
+        saveLastCheckoutSelection({
+          provider,
+          slotId: tSlot.id,
+          productId: tSlot.product_id,
         });
         redirectingRef.current = true;
         window.clearTimeout(redirectResetTimerRef.current);
@@ -546,7 +588,7 @@ export const RechargeCheckoutPanel: React.FC<RechargeCheckoutPanelProps> = ({
           style={embedded ? { width: '24px', height: '24px', borderWidth: '2.5px' } : undefined}
         />
         <span style={{ fontSize: embedded ? '0.8125rem' : '0.875rem' }}>
-          {embedded ? 'Loading top-up options...' : 'Loading membership plans...'}
+          {embedded ? 'Loading top-up options...' : 'Loading subscription plans...'}
         </span>
       </div>
     );
@@ -666,10 +708,10 @@ export const RechargeCheckoutPanel: React.FC<RechargeCheckoutPanelProps> = ({
                             </div>
                             <div className="vip-banner-copy">
                               <div className="vip-banner-title-row">
-                                <span className="vip-banner-name">{pack.name}</span>
+                                <span className="vip-banner-name">{sanitizeSubscriptionCopy(pack.name)}</span>
                                 {eqPrice && <span className="vip-banner-eq tabular-nums">{eqPrice.replace(/^≈\s*/, '')}</span>}
                               </div>
-                              <span className="vip-banner-desc">{pack.desc}</span>
+                              <span className="vip-banner-desc">{sanitizeSubscriptionCopy(pack.desc)}</span>
                             </div>
                           </div>
                           <div className="vip-banner-right">
@@ -686,13 +728,13 @@ export const RechargeCheckoutPanel: React.FC<RechargeCheckoutPanelProps> = ({
               </div>
 
               {subscriptionPacks.length > 1 && (
-                <div className="vip-carousel-dots" role="group" aria-label="Membership plan slides">
+                <div className="vip-carousel-dots" role="group" aria-label="Subscription plan slides">
                   {subscriptionPacks.map((pack, idx) => (
                     <button
                       key={pack.id}
                       type="button"
                       aria-pressed={activeSlideIndex === idx}
-                      aria-label={`View ${pack.name}`}
+                      aria-label={`View ${sanitizeSubscriptionCopy(pack.name)}`}
                       className={`vip-carousel-dot${activeSlideIndex === idx ? ' is-active' : ''}`}
                       onClick={() => {
                         setAutoRotatePaused(true);
@@ -780,7 +822,7 @@ export const RechargeCheckoutPanel: React.FC<RechargeCheckoutPanelProps> = ({
               fontSize: '0.875rem',
             }}
           >
-            No membership or coin packages are currently available. Please try again later.
+            No subscription or coin packages are currently available. Please try again later.
           </div>
         )}
 

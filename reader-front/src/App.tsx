@@ -446,7 +446,7 @@ function AppContent() {
       '/search': 'Search | StarNovel',
       '/detail': 'Book Details | StarNovel',
       '/content': 'Reader | StarNovel',
-      '/recharge': 'Membership & Coins | StarNovel',
+      '/recharge': 'Subscription & Coins | StarNovel',
     };
     document.title = titleMap[location.pathname] || 'StarNovel';
   }, [location.pathname]);
@@ -703,7 +703,7 @@ function AppContent() {
       case '/profile':
         return { title: 'Profile', showBack: false };
       case '/subscription':
-        return { title: 'Membership & Subscription', showBack: true, onBack: navigateBack };
+        return { title: 'Subscription', showBack: true, onBack: navigateBack };
       default:
         return { title: 'StarNovel', showBack: false };
     }

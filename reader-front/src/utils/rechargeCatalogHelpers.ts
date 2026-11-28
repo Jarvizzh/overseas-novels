@@ -59,6 +59,53 @@ export function clearCheckoutOrigin(intentId: string): void {
   }
 }
 
+export type CheckoutSelectionSnapshot = {
+  provider: PaymentProvider;
+  slotId: number;
+  productId?: number;
+};
+
+const LAST_CHECKOUT_SELECTION_KEY = 'last-checkout-selection';
+
+export function saveLastCheckoutSelection(snapshot: CheckoutSelectionSnapshot): void {
+  try {
+    sessionStorage.setItem(LAST_CHECKOUT_SELECTION_KEY, JSON.stringify(snapshot));
+  } catch {
+    // Ignore storage errors.
+  }
+}
+
+export function readLastCheckoutSelection(): CheckoutSelectionSnapshot | null {
+  try {
+    const raw = sessionStorage.getItem(LAST_CHECKOUT_SELECTION_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (
+      parsed &&
+      (parsed.provider === 'paypal' || parsed.provider === 'stripe') &&
+      typeof parsed.slotId === 'number' &&
+      parsed.slotId > 0
+    ) {
+      return {
+        provider: parsed.provider,
+        slotId: parsed.slotId,
+        productId: typeof parsed.productId === 'number' && parsed.productId > 0 ? parsed.productId : undefined,
+      };
+    }
+  } catch {
+    // Ignore parse/storage errors.
+  }
+  return null;
+}
+
+export function clearLastCheckoutSelection(): void {
+  try {
+    sessionStorage.removeItem(LAST_CHECKOUT_SELECTION_KEY);
+  } catch {
+    // Ignore storage errors.
+  }
+}
+
 export type PendingPaymentSuccess = {
   intentId: string;
   coins: number;
@@ -143,6 +190,20 @@ export function formatValidListPrice(
   }
   const trimmed = typeof listPrice === 'string' ? listPrice.trim() : '';
   return trimmed || `$${(listPriceCents / 100).toFixed(2)}`;
+}
+
+export function sanitizeSubscriptionCopy(text: string): string {
+  if (!text) return '';
+  return text
+    .replace(/\bMembership\s*&\s*Subscriptions?\b/gi, 'Subscription')
+    .replace(/\bVIP\s+Subscriptions?\b/gi, 'Subscription')
+    .replace(/\bVIP\s+Memberships?\b/gi, 'Subscription')
+    .replace(/\bVIP\s+Pass(es)?\b/gi, 'Subscription')
+    .replace(/\bMemberships?\b/gi, 'Subscription')
+    .replace(/\bvip\b/gi, 'Subscription')
+    .replace(/\bSubscription(\s+Subscription)+\b/gi, 'Subscription')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
 }
 
 export function vipCycleLabel(cycle?: string): string {

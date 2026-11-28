@@ -82,7 +82,7 @@ export const PaymentSuccessDialog: React.FC<PaymentSuccessDialogProps> = ({
         {isVip ? <Crown size={24} strokeWidth={1.8} aria-hidden="true" /> : <Sparkles size={24} strokeWidth={1.8} aria-hidden="true" />}
       </div>
       <h2 id={titleId} style={{ fontFamily: 'var(--font-display)', fontSize: '1.25rem', fontWeight: 600, marginBottom: '8px' }}>
-        {isVip ? 'Unlimited Membership Activated' : 'Purchase Complete'}
+        {isVip ? 'Unlimited Subscription Activated' : 'Purchase Complete'}
       </h2>
       <p style={{ fontSize: '0.875rem', color: 'var(--text-secondary)', marginBottom: '18px', lineHeight: 1.5 }}>
         {isVip

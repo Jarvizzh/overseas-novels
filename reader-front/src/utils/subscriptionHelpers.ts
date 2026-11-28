@@ -111,7 +111,7 @@ export function buildSubscriptionViewModel(
           ? 'Monthly Plan'
           : sub.cycle === 'year'
             ? 'Annual Plan'
-            : 'Unlimited Membership';
+            : 'Unlimited Subscription';
   const planName = sub.plan_name?.trim() || fallbackPlanName;
   const priceLabel = formatSubscriptionPrice(sub.price_cents, sub.currency, sub.cycle);
 
@@ -136,8 +136,8 @@ export function buildSubscriptionViewModel(
       statusTone = 'active';
       statusLabel = 'Active · Auto-Renew On';
       statusDescription = nextBillingLabel
-        ? `Your membership is active. Next scheduled billing date is ${nextBillingLabel}.`
-        : 'Your membership is active with unlimited reading access.';
+        ? `Your subscription is active. Next scheduled billing date is ${nextBillingLabel}.`
+        : 'Your subscription is active with unlimited reading access.';
       break;
     case 'cancel_pending':
       statusTone = 'warning';

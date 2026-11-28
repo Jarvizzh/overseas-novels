@@ -2677,6 +2677,29 @@
   color: var(--text-tertiary);
 }
 
+.recharge-tips-section {
+  margin-top: 24px;
+  padding: 0 4px 12px;
+  color: var(--text-tertiary);
+}
+
+.recharge-tips-title {
+  margin: 0 0 8px;
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.recharge-tips-list {
+  margin: 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 0.78125rem;
+  line-height: 1.6;
+}
+
 /* Dark Mode & Night Reader overrides for Warm Gold Payment Module */
 :root[data-user-theme="dark"] .vip-banner-shell,
 .reader-theme-night .vip-banner-shell {

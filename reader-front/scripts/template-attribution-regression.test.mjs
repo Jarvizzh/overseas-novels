@@ -174,4 +174,13 @@ test('Case 1 helpers format North American plan names, equivalent prices, and bo
   });
   rechargeHelpers.clearCheckoutOrigin('intent-reader-1');
   assert.equal(rechargeHelpers.readCheckoutOrigin('intent-reader-1'), null);
+
+  rechargeHelpers.saveLastCheckoutSelection({ provider: 'stripe', slotId: 30, productId: 10 });
+  assert.deepEqual(rechargeHelpers.readLastCheckoutSelection(), {
+    provider: 'stripe',
+    slotId: 30,
+    productId: 10,
+  });
+  rechargeHelpers.clearLastCheckoutSelection();
+  assert.equal(rechargeHelpers.readLastCheckoutSelection(), null);
 });

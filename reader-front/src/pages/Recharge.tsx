@@ -12,6 +12,7 @@ import {
 import { evaluatePurchaseLookupOutcome } from '../utils/checkoutPendingHelpers';
 import {
   clearCheckoutOrigin,
+  clearLastCheckoutSelection,
   purchaseRequestStorageKey,
   readCheckoutOrigin,
   readingReturnPath,
@@ -144,6 +145,7 @@ export const Recharge: React.FC<RechargeProps> = ({
           const originIntentId = intent.intent_id || purchaseLocator.intent;
           const recordedOrigin = readCheckoutOrigin(originIntentId);
           clearCheckoutOrigin(originIntentId);
+          clearLastCheckoutSelection();
           const storageKey = purchaseRequestStorageKey(userId, intent.slot_id, intent.product_id || 0, intent.novel_id || 0);
           try {
             const saved = JSON.parse(sessionStorage.getItem(storageKey) || 'null');
@@ -377,7 +379,7 @@ export const Recharge: React.FC<RechargeProps> = ({
             >
               <ChevronLeft size={20} strokeWidth={1.8} aria-hidden="true" />
             </button>
-            <h1 className="header-title">Membership &amp; Coins</h1>
+            <h1 className="header-title">Subscription &amp; Coins</h1>
             {typeof userCoins === 'number' ? (
               <div className="recharge-balance-pill" aria-label={`Current balance: ${userCoins.toLocaleString()} coins`}>
                 <GoldCoin size={14} />
@@ -404,6 +406,17 @@ export const Recharge: React.FC<RechargeProps> = ({
                 if (refresh) setPurchaseRefresh((value) => value + 1);
               }}
             />
+
+            <section className="recharge-tips-section" aria-label="Subscription tips">
+              <h3 className="recharge-tips-title">Tips:</h3>
+              <ol className="recharge-tips-list">
+                <li>Renewal: Your subscription will renew automatically.</li>
+                <li>Cancel: You can cancel your subscription at any time 24 hours before the subscription expires.</li>
+                <li>
+                  Manage subscriptions: You can view and manage your renewals in Subscription.
+                </li>
+              </ol>
+            </section>
           </div>
         </div>
       </div>

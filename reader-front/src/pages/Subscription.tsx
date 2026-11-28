@@ -17,6 +17,7 @@ import {
   buildSubscriptionViewModel,
   type SubscriptionViewModel,
 } from '../utils/subscriptionHelpers';
+import { sanitizeSubscriptionCopy } from '../utils/rechargeCatalogHelpers';
 
 interface SubscriptionProps {
   authReady: boolean;
@@ -81,7 +82,7 @@ export const Subscription: React.FC<SubscriptionProps> = ({
     if (!vm.canCancelAutoRenew || cancelingId === vm.subscriptionId) return;
 
     const keepAccessNote = vm.paidThroughLabel
-      ? ` You will keep full VIP reading access through ${vm.paidThroughLabel}.`
+      ? ` You will keep full subscription reading access through ${vm.paidThroughLabel}.`
       : ' Your remaining paid period will not be interrupted.';
 
     showConfirm({
@@ -163,12 +164,12 @@ export const Subscription: React.FC<SubscriptionProps> = ({
             </div>
             <div style={{ minWidth: 0 }}>
               <h2 className="sub-mgmt-title">
-                {isVip ? 'VIP Membership Active' : 'Membership & Subscriptions'}
+                {isVip ? 'Subscription Active' : 'Subscription'}
               </h2>
               <p className="sub-mgmt-subtitle">
                 {isVip
                   ? 'Manage your auto-renewal, billing cycle, and payment methods.'
-                  : 'View and manage your StarNovel VIP subscriptions.'}
+                  : 'View and manage your StarNovel subscriptions.'}
               </p>
             </div>
           </div>
@@ -208,7 +209,7 @@ export const Subscription: React.FC<SubscriptionProps> = ({
             <Crown size={28} style={{ color: 'var(--accent-color)' }} aria-hidden="true" />
             <p className="sub-mgmt-state-title">No Active Subscription</p>
             <p className="sub-mgmt-state-desc">
-              Unlock unlimited access to all VIP chapters with a flexible StarNovel VIP Pass.
+              Unlock unlimited access to all chapters with a flexible StarNovel Subscription.
             </p>
             <button
               type="button"
@@ -216,7 +217,7 @@ export const Subscription: React.FC<SubscriptionProps> = ({
               style={{ borderRadius: '999px', padding: '10px 24px', marginTop: '8px' }}
               onClick={() => onNavigate('recharge')}
             >
-              Explore VIP Plans
+              Explore Subscription Plans
             </button>
           </div>
         ) : (
@@ -226,15 +227,17 @@ export const Subscription: React.FC<SubscriptionProps> = ({
               const isCanceling = cancelingId === vm.subscriptionId;
               const isOpeningPortal = portalLoadingId === vm.subscriptionId;
 
+              const displayPlanName = sanitizeSubscriptionCopy(vm.planName);
+
               return (
                 <section
                   key={vm.subscriptionId}
                   className="sub-mgmt-card"
-                  aria-label={`${vm.planName} subscription`}
+                  aria-label={`${displayPlanName} subscription`}
                 >
                   <div className="sub-mgmt-card-top">
                     <div style={{ minWidth: 0 }}>
-                      <h3 className="sub-mgmt-plan-name">{vm.planName}</h3>
+                      <h3 className="sub-mgmt-plan-name">{displayPlanName}</h3>
                       {vm.priceLabel && <p className="sub-mgmt-plan-price">{vm.priceLabel}</p>}
                     </div>
                     <span className={`sub-status-badge sub-status-${vm.statusTone}`}>
@@ -329,7 +332,7 @@ export const Subscription: React.FC<SubscriptionProps> = ({
                 style={{ borderRadius: '999px', padding: '10px 20px', fontSize: '0.8125rem' }}
                 onClick={() => onNavigate('recharge')}
               >
-                View All VIP &amp; Coin Packages
+                View All Subscription &amp; Coin Packages
               </button>
             </div>
           </div>

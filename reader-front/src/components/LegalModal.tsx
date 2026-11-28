@@ -171,7 +171,7 @@ export const LegalModal: React.FC<LegalModalProps> = ({
 
             <h3 style={{ color: 'var(--text-primary)', fontWeight: 600, fontSize: '0.875rem', marginTop: '6px' }}>2. Virtual Currency and Purchases</h3>
             <p>
-              Coins and VIP memberships purchased on starsfic.com are digital virtual tokens intended exclusively for unlocking reading content on this platform. Virtual currency has no cash value outside starsfic.com and cannot be transferred, exchanged, or redeemed for fiat currency.
+              Coins and subscriptions purchased on starsfic.com are digital virtual tokens intended exclusively for unlocking reading content on this platform. Virtual currency has no cash value outside starsfic.com and cannot be transferred, exchanged, or redeemed for fiat currency.
             </p>
 
             <h3 style={{ color: 'var(--text-primary)', fontWeight: 600, fontSize: '0.875rem', marginTop: '6px' }}>3. Intellectual Property Rights</h3>
@@ -232,12 +232,12 @@ export const LegalModal: React.FC<LegalModalProps> = ({
           <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
             <p><strong>Last Updated:</strong> August 2026</p>
             <p>
-              Thank you for purchasing reading coins and memberships on <strong>StarNovel</strong> (<strong>starsfic.com</strong>). Please read our refund policy carefully before making any purchases.
+              Thank you for purchasing reading coins and subscriptions on <strong>StarNovel</strong> (<strong>starsfic.com</strong>). Please read our refund policy carefully before making any purchases.
             </p>
 
             <h3 style={{ color: 'var(--text-primary)', fontWeight: 600, fontSize: '0.875rem', marginTop: '6px' }}>1. Nature of Digital Goods</h3>
             <p>
-              Reading coins, chapter unlocks, and VIP passes on starsfic.com are <strong>intangible virtual digital items</strong> that are credited to your account immediately upon payment confirmation. As digital goods are consumed upon unlocking reading content, purchases are generally <strong>non-refundable</strong> once delivered.
+              Reading coins, chapter unlocks, and subscriptions on starsfic.com are <strong>intangible virtual digital items</strong> that are credited to your account immediately upon payment confirmation. As digital goods are consumed upon unlocking reading content, purchases are generally <strong>non-refundable</strong> once delivered.
             </p>
 
             <h3 style={{ color: 'var(--text-primary)', fontWeight: 600, fontSize: '0.875rem', marginTop: '6px' }}>2. Exceptions and Refund Eligibility</h3>
