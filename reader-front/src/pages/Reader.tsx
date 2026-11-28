@@ -739,6 +739,8 @@ export const Reader: React.FC<ReaderProps> = ({
                       </div>
                     </div>
 
+                    <hr className="reader-unlock-dashed-divider" />
+
                     {userCoins > 0 && userCoins >= chapterPrice ? (
                       <div className="reader-unlock-action-group">
                         <button
