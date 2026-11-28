@@ -15,6 +15,50 @@ export function readingReturnPath(value: unknown): string {
 export const purchaseRequestStorageKey = (userId: number, slot: number, productId: number, novel: number) =>
   `pending-purchase:${userId}:${slot}:${productId}:${novel}`;
 
+export type CheckoutOrigin = {
+  source: 'reader' | 'recharge';
+  path: string;
+};
+
+export const checkoutOriginStorageKey = (intentId: string) => `checkout-origin:${intentId}`;
+
+export function saveCheckoutOrigin(intentId: string, origin: CheckoutOrigin): void {
+  if (!intentId) return;
+  try {
+    sessionStorage.setItem(checkoutOriginStorageKey(intentId), JSON.stringify(origin));
+  } catch {
+    // Ignore storage errors in restricted browser contexts.
+  }
+}
+
+export function readCheckoutOrigin(intentId: string): CheckoutOrigin | null {
+  if (!intentId) return null;
+  try {
+    const raw = sessionStorage.getItem(checkoutOriginStorageKey(intentId));
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (
+      parsed &&
+      (parsed.source === 'reader' || parsed.source === 'recharge') &&
+      typeof parsed.path === 'string'
+    ) {
+      return { source: parsed.source, path: parsed.path };
+    }
+  } catch {
+    // Ignore parse/storage errors.
+  }
+  return null;
+}
+
+export function clearCheckoutOrigin(intentId: string): void {
+  if (!intentId) return;
+  try {
+    sessionStorage.removeItem(checkoutOriginStorageKey(intentId));
+  } catch {
+    // Ignore storage errors.
+  }
+}
+
 export type RechargeSlotItem = {
   id: number;
   template_id: number;

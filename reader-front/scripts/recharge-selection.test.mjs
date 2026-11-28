@@ -106,6 +106,20 @@ test('#21 completed or closed returned intent falls back to default highlighted 
     returnedPendingIntent: null,
   });
   assert.deepEqual(fallback, { selectedSlotId: 27, staleReturnedIntent: false });
+
+  // Default selection prefers subscription over a highlighted coin pack when no returned intent is pending.
+  const coinHighlightedSlots = [
+    { id: 26, product_id: 5, type: 'subscription', product_type: 'vip', name: 'VIP Daily Pass', is_highlighted: false },
+    { id: 30, product_id: 10, type: 'single', product_type: 'single', name: '999 Coins', is_highlighted: true },
+  ];
+  const subDefault = resolveRechargeSelection({
+    visibleSlots: coinHighlightedSlots,
+    currentSelected: null,
+    userManuallySelected: false,
+    returnedLookupState: 'none',
+    returnedPendingIntent: null,
+  });
+  assert.deepEqual(subDefault, { selectedSlotId: 26, staleReturnedIntent: false });
 });
 
 test('#21 initial lookup 503 failure keeps unselected while retrying, then restores slot 26', async () => {

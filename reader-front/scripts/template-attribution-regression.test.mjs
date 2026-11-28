@@ -160,4 +160,18 @@ test('Case 1 helpers format North American plan names, equivalent prices, and bo
   assert.equal(rechargeHelpers.formatValidListPrice(1499, 1999, '$14.99'), '');
   assert.equal(rechargeHelpers.formatValidListPrice(0, 1999, '$0.00'), '');
   assert.equal(rechargeHelpers.formatValidListPrice(undefined, 1999), '');
+
+  const sessionMap = new Map();
+  globalThis.sessionStorage = {
+    getItem: (k) => sessionMap.get(k) ?? null,
+    setItem: (k, v) => sessionMap.set(k, String(v)),
+    removeItem: (k) => sessionMap.delete(k),
+  };
+  rechargeHelpers.saveCheckoutOrigin('intent-reader-1', { source: 'reader', path: '/content?novel_id=7&chapter_index=5' });
+  assert.deepEqual(rechargeHelpers.readCheckoutOrigin('intent-reader-1'), {
+    source: 'reader',
+    path: '/content?novel_id=7&chapter_index=5',
+  });
+  rechargeHelpers.clearCheckoutOrigin('intent-reader-1');
+  assert.equal(rechargeHelpers.readCheckoutOrigin('intent-reader-1'), null);
 });

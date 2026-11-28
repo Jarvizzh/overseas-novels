@@ -80,10 +80,11 @@ export function resolveRechargeSelection({
     return { selectedSlotId: currentSelected, staleReturnedIntent: false };
   }
 
-  const highlightedSlot = visibleSlots.find((s) => s.is_highlighted);
+  const highlightedSubSlot = visibleSlots.find((s) => isSubscriptionSlotItem(s) && s.is_highlighted);
   const subSlot = visibleSlots.find(isSubscriptionSlotItem);
+  const highlightedSlot = visibleSlots.find((s) => s.is_highlighted);
   return {
-    selectedSlotId: (highlightedSlot || subSlot || visibleSlots[0]).id,
+    selectedSlotId: (highlightedSubSlot || subSlot || highlightedSlot || visibleSlots[0]).id,
     staleReturnedIntent: false,
   };
 }

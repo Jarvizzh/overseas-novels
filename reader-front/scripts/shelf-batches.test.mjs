@@ -3,18 +3,23 @@ import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import ts from 'typescript';
 
-const source = (await readFile(new URL('../src/utils/api.ts', import.meta.url), 'utf8')).replace(
-  'import.meta.env.VITE_API_BASE_URL',
-  "''",
-);
+const readerStorageSource = await readFile(new URL('../src/utils/readerStorage.ts', import.meta.url), 'utf8');
+const source = (await readFile(new URL('../src/utils/api.ts', import.meta.url), 'utf8'))
+  .replace("import { readerStorage } from './readerStorage';", readerStorageSource)
+  .replace('import.meta.env.VITE_API_BASE_URL', "''");
 const output = ts.transpileModule(source, {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext },
 }).outputText;
 const { api, registerSessionRefreshHandler } = await import(`data:text/javascript;base64,${Buffer.from(output).toString('base64')}`);
 
 globalThis.document = { cookie: '' };
-globalThis.window = { location: { href: 'https://example.invalid' } };
 globalThis.localStorage = { getItem: () => null };
+globalThis.window = {
+  location: { href: 'https://example.invalid' },
+  get localStorage() {
+    return globalThis.localStorage;
+  },
+};
 
 test('shelf removal preserves every ID and limits concurrency and batch size', async () => {
   const original = globalThis.fetch;

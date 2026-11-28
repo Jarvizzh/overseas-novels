@@ -12,6 +12,7 @@ import {
   purchaseRequestStorageKey,
   readingReturnPath,
   resolveInitialCarouselIndex,
+  saveCheckoutOrigin,
   type PaymentProvider,
   type RechargeSlotItem,
 } from '../utils/rechargeCatalogHelpers';
@@ -235,6 +236,8 @@ export const RechargeCheckoutPanel: React.FC<RechargeCheckoutPanelProps> = ({
 
   const subscriptionPacks = buildSubscriptionPacks(slots);
   const coinPacks = buildCoinPacks(slots, novelId);
+  const subscriptionPacksRef = useRef(subscriptionPacks);
+  subscriptionPacksRef.current = subscriptionPacks;
 
   const scrollCarouselTo = useCallback((index: number, behavior: ScrollBehavior = 'smooth') => {
     const track = carouselRef.current;
@@ -289,22 +292,26 @@ export const RechargeCheckoutPanel: React.FC<RechargeCheckoutPanelProps> = ({
 
   useEffect(() => {
     if (loadingTemplates || offersNovelId !== novelId) return;
-    const hasSelectedSubscription = selectedPack !== null && subscriptionPacks.some((pack) => pack.id === selectedPack);
-    if (subscriptionPacks.length <= 1 || autoRotatePaused || isProcessing || hasSelectedSubscription) return;
+    if (subscriptionPacks.length <= 1 || autoRotatePaused || isProcessing) return;
     if (typeof window !== 'undefined' && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) {
       return;
     }
 
     const intervalId = window.setInterval(() => {
       if (document.visibilityState !== 'visible') return;
-      const next = (activeSlideIndexRef.current + 1) % subscriptionPacks.length;
+      const packs = subscriptionPacksRef.current;
+      if (packs.length <= 1) return;
+      const next = (activeSlideIndexRef.current + 1) % packs.length;
       activeSlideIndexRef.current = next;
       setActiveSlideIndex(next);
       scrollCarouselTo(next, 'smooth');
+      if (selectedPackRef.current !== null && packs.some((pack) => pack.id === selectedPackRef.current)) {
+        setSelectedPack(packs[next].id);
+      }
     }, 3000);
 
     return () => window.clearInterval(intervalId);
-  }, [loadingTemplates, offersNovelId, novelId, subscriptionPacks, selectedPack, autoRotatePaused, isProcessing, scrollCarouselTo]);
+  }, [loadingTemplates, offersNovelId, novelId, subscriptionPacks.length, autoRotatePaused, isProcessing, scrollCarouselTo]);
 
   const startUnifiedPurchase = async (
     tSlot: RechargeSlotItem,
@@ -380,6 +387,10 @@ export const RechargeCheckoutPanel: React.FC<RechargeCheckoutPanelProps> = ({
         if (!embedded) {
           onTrackIntent(intent.intent_id, false);
         }
+        saveCheckoutOrigin(intent.intent_id, {
+          source: embedded ? 'reader' : 'recharge',
+          path: embedded ? returnPath : '/recharge',
+        });
         redirectingRef.current = true;
         window.clearTimeout(redirectResetTimerRef.current);
         redirectResetTimerRef.current = window.setTimeout(() => {
@@ -509,11 +520,6 @@ export const RechargeCheckoutPanel: React.FC<RechargeCheckoutPanelProps> = ({
   }, [selectedProvider, anyPayPalAvailable, anyStripeAvailable]);
 
   const cardLabel = 'Card';
-  const selectedSummaryPrice = !selectedSlot
-    ? ''
-    : selectedSubscriptionPack
-      ? selectedSubscriptionPack.price
-      : selectedSlot.price;
   const selectedSummaryHint = !selectedSlot
     ? ''
     : selectedSubscriptionPack
@@ -717,9 +723,9 @@ export const RechargeCheckoutPanel: React.FC<RechargeCheckoutPanelProps> = ({
                     key={pack.id}
                     onClick={() => handleSelectPack(pack.id)}
                     aria-pressed={isSelected}
-                    className={`recharge-coin-card${isSelected ? ' is-selected' : ''}${isWholeBook ? ' coin-pack-whole-book' : ''}${pack.badge ? ' has-tag' : ''}`}
+                    className={`recharge-coin-card${isSelected ? ' is-selected' : ''}${isWholeBook ? ' coin-pack-whole-book' : ''}${!isWholeBook && pack.badge ? ' has-tag' : ''}`}
                   >
-                    {pack.badge && <span className="recharge-coin-tag">{pack.badge}</span>}
+                    {!isWholeBook && pack.badge && <span className="recharge-coin-tag">{pack.badge}</span>}
                     {isWholeBook ? (
                       <div className="recharge-whole-book-body">
                         <div style={{ minWidth: 0 }}>
@@ -789,8 +795,8 @@ export const RechargeCheckoutPanel: React.FC<RechargeCheckoutPanelProps> = ({
                   onClick={() => void handlePurchase(effectiveProvider)}
                   disabled={isProcessing}
                 >
-                  <span className="tabular-nums">
-                    {isProcessing ? 'Connecting...' : `Pay Now · ${selectedSummaryPrice}`}
+                  <span>
+                    {isProcessing ? 'Connecting...' : 'Pay Now'}
                   </span>
                 </button>
                 <div className="recharge-pay-trust">

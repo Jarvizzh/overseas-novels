@@ -10,7 +10,9 @@ import {
 } from '../utils/rechargeSelectionHelpers';
 import { evaluatePurchaseLookupOutcome } from '../utils/checkoutPendingHelpers';
 import {
+  clearCheckoutOrigin,
   purchaseRequestStorageKey,
+  readCheckoutOrigin,
   readingReturnPath,
   type PaymentProvider,
 } from '../utils/rechargeCatalogHelpers';
@@ -46,6 +48,12 @@ function initialPurchaseLocator() {
   return { intent: intentParam, token, vip: false, stripeVIP: false, cancelled };
 }
 
+function resolveCancelReaderPath(intentId: string, fallbackReturnPath?: string): string {
+  const origin = readCheckoutOrigin(intentId);
+  if (origin?.source !== 'reader') return '';
+  return readingReturnPath(origin.path) || readingReturnPath(fallbackReturnPath);
+}
+
 export const Recharge: React.FC<RechargeProps> = ({
   authReady = true,
   userId,
@@ -67,6 +75,9 @@ export const Recharge: React.FC<RechargeProps> = ({
   const [returnedPendingIntent, setReturnedPendingIntent] = useState<PurchaseIntent | null>(null);
   const [returnedLookupState, setReturnedLookupState] = useState<ReturnedLookupState>(
     () => (purchaseLocator.intent || purchaseLocator.token ? 'loading' : 'none'),
+  );
+  const [returningAfterCancel, setReturningAfterCancel] = useState<boolean>(
+    () => Boolean(purchaseLocator.cancelled && purchaseLocator.intent && resolveCancelReaderPath(purchaseLocator.intent)),
   );
   const shownPurchaseRef = useRef('');
   const shownFailureRef = useRef('');
@@ -96,6 +107,11 @@ export const Recharge: React.FC<RechargeProps> = ({
   useEffect(() => {
     showToastRef.current = showToast;
   }, [showToast]);
+
+  const onNavigateRef = useRef(onNavigate);
+  useEffect(() => {
+    onNavigateRef.current = onNavigate;
+  }, [onNavigate]);
 
   const showPurchase = (id: string, subscriptionProvider?: PaymentProvider) => {
     setPurchaseLocator({ intent: id, token: '', vip: Boolean(subscriptionProvider), stripeVIP: subscriptionProvider === 'stripe', cancelled: false });
@@ -135,6 +151,7 @@ export const Recharge: React.FC<RechargeProps> = ({
           maxWaitMs: endAt - startedAt,
         });
         if (decision.shouldClearDraft) {
+          clearCheckoutOrigin(intent.intent_id || purchaseLocator.intent);
           const storageKey = purchaseRequestStorageKey(userId, intent.slot_id, intent.product_id || 0, intent.novel_id || 0);
           try {
             const saved = JSON.parse(sessionStorage.getItem(storageKey) || 'null');
@@ -143,6 +160,7 @@ export const Recharge: React.FC<RechargeProps> = ({
             // Server-owned purchase status does not depend on the draft.
           }
           if (decision.shouldShowSuccess && shownPurchaseRef.current !== (intent.intent_id || intent.order_id)) {
+            setReturningAfterCancel(false);
             shownPurchaseRef.current = intent.intent_id || intent.order_id || '';
             setSuccessAmount(intent.coins);
             setIsVipSuccess(intent.order_type === 'subscription');
@@ -155,6 +173,20 @@ export const Recharge: React.FC<RechargeProps> = ({
               void onRefreshStatusRef.current?.();
             }
           }
+        }
+        if (purchaseLocator.cancelled && !decision.shouldShowSuccess && !decision.shouldContinuePolling) {
+          const originIntentId = intent.intent_id || purchaseLocator.intent;
+          const readerCancelPath = resolveCancelReaderPath(originIntentId, intent.return_path);
+          clearCheckoutOrigin(originIntentId);
+          if (readerCancelPath) {
+            if (onNavigateRef.current) {
+              onNavigateRef.current(readerCancelPath, undefined, { replace: true });
+            } else {
+              window.location.replace(readerCancelPath);
+            }
+            return;
+          }
+          setReturningAfterCancel(false);
         }
         if (decision.outcome === 'terminal_failure') {
           const failureKey = `${intent.intent_id}:${intent.status}:${intent.confirmation_code || ''}`;
@@ -179,7 +211,19 @@ export const Recharge: React.FC<RechargeProps> = ({
           timer = window.setTimeout(() => void lookup(), delayMs);
         } else {
           setReturnedLookupState((prev) => (prev === 'resolved' ? prev : 'unresolved'));
-          if (!purchaseLocator.cancelled) {
+          if (purchaseLocator.cancelled) {
+            const readerCancelPath = resolveCancelReaderPath(purchaseLocator.intent);
+            clearCheckoutOrigin(purchaseLocator.intent);
+            if (readerCancelPath) {
+              if (onNavigateRef.current) {
+                onNavigateRef.current(readerCancelPath, undefined, { replace: true });
+              } else {
+                window.location.replace(readerCancelPath);
+              }
+              return;
+            }
+            setReturningAfterCancel(false);
+          } else {
             showToastRef.current(
               isPermanentLookupError
                 ? 'This checkout could not be found. Please make sure you are signed in with the account that paid.'
@@ -245,6 +289,26 @@ export const Recharge: React.FC<RechargeProps> = ({
     const r = dialog.getBoundingClientRect();
     return e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom;
   };
+
+  if (returningAfterCancel) {
+    return (
+      <div
+        className="page-container-full animate-fade-in"
+        style={{
+          backgroundColor: 'var(--bg-primary)',
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          justifyContent: 'center',
+          gap: '12px',
+          color: 'var(--text-secondary)',
+        }}
+      >
+        <div className="sn-spinner" />
+        <p style={{ fontSize: '0.875rem', margin: 0 }}>Returning to chapter...</p>
+      </div>
+    );
+  }
 
   return (
     <>
