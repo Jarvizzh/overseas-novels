@@ -1874,19 +1874,186 @@
   color: var(--reader-muted);
 }
 
-/* Reader Paywall Card */
-.reader-paywall-card {
-  background-color: var(--reader-card-bg);
-  border-radius: 20px;
-  padding: 28px 22px;
-  border: 1px solid var(--reader-border);
-  margin-top: 28px;
+/* Reader Paywall Inline Fade & Unlock Module */
+.reader-preview-fade {
+  -webkit-mask-image: linear-gradient(
+    to bottom,
+    #000 0%,
+    #000 max(20%, calc(100% - 3.4em)),
+    rgba(0, 0, 0, 0.32) max(55%, calc(100% - 1.6em)),
+    transparent 100%
+  );
+  mask-image: linear-gradient(
+    to bottom,
+    #000 0%,
+    #000 max(20%, calc(100% - 3.4em)),
+    rgba(0, 0, 0, 0.32) max(55%, calc(100% - 1.6em)),
+    transparent 100%
+  );
+}
+
+.reader-paywall-section {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  font-family: var(--font-sans);
+}
+
+.reader-unlock-divider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.reader-unlock-divider-line {
+  flex: 1;
+  height: 1px;
+  background-color: var(--reader-border);
+}
+
+.reader-unlock-divider-title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 1.125rem;
+  font-weight: 700;
+  color: var(--reader-text);
+  white-space: nowrap;
+}
+
+.reader-unlock-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 0.875rem;
+  color: var(--reader-muted);
+}
+
+.reader-unlock-meta-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.reader-unlock-meta-label {
+  color: var(--reader-muted);
+}
+
+.reader-unlock-meta-val {
+  color: var(--reader-text);
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.reader-balance-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.reader-balance-sep {
+  color: var(--reader-border);
+  margin-inline: 2px;
+}
+
+.reader-unlock-action-group {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 14px;
-  text-align: center;
-  font-family: var(--font-sans);
+  gap: 10px;
+}
+
+.reader-unlock-now-btn {
+  width: 100%;
+  min-height: 46px;
+  border-radius: 999px;
+  border: none;
+  background-color: var(--reader-cta-bg);
+  color: var(--reader-cta-text);
+  font-size: 0.9375rem;
+  font-weight: 700;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: var(--transition-fast);
+}
+
+.reader-unlock-now-btn:hover:not(:disabled) {
+  filter: brightness(0.95);
+}
+
+.reader-unlock-now-btn:active:not(:disabled) {
+  transform: scale(0.985);
+}
+
+.reader-unlock-now-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.reader-auto-unlock-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.8125rem;
+  color: var(--reader-muted);
+  cursor: pointer;
+}
+
+.reader-paywall-recharge {
+  margin-top: 4px;
+  --bg-primary: var(--reader-bg);
+  --bg-secondary: var(--reader-card-bg);
+  --bg-tertiary: var(--reader-hud-pill);
+  --text-primary: var(--reader-text);
+  --text-secondary: var(--reader-muted);
+  --text-tertiary: var(--reader-muted);
+  --border-color: var(--reader-border);
+  --border-strong: var(--reader-border);
+  --accent-color: var(--reader-accent);
+  --accent-text: var(--reader-accent);
+  --accent-light: rgba(154, 113, 50, 0.12);
+  --cta-bg: var(--reader-cta-bg);
+  --cta-text: var(--reader-cta-text);
+}
+
+.reader-theme-forest .reader-paywall-recharge,
+.reader-theme-mint .reader-paywall-recharge {
+  --accent-light: rgba(60, 110, 71, 0.14);
+}
+
+.reader-theme-night .reader-paywall-recharge {
+  --accent-light: rgba(212, 174, 104, 0.16);
+  --hero-bg: #25221E;
+  --hero-text: #F4F1EA;
+}
+
+.reader-theme-night .reader-paywall-recharge .recharge-coin-card.is-selected {
+  background-color: rgba(212, 174, 104, 0.12);
+}
+
+.reader-theme-night .reader-paywall-recharge .recharge-pay-btn--paypal {
+  background-color: #FAF8F5;
+  color: #003087;
+  border-color: rgba(255, 255, 255, 0.24);
+}
+
+.reader-paywall-recharge .coin-packs-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.recharge-panel-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.recharge-panel-stack.is-embedded {
+  gap: 16px;
 }
 
 /* Sidebar Drawer (Table of Contents) */
@@ -2108,10 +2275,6 @@
   cursor: pointer;
 }
 
-.recharge-scroll-container {
-  padding-bottom: 16px;
-}
-
 .vip-carousel-track {
   display: flex;
   gap: 0;
@@ -2228,23 +2391,7 @@
   grid-column: 1 / -1;
 }
 
-/* Recharge Sticky Checkout Dock */
-.recharge-checkout-dock {
-  flex-shrink: 0;
-  background-color: var(--bg-glass);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
-  border-top: 1px solid var(--border-color);
-  padding: 10px 16px calc(12px + env(safe-area-inset-bottom));
-  z-index: 20;
-}
-
-@media (min-width: 768px) {
-  .recharge-checkout-dock {
-    padding: 12px 28px calc(14px + env(safe-area-inset-bottom));
-  }
-}
-
+/* Recharge Inline Checkout Actions */
 .recharge-checkout-section {
   display: flex;
   flex-direction: column;
@@ -2693,4 +2840,190 @@
 
 .spin-icon {
   animation: sub-spin 0.9s linear infinite;
+}
+
+/* Branded PayPal / Stripe Checkout Redirect Transition Modal */
+@keyframes checkoutModalPop {
+  from {
+    opacity: 0;
+    transform: scale(0.94) translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+.checkout-transition-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background-color: rgba(15, 15, 15, 0.48);
+  backdrop-filter: blur(5px);
+  -webkit-backdrop-filter: blur(5px);
+}
+
+.checkout-transition-card {
+  width: min(264px, 100%);
+  border-radius: 24px;
+  padding: 26px 22px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  box-shadow: 0 24px 56px rgba(0, 0, 0, 0.28);
+  animation: checkoutModalPop 0.22s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.checkout-transition-card--paypal {
+  background: radial-gradient(120% 65% at 50% 0%, rgba(204, 232, 255, 0.94) 0%, #FFFFFF 58%);
+  border: 1px solid rgba(255, 255, 255, 0.85);
+}
+
+.checkout-transition-card--stripe {
+  background: radial-gradient(120% 65% at 50% 0%, rgba(226, 224, 255, 0.94) 0%, #FFFFFF 58%);
+  border: 1px solid rgba(255, 255, 255, 0.85);
+}
+
+.checkout-transition-brand {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.checkout-transition-wordmark {
+  font-size: 1.5rem;
+  font-weight: 800;
+  letter-spacing: -0.025em;
+  line-height: 1;
+  user-select: none;
+}
+
+.checkout-transition-wordmark--paypal {
+  font-style: italic;
+}
+
+.checkout-pp-pay {
+  color: #002C8A;
+}
+
+.checkout-pp-pal {
+  color: #009CDE;
+}
+
+.checkout-transition-wordmark--stripe {
+  color: #533AFD;
+}
+
+.checkout-transition-subtitle {
+  margin: 0 0 20px;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  color: #6B7280;
+}
+
+.checkout-transition-spin {
+  animation: sub-spin 0.95s linear infinite;
+}
+
+.checkout-transition-spinner-track {
+  stroke: #E5E7EB;
+}
+
+:root[data-user-theme="dark"] .checkout-transition-card--paypal,
+.reader-theme-night .checkout-transition-card--paypal {
+  background: radial-gradient(120% 65% at 50% 0%, rgba(0, 121, 193, 0.24) 0%, #1E1D1B 60%);
+  border-color: rgba(255, 255, 255, 0.14);
+}
+
+:root[data-user-theme="dark"] .checkout-transition-card--stripe,
+.reader-theme-night .checkout-transition-card--stripe {
+  background: radial-gradient(120% 65% at 50% 0%, rgba(83, 58, 253, 0.24) 0%, #1E1D1B 60%);
+  border-color: rgba(255, 255, 255, 0.14);
+}
+
+:root[data-user-theme="dark"] .checkout-pp-pay,
+.reader-theme-night .checkout-pp-pay {
+  color: #E5F0FF;
+}
+
+:root[data-user-theme="dark"] .checkout-transition-wordmark--stripe,
+.reader-theme-night .checkout-transition-wordmark--stripe {
+  color: #9B8CFF;
+}
+
+:root[data-user-theme="dark"] .checkout-transition-subtitle,
+.reader-theme-night .checkout-transition-subtitle {
+  color: #B0A99F;
+}
+
+:root[data-user-theme="dark"] .checkout-transition-spinner-track,
+.reader-theme-night .checkout-transition-spinner-track {
+  stroke: rgba(255, 255, 255, 0.14);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-user-theme="light"]) .checkout-transition-card--paypal {
+    background: radial-gradient(120% 65% at 50% 0%, rgba(0, 121, 193, 0.24) 0%, #1E1D1B 60%);
+    border-color: rgba(255, 255, 255, 0.14);
+  }
+  :root:not([data-user-theme="light"]) .checkout-transition-card--stripe {
+    background: radial-gradient(120% 65% at 50% 0%, rgba(83, 58, 253, 0.24) 0%, #1E1D1B 60%);
+    border-color: rgba(255, 255, 255, 0.14);
+  }
+  :root:not([data-user-theme="light"]) .checkout-pp-pay {
+    color: #E5F0FF;
+  }
+  :root:not([data-user-theme="light"]) .checkout-transition-wordmark--stripe {
+    color: #9B8CFF;
+  }
+  :root:not([data-user-theme="light"]) .checkout-transition-subtitle {
+    color: #B0A99F;
+  }
+  :root:not([data-user-theme="light"]) .checkout-transition-spinner-track {
+    stroke: rgba(255, 255, 255, 0.14);
+  }
+}
+
+/* Keep light reader themes consistent even when app/OS theme is dark */
+:root .reader-container:not(.reader-theme-night) .recharge-coin-card.is-selected {
+  background-color: rgba(154, 113, 50, 0.06);
+}
+
+:root .reader-container:not(.reader-theme-night) .recharge-pay-btn--paypal {
+  background-color: #FFFFFF;
+  color: #003087;
+  border-color: rgba(0, 48, 135, 0.22);
+}
+
+:root .reader-container:not(.reader-theme-night) .checkout-transition-card--paypal {
+  background: radial-gradient(120% 65% at 50% 0%, rgba(204, 232, 255, 0.94) 0%, #FFFFFF 58%);
+  border-color: rgba(255, 255, 255, 0.85);
+}
+
+:root .reader-container:not(.reader-theme-night) .checkout-transition-card--stripe {
+  background: radial-gradient(120% 65% at 50% 0%, rgba(226, 224, 255, 0.94) 0%, #FFFFFF 58%);
+  border-color: rgba(255, 255, 255, 0.85);
+}
+
+:root .reader-container:not(.reader-theme-night) .checkout-pp-pay {
+  color: #002C8A;
+}
+
+:root .reader-container:not(.reader-theme-night) .checkout-transition-wordmark--stripe {
+  color: #533AFD;
+}
+
+:root .reader-container:not(.reader-theme-night) .checkout-transition-subtitle {
+  color: #6B7280;
+}
+
+:root .reader-container:not(.reader-theme-night) .checkout-transition-spinner-track {
+  stroke: #E5E7EB;
 }

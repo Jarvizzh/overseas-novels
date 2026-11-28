@@ -1,12 +1,13 @@
 import { readerStorage } from '../utils/readerStorage';
 import React, { useState, useEffect, useLayoutEffect, useRef, useCallback } from 'react';
-import { ChevronLeft, ChevronRight, List, Lock, BookOpen } from 'lucide-react';
+import { ChevronLeft, ChevronRight, List, Lock, BookOpen, Sparkles } from 'lucide-react';
 import { useToast } from '../context/toastStore';
 import { api, ApiError } from '../utils/api';
 import type { Novel, Chapter, ChapterContentResponse } from '../utils/api';
 import { ReaderSettings, type ReaderFontFamily, type ReaderLineHeight } from '../components/ReaderSettings';
 import { Drawer } from '../components/Drawer';
 import { GoldCoin } from '../components/GoldCoin';
+import { RechargeCheckoutPanel } from '../components/RechargeCheckoutPanel';
 import { readerCache } from '../utils/readerCache';
 
 interface ReaderProps {
@@ -33,7 +34,10 @@ interface ReaderProps {
   onMarkChapterUnlocked: (chapterId: string) => void;
   onUnmarkChapterUnlocked: (chapterId: string) => void;
   onUnlockChapter: (bookId: number, chapterIndex: number, price: number, chapterId: string, version: number) => Promise<boolean>;
+  onRefreshWallet?: () => Promise<void>;
   userCoins: number;
+  chargedCoins?: number;
+  bonusCoins?: number;
 }
 
 function normalizeReaderTheme(raw: string | null): string {
@@ -79,7 +83,10 @@ export const Reader: React.FC<ReaderProps> = ({
   onMarkChapterUnlocked,
   onUnmarkChapterUnlocked,
   onUnlockChapter,
+  onRefreshWallet,
   userCoins,
+  chargedCoins = userCoins,
+  bonusCoins = 0,
 }) => {
   const { showToast } = useToast();
   const [novel, setNovel] = useState<Novel | null>(null);
@@ -191,7 +198,7 @@ export const Reader: React.FC<ReaderProps> = ({
   const [showTOC, setShowTOC] = useState(false);
 
   const [autoUnlock, setAutoUnlock] = useState<boolean>(() => {
-    return readerStorage.getItem('reader-auto-unlock') === 'true';
+    return readerStorage.getItem('reader-auto-unlock') !== 'false';
   });
 
   const autoUnlockRef = useRef(autoUnlock);
@@ -463,6 +470,15 @@ export const Reader: React.FC<ReaderProps> = ({
     readerStorage.setItem('reader-auto-unlock', autoUnlock.toString());
   }, [autoUnlock]);
 
+  const prevIsVipRef = useRef(isVip);
+  useEffect(() => {
+    const wasVip = prevIsVipRef.current;
+    prevIsVipRef.current = isVip;
+    if (!wasVip && isVip && authReady && isLocked && !loading && !purchaseNeedsReview) {
+      void loadChapter(currentChIndex, false);
+    }
+  }, [isVip, authReady, isLocked, loading, purchaseNeedsReview, currentChIndex, loadChapter]);
+
   const handleChapterSelect = useCallback(
     (targetIdx: number) => {
       const total = chaptersRef.current.length;
@@ -491,32 +507,28 @@ export const Reader: React.FC<ReaderProps> = ({
   const [isUnlocking, setIsUnlocking] = useState(false);
 
   const handleUnlockNow = async () => {
-    if (isUnlocking || purchaseNeedsReview || !chapterDetail || !chapterVersion) return;
+    if (isUnlocking || purchaseNeedsReview || !chapterDetail || !chapterVersion || userCoins < chapterPrice) return;
     const unlockSeq = loadSeqRef.current;
     setIsUnlocking(true);
     try {
-      if (userCoins >= chapterPrice) {
-        const success = await onUnlockChapter(novelId, currentChIndex, chapterPrice, chapterDetail.id, chapterVersion);
+      const success = await onUnlockChapter(novelId, currentChIndex, chapterPrice, chapterDetail.id, chapterVersion);
+      if (unlockSeq !== loadSeqRef.current) return;
+      if (success) {
+        showToast('Chapter unlocked!', 'success');
+        const res = await api.getChapterContent(novelId, currentChIndex, userId);
         if (unlockSeq !== loadSeqRef.current) return;
-        if (success) {
-          showToast('Chapter unlocked!', 'success');
-          const res = await api.getChapterContent(novelId, currentChIndex, userId);
-          if (unlockSeq !== loadSeqRef.current) return;
-          if (!res.locked) {
-            await readerCache.setCachedChapter(userId, novelId, currentChIndex, res);
-            if (res.access_type === 'chapter') {
-              onMarkChapterUnlocked(res.chapter.id);
-            }
+        if (!res.locked) {
+          await readerCache.setCachedChapter(userId, novelId, currentChIndex, res);
+          if (res.access_type === 'chapter') {
+            onMarkChapterUnlocked(res.chapter.id);
           }
-          setChapterDetail(res.chapter);
-          setIsLocked(res.locked);
-          setChapterPrice(res.price ?? chapterPrice);
-          setChapterVersion(res.content_version);
-          setPurchaseNeedsReview(Boolean(res.purchase_needs_review));
-          setChapterAccessType(res.access_type ?? null);
         }
-      } else {
-        onNavigate('recharge', { id: novelId });
+        setChapterDetail(res.chapter);
+        setIsLocked(res.locked);
+        setChapterPrice(res.price ?? chapterPrice);
+        setChapterVersion(res.content_version);
+        setPurchaseNeedsReview(Boolean(res.purchase_needs_review));
+        setChapterAccessType(res.access_type ?? null);
       }
     } catch (err) {
       if (unlockSeq !== loadSeqRef.current) return;
@@ -535,8 +547,8 @@ export const Reader: React.FC<ReaderProps> = ({
           setChapterAccessType(refreshed.access_type ?? null);
         }
       } else if (err instanceof ApiError && err.status === 402) {
-        showToast('Insufficient balance. Please top up coins.', 'error');
-        onNavigate('recharge', { id: novelId });
+        showToast('Insufficient balance. Please top up below.', 'error');
+        void onRefreshWallet?.();
       } else {
         const msg = err instanceof Error ? err.message : 'Failed to unlock chapter.';
         showToast(msg, 'error');
@@ -692,138 +704,98 @@ export const Reader: React.FC<ReaderProps> = ({
           <article className="reader-article">
             <h1 className="reader-chapter-title">{currentChapterTitle}</h1>
 
-            {paragraphs.map((paragraph, pIdx) => (
-              <p key={pIdx} data-paragraph-index={pIdx} className="reader-text-paragraph">
-                {paragraph}
-              </p>
-            ))}
+            <div className={isLocked && paragraphs.length > 0 ? 'reader-preview-fade' : undefined}>
+              {paragraphs.map((paragraph, pIdx) => (
+                <p key={pIdx} data-paragraph-index={pIdx} className="reader-text-paragraph">
+                  {paragraph}
+                </p>
+              ))}
+            </div>
 
             {isLocked && (
-              <div
-                className="reader-paywall-card"
+              <section
+                className="reader-paywall-section"
+                aria-label="Unlock chapter"
                 onClick={(e) => e.stopPropagation()}
               >
-                <div
-                  style={{
-                    width: '48px',
-                    height: '48px',
-                    borderRadius: '50%',
-                    backgroundColor: 'var(--reader-hud-pill)',
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    color: 'var(--reader-accent)',
-                  }}
-                >
-                  <Lock size={20} strokeWidth={1.8} aria-hidden="true" />
+                <div className="reader-unlock-divider">
+                  <span className="reader-unlock-divider-line" aria-hidden="true" />
+                  <h2 className="reader-unlock-divider-title">
+                    {purchaseNeedsReview ? 'Earlier Purchase Needs Review' : 'Unlock Chapters'}
+                  </h2>
+                  <span className="reader-unlock-divider-line" aria-hidden="true" />
                 </div>
-                <h2 style={{ fontFamily: 'var(--font-display)', fontSize: '1.1875rem', fontWeight: 600, color: 'var(--reader-text)' }}>
-                  {purchaseNeedsReview ? 'Earlier purchase needs review' : 'Unlock to Continue Reading'}
-                </h2>
-                <p style={{ fontSize: '0.8125rem', color: 'var(--reader-muted)' }}>
-                  Full chapter length: {(chapterDetail?.word_count || 0).toLocaleString()} words
-                </p>
 
                 {purchaseNeedsReview ? (
-                  <p style={{ fontSize: '0.8125rem', color: 'var(--reader-muted)' }}>
+                  <p style={{ fontSize: '0.8125rem', color: 'var(--reader-muted)', textAlign: 'center', marginTop: '8px' }}>
                     Contact support to verify your earlier purchase before buying another chapter in this book.
                   </p>
                 ) : (
                   <>
-                    <div
-                      style={{
-                        width: '100%',
-                        maxWidth: '300px',
-                        borderTop: '1px solid var(--reader-border)',
-                        paddingTop: '12px',
-                        display: 'flex',
-                        flexDirection: 'column',
-                        gap: '8px',
-                        fontSize: '0.8125rem',
-                      }}
-                    >
-                      <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                        <span style={{ color: 'var(--reader-muted)' }}>Chapter Price</span>
-                        <span className="tabular-nums" style={{ fontWeight: 600, color: 'var(--reader-text)', display: 'inline-flex', alignItems: 'center', gap: '5px' }}>
-                          <GoldCoin size={14} />
-                          <span>{chapterPrice} Coins</span>
+                    <div className="reader-unlock-meta">
+                      <div className="reader-unlock-meta-row">
+                        <span className="reader-unlock-meta-label">Unlock:</span>
+                        <span className="reader-unlock-meta-val tabular-nums">
+                          <strong>{chapterPrice.toLocaleString()}</strong> Coins or Bonus
                         </span>
                       </div>
-                      <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                        <span style={{ color: 'var(--reader-muted)' }}>Your Balance</span>
-                        <span
-                          className="tabular-nums"
-                          style={{
-                            fontWeight: 600,
-                            color: userCoins >= chapterPrice ? '#16a34a' : '#dc2626',
-                          }}
-                        >
-                          {userCoins.toLocaleString()} Coins
+                      <div className="reader-unlock-meta-row">
+                        <span className="reader-unlock-meta-label">Balance:</span>
+                        <span className="reader-unlock-meta-val tabular-nums">
+                          <span className="reader-balance-item">
+                            <GoldCoin size={14} />
+                            <strong>{chargedCoins.toLocaleString()}</strong> Coins
+                          </span>
+                          <span className="reader-balance-sep" aria-hidden="true">|</span>
+                          <span className="reader-balance-item">
+                            <Sparkles size={13} strokeWidth={2} style={{ color: 'var(--reader-accent)' }} aria-hidden="true" />
+                            <strong>{bonusCoins.toLocaleString()}</strong> Bonus
+                          </span>
                         </span>
                       </div>
                     </div>
 
-                    <label
-                      htmlFor="auto-unlock-checkbox"
-                      style={{
-                        display: 'inline-flex',
-                        alignItems: 'center',
-                        gap: '8px',
-                        fontSize: '0.8125rem',
-                        color: 'var(--reader-muted)',
-                        cursor: 'pointer',
-                        marginTop: '2px',
-                      }}
-                    >
-                      <input
-                        type="checkbox"
-                        id="auto-unlock-checkbox"
-                        checked={autoUnlock}
-                        onChange={(e) => setAutoUnlock(e.target.checked)}
-                        style={{ width: '16px', height: '16px', cursor: 'pointer' }}
-                      />
-                      <span>Auto-unlock next chapters</span>
-                    </label>
+                    {userCoins > 0 && userCoins >= chapterPrice && (
+                      <div className="reader-unlock-action-group">
+                        <button
+                          type="button"
+                          className="reader-unlock-now-btn"
+                          onClick={handleUnlockNow}
+                          disabled={isUnlocking}
+                        >
+                          {isUnlocking ? 'Unlocking...' : 'Unlock Now'}
+                        </button>
 
-                    <button
-                      type="button"
-                      onClick={handleUnlockNow}
-                      disabled={isUnlocking}
-                      style={{
-                        width: '100%',
-                        maxWidth: '300px',
-                        minHeight: '46px',
-                        borderRadius: '999px',
-                        border: 'none',
-                        display: 'inline-flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        gap: '8px',
-                        fontSize: '0.9375rem',
-                        fontWeight: 600,
-                        cursor: isUnlocking ? 'not-allowed' : 'pointer',
-                        marginTop: '4px',
-                        backgroundColor: 'var(--reader-cta-bg)',
-                        color: 'var(--reader-cta-text)',
-                      }}
-                    >
-                      {isUnlocking ? (
-                        <span>Unlocking...</span>
-                      ) : userCoins >= chapterPrice ? (
-                        <>
-                          <span>Unlock Chapter</span>
-                          <span className="tabular-nums" style={{ opacity: 0.85 }}>· {chapterPrice} Coins</span>
-                    </>
-                  ) : (
-                    <>
-                      <span>Top Up Coins</span>
-                      <ChevronRight size={16} strokeWidth={2.2} aria-hidden="true" />
-                    </>
-                  )}
-                </button>
+                        <label htmlFor="auto-unlock-checkbox" className="reader-auto-unlock-label">
+                          <input
+                            type="checkbox"
+                            id="auto-unlock-checkbox"
+                            checked={autoUnlock}
+                            onChange={(e) => setAutoUnlock(e.target.checked)}
+                            style={{ width: '16px', height: '16px', cursor: 'pointer' }}
+                          />
+                          <span>Auto-unlock next chapters</span>
+                        </label>
+                      </div>
+                    )}
+
+                    <div className="reader-paywall-recharge">
+                      <RechargeCheckoutPanel
+                        embedded
+                        authReady={authReady}
+                        userId={userId}
+                        novelId={novelId}
+                        novelTitle={novel.title}
+                        returnPathOverride={`/content?novel_id=${novelId}&chapter_index=${currentChIndex + 1}`}
+                        onRefreshStatus={onRefreshWallet}
+                        onIntentTracked={(intentId) =>
+                          onNavigate(`/recharge?purchase=${encodeURIComponent(intentId)}`)
+                        }
+                      />
+                    </div>
                   </>
                 )}
-              </div>
+              </section>
             )}
 
             <div className="reader-bottom-nav-row" onClick={(e) => e.stopPropagation()}>

@@ -1005,7 +1005,10 @@ function AppContent() {
                 onMarkChapterUnlocked={markChapterUnlocked}
                 onUnmarkChapterUnlocked={unmarkChapterUnlocked}
                 onUnlockChapter={handleUnlockChapter}
+                onRefreshWallet={reloadWallet}
                 userCoins={userCoins}
+                chargedCoins={chargedCoins}
+                bonusCoins={bonusCoins}
               />
             }
           />

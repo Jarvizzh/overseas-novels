@@ -1,3 +1,20 @@
+export type PaymentProvider = 'paypal' | 'stripe';
+
+export function readingReturnPath(value: unknown): string {
+  if (typeof value !== 'string' || !value) return '';
+  try {
+    const target = new URL(value, window.location.origin);
+    return target.origin !== 'null' && target.origin === window.location.origin && target.pathname === '/content'
+      ? target.pathname + target.search
+      : '';
+  } catch {
+    return '';
+  }
+}
+
+export const purchaseRequestStorageKey = (userId: number, slot: number, productId: number, novel: number) =>
+  `pending-purchase:${userId}:${slot}:${productId}:${novel}`;
+
 export type RechargeSlotItem = {
   id: number;
   template_id: number;
