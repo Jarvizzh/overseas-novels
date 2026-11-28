@@ -1,8 +1,9 @@
 import { readerStorage } from '../utils/readerStorage';
-import React, { useState, useEffect, useRef, useId } from 'react';
-import { ChevronLeft, Crown, Sparkles, BookOpen } from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
+import { ChevronLeft } from 'lucide-react';
 import { useToast } from '../context/toastStore';
 import { GoldCoin } from '../components/GoldCoin';
+import { PaymentSuccessDialog } from '../components/PaymentSuccessDialog';
 import { api, ApiError, type PurchaseIntent } from '../utils/api';
 import {
   isPendingPurchaseStatus,
@@ -14,6 +15,7 @@ import {
   purchaseRequestStorageKey,
   readCheckoutOrigin,
   readingReturnPath,
+  savePendingPaymentSuccess,
   type PaymentProvider,
 } from '../utils/rechargeCatalogHelpers';
 import { RechargeCheckoutPanel } from '../components/RechargeCheckoutPanel';
@@ -78,27 +80,13 @@ export const Recharge: React.FC<RechargeProps> = ({
   const [returnedLookupState, setReturnedLookupState] = useState<ReturnedLookupState>(
     () => (purchaseLocator.intent || purchaseLocator.token ? 'loading' : 'none'),
   );
-  const [returningAfterCancel, setReturningAfterCancel] = useState<boolean>(
-    () => Boolean(purchaseLocator.cancelled && purchaseLocator.intent && resolveCancelReaderPath(purchaseLocator.intent)),
+  const [returningToReader, setReturningToReader] = useState<boolean>(
+    () => Boolean(purchaseLocator.intent && resolveCancelReaderPath(purchaseLocator.intent)),
   );
   const shownPurchaseRef = useRef('');
   const shownFailureRef = useRef('');
   const [isVipSuccess, setIsVipSuccess] = useState(false);
   const [vipSuccessTitle, setVipSuccessTitle] = useState('');
-
-  const successDialogRef = useRef<HTMLDialogElement>(null);
-  const pressedOutsideRef = useRef(false);
-  const successTitleId = useId();
-
-  useEffect(() => {
-    const dialog = successDialogRef.current;
-    if (!dialog) return;
-    if (showSuccess && !dialog.open) {
-      dialog.showModal();
-    } else if (!showSuccess && dialog.open) {
-      dialog.close();
-    }
-  }, [showSuccess]);
 
   const onRefreshStatusRef = useRef(onRefreshStatus);
   useEffect(() => {
@@ -164,10 +152,33 @@ export const Recharge: React.FC<RechargeProps> = ({
             // Server-owned purchase status does not depend on the draft.
           }
           if (decision.shouldShowSuccess && shownPurchaseRef.current !== (intent.intent_id || intent.order_id)) {
-            setReturningAfterCancel(false);
+            shownPurchaseRef.current = intent.intent_id || intent.order_id || '';
+            const readerSuccessPath =
+              recordedOrigin?.source === 'reader'
+                ? readingReturnPath(recordedOrigin.path) || readingReturnPath(intent.return_path)
+                : '';
+            if (readerSuccessPath) {
+              if (decision.shouldRefreshWallet) {
+                await onRefreshStatusRef.current?.();
+              }
+              if (controller.signal.aborted) return;
+              savePendingPaymentSuccess({
+                intentId: intent.intent_id || intent.order_id || originIntentId,
+                coins: intent.coins,
+                isVip: intent.order_type === 'subscription',
+                isWholeBook: intent.order_type === 'whole_book',
+                vipTitle: intent.order_type === 'subscription' ? 'StarNovel Unlimited' : undefined,
+              });
+              if (onNavigateRef.current) {
+                onNavigateRef.current(readerSuccessPath, undefined, { replace: true });
+              } else {
+                window.location.replace(readerSuccessPath);
+              }
+              return;
+            }
+            setReturningToReader(false);
             successOriginRef.current = recordedOrigin;
             setSuccessOriginSource(recordedOrigin?.source ?? null);
-            shownPurchaseRef.current = intent.intent_id || intent.order_id || '';
             setSuccessAmount(intent.coins);
             setIsVipSuccess(intent.order_type === 'subscription');
             if (intent.order_type === 'subscription') {
@@ -192,7 +203,7 @@ export const Recharge: React.FC<RechargeProps> = ({
             }
             return;
           }
-          setReturningAfterCancel(false);
+          setReturningToReader(false);
         }
         if (decision.outcome === 'terminal_failure') {
           const failureKey = `${intent.intent_id}:${intent.status}:${intent.confirmation_code || ''}`;
@@ -203,9 +214,23 @@ export const Recharge: React.FC<RechargeProps> = ({
               'error',
             );
           }
+          const originIntentId = intent.intent_id || purchaseLocator.intent;
+          const readerFailPath = resolveCancelReaderPath(originIntentId, intent.return_path);
+          clearCheckoutOrigin(originIntentId);
+          if (readerFailPath) {
+            if (onNavigateRef.current) {
+              onNavigateRef.current(readerFailPath, undefined, { replace: true });
+            } else {
+              window.location.replace(readerFailPath);
+            }
+            return;
+          }
+          setReturningToReader(false);
         }
         if (decision.shouldContinuePolling && decision.nextPollDelayMs !== null) {
           timer = window.setTimeout(() => void lookup(), decision.nextPollDelayMs);
+        } else if (!decision.shouldShowSuccess) {
+          setReturningToReader(false);
         }
       } catch (error) {
         if (controller.signal.aborted) return;
@@ -217,18 +242,18 @@ export const Recharge: React.FC<RechargeProps> = ({
           timer = window.setTimeout(() => void lookup(), delayMs);
         } else {
           setReturnedLookupState((prev) => (prev === 'resolved' ? prev : 'unresolved'));
+          const readerFallbackPath = resolveCancelReaderPath(purchaseLocator.intent);
+          clearCheckoutOrigin(purchaseLocator.intent);
           if (purchaseLocator.cancelled) {
-            const readerCancelPath = resolveCancelReaderPath(purchaseLocator.intent);
-            clearCheckoutOrigin(purchaseLocator.intent);
-            if (readerCancelPath) {
+            if (readerFallbackPath) {
               if (onNavigateRef.current) {
-                onNavigateRef.current(readerCancelPath, undefined, { replace: true });
+                onNavigateRef.current(readerFallbackPath, undefined, { replace: true });
               } else {
-                window.location.replace(readerCancelPath);
+                window.location.replace(readerFallbackPath);
               }
               return;
             }
-            setReturningAfterCancel(false);
+            setReturningToReader(false);
           } else {
             showToastRef.current(
               isPermanentLookupError
@@ -236,6 +261,15 @@ export const Recharge: React.FC<RechargeProps> = ({
                 : 'Payment status is temporarily unavailable. Please try again later.',
               'error',
             );
+            if (readerFallbackPath) {
+              if (onNavigateRef.current) {
+                onNavigateRef.current(readerFallbackPath, undefined, { replace: true });
+              } else {
+                window.location.replace(readerFallbackPath);
+              }
+              return;
+            }
+            setReturningToReader(false);
           }
         }
       } finally {
@@ -301,12 +335,7 @@ export const Recharge: React.FC<RechargeProps> = ({
     }
   };
 
-  const isPointerOutside = (e: React.PointerEvent<HTMLDialogElement>, dialog: HTMLDialogElement) => {
-    const r = dialog.getBoundingClientRect();
-    return e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom;
-  };
-
-  if (returningAfterCancel) {
+  if (returningToReader) {
     return (
       <div
         className="page-container-full animate-fade-in"
@@ -321,7 +350,9 @@ export const Recharge: React.FC<RechargeProps> = ({
         }}
       >
         <div className="sn-spinner" />
-        <p style={{ fontSize: '0.875rem', margin: 0 }}>Returning to chapter...</p>
+        <p style={{ fontSize: '0.875rem', margin: 0 }}>
+          {purchaseLocator.cancelled ? 'Returning to chapter...' : 'Confirming payment...'}
+        </p>
       </div>
     );
   }
@@ -377,131 +408,24 @@ export const Recharge: React.FC<RechargeProps> = ({
         </div>
       </div>
 
-      {/* Native <dialog> Payment Success Modal */}
-      <dialog
-        ref={successDialogRef}
-        className="sn-dialog"
-        aria-labelledby={successTitleId}
-        onCancel={(e) => {
-          e.preventDefault();
+      <PaymentSuccessDialog
+        open={showSuccess}
+        isVip={isVipSuccess}
+        vipTitle={vipSuccessTitle || 'StarNovel Unlimited'}
+        isWholeBook={isWholeBookSuccess}
+        novelTitle={novelTitle}
+        coinsAdded={successAmount}
+        actionLabel={successOriginSource === 'recharge' ? 'Done' : 'Start Reading Now'}
+        onClose={() => setShowSuccess(false)}
+        onAction={() => {
           setShowSuccess(false);
-        }}
-        onPointerDown={(e) => {
-          if (successDialogRef.current) {
-            pressedOutsideRef.current = isPointerOutside(e, successDialogRef.current);
+          if (successOriginSource === 'recharge') {
+            clearReturnQueryFromUrl();
+          } else {
+            handleReturnToContent();
           }
         }}
-        onPointerUp={(e) => {
-          if (successDialogRef.current && pressedOutsideRef.current && isPointerOutside(e, successDialogRef.current)) {
-            setShowSuccess(false);
-          }
-          pressedOutsideRef.current = false;
-        }}
-        style={{ width: '100%', maxWidth: '340px', padding: '26px 24px', textAlign: 'center' }}
-      >
-        <div
-          style={{
-            width: '52px',
-            height: '52px',
-            borderRadius: '50%',
-            backgroundColor: 'var(--accent-light)',
-            color: 'var(--accent-text)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            margin: '0 auto 14px',
-          }}
-        >
-          {isVipSuccess ? <Crown size={24} strokeWidth={1.8} aria-hidden="true" /> : <Sparkles size={24} strokeWidth={1.8} aria-hidden="true" />}
-        </div>
-        <h2 id={successTitleId} style={{ fontFamily: 'var(--font-display)', fontSize: '1.25rem', fontWeight: 600, marginBottom: '8px' }}>
-          {isVipSuccess ? 'Unlimited Membership Activated' : 'Purchase Complete'}
-        </h2>
-        <p style={{ fontSize: '0.875rem', color: 'var(--text-secondary)', marginBottom: '18px', lineHeight: 1.5 }}>
-          {isVipSuccess
-            ? 'You now have unlimited access to every story and chapter across StarNovel.'
-            : isWholeBookSuccess
-              ? 'This novel is now unlocked, including future chapters.'
-              : 'Your coins have been credited to your wallet. Enjoy reading!'}
-        </p>
-
-        {isVipSuccess ? (
-          <div
-            style={{
-              display: 'inline-flex',
-              alignItems: 'center',
-              gap: '6px',
-              backgroundColor: 'var(--accent-light)',
-              color: 'var(--accent-text)',
-              fontWeight: 600,
-              padding: '7px 14px',
-              borderRadius: '999px',
-              margin: '0 auto 20px',
-              fontSize: '0.8125rem',
-            }}
-          >
-            <Crown size={14} strokeWidth={1.9} aria-hidden="true" />
-            <span>{vipSuccessTitle} Active</span>
-          </div>
-        ) : (
-          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '8px', margin: '0 auto 20px' }}>
-            {isWholeBookSuccess && (
-              <div
-                style={{
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  gap: '6px',
-                  backgroundColor: 'var(--accent-light)',
-                  color: 'var(--accent-text)',
-                  fontWeight: 600,
-                  padding: '7px 14px',
-                  borderRadius: '999px',
-                  fontSize: '0.8125rem',
-                }}
-              >
-                <BookOpen size={14} strokeWidth={1.9} aria-hidden="true" />
-                <span>{novelTitle ? `${novelTitle} Unlocked` : 'Full Novel Unlocked'}</span>
-              </div>
-            )}
-            {successAmount > 0 && (
-              <div
-                className="tabular-nums"
-                style={{
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  gap: '6px',
-                  backgroundColor: 'var(--accent-light)',
-                  color: 'var(--accent-text)',
-                  fontWeight: 700,
-                  padding: '7px 16px',
-                  borderRadius: '999px',
-                  fontSize: '0.875rem',
-                }}
-              >
-                <GoldCoin size={15} />
-                <span>+{successAmount.toLocaleString()} Coins Added</span>
-              </div>
-            )}
-          </div>
-        )}
-
-        <button
-          type="button"
-          autoFocus
-          className="btn-cta-primary"
-          style={{ width: '100%', borderRadius: '999px' }}
-          onClick={() => {
-            setShowSuccess(false);
-            if (successOriginSource === 'recharge') {
-              clearReturnQueryFromUrl();
-            } else {
-              handleReturnToContent();
-            }
-          }}
-        >
-          {successOriginSource === 'recharge' ? 'Done' : 'Start Reading Now'}
-        </button>
-      </dialog>
+      />
     </>
   );
 };

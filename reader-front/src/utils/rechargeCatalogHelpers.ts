@@ -59,6 +59,45 @@ export function clearCheckoutOrigin(intentId: string): void {
   }
 }
 
+export type PendingPaymentSuccess = {
+  intentId: string;
+  coins: number;
+  isVip: boolean;
+  isWholeBook: boolean;
+  vipTitle?: string;
+};
+
+const PENDING_PAYMENT_SUCCESS_KEY = 'pending-payment-success';
+
+export function savePendingPaymentSuccess(payload: PendingPaymentSuccess): void {
+  try {
+    sessionStorage.setItem(PENDING_PAYMENT_SUCCESS_KEY, JSON.stringify(payload));
+  } catch {
+    // Ignore storage errors.
+  }
+}
+
+export function consumePendingPaymentSuccess(): PendingPaymentSuccess | null {
+  try {
+    const raw = sessionStorage.getItem(PENDING_PAYMENT_SUCCESS_KEY);
+    if (!raw) return null;
+    sessionStorage.removeItem(PENDING_PAYMENT_SUCCESS_KEY);
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed.intentId === 'string') {
+      return {
+        intentId: parsed.intentId,
+        coins: typeof parsed.coins === 'number' ? parsed.coins : 0,
+        isVip: Boolean(parsed.isVip),
+        isWholeBook: Boolean(parsed.isWholeBook),
+        vipTitle: typeof parsed.vipTitle === 'string' ? parsed.vipTitle : undefined,
+      };
+    }
+  } catch {
+    // Ignore parse/storage errors.
+  }
+  return null;
+}
+
 export type RechargeSlotItem = {
   id: number;
   template_id: number;

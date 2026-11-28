@@ -7,7 +7,9 @@ import type { Novel, Chapter, ChapterContentResponse } from '../utils/api';
 import { ReaderSettings, type ReaderFontFamily } from '../components/ReaderSettings';
 import { Drawer } from '../components/Drawer';
 import { GoldCoin } from '../components/GoldCoin';
+import { PaymentSuccessDialog } from '../components/PaymentSuccessDialog';
 import { RechargeCheckoutPanel } from '../components/RechargeCheckoutPanel';
+import { consumePendingPaymentSuccess, type PendingPaymentSuccess } from '../utils/rechargeCatalogHelpers';
 import { readerCache } from '../utils/readerCache';
 
 interface ReaderProps {
@@ -182,6 +184,7 @@ export const Reader: React.FC<ReaderProps> = ({
 
   const [showSettings, setShowSettings] = useState(false);
   const [showTOC, setShowTOC] = useState(false);
+  const [paymentSuccess, setPaymentSuccess] = useState<PendingPaymentSuccess | null>(() => consumePendingPaymentSuccess());
 
   const [autoUnlock, setAutoUnlock] = useState<boolean>(() => {
     return readerStorage.getItem('reader-auto-unlock') !== 'false';
@@ -822,6 +825,18 @@ export const Reader: React.FC<ReaderProps> = ({
           </article>
         )}
       </div>
+
+      <PaymentSuccessDialog
+        open={Boolean(paymentSuccess)}
+        isVip={Boolean(paymentSuccess?.isVip)}
+        vipTitle={paymentSuccess?.vipTitle || 'StarNovel Unlimited'}
+        isWholeBook={Boolean(paymentSuccess?.isWholeBook)}
+        novelTitle={novel.title}
+        coinsAdded={paymentSuccess?.coins ?? 0}
+        actionLabel="Start Reading Now"
+        onClose={() => setPaymentSuccess(null)}
+        onAction={() => setPaymentSuccess(null)}
+      />
     </div>
   );
 };
