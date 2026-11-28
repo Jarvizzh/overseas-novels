@@ -3066,7 +3066,9 @@
 
 .sub-mgmt-footer {
   display: flex;
+  flex-wrap: wrap;
   justify-content: center;
+  gap: 10px;
   padding-top: 4px;
 }
 
@@ -3257,4 +3259,427 @@
 
 :root .reader-container:not(.reader-theme-night) .checkout-transition-spinner-track {
   stroke: #E5E7EB;
+}
+
+/* ============================================
+   Top Up History & Coin History Pages
+   ============================================ */
+.history-filter-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  overflow-x: auto;
+  padding: 2px 0;
+  scrollbar-width: none;
+}
+
+.history-filter-bar::-webkit-scrollbar {
+  display: none;
+}
+
+.history-filter-pill {
+  flex-shrink: 0;
+  min-height: 34px;
+  padding: 6px 14px;
+  border-radius: 999px;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-card);
+  color: var(--text-secondary);
+  font-size: 0.8125rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background-color 0.16s ease, color 0.16s ease, border-color 0.16s ease;
+}
+
+.history-filter-pill:hover {
+  border-color: var(--accent-color);
+  color: var(--text-primary);
+}
+
+.history-filter-pill.active {
+  background: var(--accent-color);
+  border-color: var(--accent-color);
+  color: #FFFFFF;
+  font-weight: 600;
+}
+
+.history-guest-notice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: var(--accent-soft, rgba(217, 119, 6, 0.1));
+  border: 1px solid var(--border-subtle);
+}
+
+.history-guest-notice p {
+  margin: 0;
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  line-height: 1.45;
+}
+
+.history-guest-btn {
+  flex-shrink: 0;
+  min-height: 32px;
+  padding: 5px 12px;
+  border-radius: 999px;
+  font-size: 0.75rem;
+}
+
+.history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.history-order-card {
+  width: 100%;
+  text-align: left;
+  padding: 14px 16px;
+  border-radius: 14px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  cursor: pointer;
+  transition: border-color 0.16s ease, transform 0.12s ease;
+}
+
+.history-order-card:hover {
+  border-color: var(--accent-color);
+}
+
+.history-order-card:active {
+  transform: scale(0.995);
+}
+
+.history-order-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.history-order-title-group {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  min-width: 0;
+  flex: 1;
+}
+
+.history-type-badge {
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  background: var(--bg-secondary);
+  color: var(--accent-color);
+}
+
+.history-type-vip {
+  background: var(--accent-soft, rgba(217, 119, 6, 0.12));
+  color: var(--accent-color);
+}
+
+.history-type-book {
+  background: rgba(59, 130, 246, 0.12);
+  color: #2563EB;
+}
+
+.history-type-coin {
+  background: rgba(245, 158, 11, 0.12);
+}
+
+.history-order-title-col {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.history-order-title-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.history-order-title {
+  font-size: 0.9375rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.history-order-benefit {
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  line-height: 1.4;
+}
+
+.history-order-amount-col {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  flex-shrink: 0;
+  gap: 2px;
+}
+
+.history-order-amount {
+  font-size: 1rem;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.history-order-usd-sub {
+  font-size: 0.6875rem;
+  color: var(--text-tertiary);
+}
+
+.history-order-inline-note {
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: rgba(245, 158, 11, 0.1);
+  color: #B45309;
+  font-size: 0.75rem;
+  font-weight: 500;
+}
+
+.history-order-bottom {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border-subtle);
+  flex-wrap: wrap;
+}
+
+.history-order-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 0.72rem;
+  color: var(--text-tertiary);
+  min-width: 0;
+}
+
+.history-status-pill {
+  padding: 2px 8px;
+  font-size: 0.6875rem;
+}
+
+.history-meta-dot {
+  opacity: 0.55;
+}
+
+.history-order-no-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--text-tertiary);
+  flex-shrink: 0;
+}
+
+.history-order-no {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.72rem;
+}
+
+.history-detail-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 14px;
+}
+
+.history-detail-title {
+  font-family: var(--font-display);
+  font-size: 1.125rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 0;
+}
+
+.history-detail-amount-box {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 6px;
+  padding: 16px 14px;
+  border-radius: 14px;
+  background: var(--bg-secondary);
+  margin-bottom: 16px;
+}
+
+.history-detail-amount {
+  font-size: 1.625rem;
+  font-weight: 700;
+  color: var(--text-primary);
+  line-height: 1.2;
+}
+
+.history-detail-usd {
+  font-size: 0.75rem;
+  color: var(--text-tertiary);
+}
+
+.history-detail-status-desc {
+  margin: 4px 0 0;
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  line-height: 1.45;
+  max-width: 320px;
+}
+
+.history-detail-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 0 0 18px;
+}
+
+.history-detail-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 0.8125rem;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.history-detail-row:last-child {
+  border-bottom: none;
+  padding-bottom: 0;
+}
+
+.history-detail-row dt {
+  color: var(--text-tertiary);
+  flex-shrink: 0;
+}
+
+.history-detail-row dd {
+  margin: 0;
+  color: var(--text-primary);
+  font-weight: 500;
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+
+.history-detail-order-no {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.history-copy-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  font-size: 0.72rem;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.history-copy-btn:hover {
+  border-color: var(--accent-color);
+  color: var(--accent-text);
+}
+
+.history-detail-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.coin-history-card {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 16px;
+  background-color: var(--bg-card);
+  border-radius: 14px;
+  border: 1px solid var(--border-subtle);
+}
+
+.coin-history-desc {
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+
+.coin-history-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 0.72rem;
+  color: var(--text-tertiary);
+  margin-top: 4px;
+}
+
+.coin-history-biz-tag {
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
+.coin-history-amount {
+  font-size: 0.9375rem;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+.recharge-history-link-row {
+  display: flex;
+  justify-content: center;
+  margin-top: 14px;
+}
+
+.recharge-history-link-btn {
+  border-radius: 999px;
+  padding: 8px 18px;
+  font-size: 0.8125rem;
+}
+
+:root[data-user-theme="dark"] .history-order-inline-note {
+  background: rgba(245, 158, 11, 0.16);
+  color: #FBBF24;
+}
+
+:root[data-user-theme="dark"] .history-type-book {
+  background: rgba(59, 130, 246, 0.18);
+  color: #60A5FA;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-user-theme="light"]) .history-order-inline-note {
+    background: rgba(245, 158, 11, 0.16);
+    color: #FBBF24;
+  }
+
+  :root:not([data-user-theme="light"]) .history-type-book {
+    background: rgba(59, 130, 246, 0.18);
+    color: #60A5FA;
+  }
 }

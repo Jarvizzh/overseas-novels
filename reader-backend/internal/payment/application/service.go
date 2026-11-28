@@ -24,6 +24,7 @@ type Service interface {
 	GetPurchase(context.Context, int64, string, string) (*PurchaseIntent, error)
 	GetVIPPurchase(context.Context, int64, string, string) (*PurchaseIntent, error)
 	ListRecentPurchases(context.Context, int64) ([]PurchaseIntent, error)
+	ListTopUpHistory(ctx context.Context, userID int64, limit int, cursor string, orderType string) (*TopUpHistoryPage, error)
 	GetPaymentMethods(context.Context) (PaymentMethods, error)
 	CapturePayPalPayment(context.Context, int64, string) (*CheckoutResult, error)
 	CreateSubscription(ctx context.Context, userID int64, providerName string, slotID int, returnURL, cancelURL, returnPath, fbp, fbc, pixelID, ip, ua, sourceURL, country string) (*payment.SubscriptionResult, error)

@@ -438,6 +438,17 @@ export const Recharge: React.FC<RechargeProps> = ({
                   Manage subscriptions: You can view and manage your renewals in My Subscription.
                 </li>
               </ol>
+              {onNavigate && (
+                <div className="recharge-history-link-row">
+                  <button
+                    type="button"
+                    className="btn-cta-secondary recharge-history-link-btn"
+                    onClick={() => onNavigate('topup-history')}
+                  >
+                    View Top Up History
+                  </button>
+                </div>
+              )}
             </section>
           </div>
         </div>

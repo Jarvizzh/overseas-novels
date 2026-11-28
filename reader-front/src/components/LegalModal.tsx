@@ -10,6 +10,7 @@ interface LegalModalProps {
   isOpen: boolean;
   onClose: () => void;
   defaultEmail?: string;
+  defaultSubject?: string;
 }
 
 export const LegalModal: React.FC<LegalModalProps> = ({
@@ -17,6 +18,7 @@ export const LegalModal: React.FC<LegalModalProps> = ({
   isOpen,
   onClose,
   defaultEmail = '',
+  defaultSubject = 'Payment / Recharge Issue',
 }) => {
   const { showToast } = useToast();
   const dialogRef = useRef<HTMLDialogElement>(null);
@@ -27,7 +29,7 @@ export const LegalModal: React.FC<LegalModalProps> = ({
   const contentInputId = useId();
 
   const [email, setEmail] = useState(defaultEmail);
-  const [subject, setSubject] = useState('Payment / Recharge Issue');
+  const [subject, setSubject] = useState(defaultSubject);
   const [content, setContent] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submittedSuccess, setSubmittedSuccess] = useState(false);
@@ -40,6 +42,7 @@ export const LegalModal: React.FC<LegalModalProps> = ({
       if (defaultEmail) {
         setEmail((prev) => prev || defaultEmail);
       }
+      setSubject(defaultSubject || 'Payment / Recharge Issue');
       setSubmittedSuccess(false);
       if (!dialog.open) {
         dialog.showModal();
@@ -47,7 +50,7 @@ export const LegalModal: React.FC<LegalModalProps> = ({
     } else if (dialog.open) {
       dialog.close();
     }
-  }, [isOpen, defaultEmail]);
+  }, [isOpen, defaultEmail, defaultSubject]);
 
   const handleFeedbackSubmit = async (e: React.FormEvent) => {
     e.preventDefault();

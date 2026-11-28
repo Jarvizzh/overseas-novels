@@ -33,6 +33,7 @@ func (h *Handler) RegisterRoutes(r *gin.RouterGroup) {
 		walletGroup.POST("/purchase-intents", h.PreparePurchase)
 		walletGroup.GET("/purchase-methods", h.GetPaymentMethods)
 		walletGroup.GET("/purchase-intents", h.ListRecentPurchases)
+		walletGroup.GET("/topup-history", h.ListTopUpHistory)
 		walletGroup.GET("/purchase-intents/return", h.ReturnedPurchase)
 		walletGroup.GET("/purchase-intents/:intent", h.GetPurchase)
 		walletGroup.POST("/purchase-intents/:intent/checkout", h.StartPayPalCheckout)
@@ -156,6 +157,38 @@ func (h *Handler) ListRecentPurchases(c *gin.Context) {
 	}
 	c.Header("Cache-Control", "private, no-store")
 	c.JSON(http.StatusOK, gin.H{"purchases": intents})
+}
+
+func (h *Handler) ListTopUpHistory(c *gin.Context) {
+	limit := topUpHistoryDefaultLimit
+	if rawLimit := c.Query("limit"); rawLimit != "" {
+		parsed, err := strconv.Atoi(rawLimit)
+		if err != nil || parsed < 1 || parsed > topUpHistoryMaxLimit {
+			httpx.Fail(c, http.StatusBadRequest, "invalid_pagination", "Page size must be 1–50", nil)
+			return
+		}
+		limit = parsed
+	}
+	page, err := h.service.ListTopUpHistory(
+		c.Request.Context(),
+		c.GetInt64("user_id"),
+		limit,
+		c.Query("cursor"),
+		c.Query("type"),
+	)
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrInvalidTopUpCursor):
+			httpx.Fail(c, http.StatusBadRequest, "invalid_cursor", "Invalid top-up history cursor", nil)
+		case errors.Is(err, ErrInvalidTopUpFilter):
+			httpx.Fail(c, http.StatusBadRequest, "invalid_filter", "Invalid order type filter", nil)
+		default:
+			httpx.Fail(c, http.StatusServiceUnavailable, "history_unavailable", "Failed to fetch top-up history", err)
+		}
+		return
+	}
+	c.Header("Cache-Control", "private, no-store")
+	c.JSON(http.StatusOK, page)
 }
 
 func (h *Handler) GetPaymentMethods(c *gin.Context) {

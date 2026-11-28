@@ -4,7 +4,7 @@ import { vipCycleLabel } from '../utils/rechargeCatalogHelpers';
 import { useToast } from '../context/toastStore';
 import { GoldCoin } from '../components/GoldCoin';
 import { api } from '../utils/api';
-import type { User, Transaction, SubscriptionInfo } from '../utils/api';
+import type { User, SubscriptionInfo } from '../utils/api';
 import { LegalModal, type LegalModalType } from '../components/LegalModal';
 import type { ThemePreference } from '../utils/theme';
 
@@ -17,10 +17,6 @@ interface ProfileProps {
   bonusCoins: number;
   isVip: boolean;
   subscription: SubscriptionInfo | null;
-  transactionHistory: Transaction[];
-  hasMoreTransactions?: boolean;
-  loadingMoreTransactions?: boolean;
-  onLoadMoreTransactions?: () => void;
   currentUser: User | null;
   themePreference: ThemePreference;
   systemTheme: 'light' | 'dark';
@@ -39,10 +35,6 @@ export const Profile: React.FC<ProfileProps> = ({
   bonusCoins,
   isVip,
   subscription,
-  transactionHistory,
-  hasMoreTransactions = false,
-  loadingMoreTransactions = false,
-  onLoadMoreTransactions,
   currentUser,
   themePreference,
   systemTheme,
@@ -51,7 +43,6 @@ export const Profile: React.FC<ProfileProps> = ({
   onProfileUpdated,
   onLogout,
 }) => {
-  const [activeSubTab, setActiveSubTab] = useState<'settings' | 'history'>('settings');
   const [authMode, setAuthMode] = useState<'none' | 'login' | 'signup'>('none');
   const [activeLegalModal, setActiveLegalModal] = useState<LegalModalType | null>(null);
 
@@ -398,218 +389,146 @@ export const Profile: React.FC<ProfileProps> = ({
           </div>
         </div>
 
-        {/* Sub Tabs: Settings vs Coin History */}
-        <div className="sub-tabs-container" role="tablist">
-          <button
-            type="button"
-            role="tab"
-            aria-selected={activeSubTab === 'settings'}
-            className={`sub-tab-btn ${activeSubTab === 'settings' ? 'active' : ''}`}
-            onClick={() => setActiveSubTab('settings')}
-          >
-            Account &amp; Preferences
-          </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={activeSubTab === 'history'}
-            className={`sub-tab-btn ${activeSubTab === 'history' ? 'active' : ''}`}
-            onClick={() => setActiveSubTab('history')}
-          >
-            Coin History
-          </button>
-        </div>
-
-        {activeSubTab === 'settings' ? (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
-            {/* Membership & Appearance */}
-            <div className="settings-list">
-              {!isGuest && (
-                <button type="button" className="settings-item" onClick={openEditModal}>
-                  <span>Account Profile</span>
-                  <span className="settings-item-value">
-                    <span>Nickname, Email &amp; Password</span>
-                    <ChevronRight size={15} strokeWidth={1.8} aria-hidden="true" />
-                  </span>
-                </button>
-              )}
-
-              <div className="settings-item settings-item-static settings-item-wrap">
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
-                  <span>Appearance</span>
-                  <span style={{ fontSize: '0.6875rem', color: 'var(--text-tertiary)', fontWeight: 400 }}>
-                    {themePreference === 'system'
-                      ? `Following OS (${systemTheme === 'dark' ? 'Dark' : 'Light'})`
-                      : `Pinned to ${themePreference === 'dark' ? 'Dark' : 'Light'} mode`}
-                  </span>
-                </div>
-                <div className="theme-segmented" role="group" aria-label="Appearance theme">
-                  <button
-                    type="button"
-                    className={`theme-seg-btn ${themePreference === 'light' ? 'active' : ''}`}
-                    onClick={() => onThemePreferenceChange('light')}
-                    aria-pressed={themePreference === 'light'}
-                  >
-                    <Sun size={13} strokeWidth={1.9} aria-hidden="true" />
-                    <span>Light</span>
-                  </button>
-                  <button
-                    type="button"
-                    className={`theme-seg-btn ${themePreference === 'dark' ? 'active' : ''}`}
-                    onClick={() => onThemePreferenceChange('dark')}
-                    aria-pressed={themePreference === 'dark'}
-                  >
-                    <Moon size={13} strokeWidth={1.9} aria-hidden="true" />
-                    <span>Dark</span>
-                  </button>
-                  <button
-                    type="button"
-                    className={`theme-seg-btn ${themePreference === 'system' ? 'active' : ''}`}
-                    onClick={() => onThemePreferenceChange('system')}
-                    aria-pressed={themePreference === 'system'}
-                  >
-                    <Monitor size={13} strokeWidth={1.9} aria-hidden="true" />
-                    <span>System</span>
-                  </button>
-                </div>
-              </div>
-
-              <button type="button" className="settings-item" onClick={() => onNavigate('rewards')}>
-                <span>Daily Rewards</span>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
+          {/* Membership & Appearance */}
+          <div className="settings-list">
+            {!isGuest && (
+              <button type="button" className="settings-item" onClick={openEditModal}>
+                <span>Account Profile</span>
                 <span className="settings-item-value">
-                  <span>Check-in</span>
+                  <span>Nickname, Email &amp; Password</span>
                   <ChevronRight size={15} strokeWidth={1.8} aria-hidden="true" />
                 </span>
               </button>
-
-              <button type="button" className="settings-item" onClick={() => onNavigate('shelf')}>
-                <span>Saved Library</span>
-                <span className="settings-item-value">
-                  <span>{shelfBookIds.length} {shelfBookIds.length === 1 ? 'book' : 'books'}</span>
-                  <ChevronRight size={15} strokeWidth={1.8} aria-hidden="true" />
-                </span>
-              </button>
-
-              <button type="button" className="settings-item" onClick={() => onNavigate('shelf', { tab: 'recent' })}>
-                <span>Recently Read</span>
-                <span className="settings-item-value">
-                  <span>{recentBookCount} {recentBookCount === 1 ? 'book' : 'books'}</span>
-                  <ChevronRight size={15} strokeWidth={1.8} aria-hidden="true" />
-                </span>
-              </button>
-
-              <button type="button" className="settings-item" onClick={() => onNavigate('subscription')}>
-                <span>My Subscription</span>
-                <span
-                  className="settings-item-value"
-                  style={{ color: isVip ? 'var(--accent-text)' : 'var(--text-tertiary)', fontWeight: isVip ? 600 : 400 }}
-                >
-                  <span>{subscriptionSummary}</span>
-                  <ChevronRight size={15} strokeWidth={1.8} aria-hidden="true" />
-                </span>
-              </button>
-            </div>
-
-            {/* Support & Legal */}
-            <div>
-              <h3 className="hot-tags-title">Support &amp; Legal Policies</h3>
-              <div className="settings-list">
-                <button type="button" className="settings-item" onClick={() => setActiveLegalModal('contact')}>
-                  <span>Contact Us &amp; Customer Support</span>
-                  <span className="settings-item-value">
-                    <span>Support</span>
-                    <ChevronRight size={15} strokeWidth={1.8} aria-hidden="true" />
-                  </span>
-                </button>
-                <button type="button" className="settings-item" onClick={() => setActiveLegalModal('refund')}>
-                  <span>Refund &amp; Purchase Policy</span>
-                  <span className="settings-item-value">
-                    <span>View</span>
-                    <ChevronRight size={15} strokeWidth={1.8} aria-hidden="true" />
-                  </span>
-                </button>
-                <button type="button" className="settings-item" onClick={() => setActiveLegalModal('terms')}>
-                  <span>Terms of Service</span>
-                  <span className="settings-item-value">
-                    <span>View</span>
-                    <ChevronRight size={15} strokeWidth={1.8} aria-hidden="true" />
-                  </span>
-                </button>
-                <button type="button" className="settings-item" onClick={() => setActiveLegalModal('privacy')}>
-                  <span>Privacy Policy</span>
-                  <span className="settings-item-value">
-                    <span>View</span>
-                    <ChevronRight size={15} strokeWidth={1.8} aria-hidden="true" />
-                  </span>
-                </button>
-              </div>
-            </div>
-          </div>
-        ) : (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-            {transactionHistory.length > 0 ? (
-              <>
-                {transactionHistory.map((item) => (
-                  <div
-                    key={item.id}
-                    style={{
-                      display: 'flex',
-                      justifyContent: 'space-between',
-                      alignItems: 'center',
-                      gap: '12px',
-                      padding: '14px 16px',
-                      backgroundColor: 'var(--bg-secondary)',
-                      borderRadius: '12px',
-                      border: '1px solid var(--border-color)',
-                    }}
-                  >
-                    <div style={{ minWidth: 0 }}>
-                      <div style={{ fontSize: '0.875rem', fontWeight: 600, color: 'var(--text-primary)' }}>
-                        {item.desc}
-                      </div>
-                      <span style={{ fontSize: '0.6875rem', color: 'var(--text-tertiary)', marginTop: '3px', display: 'block' }}>
-                        {new Date(item.date).toLocaleString()}
-                      </span>
-                    </div>
-                    <span
-                      className="tabular-nums"
-                      style={{
-                        fontSize: '0.9375rem',
-                        fontWeight: 700,
-                        color: item.type === 'credit' ? '#16a34a' : '#dc2626',
-                        flexShrink: 0,
-                      }}
-                    >
-                      {item.type === 'credit' ? '+' : '-'}{item.amount.toLocaleString()}
-                    </span>
-                  </div>
-                ))}
-                {hasMoreTransactions && onLoadMoreTransactions && (
-                  <div style={{ display: 'flex', justifyContent: 'center', marginTop: '8px' }}>
-                    <button
-                      type="button"
-                      className="btn-cta-secondary"
-                      disabled={loadingMoreTransactions}
-                      onClick={onLoadMoreTransactions}
-                    >
-                      {loadingMoreTransactions ? 'Loading...' : 'Load More History'}
-                    </button>
-                  </div>
-                )}
-              </>
-            ) : (
-              <div className="shelf-empty-state">
-                <div className="shelf-empty-icon-wrap">
-                  <GoldCoin size={28} />
-                </div>
-                <p style={{ fontWeight: 600, color: 'var(--text-primary)' }}>No transaction history yet</p>
-                <p style={{ fontSize: '0.8125rem' }}>
-                  Top up coins or claim daily rewards to unlock paid chapters.
-                </p>
-              </div>
             )}
+
+            <div className="settings-item settings-item-static settings-item-wrap">
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+                <span>Appearance</span>
+                <span style={{ fontSize: '0.6875rem', color: 'var(--text-tertiary)', fontWeight: 400 }}>
+                  {themePreference === 'system'
+                    ? `Following OS (${systemTheme === 'dark' ? 'Dark' : 'Light'})`
+                    : `Pinned to ${themePreference === 'dark' ? 'Dark' : 'Light'} mode`}
+                </span>
+              </div>
+              <div className="theme-segmented" role="group" aria-label="Appearance theme">
+                <button
+                  type="button"
+                  className={`theme-seg-btn ${themePreference === 'light' ? 'active' : ''}`}
+                  onClick={() => onThemePreferenceChange('light')}
+                  aria-pressed={themePreference === 'light'}
+                >
+                  <Sun size={13} strokeWidth={1.9} aria-hidden="true" />
+                  <span>Light</span>
+                </button>
+                <button
+                  type="button"
+                  className={`theme-seg-btn ${themePreference === 'dark' ? 'active' : ''}`}
+                  onClick={() => onThemePreferenceChange('dark')}
+                  aria-pressed={themePreference === 'dark'}
+                >
+                  <Moon size={13} strokeWidth={1.9} aria-hidden="true" />
+                  <span>Dark</span>
+                </button>
+                <button
+                  type="button"
+                  className={`theme-seg-btn ${themePreference === 'system' ? 'active' : ''}`}
+                  onClick={() => onThemePreferenceChange('system')}
+                  aria-pressed={themePreference === 'system'}
+                >
+                  <Monitor size={13} strokeWidth={1.9} aria-hidden="true" />
+                  <span>System</span>
+                </button>
+              </div>
+            </div>
+
+            <button type="button" className="settings-item" onClick={() => onNavigate('rewards')}>
+              <span>Daily Rewards</span>
+              <span className="settings-item-value">
+                <span>Check-in</span>
+                <ChevronRight size={15} strokeWidth={1.8} aria-hidden="true" />
+              </span>
+            </button>
+
+            <button type="button" className="settings-item" onClick={() => onNavigate('shelf')}>
+              <span>Saved Library</span>
+              <span className="settings-item-value">
+                <span>{shelfBookIds.length} {shelfBookIds.length === 1 ? 'book' : 'books'}</span>
+                <ChevronRight size={15} strokeWidth={1.8} aria-hidden="true" />
+              </span>
+            </button>
+
+            <button type="button" className="settings-item" onClick={() => onNavigate('shelf', { tab: 'recent' })}>
+              <span>Recently Read</span>
+              <span className="settings-item-value">
+                <span>{recentBookCount} {recentBookCount === 1 ? 'book' : 'books'}</span>
+                <ChevronRight size={15} strokeWidth={1.8} aria-hidden="true" />
+              </span>
+            </button>
+
+            <button type="button" className="settings-item" onClick={() => onNavigate('subscription')}>
+              <span>My Subscription</span>
+              <span
+                className="settings-item-value"
+                style={{ color: isVip ? 'var(--accent-text)' : 'var(--text-tertiary)', fontWeight: isVip ? 600 : 400 }}
+              >
+                <span>{subscriptionSummary}</span>
+                <ChevronRight size={15} strokeWidth={1.8} aria-hidden="true" />
+              </span>
+            </button>
+
+            <button type="button" className="settings-item" onClick={() => onNavigate('topup-history')}>
+              <span>Top Up History</span>
+              <span className="settings-item-value">
+                <span>Orders &amp; Receipts</span>
+                <ChevronRight size={15} strokeWidth={1.8} aria-hidden="true" />
+              </span>
+            </button>
+
+            <button type="button" className="settings-item" onClick={() => onNavigate('coin-history')}>
+              <span>Coin History</span>
+              <span className="settings-item-value">
+                <span>Coin Activity</span>
+                <ChevronRight size={15} strokeWidth={1.8} aria-hidden="true" />
+              </span>
+            </button>
           </div>
-        )}
+
+          {/* Support & Legal */}
+          <div>
+            <h3 className="hot-tags-title">Support &amp; Legal Policies</h3>
+            <div className="settings-list">
+              <button type="button" className="settings-item" onClick={() => setActiveLegalModal('contact')}>
+                <span>Contact Us &amp; Customer Support</span>
+                <span className="settings-item-value">
+                  <span>Support</span>
+                  <ChevronRight size={15} strokeWidth={1.8} aria-hidden="true" />
+                </span>
+              </button>
+              <button type="button" className="settings-item" onClick={() => setActiveLegalModal('refund')}>
+                <span>Refund &amp; Purchase Policy</span>
+                <span className="settings-item-value">
+                  <span>View</span>
+                  <ChevronRight size={15} strokeWidth={1.8} aria-hidden="true" />
+                </span>
+              </button>
+              <button type="button" className="settings-item" onClick={() => setActiveLegalModal('terms')}>
+                <span>Terms of Service</span>
+                <span className="settings-item-value">
+                  <span>View</span>
+                  <ChevronRight size={15} strokeWidth={1.8} aria-hidden="true" />
+                </span>
+              </button>
+              <button type="button" className="settings-item" onClick={() => setActiveLegalModal('privacy')}>
+                <span>Privacy Policy</span>
+                <span className="settings-item-value">
+                  <span>View</span>
+                  <ChevronRight size={15} strokeWidth={1.8} aria-hidden="true" />
+                </span>
+              </button>
+            </div>
+          </div>
+        </div>
       </div>
 
       {/* Native <dialog> Auth Modal */}

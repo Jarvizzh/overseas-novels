@@ -240,7 +240,7 @@ export interface Transaction {
   id: string;
   user_id: number;
   type: 'credit' | 'debit';
-  biz_type: 'recharge' | 'checkin' | 'unlock' | 'reward_task';
+  biz_type: 'recharge' | 'checkin' | 'unlock' | 'reward_task' | 'refund' | (string & {});
   amount: number;
   charged_amount: number;
   bonus_amount: number;
@@ -250,6 +250,47 @@ export interface Transaction {
 
 export interface TransactionPage {
   items: Transaction[];
+  next_cursor?: string;
+}
+
+export type TopUpOrderType = 'single' | 'whole_book' | 'subscription';
+
+export type TopUpDisplayStatus =
+  | 'completed'
+  | 'confirming'
+  | 'under_review'
+  | 'refund_pending'
+  | 'partially_refunded'
+  | 'refunded'
+  | 'revoked';
+
+export interface TopUpHistoryItem {
+  order_id: number;
+  order_no: string;
+  order_type: TopUpOrderType;
+  title: string;
+  display_status: TopUpDisplayStatus;
+  amount_minor: number;
+  currency: string;
+  presentment_amount_minor?: number;
+  presentment_currency?: string;
+  refunded_minor?: number;
+  coins?: number;
+  bonus_coins?: number;
+  provider: string;
+  novel_id?: number;
+  novel_title?: string;
+  cycle?: string;
+  billing_kind?: 'initial' | 'renewal' | string;
+  period_start?: string;
+  period_end?: string;
+  created_at: string;
+  paid_at?: string;
+  fulfilled_at?: string;
+}
+
+export interface TopUpHistoryPage {
+  items: TopUpHistoryItem[];
   next_cursor?: string;
 }
 
@@ -470,7 +511,26 @@ export const api = {
   getTransactionHistory: (limit: number, cursor?: string, signal?: AbortSignal) => {
     const params = new URLSearchParams({ limit: String(limit) });
     if (cursor) params.set('cursor', cursor);
-    return request<TransactionPage>(`/wallet/history/cursor?${params}`, { signal });
+    return request<TransactionPage>(`/wallet/history/cursor?${params}`, { signal, cache: 'no-store' });
+  },
+
+  getTopUpHistory: (
+    options: {
+      limit?: number;
+      cursor?: string;
+      type?: 'all' | TopUpOrderType;
+      signal?: AbortSignal;
+    } = {},
+  ) => {
+    const params = new URLSearchParams();
+    if (options.limit) params.set('limit', String(options.limit));
+    if (options.cursor) params.set('cursor', options.cursor);
+    if (options.type && options.type !== 'all') params.set('type', options.type);
+    const qs = params.toString();
+    return request<TopUpHistoryPage>(`/wallet/topup-history${qs ? `?${qs}` : ''}`, {
+      signal: options.signal,
+      cache: 'no-store',
+    });
   },
 
   unlockChapter: (novelId: number, chapterIndex: number, price: number, chapterId: string, contentVersion: number, userId: number, authToken: string) =>

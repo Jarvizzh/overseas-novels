@@ -44,6 +44,7 @@ type Repository interface {
 	preparePurchase(context.Context, int64, purchaseRequest, checkoutAttribution) (*PurchaseIntent, error)
 	purchaseByReference(context.Context, int64, string, string) (*PurchaseIntent, error)
 	recentPurchases(context.Context, int64) ([]PurchaseIntent, error)
+	listTopUpHistory(ctx context.Context, userID int64, orderType string, limit int, after *topUpHistoryCursor) ([]TopUpHistoryItem, error)
 	reservePayPalAttempt(context.Context, int64, string, string, string, payment.WebhookAccount) (*paypalCheckoutAttempt, error)
 	reserveStripePurchase(context.Context, int64, string, string, string, payment.WebhookAccount) (*stripePurchaseAttempt, error)
 	claimStripeAttempts(context.Context, payment.WebhookAccount, string, bool) ([]stripePurchaseAttempt, error)

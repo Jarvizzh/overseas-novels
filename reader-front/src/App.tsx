@@ -14,8 +14,10 @@ import { Profile } from './pages/Profile';
 import { Rewards } from './pages/Rewards';
 import { Recharge } from './pages/Recharge';
 import { Subscription } from './pages/Subscription';
+import { TopUpHistory } from './pages/TopUpHistory';
+import { CoinHistory } from './pages/CoinHistory';
 import { api, ApiError, registerSessionRefreshHandler } from './utils/api';
-import type { BookshelfItem, Novel, User, Transaction, SubscriptionInfo, SavedProgress } from './utils/api';
+import type { BookshelfItem, Novel, User, SubscriptionInfo, SavedProgress } from './utils/api';
 import { useProgressOutbox } from './utils/useProgressOutbox';
 import { useShelf } from './utils/useShelf';
 import { withRequestTimeout } from './utils/requestTimeout';
@@ -37,8 +39,6 @@ const TRACKING_KEYS = [
   'link_id',
   'promo_id',
 ];
-
-const TX_PAGE_SIZE = 30;
 
 function loadScopedUnlockedChapters(userId: number | null): string[] {
   if (!userId) return [];
@@ -146,10 +146,7 @@ function AppContent() {
   const [subscription, setSubscription] = useState<SubscriptionInfo | null>(null);
 
   const [unlockedBookChapters, setUnlockedBookChapters] = useState<string[]>([]);
-  const [transactionHistory, setTransactionHistory] = useState<Transaction[]>([]);
-  const [nextTransactionCursor, setNextTransactionCursor] = useState<string>();
-  const [loadingMoreTransactions, setLoadingMoreTransactions] = useState(false);
-  const transactionRequest = useRef<AbortController | null>(null);
+  const walletRequest = useRef<AbortController | null>(null);
 
   const guestLoginPromiseRef = useRef<Promise<string | null> | null>(null);
 
@@ -186,10 +183,9 @@ function AppContent() {
   }, [themePreference]);
 
   const reloadWallet = useCallback(async () => {
-    transactionRequest.current?.abort();
+    walletRequest.current?.abort();
     const controller = new AbortController();
-    transactionRequest.current = controller;
-    setLoadingMoreTransactions(false);
+    walletRequest.current = controller;
     try {
       const balanceTask = api
         .getWalletBalance(controller.signal)
@@ -203,17 +199,6 @@ function AppContent() {
           if (!controller.signal.aborted) console.error('Failed to load wallet balance:', err);
         });
 
-      const historyTask = api
-        .getTransactionHistory(TX_PAGE_SIZE, undefined, controller.signal)
-        .then((txs) => {
-          if (controller.signal.aborted) return;
-          setTransactionHistory(txs.items);
-          setNextTransactionCursor(txs.next_cursor);
-        })
-        .catch((err) => {
-          if (!controller.signal.aborted) console.error('Failed to load transaction history:', err);
-        });
-
       const subTask = api
         .getSubscriptionStatus(controller.signal)
         .then((subStatus) => {
@@ -223,33 +208,13 @@ function AppContent() {
         })
         .catch(() => null);
 
-      await Promise.all([balanceTask, historyTask, subTask]);
+      await Promise.all([balanceTask, subTask]);
     } finally {
-      if (transactionRequest.current === controller) {
-        transactionRequest.current = null;
+      if (walletRequest.current === controller) {
+        walletRequest.current = null;
       }
     }
   }, []);
-
-  const handleLoadMoreTransactions = useCallback(async () => {
-    if (!nextTransactionCursor || transactionRequest.current) return;
-    const controller = new AbortController();
-    transactionRequest.current = controller;
-    setLoadingMoreTransactions(true);
-    try {
-      const page = await api.getTransactionHistory(TX_PAGE_SIZE, nextTransactionCursor, controller.signal);
-      if (controller.signal.aborted) return;
-      setTransactionHistory((prev) => [...prev, ...page.items]);
-      setNextTransactionCursor(page.next_cursor);
-    } catch (err) {
-      if (!controller.signal.aborted) console.error('Failed to load more transactions:', err);
-    } finally {
-      if (transactionRequest.current === controller) {
-        transactionRequest.current = null;
-        setLoadingMoreTransactions(false);
-      }
-    }
-  }, [nextTransactionCursor]);
 
   const triggerGuestLogin = useCallback(async (): Promise<string | null> => {
     if (!guestLoginPromiseRef.current) {
@@ -402,7 +367,7 @@ function AppContent() {
       if (event.key !== 'auth-token') return;
       request?.abort();
       if (!event.newValue) {
-        transactionRequest.current?.abort();
+        walletRequest.current?.abort();
         setSession(null);
         setRecentBooks([]);
         setUserCoins(0);
@@ -410,9 +375,6 @@ function AppContent() {
         setBonusCoins(0);
         setIsVip(false);
         setSubscription(null);
-        setTransactionHistory([]);
-        setNextTransactionCursor(undefined);
-        setLoadingMoreTransactions(false);
         return;
       }
       const token = event.newValue;
@@ -447,6 +409,9 @@ function AppContent() {
       '/detail': 'Book Details | StarNovel',
       '/content': 'Reader | StarNovel',
       '/recharge': 'Subscription & Coins | StarNovel',
+      '/subscription': 'My Subscription | StarNovel',
+      '/topup-history': 'Top Up History | StarNovel',
+      '/coin-history': 'Coin History | StarNovel',
     };
     document.title = titleMap[location.pathname] || 'StarNovel';
   }, [location.pathname]);
@@ -485,6 +450,10 @@ function AppContent() {
         targetPath = '/profile';
       } else if (pageOrPath === 'subscription') {
         targetPath = '/subscription';
+      } else if (pageOrPath === 'topup-history') {
+        targetPath = '/topup-history';
+      } else if (pageOrPath === 'coin-history') {
+        targetPath = '/coin-history';
       } else if (pageOrPath === 'recharge') {
         targetPath = '/recharge';
         if (typeof params?.id === 'number') mergedParams.set('novel_id', String(params.id));
@@ -704,6 +673,10 @@ function AppContent() {
         return { title: 'Profile', showBack: false };
       case '/subscription':
         return { title: 'Subscription', showBack: true, onBack: navigateBack };
+      case '/topup-history':
+        return { title: 'Top Up History', showBack: true, onBack: navigateBack };
+      case '/coin-history':
+        return { title: 'Coin History', showBack: true, onBack: navigateBack };
       default:
         return { title: 'StarNovel', showBack: false };
     }
@@ -920,17 +893,11 @@ function AppContent() {
                 bonusCoins={bonusCoins}
                 isVip={isVip}
                 subscription={subscription}
-                transactionHistory={transactionHistory}
-                hasMoreTransactions={Boolean(nextTransactionCursor)}
-                loadingMoreTransactions={loadingMoreTransactions}
-                onLoadMoreTransactions={handleLoadMoreTransactions}
                 currentUser={user}
                 themePreference={themePreference}
                 systemTheme={systemTheme}
                 onThemePreferenceChange={setThemePreference}
                 onLoginSuccess={async (token, u) => {
-                  setTransactionHistory([]);
-                  setNextTransactionCursor(undefined);
                   readerStorage.setItem('auth-token', token);
                   setSession({ user: u, token });
                   void reloadWallet();
@@ -946,8 +913,8 @@ function AppContent() {
                 }}
                 onLogout={async () => {
                   await api.logout();
-                  transactionRequest.current?.abort();
-                  transactionRequest.current = null;
+                  walletRequest.current?.abort();
+                  walletRequest.current = null;
                   readerStorage.removeItem('auth-token');
                   setSession(null);
                   setRecentBooks([]);
@@ -957,9 +924,6 @@ function AppContent() {
                   setBonusCoins(0);
                   setIsVip(false);
                   setSubscription(null);
-                  setTransactionHistory([]);
-                  setNextTransactionCursor(undefined);
-                  setLoadingMoreTransactions(false);
                   setUnlockedBookChapters([]);
                   triggerGuestLogin();
                 }}
@@ -1019,6 +983,33 @@ function AppContent() {
                 key={user?.id}
                 authReady={authReady}
                 onRefreshStatus={reloadWallet}
+                onNavigate={navigateTo}
+              />
+            }
+          />
+          <Route
+            path="/topup-history"
+            element={
+              <TopUpHistory
+                key={user?.id}
+                authReady={authReady}
+                isGuest={!user || !user.email}
+                userEmail={user?.email || ''}
+                onRefreshWallet={reloadWallet}
+                onNavigate={navigateTo}
+              />
+            }
+          />
+          <Route
+            path="/coin-history"
+            element={
+              <CoinHistory
+                key={user?.id}
+                authReady={authReady}
+                userCoins={userCoins}
+                chargedCoins={chargedCoins}
+                bonusCoins={bonusCoins}
+                onRefreshWallet={reloadWallet}
                 onNavigate={navigateTo}
               />
             }

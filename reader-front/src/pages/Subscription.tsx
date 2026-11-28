@@ -330,9 +330,17 @@ export const Subscription: React.FC<SubscriptionProps> = ({
                 type="button"
                 className="btn-cta-secondary"
                 style={{ borderRadius: '999px', padding: '10px 20px', fontSize: '0.8125rem' }}
+                onClick={() => onNavigate('topup-history')}
+              >
+                Top Up History
+              </button>
+              <button
+                type="button"
+                className="btn-cta-secondary"
+                style={{ borderRadius: '999px', padding: '10px 20px', fontSize: '0.8125rem' }}
                 onClick={() => onNavigate('recharge')}
               >
-                View All Subscription &amp; Coin Packages
+                View All Packages
               </button>
             </div>
           </div>
