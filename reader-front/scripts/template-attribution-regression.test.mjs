@@ -175,12 +175,48 @@ test('Case 1 helpers format North American plan names, equivalent prices, and bo
   rechargeHelpers.clearCheckoutOrigin('intent-reader-1');
   assert.equal(rechargeHelpers.readCheckoutOrigin('intent-reader-1'), null);
 
-  rechargeHelpers.saveLastCheckoutSelection({ provider: 'stripe', slotId: 30, productId: 10 });
-  assert.deepEqual(rechargeHelpers.readLastCheckoutSelection(), {
+  rechargeHelpers.saveLastCheckoutSelection({ provider: 'stripe', slotId: 30, productId: 10 }, 1_000);
+  assert.deepEqual(rechargeHelpers.readLastCheckoutSelection(undefined, 2_000), {
     provider: 'stripe',
     slotId: 30,
     productId: 10,
   });
+  // Source isolation & 30-min TTL
+  rechargeHelpers.saveLastCheckoutSelection(
+    { provider: 'stripe', slotId: 31, productId: 11, source: 'reader' },
+    10_000,
+  );
+  assert.equal(rechargeHelpers.readLastCheckoutSelection('recharge', 11_000), null);
+  assert.deepEqual(rechargeHelpers.readLastCheckoutSelection('reader', 11_000), {
+    provider: 'stripe',
+    slotId: 31,
+    productId: 11,
+    source: 'reader',
+  });
+  assert.equal(rechargeHelpers.readLastCheckoutSelection('reader', 10_000 + 31 * 60 * 1000), null);
   rechargeHelpers.clearLastCheckoutSelection();
   assert.equal(rechargeHelpers.readLastCheckoutSelection(), null);
+
+  // StrictMode-safe non-destructive read + TTL for pending payment success modal
+  rechargeHelpers.savePendingPaymentSuccess(
+    { intentId: 'intent-ok-1', coins: 500, isVip: false, isWholeBook: false },
+    50_000,
+  );
+  assert.deepEqual(rechargeHelpers.readPendingPaymentSuccess(51_000), {
+    intentId: 'intent-ok-1',
+    coins: 500,
+    isVip: false,
+    isWholeBook: false,
+    vipTitle: undefined,
+  });
+  // Second read still returns payload (StrictMode double-initializer safe)
+  assert.equal(rechargeHelpers.readPendingPaymentSuccess(51_500)?.intentId, 'intent-ok-1');
+  // Expired after 10 minutes
+  assert.equal(rechargeHelpers.readPendingPaymentSuccess(50_000 + 11 * 60 * 1000), null);
+  rechargeHelpers.savePendingPaymentSuccess(
+    { intentId: 'intent-ok-2', coins: 0, isVip: true, isWholeBook: false, vipTitle: 'StarNovel Unlimited' },
+    60_000,
+  );
+  rechargeHelpers.clearPendingPaymentSuccess();
+  assert.equal(rechargeHelpers.readPendingPaymentSuccess(61_000), null);
 });

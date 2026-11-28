@@ -9,7 +9,11 @@ import { Drawer } from '../components/Drawer';
 import { GoldCoin } from '../components/GoldCoin';
 import { PaymentSuccessDialog } from '../components/PaymentSuccessDialog';
 import { RechargeCheckoutPanel } from '../components/RechargeCheckoutPanel';
-import { consumePendingPaymentSuccess, type PendingPaymentSuccess } from '../utils/rechargeCatalogHelpers';
+import {
+  clearPendingPaymentSuccess,
+  readPendingPaymentSuccess,
+  type PendingPaymentSuccess,
+} from '../utils/rechargeCatalogHelpers';
 import { readerCache } from '../utils/readerCache';
 
 interface ReaderProps {
@@ -184,7 +188,13 @@ export const Reader: React.FC<ReaderProps> = ({
 
   const [showSettings, setShowSettings] = useState(false);
   const [showTOC, setShowTOC] = useState(false);
-  const [paymentSuccess, setPaymentSuccess] = useState<PendingPaymentSuccess | null>(() => consumePendingPaymentSuccess());
+  const [paymentSuccess, setPaymentSuccess] = useState<PendingPaymentSuccess | null>(() => readPendingPaymentSuccess());
+
+  useEffect(() => {
+    if (paymentSuccess) {
+      clearPendingPaymentSuccess();
+    }
+  }, [paymentSuccess]);
 
   const [autoUnlock, setAutoUnlock] = useState<boolean>(() => {
     return readerStorage.getItem('reader-auto-unlock') !== 'false';
@@ -834,8 +844,14 @@ export const Reader: React.FC<ReaderProps> = ({
         novelTitle={novel.title}
         coinsAdded={paymentSuccess?.coins ?? 0}
         actionLabel="Start Reading Now"
-        onClose={() => setPaymentSuccess(null)}
-        onAction={() => setPaymentSuccess(null)}
+        onClose={() => {
+          clearPendingPaymentSuccess();
+          setPaymentSuccess(null);
+        }}
+        onAction={() => {
+          clearPendingPaymentSuccess();
+          setPaymentSuccess(null);
+        }}
       />
     </div>
   );

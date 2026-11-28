@@ -84,7 +84,8 @@ export const RechargeCheckoutPanel: React.FC<RechargeCheckoutPanelProps> = ({
   onLoadingChange,
 }) => {
   const { showToast } = useToast();
-  const initialSavedSelectionRef = useRef(readLastCheckoutSelection());
+  const checkoutSource = embedded ? 'reader' : 'recharge';
+  const initialSavedSelectionRef = useRef(readLastCheckoutSelection(checkoutSource));
   const [selectedPack, setSelectedPack] = useState<number | null>(null);
   const [selectedProvider, setSelectedProvider] = useState<PaymentProvider>(
     () => initialSavedSelectionRef.current?.provider ?? 'paypal',
@@ -222,30 +223,43 @@ export const RechargeCheckoutPanel: React.FC<RechargeCheckoutPanelProps> = ({
     const visibleSlots = slots.filter((slot) => visibleIds.has(slot.id));
 
     const savedSelection = initialSavedSelectionRef.current;
-    if (savedSelection && !userManuallySelectedRef.current && returnedLookupState !== 'loading') {
+    if (
+      savedSelection &&
+      visibleSlots.length > 0 &&
+      !userManuallySelectedRef.current &&
+      returnedLookupState !== 'loading'
+    ) {
       initialSavedSelectionRef.current = null;
       clearLastCheckoutSelection();
-      const matchedSaved = visibleSlots.find(
-        (slot) =>
-          slot.id === savedSelection.slotId &&
-          (!savedSelection.productId || !slot.product_id || slot.product_id === savedSelection.productId),
+      const conflictsWithReturnedIntent = Boolean(
+        returnedPendingIntent &&
+          isPendingPurchaseStatus(returnedPendingIntent.status) &&
+          returnedPendingIntent.slot_id > 0 &&
+          returnedPendingIntent.slot_id !== savedSelection.slotId,
       );
-      if (matchedSaved) {
-        userManuallySelectedRef.current = true;
-        setAutoRotatePaused(true);
-        if (matchedSaved.id !== selectedPackRef.current) {
-          setSelectedPack(matchedSaved.id);
+      if (!conflictsWithReturnedIntent) {
+        const matchedSaved = visibleSlots.find(
+          (slot) =>
+            slot.id === savedSelection.slotId &&
+            (!savedSelection.productId || !slot.product_id || slot.product_id === savedSelection.productId),
+        );
+        if (matchedSaved) {
+          userManuallySelectedRef.current = true;
+          setAutoRotatePaused(true);
+          if (matchedSaved.id !== selectedPackRef.current) {
+            setSelectedPack(matchedSaved.id);
+          }
+          const subIdx = subPacks.findIndex((pack) => pack.id === matchedSaved.id);
+          if (subIdx >= 0) {
+            hasAlignedInitialSlideRef.current = true;
+            activeSlideIndexRef.current = subIdx;
+            setActiveSlideIndex(subIdx);
+            requestAnimationFrame(() => {
+              scrollCarouselTo(subIdx, 'auto');
+            });
+          }
+          return;
         }
-        const subIdx = subPacks.findIndex((pack) => pack.id === matchedSaved.id);
-        if (subIdx >= 0) {
-          hasAlignedInitialSlideRef.current = true;
-          activeSlideIndexRef.current = subIdx;
-          setActiveSlideIndex(subIdx);
-          requestAnimationFrame(() => {
-            scrollCarouselTo(subIdx, 'auto');
-          });
-        }
-        return;
       }
     }
 
@@ -432,6 +446,7 @@ export const RechargeCheckoutPanel: React.FC<RechargeCheckoutPanelProps> = ({
           provider,
           slotId: tSlot.id,
           productId: tSlot.product_id,
+          source: checkoutSource,
         });
         redirectingRef.current = true;
         window.clearTimeout(redirectResetTimerRef.current);
@@ -554,12 +569,13 @@ export const RechargeCheckoutPanel: React.FC<RechargeCheckoutPanelProps> = ({
           : 'stripe';
 
   useEffect(() => {
+    if (isOffersLoading) return;
     if (selectedProvider === 'paypal' && !anyPayPalAvailable && anyStripeAvailable) {
       setSelectedProvider('stripe');
     } else if (selectedProvider === 'stripe' && !anyStripeAvailable && anyPayPalAvailable) {
       setSelectedProvider('paypal');
     }
-  }, [selectedProvider, anyPayPalAvailable, anyStripeAvailable]);
+  }, [isOffersLoading, selectedProvider, anyPayPalAvailable, anyStripeAvailable]);
 
   const cardLabel = 'Card';
   const selectedSummaryHint = !selectedSlot

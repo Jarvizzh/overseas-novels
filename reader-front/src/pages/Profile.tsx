@@ -306,7 +306,11 @@ export const Profile: React.FC<ProfileProps> = ({
     return e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom;
   };
 
-  const subscriptionSummary = isVip ? vipCycleLabel(subscription?.cycle) : 'Inactive';
+  const subscriptionSummary = isVip
+    ? subscription?.cycle
+      ? vipCycleLabel(subscription.cycle)
+      : 'Active'
+    : 'Inactive';
 
   return (
     <div className="scroll-container animate-fade-in">

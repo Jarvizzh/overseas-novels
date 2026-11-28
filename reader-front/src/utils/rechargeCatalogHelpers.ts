@@ -63,34 +63,59 @@ export type CheckoutSelectionSnapshot = {
   provider: PaymentProvider;
   slotId: number;
   productId?: number;
+  source?: 'reader' | 'recharge';
 };
 
 const LAST_CHECKOUT_SELECTION_KEY = 'last-checkout-selection';
+const LAST_CHECKOUT_SELECTION_TTL_MS = 30 * 60 * 1000;
 
-export function saveLastCheckoutSelection(snapshot: CheckoutSelectionSnapshot): void {
+export function saveLastCheckoutSelection(snapshot: CheckoutSelectionSnapshot, now = Date.now()): void {
   try {
-    sessionStorage.setItem(LAST_CHECKOUT_SELECTION_KEY, JSON.stringify(snapshot));
+    sessionStorage.setItem(
+      LAST_CHECKOUT_SELECTION_KEY,
+      JSON.stringify({ ...snapshot, savedAt: now }),
+    );
   } catch {
     // Ignore storage errors.
   }
 }
 
-export function readLastCheckoutSelection(): CheckoutSelectionSnapshot | null {
+export function readLastCheckoutSelection(
+  expectedSource?: 'reader' | 'recharge',
+  now = Date.now(),
+): CheckoutSelectionSnapshot | null {
   try {
     const raw = sessionStorage.getItem(LAST_CHECKOUT_SELECTION_KEY);
     if (!raw) return null;
     const parsed = JSON.parse(raw);
+    if (
+      typeof parsed?.savedAt === 'number' &&
+      Number.isFinite(parsed.savedAt) &&
+      now - parsed.savedAt > LAST_CHECKOUT_SELECTION_TTL_MS
+    ) {
+      sessionStorage.removeItem(LAST_CHECKOUT_SELECTION_KEY);
+      return null;
+    }
+    const parsedSource =
+      parsed?.source === 'reader' || parsed?.source === 'recharge' ? parsed.source : undefined;
+    if (expectedSource && parsedSource && parsedSource !== expectedSource) {
+      return null;
+    }
     if (
       parsed &&
       (parsed.provider === 'paypal' || parsed.provider === 'stripe') &&
       typeof parsed.slotId === 'number' &&
       parsed.slotId > 0
     ) {
-      return {
+      const snapshot: CheckoutSelectionSnapshot = {
         provider: parsed.provider,
         slotId: parsed.slotId,
         productId: typeof parsed.productId === 'number' && parsed.productId > 0 ? parsed.productId : undefined,
       };
+      if (parsedSource) {
+        snapshot.source = parsedSource;
+      }
+      return snapshot;
     }
   } catch {
     // Ignore parse/storage errors.
@@ -115,21 +140,32 @@ export type PendingPaymentSuccess = {
 };
 
 const PENDING_PAYMENT_SUCCESS_KEY = 'pending-payment-success';
+const PENDING_PAYMENT_SUCCESS_TTL_MS = 10 * 60 * 1000;
 
-export function savePendingPaymentSuccess(payload: PendingPaymentSuccess): void {
+export function savePendingPaymentSuccess(payload: PendingPaymentSuccess, now = Date.now()): void {
   try {
-    sessionStorage.setItem(PENDING_PAYMENT_SUCCESS_KEY, JSON.stringify(payload));
+    sessionStorage.setItem(
+      PENDING_PAYMENT_SUCCESS_KEY,
+      JSON.stringify({ ...payload, savedAt: now }),
+    );
   } catch {
     // Ignore storage errors.
   }
 }
 
-export function consumePendingPaymentSuccess(): PendingPaymentSuccess | null {
+export function readPendingPaymentSuccess(now = Date.now()): PendingPaymentSuccess | null {
   try {
     const raw = sessionStorage.getItem(PENDING_PAYMENT_SUCCESS_KEY);
     if (!raw) return null;
-    sessionStorage.removeItem(PENDING_PAYMENT_SUCCESS_KEY);
     const parsed = JSON.parse(raw);
+    if (
+      typeof parsed?.savedAt === 'number' &&
+      Number.isFinite(parsed.savedAt) &&
+      now - parsed.savedAt > PENDING_PAYMENT_SUCCESS_TTL_MS
+    ) {
+      sessionStorage.removeItem(PENDING_PAYMENT_SUCCESS_KEY);
+      return null;
+    }
     if (parsed && typeof parsed.intentId === 'string') {
       return {
         intentId: parsed.intentId,
@@ -143,6 +179,20 @@ export function consumePendingPaymentSuccess(): PendingPaymentSuccess | null {
     // Ignore parse/storage errors.
   }
   return null;
+}
+
+export function clearPendingPaymentSuccess(): void {
+  try {
+    sessionStorage.removeItem(PENDING_PAYMENT_SUCCESS_KEY);
+  } catch {
+    // Ignore storage errors.
+  }
+}
+
+export function consumePendingPaymentSuccess(now = Date.now()): PendingPaymentSuccess | null {
+  const payload = readPendingPaymentSuccess(now);
+  clearPendingPaymentSuccess();
+  return payload;
 }
 
 export type RechargeSlotItem = {

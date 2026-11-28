@@ -9,7 +9,7 @@ import {
   isPendingPurchaseStatus,
   type ReturnedLookupState,
 } from '../utils/rechargeSelectionHelpers';
-import { evaluatePurchaseLookupOutcome } from '../utils/checkoutPendingHelpers';
+import { evaluatePurchaseLookupOutcome, parsePurchaseLocator } from '../utils/checkoutPendingHelpers';
 import {
   clearCheckoutOrigin,
   clearLastCheckoutSelection,
@@ -37,18 +37,7 @@ interface RechargeProps {
 }
 
 function initialPurchaseLocator() {
-  const query = new URLSearchParams(window.location.search);
-  const stripeVIP = query.get('stripe_vip');
-  if (stripeVIP) return { intent: stripeVIP, token: '', vip: true, stripeVIP: true, cancelled: false };
-  const cancelled = query.get('payment') === 'cancel';
-  const intentParam = query.get('purchase') || '';
-  const vipIntent = query.get('vip_purchase') || '';
-  const rawToken = query.get('subscription_id') || query.get('token') || '';
-  const token = cancelled && (vipIntent || intentParam) ? '' : rawToken;
-  if (vipIntent || query.has('subscription_id') || rawToken.startsWith('I-')) {
-    return { intent: vipIntent || intentParam, token, vip: true, stripeVIP: false, cancelled };
-  }
-  return { intent: intentParam, token, vip: false, stripeVIP: false, cancelled };
+  return parsePurchaseLocator(window.location.search);
 }
 
 function resolveCancelReaderPath(intentId: string, fallbackReturnPath?: string): string {
@@ -73,6 +62,7 @@ export const Recharge: React.FC<RechargeProps> = ({
   const [isWholeBookSuccess, setIsWholeBookSuccess] = useState(false);
   const hasReturnedFromPaymentRef = useRef(false);
   const pendingReturnPathRef = useRef('');
+  const returnedOriginRef = useRef<{ source: 'reader' | 'recharge'; path: string } | null>(null);
   const successOriginRef = useRef<{ source: 'reader' | 'recharge'; path: string } | null>(null);
   const [successOriginSource, setSuccessOriginSource] = useState<'reader' | 'recharge' | null>(null);
   const [purchaseLocator, setPurchaseLocator] = useState(initialPurchaseLocator);
@@ -113,6 +103,21 @@ export const Recharge: React.FC<RechargeProps> = ({
   };
 
   useEffect(() => {
+    if (!returningToReader || !authReady || userId) return;
+    const fallbackPath = resolveCancelReaderPath(purchaseLocator.intent);
+    clearCheckoutOrigin(purchaseLocator.intent);
+    if (fallbackPath) {
+      if (onNavigateRef.current) {
+        onNavigateRef.current(fallbackPath, undefined, { replace: true });
+      } else {
+        window.location.replace(fallbackPath);
+      }
+      return;
+    }
+    setReturningToReader(false);
+  }, [returningToReader, authReady, userId, purchaseLocator.intent]);
+
+  useEffect(() => {
     if (!authReady || !userId || (!purchaseLocator.intent && !purchaseLocator.token)) return;
     const controller = new AbortController();
     const startedAt = Date.now();
@@ -134,6 +139,11 @@ export const Recharge: React.FC<RechargeProps> = ({
         if (controller.signal.aborted) return;
         hasReturnedFromPaymentRef.current = true;
         pendingReturnPathRef.current = intent.return_path || '';
+        const lookupOriginIntentId = intent.intent_id || purchaseLocator.intent;
+        const lookupRecordedOrigin = readCheckoutOrigin(lookupOriginIntentId);
+        if (lookupRecordedOrigin) {
+          returnedOriginRef.current = lookupRecordedOrigin;
+        }
         setReturnedPendingIntent(isPendingPurchaseStatus(intent.status) ? intent : null);
         setReturnedLookupState('resolved');
         const decision = evaluatePurchaseLookupOutcome(intent, {
@@ -144,17 +154,19 @@ export const Recharge: React.FC<RechargeProps> = ({
         if (decision.shouldClearDraft) {
           const originIntentId = intent.intent_id || purchaseLocator.intent;
           const recordedOrigin = readCheckoutOrigin(originIntentId);
-          clearCheckoutOrigin(originIntentId);
-          clearLastCheckoutSelection();
-          const storageKey = purchaseRequestStorageKey(userId, intent.slot_id, intent.product_id || 0, intent.novel_id || 0);
-          try {
-            const saved = JSON.parse(sessionStorage.getItem(storageKey) || 'null');
-            if (saved?.intentId === intent.intent_id) sessionStorage.removeItem(storageKey);
-          } catch {
-            // Server-owned purchase status does not depend on the draft.
-          }
-          if (decision.shouldShowSuccess && shownPurchaseRef.current !== (intent.intent_id || intent.order_id)) {
-            shownPurchaseRef.current = intent.intent_id || intent.order_id || '';
+          const clearDraftStorage = () => {
+            clearCheckoutOrigin(originIntentId);
+            clearLastCheckoutSelection();
+            const storageKey = purchaseRequestStorageKey(userId, intent.slot_id, intent.product_id || 0, intent.novel_id || 0);
+            try {
+              const saved = JSON.parse(sessionStorage.getItem(storageKey) || 'null');
+              if (saved?.intentId === intent.intent_id) sessionStorage.removeItem(storageKey);
+            } catch {
+              // Server-owned purchase status does not depend on the draft.
+            }
+          };
+          const purchaseKey = intent.intent_id || intent.order_id || '';
+          if (decision.shouldShowSuccess && shownPurchaseRef.current !== purchaseKey) {
             const readerSuccessPath =
               recordedOrigin?.source === 'reader'
                 ? readingReturnPath(recordedOrigin.path) || readingReturnPath(intent.return_path)
@@ -164,6 +176,8 @@ export const Recharge: React.FC<RechargeProps> = ({
                 await onRefreshStatusRef.current?.();
               }
               if (controller.signal.aborted) return;
+              shownPurchaseRef.current = purchaseKey;
+              clearDraftStorage();
               savePendingPaymentSuccess({
                 intentId: intent.intent_id || intent.order_id || originIntentId,
                 coins: intent.coins,
@@ -178,6 +192,8 @@ export const Recharge: React.FC<RechargeProps> = ({
               }
               return;
             }
+            shownPurchaseRef.current = purchaseKey;
+            clearDraftStorage();
             setReturningToReader(false);
             successOriginRef.current = recordedOrigin;
             setSuccessOriginSource(recordedOrigin?.source ?? null);
@@ -190,6 +206,11 @@ export const Recharge: React.FC<RechargeProps> = ({
             setShowSuccess(true);
             if (decision.shouldRefreshWallet) {
               void onRefreshStatusRef.current?.();
+            }
+          } else {
+            clearDraftStorage();
+            if (decision.shouldShowSuccess) {
+              setReturningToReader(false);
             }
           }
         }
@@ -369,7 +390,8 @@ export const Recharge: React.FC<RechargeProps> = ({
               type="button"
               className="header-btn"
               onClick={() => {
-                if (hasReturnedFromPaymentRef.current && successOriginRef.current?.source !== 'recharge') {
+                const resolvedOrigin = successOriginRef.current ?? returnedOriginRef.current;
+                if (hasReturnedFromPaymentRef.current && resolvedOrigin?.source !== 'recharge') {
                   handleReturnToContent();
                 } else {
                   onBack();
@@ -413,7 +435,7 @@ export const Recharge: React.FC<RechargeProps> = ({
                 <li>Renewal: Your subscription will renew automatically.</li>
                 <li>Cancel: You can cancel your subscription at any time 24 hours before the subscription expires.</li>
                 <li>
-                  Manage subscriptions: You can view and manage your renewals in Subscription.
+                  Manage subscriptions: You can view and manage your renewals in My Subscription.
                 </li>
               </ol>
             </section>
@@ -429,7 +451,12 @@ export const Recharge: React.FC<RechargeProps> = ({
         novelTitle={novelTitle}
         coinsAdded={successAmount}
         actionLabel={successOriginSource === 'recharge' ? 'Done' : 'Start Reading Now'}
-        onClose={() => setShowSuccess(false)}
+        onClose={() => {
+          setShowSuccess(false);
+          if (successOriginSource === 'recharge') {
+            clearReturnQueryFromUrl();
+          }
+        }}
         onAction={() => {
           setShowSuccess(false);
           if (successOriginSource === 'recharge') {

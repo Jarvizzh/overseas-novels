@@ -124,3 +124,50 @@ test('P2-4 terminal payment failure or review stops polling without showing succ
   assert.equal(review.outcome, 'terminal_failure');
   assert.equal(review.shouldContinuePolling, false);
 });
+
+test('parsePurchaseLocator preserves cancelled flag for stripe_vip, vip_purchase, and single purchases', async () => {
+  const { parsePurchaseLocator, evaluatePurchaseLookupOutcome } = await loadCheckoutPendingHelpers();
+
+  const stripeVipCancel = parsePurchaseLocator('?payment=cancel&stripe_vip=sv-intent-1');
+  assert.deepEqual(stripeVipCancel, {
+    intent: 'sv-intent-1',
+    token: '',
+    vip: true,
+    stripeVIP: true,
+    cancelled: true,
+  });
+
+  // Stripe VIP cancel with awaiting_approval must NOT keep polling for 75s.
+  const stripeVipCancelDecision = evaluatePurchaseLookupOutcome(
+    { intent_id: 'sv-intent-1', status: 'awaiting_approval' },
+    { cancelled: stripeVipCancel.cancelled, elapsedMs: 500 },
+  );
+  assert.equal(stripeVipCancelDecision.shouldContinuePolling, false);
+
+  const stripeVipReturn = parsePurchaseLocator('?payment=return&stripe_vip=sv-intent-2');
+  assert.deepEqual(stripeVipReturn, {
+    intent: 'sv-intent-2',
+    token: '',
+    vip: true,
+    stripeVIP: true,
+    cancelled: false,
+  });
+
+  const paypalVipCancel = parsePurchaseLocator('?payment=cancel&vip_purchase=pv-intent-1&subscription_id=I-123');
+  assert.deepEqual(paypalVipCancel, {
+    intent: 'pv-intent-1',
+    token: '',
+    vip: true,
+    stripeVIP: false,
+    cancelled: true,
+  });
+
+  const singleCancel = parsePurchaseLocator('?payment=cancel&purchase=p-intent-1&token=EC-123');
+  assert.deepEqual(singleCancel, {
+    intent: 'p-intent-1',
+    token: '',
+    vip: false,
+    stripeVIP: false,
+    cancelled: true,
+  });
+});

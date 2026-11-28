@@ -44,6 +44,31 @@ export function buildCheckoutPendingLocator(intentId: string) {
   };
 }
 
+export interface PurchaseLocator {
+  intent: string;
+  token: string;
+  vip: boolean;
+  stripeVIP: boolean;
+  cancelled: boolean;
+}
+
+export function parsePurchaseLocator(search: string): PurchaseLocator {
+  const query = new URLSearchParams(search);
+  const cancelled = query.get('payment') === 'cancel';
+  const stripeVIP = query.get('stripe_vip');
+  if (stripeVIP) {
+    return { intent: stripeVIP, token: '', vip: true, stripeVIP: true, cancelled };
+  }
+  const intentParam = query.get('purchase') || '';
+  const vipIntent = query.get('vip_purchase') || '';
+  const rawToken = query.get('subscription_id') || query.get('token') || '';
+  const token = cancelled && (vipIntent || intentParam) ? '' : rawToken;
+  if (vipIntent || query.has('subscription_id') || rawToken.startsWith('I-')) {
+    return { intent: vipIntent || intentParam, token, vip: true, stripeVIP: false, cancelled };
+  }
+  return { intent: intentParam, token, vip: false, stripeVIP: false, cancelled };
+}
+
 export function evaluatePurchaseLookupOutcome(
   intent: PurchaseLookupIntentLike,
   opts: {
