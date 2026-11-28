@@ -144,7 +144,12 @@ PGSERVICE=star_novel_release psql -X -v ON_ERROR_STOP=1 \
   -c 'SELECT max(version) FROM reader_schema_migrations;'
 ```
 
-   当前应返回 `2026112802`。空库创建完整结构并初始化系统数据；现行 `2026111942` 库先检查 30 个查询索引，全部有效后继续升级。若报告 missing，取 schema.sql 中对应定义，在事务外使用 CREATE INDEX CONCURRENTLY 补建；若报告 invalid，先修复该索引。随后重跑 CMS -migrate。更早的库先使用 `a540d96` 的迁移入口升到 `2026111942`。独立数据库角色环境迁移后应用 [角色授权脚本](cms-backend/ops/conversion_role_grants.sql)；生产统一使用具备相应对象权限的 `star_novel` 时无需拆分角色。使用 OSS 正文且存在历史预览缺口时，执行 `dc run --rm --no-deps cms -backfill-chapter-previews` 并核对结果。
+   当前应返回 `2026112802`（同时校验 `public.recharge_slots` 已存在 `list_price_cents` 列与非负约束 `recharge_slots_list_price_cents_check`）。各起点库的自动迁移行为如下：
+   - **空库**：由 `migrations/schema.sql` 与 `migrations/2026112801.sql` 一步初始化完整结构、基础系统配置、内置 5 个 RBAC 角色并写入版本账本至 `2026112802`（须提供 `CMS_BOOTSTRAP_ADMIN_PASSWORD`）。
+   - **现行 `2026112801` 库**：直接幂等补加 `public.recharge_slots.list_price_cents`（`integer NOT NULL DEFAULT 0`）及 `recharge_slots_list_price_cents_check` 约束，并将版本推进至 `2026112802`。
+   - **现行 `2026111942` 库**：先校验 30 个查询索引均存在且 `indisvalid = true`，随后执行 `2026112802` 增量加列并写入版本账本。若报告 `missing`，从发布包内 `migrations/schema.sql` 的 `-- BEGIN 2026111942 optional query indexes` 段取对应定义，在事务外使用 `CREATE INDEX CONCURRENTLY` 补建；若报告 `invalid`，先修复该索引，再重跑 `cms -migrate`。
+   - **早于 `2026111942` 的旧库**：先使用 `a540d96` 的 CMS `-migrate` 升至 `2026111942`，再切换当前版本升至 `2026112802`。
+   - **后续可选脚本**：独立数据库角色环境迁移后在发布目录执行 `migrations/conversion_role_grants.sql`（仓内路径 [conversion_role_grants.sql](cms-backend/ops/conversion_role_grants.sql)）；生产统一使用具备相应对象权限的 `star_novel` 时无需拆分角色。使用 OSS 正文且存在历史预览缺口时执行 `dc run --rm --no-deps cms -backfill-chapter-previews`；如需按英文单词重算历史章节字数与定价，可先用 `dc run --rm --no-deps cms -backfill-word-counts -dry-run` 预演后再正式执行。
 
 5. 核对存量订单、协议、收款、回调游标和权益。环境或原账户缺少依据的记录留在支付中心待核对；历史整本权益按原商品和小说证据核验。回传按现场记录判定是否需要历史接管。确认旧服务从未对 Meta 上报时直接部署新链路；如已有历史发送证据，先保持新发送暂停，再按原业务键、事件 ID 和发送证据检查接管范围。 [历史队列接管](conversion-backend/README.md#历史队列接管)
 
@@ -160,7 +165,7 @@ Conversion API 在 Compose 中没有 HTTP 健康检查。旧版 CMS、Reader 和
 
 - 通过 `/api/v1/admin/auth/me` 核对超管身份、角色和权限，在「账号管理」检查启用态超管名单与迁移前批准的名单一致。首次引导时核对 `bootstrap_super_admin` 审计。超管可管理角色及账号，普通管理员直调相关写接口须返回 `403`。
 - 用最小权限账号验证页面、菜单和 API 一致。仅有 `ads.conversions:read` 的账号可通过 CMS 查询回传概要和吞吐，直调投递重排返回 `403`。在隔离环境验证授权写入后撤权，同一登录会话再次调用写接口时须被拒绝；停用账号或角色后受保护接口须返回 `401`。回传详情或写入异常时同时检查 CMS 代理鉴权和 Conversion 的数据库权限函数。
-- 若部署使用独立数据库角色，迁移后由迁移所有者重跑新版 [角色授权脚本](cms-backend/ops/conversion_role_grants.sql)。用实际运行账号验证 CMS 角色增改与序列权限、Conversion API 的写权限函数、Reader 支付后台的操作人检查，以及超管专属的回传保留期清理权限。实际写入与清理演练使用隔离环境。统一账号部署按第 3 节核对对象权限。
+- 若部署使用独立数据库角色，迁移后由迁移所有者重跑发布包内 `migrations/conversion_role_grants.sql`（仓内 [conversion_role_grants.sql](cms-backend/ops/conversion_role_grants.sql)）。用实际运行账号验证 CMS 角色增改与序列权限、Conversion API 的写权限函数、Reader 支付后台的操作人检查，以及超管专属的回传保留期清理权限。实际写入与清理演练使用隔离环境。统一账号部署按第 3 节核对对象权限。
 
 ## 4. 配置业务并启动 Reader
 
@@ -173,7 +178,7 @@ Conversion API 在 Compose 中没有 HTTP 健康检查。旧版 CMS、Reader 和
 1. SuperAdmin 在「支付中心 → 渠道与商户」核对现有 PayPal、Stripe 商户、环境、主账户、新单和订阅开关。新商户先建草稿并加密保存凭据，确认账号身份、权限和环境，验证通过后发布。发布对新单生效前，先核对原账户的在途 Checkout、续费、退款与争议。保留旧账户的有效凭据、入口和订单绑定，直到存量售后处理完成。
 2. 动态账户使用 CMS 展示的 `/api/v1/wallet/webhook/channel/<token>` 路径，以实际 Reader HTTPS 域名配置各渠道账户端点。PayPal 记录该应用的 Webhook ID，Stripe 使用该端点的签名密钥。需要在线验证的端点，在 Reader 启动并开放该路径后完成渠道登记与投递测试。已注册的 `/api/v1/wallet/webhook/paypal`、`/api/v1/wallet/webhook/stripe` 和 `/api/v1/wallet/webhook/subscription/<provider>` 按原商户保留。网关保留请求体、签名头及真实协议，Webhook 路径跳过缓存、登录跳转和浏览器挑战。
 3. 按启用能力订阅结账、扣款、订阅变化和失败、退款、冲回、风险与争议事件；使用自动对账时再核对结算和报表事件及账户读取权限。CMS 的渠道校验和真实签名回调分别验收，核对每个账户和环境的回调入库。 [渠道事件与业务确认依据](docs/payment-domain-architecture-and-implementation.md#渠道事件与业务确认依据)
-4. 在「支付中心 → 商品」准备商品版本和目标环境的 PayPal 或 Stripe 绑定。核对价格、USD 币种、单次或订阅周期、市场、Stripe 税务和销售模式，按所需渠道同步并发布。为对应环境的充值模板选择已发布版本，核对推广链接与模板、H5 显示及实际下单快照。Stripe 分别确认一次性购买和 VIP 的账户能力及 Reader 开关；Managed Payments 还需核对获批市场、税务责任和 Link 售后。 [统一商品与定价](docs/payment-domain-architecture-and-implementation.md#37-统一商品与定价)
+4. 在「支付中心 → 商品」准备商品版本和目标环境的 PayPal 或 Stripe 绑定（未发布草稿支持编辑与删除，已发布商品商业字段锁定）。核对价格、USD 币种、单次或订阅周期、市场、Stripe 税务和销售模式，按所需渠道同步并发布。为对应环境的充值模板选择已发布版本，按需配置纯展示的划线原价 `list_price_cents`（须严格大于商品 `price_cents` 且 `≤ $1,000,000.00`，留空则不展示，不影响渠道计费），核对推广链接与模板、H5 显示及实际下单快照。Stripe 分别确认一次性购买和 VIP 的账户能力及 Reader 开关；Managed Payments 还需核对获批市场、税务责任和 Link 售后。 [统一商品与定价](docs/payment-domain-architecture-and-implementation.md#37-统一商品与定价)
 
 ### 4.2 Pixel、推广路由与进程启动
 
@@ -238,8 +243,9 @@ dc up -d --no-build --no-deps --force-recreate conversion-worker
 
 | 链路 | 验收证据 |
 | --- | --- |
-| 服务和基础设施 | 三个后端 schema 一致，CMS/Reader `/healthz` 正常，`/health` 版本与制品一致，Redis、RDS、正文及封面访问正常。两个 SPA 深链接可刷新，CMS `/pixels`、`/conversions`、`/payments` 可访问。 |
-| 交易与权益 | 按渠道和账户验收购买、同步回跳、签名回执、重复 Webhook、查单和一次履约。核对整本权益与原小说、订阅首付及续费账期、期末取消和重新开通、部分退款与全退。风险／争议、退款、对账状态在相应 CMS 权限内可查。 |
+| 服务和基础设施 | CMS、Reader、Conversion 三个后端 schema 均通过 `2026112802` 校验，CMS/Reader `/healthz` 正常，`/health` 版本与制品一致，Redis、RDS、正文及封面访问正常。两个 SPA 深链接可刷新，CMS `/pixels`、`/conversions`、`/payments`、`/recharge-templates` 可访问。 |
+| 交易与权益 | 按渠道和账户验收购买、同步回跳、签名回执、重复 Webhook、查单和一次履约。核对整本权益与原小说、订阅首付及续费账期（含订单列表订阅周期展示）、期末取消和重新开通、部分退款与全退。风险／争议、退款、对账状态在相应 CMS 权限内可查。 |
+| H5 收银台与阅读页解锁 | 独立 `/recharge` 与阅读页内嵌支付模块：顶部 `PayPal / Card` 渠道切换胶囊、紧凑 VIP 轮播横幅（滑动/点选与选中态一致）、2×2 金币档位（合法 `list_price_cents > price_cents` 才渲染划线价）、全宽 `Pay Now` 主按钮及 PayPal / Stripe 品牌跳转过渡层（浏览器回退自动复位）。阅读页未解锁章节：余额不足时展示渐隐预览 + 内嵌充值模块并隐藏底部翻页栏；余额充足时仅展示 `Unlock Now` 与默认勾选 `Auto-unlock next chapters`，隐藏内嵌充值模块与底部翻页栏；阅读设置面板无 `Spacing` 项。 |
 | 回传 | 从真实业务键追溯 Reader Outbox、归一化、目标 Pixel、批次、成员与最终回执。缩小批量、部分接收、未知结果、失租和迟到旧凭据错误在隔离环境演练，确认较新成功回执仍决定后续领取。正式观察积压、最老待处理时间、429、未知成员、凭据暂停和 Collector 告警。 |
 | 分销 | 当前生产保持关闭。隔离环境验证回调验签、相同回调去重、冲突识别、Inbox 消费和回告。正式开放前完成正式契约、鉴权、签名、空值编码、结果未知后的核对规则及正式消费者注册，随后单列公网精确路径及回告验收。 [司南模拟联调](conversion-backend/README.md#司南阶段-c-模拟联调) |
 
@@ -259,6 +265,6 @@ ln -sfn "$(pwd -P)" /www/star-novel-server/current
 | 新结账或渠道配置 | 关闭受影响账户的新单或订阅，必要时关闭对应 Reader Stripe 开关。保留原账户、回调、对账和售后，以核实的上一份有效配置重新发布或以新凭据前滚。 |
 | Meta 投递 | 将 `conversion.meta_enabled` 设为 `false`，重新生成并重建 Worker。保留 Outbox、归一化、Collector、请求账本及在途回执证据。结果未知进入人工核对，重排沿用原事件身份。 |
 | 同 schema 应用故障 | 用已验证支持当前 schema、支付记录和批次账本的上一版镜像与配置恢复。先看仓内 `RequiredSchemaVersion` 和实际发布记录，从对应版本目录重建相关进程并验收，再更新 `current`。 |
-| 跨 schema 迁移或新版本已处理业务 | 优先按当前 schema 前滚。需要恢复数据库时维持维护窗口，协调恢复点、配套的全部应用和前端。恢复前核对恢复点之后已发生的第三方扣款、退款、续费与 Meta 回执，拟定补账、回调回补和去重方案，确认后恢复外部写入。 |
+| 跨 schema 迁移或新版本已处理业务 | 优先按当前 schema（`2026112802`）前滚；旧版 CMS、Reader 与 Conversion 启动均强校验 schema 版本，无法直接回退连接到已升级数据库。需要恢复数据库时维持维护窗口，协调恢复点、配套的全部应用和前端。恢复前核对恢复点之后已发生的第三方扣款、退款、续费与 Meta 回执，拟定补账、回调回补和去重方案，确认后恢复外部写入。 |
 
 配置变更在 `config.yaml` 中维护，并重新生成服务环境文件。Pixel 加密密钥轮换时先在所有读取方部署新旧密钥，再修改 API 写入版本并逐个轮换 Pixel 凭据；复核存量密文引用后才退役旧密钥。支付密钥环同样先扩充 CMS 与 Reader 的读密钥，再切换 CMS 写入版本并在商户页面按「验证 → 发布」轮换。源数据清理、凭据校验与回传人工重排使用有审计记录的 CMS 或受控运维 CLI。 [Conversion 运维入口](conversion-backend/README.md#运行与运维)
